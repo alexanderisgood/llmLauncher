@@ -9583,6 +9583,13 @@ async function cancelSessionSetOpen() {
 
 function applyBootstrapData(boot, setProject = false) {
   state.token = boot.token || state.token;
+  if (boot.controllerSourceCurrent === false) {
+    showNotice(
+      boot.controllerRestartMessage
+        || "LLM Launcher was updated. Restart the launcher and refresh this page before starting new work.",
+      true,
+    );
+  }
   if (boot.binaries) state.binaries = boot.binaries;
   if (boot.adapters) state.adapters = boot.adapters;
   if (boot.clientSupport) state.clientSupport = boot.clientSupport;

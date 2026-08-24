@@ -47,6 +47,7 @@ from typing import Any
 
 
 APP_DIR = Path(__file__).resolve().parent
+CONTROLLER_SOURCE_PATH = Path(__file__).resolve()
 STATE_DIR = Path.home() / "Library" / "Application Support" / "LLM Launcher"
 RUNS_DIR = STATE_DIR / "runs"
 LOGS_DIR = STATE_DIR / "logs"
@@ -106,6 +107,49 @@ ROUTE_CHECK_PROMPT = (
     "This is a synthetic local route check containing no user or project data. "
     "Reply briefly with the word READY."
 )
+CONTROLLER_FRESHNESS_REQUIRED_PATHS = frozenset({
+    "/api/launch",
+    "/api/session/warm-attach",
+    "/api/session/attach",
+    "/api/session-sets/open",
+    "/api/agent-console/restart",
+    "/api/runtime/update/start",
+    "/api/runtime/promotion/start",
+    "/api/runtime/promotion/apply",
+    "/api/runtime/select",
+    "/api/freetoken/connect",
+    "/api/freetoken/disconnect",
+    "/api/route-check/start",
+    "/api/benchmark/start",
+    "/api/setup/download-draft",
+    "/api/acquisition/start",
+    "/api/ane/start",
+    "/api/ane/clone/start",
+})
+CONTROLLER_RESTART_MESSAGE = (
+    "LLM Launcher was updated while this controller was running. "
+    "Restart the launcher, refresh this page, and try again. Nothing was started."
+)
+
+
+def controller_source_stamp(path: Path = CONTROLLER_SOURCE_PATH) -> tuple[int, int] | None:
+    """Return a cheap immutable-enough stamp for detecting an edited controller."""
+    try:
+        source = path.stat()
+    except OSError:
+        return None
+    return source.st_mtime_ns, source.st_size
+
+
+CONTROLLER_SOURCE_STAMP = controller_source_stamp()
+
+
+def controller_source_is_current() -> bool:
+    """Fail closed before starting new work when this process runs older source."""
+    current = controller_source_stamp(CONTROLLER_SOURCE_PATH)
+    return current is not None and current == CONTROLLER_SOURCE_STAMP
+
+
 RUNTIME_PREFERENCES_VERSION = 1
 RUNTIME_PREFERENCES_FILE = STATE_DIR / "runtime-preferences.json"
 MANAGED_RUNTIMES_DIR = STATE_DIR / "runtimes"
@@ -20404,6 +20448,8 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/api/bootstrap":
             self.json_response({
                 "version": VERSION,
+                "controllerSourceCurrent": controller_source_is_current(),
+                "controllerRestartMessage": CONTROLLER_RESTART_MESSAGE,
                 "token": self.server.csrf_token,
                 "binaries": public_binary_status(),
                 "adapters": adapter_inventory(),
@@ -20512,6 +20558,16 @@ class Handler(SimpleHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin and not re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):\d+", origin):
             self.send_error(HTTPStatus.FORBIDDEN)
+            return
+        if (
+            self.path in CONTROLLER_FRESHNESS_REQUIRED_PATHS
+            and not controller_source_is_current()
+        ):
+            self.json_response({
+                "ok": False,
+                "error": CONTROLLER_RESTART_MESSAGE,
+                "restartRequired": True,
+            }, HTTPStatus.CONFLICT)
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))

@@ -315,6 +315,22 @@ class LauncherTests(unittest.TestCase):
             self.port_patch.stop()
         self.temp.cleanup()
 
+    def test_controller_source_freshness_blocks_new_work_but_not_stop(self) -> None:
+        source = Path(self.temp.name) / "launcher-copy.py"
+        source.write_text("old", encoding="utf-8")
+        startup_stamp = launcher.controller_source_stamp(source)
+        self.assertIsNotNone(startup_stamp)
+        with mock.patch.object(launcher, "CONTROLLER_SOURCE_PATH", source), mock.patch.object(
+            launcher, "CONTROLLER_SOURCE_STAMP", startup_stamp,
+        ):
+            self.assertTrue(launcher.controller_source_is_current())
+            source.write_text("new source", encoding="utf-8")
+            self.assertFalse(launcher.controller_source_is_current())
+        self.assertIn("/api/benchmark/start", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
+        self.assertIn("/api/launch", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
+        self.assertNotIn("/api/benchmark/stop", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
+        self.assertNotIn("/api/stop", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
+
     def model_for(self, backend: str, pattern: str | None = None) -> dict:
         candidates = [m for m in self.models if m["backends"][backend]["runnable"]]
         if pattern:

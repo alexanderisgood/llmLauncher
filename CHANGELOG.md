@@ -4,6 +4,7 @@ All notable public changes are recorded here.
 
 ## Unreleased
 
+- A controller that is still running older Python source now blocks new launches, measurements, downloads, runtime changes, and Session Set opens immediately with a restart message instead of executing stale routing code.
 - Reversible local actions no longer ask for a redundant checkbox: Route Check, Calibration, ANE measurement, runtime comparison, and ordinary Session Set opening now start from their clearly labelled action button. Extra confirmation remains for downloads, installs, large-file creation, destructive deletion, experimental routes, and memory-risk overrides.
 - Cooling is now a user-owned safety setting. Apply fastest preserves it, Calibration defaults to Automatic, and maximum fans requires an explicit loud-mode selection.
 - Calibration evidence includes the selected cooling policy, preventing maximum-fan results from being applied to normal-cooling routes.

@@ -7262,6 +7262,7 @@ function calibrationOperationBlocked() {
 function updateCalibrationHelp() {
   const suite = $("calibrationSuiteSelect").value;
   const preference = $("calibrationPreferenceSelect").value;
+  const cooling = $("calibrationCoolingSelect").value;
   $("calibrationSuiteHelp").textContent = ({
     agentic:"Measures cold prefill, prefix reuse, tool ingestion, and a warm follow-up.",
     standard:"Measures repeated 2K and 8K prompt routes for general chat throughput.",
@@ -7274,12 +7275,17 @@ function updateCalibrationHelp() {
     memory:"Uses system-wide unified-memory headroom and requires at least a 512 MB advantage.",
     thermal:"Requires comparable starting conditions, then ranks worst public macOS thermal state and speed.",
   })[preference] || "Uses matching local evidence only.";
+  $("calibrationCoolingHelp").textContent = cooling === "max"
+    ? "Maximum fans is an explicit loud-mode choice for MTPLX routes in this measurement."
+    : "The launcher will not force maximum fans. macOS may still increase cooling under sustained load.";
 }
 
 function calibrationPlanRequest() {
   const request = gather("custom");
   request.suite = $("calibrationSuiteSelect").value;
   request.enginePreference = $("calibrationPreferenceSelect").value;
+  request.calibrationCooling = $("calibrationCoolingSelect").value;
+  request.options.fan = request.calibrationCooling;
   request.reasoningPolicy = "all-engines-model-default";
   return request;
 }
@@ -7314,6 +7320,7 @@ function renderCalibrationPlan() {
   const controlsLocked = state.calibrationLoading || active || state.calibrationApplying;
   $("calibrationSuiteSelect").disabled = controlsLocked;
   $("calibrationPreferenceSelect").disabled = controlsLocked;
+  $("calibrationCoolingSelect").disabled = controlsLocked;
   if (!plan) {
     calibrationStateBadge("calibrationContractState", state.calibrationLoading ? "Checking" : "Unavailable", state.calibrationLoading ? "" : "blocked");
     calibrationStateBadge("calibrationEngineState", "Waiting", "");
@@ -7341,7 +7348,7 @@ function renderCalibrationPlan() {
     ["Workload", plan.suite.label], ["Goal", plan.preferenceLabel],
     ["Reasoning", normalizedReasoning ? `Model default (from ${reasoningContract.requested})` : request.reasoning], ["KV precision", kv],
     ["Model reloads", String(plan.modelReloadCount)], ["Measured requests", String(plan.measuredRequestCount)],
-    ["Compared engines", String(plan.eligibleEngineCount)], ["Contract ID", plan.contractId],
+    ["Compared engines", String(plan.eligibleEngineCount)], ["Cooling", plan.calibrationCoolingLabel || "Automatic"],
   ].map(([label,value]) => `<span><small>${esc(label)}</small><b title="${esc(value)}">${esc(value)}</b></span>`).join("");
   calibrationStateBadge(
     "calibrationEngineState",
@@ -7369,7 +7376,7 @@ function renderCalibrationPlan() {
   $("calibrationConsent").disabled = !canMeasure;
   $("calibrationConsentPanel").classList.toggle("inactive", !canMeasure);
   $("calibrationConsentCopy").textContent = plan.ready
-    ? `${plan.eligibleEngineCount} engines · ${plan.modelReloadCount} isolated reloads · ${plan.measuredRequestCount} generated local requests · up to ${Math.round(plan.resourceCooldownMaxSecondsPerRoute)} seconds of cancellable settling before each route.`
+    ? `${plan.eligibleEngineCount} engines · ${plan.modelReloadCount} isolated reloads · ${plan.measuredRequestCount} generated local requests · ${plan.calibrationCoolingLabel || "Automatic"} cooling · up to ${Math.round(plan.resourceCooldownMaxSecondsPerRoute)} seconds of cancellable settling before each route.`
     : blockers || "Resolve the engine blockers before measurement.";
   $("calibrationStartButton").disabled = !canMeasure || !$("calibrationConsent").checked;
   $("calibrationStartButton").querySelector("strong").textContent = evidenceReady ? "Evidence already available" : "Run local calibration";
@@ -7505,6 +7512,7 @@ async function openCalibrationAssistant(options = {}) {
   closeOptimizerMenu();
   $("calibrationSuiteSelect").value = recommendedSuite;
   $("calibrationPreferenceSelect").value = preference;
+  $("calibrationCoolingSelect").value = "smart";
   $("calibrationConsent").checked = false;
   if (!$("calibrationDialog").open) $("calibrationDialog").showModal();
   await pollBenchmarkStatus();
@@ -7546,7 +7554,9 @@ async function applyCalibrationResult(saveProfile = false) {
   if (!plan || plan.action !== "apply-existing" || calibrationOperationBlocked()) return;
   const reasoningContract = plan.reasoningContract || {};
   const previousReasoning = $("reasoningSelect").value;
+  const previousCooling = $("fanSelect").value;
   let reasoningChanged = false;
+  let coolingChanged = false;
   let routeApplied = false;
   const name = $("calibrationProfileName").value.trim();
   if (saveProfile && !name) {
@@ -7565,6 +7575,11 @@ async function applyCalibrationResult(saveProfile = false) {
       reasoningChanged = measured !== previousReasoning;
       refreshLaunchability();
     }
+    const measuredCooling = String(plan.calibrationCooling || "smart");
+    const coolingOption = [...$("fanSelect").options].find(item => item.value === measuredCooling);
+    if (!coolingOption) throw new Error("The calibrated cooling setting is no longer available.");
+    $("fanSelect").value = measuredCooling;
+    coolingChanged = measuredCooling !== previousCooling;
     const applied = await applyOptimal("engine", plan.preference);
     if (!applied) throw new Error("The measured decision no longer matches the visible contract, so nothing was saved.");
     routeApplied = true;
@@ -7580,13 +7595,17 @@ async function applyCalibrationResult(saveProfile = false) {
       showNotice(`Applied ${state.optimalLabel || "the calibrated route"}${reasoningChanged ? " at model-default reasoning" : ""} and saved “${name}” as an auto-measured Quick Launch profile.`);
     } else {
       showNotice(reasoningChanged
-        ? `Applied ${state.optimalLabel || "the calibrated route"}. Reasoning changed from ${previousReasoning} to model default so the measured three-engine result remains like-for-like; model, limits, sampling, and KV precision were preserved.`
-        : `Applied ${state.optimalLabel || "the calibrated route"}. Model, limits, reasoning, sampling, and KV precision were preserved.`);
+        ? `Applied ${state.optimalLabel || "the calibrated route"}. Reasoning changed from ${previousReasoning} to model default so the measured three-engine result remains like-for-like; cooling is ${plan.calibrationCoolingLabel || "Automatic"}.`
+        : `Applied ${state.optimalLabel || "the calibrated route"} with ${plan.calibrationCoolingLabel || "Automatic"} cooling. Model, limits, reasoning, sampling, and KV precision were preserved.`);
     }
     if ($("calibrationDialog").open) $("calibrationDialog").close();
   } catch (error) {
     if (reasoningChanged && !routeApplied) {
       $("reasoningSelect").value = previousReasoning;
+      refreshLaunchability();
+    }
+    if (coolingChanged && !routeApplied) {
+      $("fanSelect").value = previousCooling;
       refreshLaunchability();
     }
     $("calibrationStatus").textContent = error.message;
@@ -10899,6 +10918,7 @@ $("calibrationDetailToggle").addEventListener("click", () => {
   renderCalibration();
 });
 $("calibrationSuiteSelect").addEventListener("change", () => loadCalibrationPlan(true));
+$("calibrationCoolingSelect").addEventListener("change", () => loadCalibrationPlan(true));
 $("calibrationPreferenceSelect").addEventListener("change", () => {
   if (state.calibrationEntry) {
     state.calibrationEntry = {

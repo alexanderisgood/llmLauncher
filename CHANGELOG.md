@@ -2,6 +2,11 @@
 
 All notable public changes are recorded here.
 
+## Unreleased
+
+- Cooling is now a user-owned safety setting. Apply fastest preserves it, Calibration defaults to Automatic, and maximum fans requires an explicit loud-mode selection.
+- Calibration evidence includes the selected cooling policy, preventing maximum-fan results from being applied to normal-cooling routes.
+
 ## 1.66.0-alpha.2 - 2026-08-24
 
 First public alpha.

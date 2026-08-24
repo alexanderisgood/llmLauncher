@@ -16,6 +16,7 @@ It currently supports **oMLX**, **LM Studio**, and **MTPLX**. Instead of treatin
 - Launches one model into Pi, OpenCode, Codex, or local Chat without rewriting those tools' permanent configuration.
 - Preserves context, output, reasoning, sampling, and KV-cache choices across the complete route.
 - Measures like-for-like engine and accelerator performance before claiming a fastest option.
+- Keeps cooling user-owned: optimisation and Calibration use automatic cooling by default and never select maximum fans without an explicit choice.
 - Supports streaming thinking, message queues, history, branching, TPS, warm-route reuse, and resumable local Chat.
 - Keeps generated routes on authenticated loopback addresses and stops only launcher-owned processes.
 - Provides profiles, Session Sets, model acquisition, runtime inspection, route checks, and capacity controls.

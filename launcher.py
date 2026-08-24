@@ -6383,7 +6383,12 @@ def fastest_safe_options(
             measured_engine_settings.get("profile")
             or capability.get("profile") or "sustained"
         )
-        options["fan"] = str(measured_engine_settings.get("fan") or "max")
+        # Cooling is a user-owned safety control. A speed preset may tune the
+        # runtime profile, but must never promote an ordinary route to forced
+        # maximum fans. Exact benchmark matching already includes fan policy,
+        # so maximum-cooling evidence cannot be reused for this normal route.
+        selected_fan = str(before.get("fan") or "smart")
+        options["fan"] = selected_fan if selected_fan in {"default", "smart", "max"} else "smart"
         if preferred == "mtp":
             options["depth"] = safe_int(
                 capability.get("depth"), 1, 1, int(capability.get("depthMax") or 1)
@@ -6392,9 +6397,9 @@ def fastest_safe_options(
                 evidence_tier = "artifact-benchmark"
                 evidence_label = "Artifact-backed speed preset"
         rationale.append(
-            "Reuse the measured MTPLX profile and cooling contract."
+            "Reuse the measured MTPLX profile while preserving your visible cooling choice."
             if measured_engine_settings else
-            "Use the artifact's validated MTPLX profile and maximum cooling for sustained throughput."
+            "Use the artifact's validated MTPLX profile and keep cooling on your visible choice."
         )
     else:
         options.update({"acceleration": "off", "depth": 1, "kv": "off"})
@@ -6437,7 +6442,7 @@ def fastest_safe_options(
         "appliedKeys": applied,
         "preservedKeys": [
             "model", "quantisation", "context", "output", "reasoning",
-            "sampling", "prompts", "tools", "kv",
+            "sampling", "prompts", "tools", "kv", "fan",
         ],
         "evidenceTier": evidence_tier,
         "evidenceLabel": evidence_label,
@@ -11048,6 +11053,13 @@ def validated_engine_shootout_request(
     reasoning_contract = benchmark_reasoning_contract(payload, model)
     comparison_payload = copy.deepcopy(payload)
     comparison_payload["reasoning"] = reasoning_contract["measured"]
+    if "calibrationCooling" in payload:
+        calibration_cooling = validated_calibration_cooling(payload)
+        comparison_options = comparison_payload.get("options")
+        if not isinstance(comparison_options, dict):
+            comparison_options = {}
+            comparison_payload["options"] = comparison_options
+        comparison_options["fan"] = calibration_cooling
     current = optimal_request(comparison_payload, models)
     client = str(comparison_payload.get("client") or "")
     reasoning = str(comparison_payload.get("reasoning") or "auto")
@@ -11120,10 +11132,19 @@ def validated_engine_shootout_request(
     }
 
 
+def validated_calibration_cooling(payload: dict[str, Any]) -> str:
+    """Return the explicit MTPLX cooling policy for a calibration run."""
+    cooling = str(payload.get("calibrationCooling") or "smart")
+    if cooling not in {"default", "smart", "max"}:
+        raise ValueError("Choose Automatic, System controlled, or Maximum calibration cooling.")
+    return cooling
+
+
 def calibration_plan(
     payload: dict[str, Any], models: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Describe an exact-contract calibration without starting or allocating anything."""
+    calibration_cooling = validated_calibration_cooling(payload)
     visible_request = validated_launch_profile_request(payload, models)
     suite_name = str(payload.get("suite") or ("standard" if visible_request["client"] == "chat" else "agentic"))
     suite = BENCHMARK_SUITES.get(suite_name)
@@ -11143,6 +11164,7 @@ def calibration_plan(
     )
     measurement_payload = copy.deepcopy(visible_request)
     measurement_payload["reasoning"] = reasoning_contract["measured"]
+    measurement_payload.setdefault("options", {})["fan"] = calibration_cooling
     request = validated_launch_profile_request(measurement_payload, models)
     kv = str(request.get("options", {}).get("kv") or "off")
     engines: list[dict[str, Any]] = []
@@ -11157,6 +11179,7 @@ def calibration_plan(
             candidate = copy.deepcopy(request)
             candidate["backend"] = backend
             candidate["suite"] = suite_name
+            candidate.setdefault("options", {})["fan"] = calibration_cooling
             try:
                 job = validated_benchmark_request(
                     candidate, models, allow_baseline_only=True,
@@ -11223,6 +11246,7 @@ def calibration_plan(
     )
 
     measured_request = copy.deepcopy(request)
+    measured_request.setdefault("options", {})["fan"] = calibration_cooling
     measured_request["enginePreference"] = preference
     decision = best_engine_request(measured_request, models)
     evidence_tier = str(decision.get("engineEvidenceTier") or decision.get("evidenceTier") or "")
@@ -11237,7 +11261,7 @@ def calibration_plan(
         "context": request["context"], "output": request["output"],
         "reasoning": request["reasoning"], "kv": kv,
         "chat": request.get("chat"), "suite": suite_name,
-        "enginePreference": preference,
+        "enginePreference": preference, "calibrationCooling": calibration_cooling,
     }
     contract_id = hashlib.sha256(json.dumps(
         contract_value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
@@ -11264,6 +11288,12 @@ def calibration_plan(
         },
         "preference": preference,
         "preferenceLabel": ENGINE_PREFERENCE_LABELS[preference],
+        "calibrationCooling": calibration_cooling,
+        "calibrationCoolingLabel": {
+            "default": "System controlled",
+            "smart": "Automatic",
+            "max": "Maximum fans",
+        }[calibration_cooling],
         "engines": engines,
         "eligibleEngineCount": len(jobs),
         "routeCount": route_count,

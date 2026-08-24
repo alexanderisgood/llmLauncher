@@ -2988,9 +2988,15 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result["options"]["acceleration"], "mtp")
         self.assertEqual(result["options"]["depth"], 3)
         self.assertEqual(result["options"]["profile"], "turbo")
-        self.assertEqual(result["options"]["fan"], "max")
+        self.assertEqual(result["options"]["fan"], "smart")
+        self.assertIn("fan", result["preservedKeys"])
         self.assertIn("context", result["preservedKeys"])
         self.assertIn("reasoning", result["preservedKeys"])
+
+        explicit_max = self.payload("mtplx", "pi", model, mode="fastest")
+        explicit_max["options"]["fan"] = "max"
+        explicit_result = launcher.optimal_request(explicit_max, self.models)
+        self.assertEqual(explicit_result["options"]["fan"], "max")
 
         omlx = json.loads(json.dumps(model["backends"]["omlx"]))
         omlx.update({"preferredAcceleration": "dflash", "dflash": False})
@@ -6498,6 +6504,9 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(plan["modelReloadCount"], 6)
         self.assertEqual(plan["measuredRequestCount"], 36)
         self.assertEqual(plan["request"]["reasoning"], "auto")
+        self.assertEqual(plan["request"]["options"]["fan"], "smart")
+        self.assertEqual(plan["calibrationCooling"], "smart")
+        self.assertEqual(plan["calibrationCoolingLabel"], "Automatic")
         self.assertEqual(plan["reasoningContract"]["requested"], "medium")
         self.assertEqual(plan["reasoningContract"]["measured"], "auto")
         self.assertTrue(plan["reasoningContract"]["normalized"])
@@ -6513,6 +6522,14 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(plan["privacy"]["usesProjectData"])
         self.assertFalse(plan["privacy"]["storesGeneratedText"])
         self.assertFalse(self.state.exists(), "planning calibration must not create launcher state")
+
+        loud_request = json.loads(json.dumps(request))
+        loud_request["calibrationCooling"] = "max"
+        loud_plan = launcher.calibration_plan(loud_request, [model])
+        self.assertEqual(loud_plan["request"]["options"]["fan"], "max")
+        self.assertEqual(loud_plan["calibrationCoolingLabel"], "Maximum fans")
+        with self.assertRaisesRegex(ValueError, "calibration cooling"):
+            launcher.calibration_plan({**request, "calibrationCooling": "silent"}, [model])
 
     def test_all_engine_reasoning_policy_normalizes_the_shootout_without_weakening_strict_mode(self) -> None:
         model = json.loads(json.dumps(self.models[0]))
@@ -6536,6 +6553,15 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual({job["reasoning"] for job in inclusive["jobs"]}, {"auto"})
         self.assertEqual(inclusive["request"]["reasoning"], "auto")
         self.assertTrue(inclusive["reasoningContract"]["normalized"])
+
+        loud = launcher.validated_engine_shootout_request({
+            **request,
+            "reasoningPolicy": launcher.BENCHMARK_REASONING_POLICY_ALL_ENGINES,
+            "calibrationCooling": "max",
+        }, [model])
+        mtplx_job = next(job for job in loud["jobs"] if job["backend"] == "mtplx")
+        self.assertEqual(mtplx_job["options"]["fan"], "max")
+        self.assertEqual(mtplx_job["evidence"]["engineSettings"]["fan"], "max")
 
     def test_calibration_plan_uses_existing_trusted_evidence_or_blocks_incompatible_kv(self) -> None:
         model = json.loads(json.dumps(self.models[0]))
@@ -7985,7 +8011,8 @@ class LauncherTests(unittest.TestCase):
             self.assertIn(f'id="{element_id}"', index)
         for element_id in (
             "openCalibrationAssistant", "calibrationDialog", "calibrationSuiteSelect",
-            "calibrationPreferenceSelect", "calibrationEngineCards", "calibrationConsent",
+            "calibrationPreferenceSelect", "calibrationCoolingSelect", "calibrationCoolingHelp",
+            "calibrationEngineCards", "calibrationConsent",
             "calibrationStartButton", "calibrationApplyButton", "calibrationSaveButton",
             "calibrationProgressBar", "calibrationStatus", "calibrationOrigin",
             "calibrationOriginTitle", "calibrationOriginDetail",

@@ -1,0 +1,837 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM Launcher</title>
+  <script src="theme.js"></script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-bar">
+      <div class="app-title">
+        <span class="brandmark" aria-hidden="true">L</span>
+        <div><strong>LLM Launcher</strong><small>Local AI hub</small></div>
+      </div>
+      <div class="app-toolbar">
+        <span id="healthPill" class="status-pill neutral"><i></i>Local controller</span>
+        <span class="toolbar-separator" aria-hidden="true"></span>
+        <button id="openSessionDashboard" type="button" class="toolbar-button" aria-label="Open Sessions and Capacity">◉ <span>Sessions</span></button>
+        <button id="openModelLibrary" type="button" class="toolbar-button" aria-label="Open Model Library and compatibility doctor">◈ <span>Models</span></button>
+        <button id="openChatHistoryTop" type="button" class="toolbar-button" aria-label="Open previous chats">◌ <span>Chats</span></button>
+        <div class="hub-tools-control">
+          <button id="hubToolsMenuButton" type="button" class="toolbar-button" aria-haspopup="menu" aria-expanded="false" aria-controls="hubToolsMenu" aria-label="Open launcher tools">＋ <span>Tools</span></button>
+          <div id="hubToolsMenu" class="hub-tools-menu" role="menu" aria-label="Launcher tools" hidden>
+            <header><span>Launcher tools</span><small>Setup and management</small></header>
+            <button id="openCalibrationAssistant" type="button" role="menuitem"><i aria-hidden="true">◎</i><span><strong>Calibration</strong><small>Measure the fastest compatible engine.</small></span></button>
+            <button id="openProfileManager" type="button" role="menuitem"><i aria-hidden="true">▣</i><span><strong>Launch profiles</strong><small>Save and restore one exact route.</small></span></button>
+            <button id="openSessionSets" type="button" role="menuitem"><i aria-hidden="true">▤</i><span><strong>Session sets</strong><small>Open saved multi-surface workspaces.</small></span></button>
+            <button id="openRuntimeManager" type="button" role="menuitem"><i aria-hidden="true">◫</i><span><strong>Runtimes</strong><small>Inspect and select installed engines.</small></span></button>
+            <button id="refreshModels" type="button" role="menuitem"><i aria-hidden="true">↻</i><span><strong>Rescan models</strong><small>Refresh configured model folders.</small></span></button>
+            <a role="menuitem" href="manual.html" target="_blank" rel="noopener"><i aria-hidden="true">?</i><span><strong>Manual</strong><small>Open the local launcher guide.</small></span></a>
+          </div>
+        </div>
+        <div class="theme-control">
+          <button id="themeMenuButton" type="button" class="toolbar-button" aria-haspopup="menu" aria-expanded="false" aria-controls="themeMenu" aria-label="Choose appearance theme">◐ <span id="themeToolbarLabel">Theme</span></button>
+          <div id="themeMenu" class="theme-menu" role="menu" aria-label="Appearance theme" hidden>
+            <header><span>Appearance</span><small>Saved only in this browser</small></header>
+            <button type="button" role="menuitemradio" data-theme-choice="graphite" aria-checked="true"><i class="theme-swatch graphite" aria-hidden="true"><b></b></i><span><strong>Graphite</strong><small>Neutral charcoal · amber + sage</small></span><em aria-hidden="true">✓</em></button>
+            <button type="button" role="menuitemradio" data-theme-choice="daylight" aria-checked="false"><i class="theme-swatch daylight" aria-hidden="true"><b></b></i><span><strong>Daylight</strong><small>Light canvas · blue + jade</small></span><em aria-hidden="true">✓</em></button>
+            <button type="button" role="menuitemradio" data-theme-choice="ember" aria-checked="false"><i class="theme-swatch ember" aria-hidden="true"><b></b></i><span><strong>Ember</strong><small>Warm cocoa · soft coral</small></span><em aria-hidden="true">✓</em></button>
+            <button type="button" role="menuitemradio" data-theme-choice="midnight" aria-checked="false"><i class="theme-swatch midnight" aria-hidden="true"><b></b></i><span><strong>Midnight</strong><small>Deep blue · violet</small></span><em aria-hidden="true">✓</em></button>
+            <div class="theme-menu-label" role="separator"><span>Information level</span><small>Does not change launch settings</small></div>
+            <button type="button" role="menuitemradio" data-detail-choice="focused" aria-checked="true"><i class="detail-level-icon" aria-hidden="true">◉</i><span><strong>Focused</strong><small>Launch essentials with help on demand</small></span><em aria-hidden="true">✓</em></button>
+            <button type="button" role="menuitemradio" data-detail-choice="detailed" aria-checked="false"><i class="detail-level-icon" aria-hidden="true">≡</i><span><strong>Detailed</strong><small>Diagnostics, evidence and helper copy</small></span><em aria-hidden="true">✓</em></button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="app-workspace">
+      <section class="config-pane" aria-labelledby="configTitle">
+        <header class="pane-heading">
+          <div><h1 id="configTitle">Launch configuration</h1><p id="configSubtitle">Choose a runtime, model and work surface.</p></div>
+          <div class="pane-heading-actions">
+            <div id="focusedRunStatus" class="focused-run-status" data-phase="idle" aria-label="Run status">
+              <i aria-hidden="true"></i>
+              <span class="focused-run-copy"><strong id="focusedRunPhase">Idle</strong><small id="focusedRunMessage" role="status" aria-live="polite" aria-atomic="true">Configure a launch.</small></span>
+              <button id="focusedStopButton" type="button" class="focused-run-action stop" aria-label="Stop process" title="Stop process" disabled>Stop</button>
+              <button id="focusedLogButton" type="button" class="focused-run-action log" aria-label="View log" title="View log" disabled>Log</button>
+            </div>
+            <button id="interfaceDetailButton" type="button" class="interface-detail-button" aria-pressed="false"><span aria-hidden="true">≡</span><strong>Show details</strong></button><span id="localChip" class="local-chip">Local only</span>
+          </div>
+        </header>
+
+        <div id="configScroll" class="config-scroll">
+          <section id="quickStart" class="quick-start hidden" aria-labelledby="quickStartTitle">
+            <div class="quick-start-heading">
+              <div><h2 id="quickStartTitle">Saved routes</h2><p id="quickStartSummary">Optional shortcuts are available.</p></div>
+              <button id="quickStartCustom" type="button" class="text-button" aria-expanded="false" aria-controls="quickStartCards">Show saved routes</button>
+            </div>
+            <div id="quickStartCards" class="quick-start-cards hidden" aria-live="polite"></div>
+          </section>
+
+          <div id="customLaunchEditor" class="custom-launch-editor">
+          <div class="setup-grid">
+            <section class="config-section" aria-labelledby="runtimeTitle">
+              <div class="section-head"><h2 id="runtimeTitle">Runtime</h2><span>Inference engine</span></div>
+              <div class="choice-grid" id="backendChoices" role="group" aria-label="Model runtime">
+                <button type="button" class="choice selected" data-backend="mtplx" aria-pressed="true"><span class="choice-icon mtplx" aria-hidden="true">M</span><span><strong>MTPLX</strong><small>MTP specialist</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                <button type="button" class="choice" data-backend="omlx" aria-pressed="false"><span class="choice-icon omlx" aria-hidden="true">O</span><span><strong>oMLX</strong><small>Flexible MLX</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                <button type="button" class="choice" data-backend="lmstudio" aria-pressed="false"><span class="choice-icon lms" aria-hidden="true">LM</span><span><strong>LM Studio</strong><small>Desktop runtime</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                <button type="button" class="choice" data-backend="freetoken" data-ui-feature="freetoken" aria-pressed="false" hidden disabled><span class="choice-icon freetoken" aria-hidden="true">FT</span><span><strong>FreeToken</strong><small>Native or remote MoE</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+              </div>
+            </section>
+
+            <section class="config-section" aria-labelledby="agentTitle">
+              <div class="section-head"><h2 id="agentTitle">Work surface</h2><span>Agent or chat</span></div>
+              <div class="segmented" id="clientChoices" role="group" aria-label="Work surface" aria-describedby="compatibilityLine">
+                <button type="button" class="selected" data-client="pi" aria-pressed="true"><b aria-hidden="true">π</b> Pi</button>
+                <button type="button" data-client="opencode" aria-pressed="false"><b aria-hidden="true">◈</b> OpenCode</button>
+                <button type="button" data-client="codex" aria-pressed="false"><b aria-hidden="true">⌁</b> Codex</button>
+                <button type="button" data-client="chat" aria-pressed="false"><b aria-hidden="true">●</b> Chat</button>
+              </div>
+              <p id="compatibilityLine" class="compatibility-line" role="status" aria-live="polite">Checking local compatibility…</p>
+            </section>
+          </div>
+
+          <section id="freeTokenConnectionBanner" class="freetoken-connection-banner hidden" data-ui-feature="freetoken" aria-live="polite" hidden>
+            <span class="choice-icon freetoken" aria-hidden="true">FT</span>
+            <div><strong id="freeTokenConnectionTitle">Connect a FreeToken server</strong><small id="freeTokenConnectionDetail">Discover its live models, then use them with Chat, Pi, OpenCode, or Codex.</small></div>
+            <button id="openFreeTokenConnection" type="button" class="secondary">Configure</button>
+          </section>
+
+          <section class="config-section model-section" aria-labelledby="modelTitle">
+            <div class="section-head"><h2 id="modelTitle">Model</h2><span>Scanned from every configured model folder</span></div>
+            <label class="field"><span>Detected model</span><select id="modelSelect"><option>Scanning models…</option></select></label>
+            <div id="modelCard" class="model-card loading"><div class="model-title"><span class="skeleton wide"></span></div><div class="model-meta"><span class="skeleton"></span><span class="skeleton"></span></div></div>
+          </section>
+
+          <section class="config-section" aria-labelledby="sessionTitle">
+            <div class="section-head"><h2 id="sessionTitle">Session</h2><span>Kept exact end to end</span></div>
+            <label class="field project-field"><span id="projectLabel">Project folder</span><input id="projectPath" type="text" spellcheck="false" placeholder="/Users/you/Documents/Code/project"></label>
+            <div class="fields-row limits-row">
+              <label class="field"><span>Context tokens</span><input id="contextInput" type="number" min="1024" step="1024" value="131072"></label>
+              <label class="field"><span>Max response</span><input id="outputInput" type="number" min="256" step="256" value="16384"></label>
+              <label class="field"><span>Reasoning</span><select id="reasoningSelect"><option value="auto">Model default</option><option>off</option><option>minimal</option><option>low</option><option selected>medium</option><option>high</option><option>xhigh</option></select></label>
+            </div>
+            <p class="invariant"><span>✓</span>The optimiser never changes model, quantisation, context, response limit, reasoning, sampling or KV precision.</p>
+          </section>
+
+          <section id="agentHostSettings" class="config-section agent-host-settings" aria-labelledby="agentHostTitle">
+            <div class="section-head"><h2 id="agentHostTitle">Agent window</h2><span>Where the coding agent opens</span></div>
+            <label class="field"><span>Open agent in</span><select id="agentHostSelect"><option value="console" selected>Hub Console · stays in launcher</option><option value="terminal">macOS Terminal · external handoff</option></select><small id="agentHostHelp">Hub Console is private, launcher-owned, stoppable, and keeps up to 2 MB of terminal output in memory only.</small></label>
+          </section>
+
+          <section id="chatSettings" class="config-section chat-settings hidden" aria-labelledby="chatSettingsTitle">
+            <div class="section-head"><h2 id="chatSettingsTitle">Chat controls</h2><span>Locked to this chat run</span></div>
+            <label class="field system-prompt-field"><span>System prompt</span><textarea id="systemPrompt" rows="3" maxlength="32000" placeholder="Optional instructions for the model"></textarea><small>Prepended privately to every turn in this chat.</small></label>
+            <div class="fields-row chat-sampling-row">
+              <label class="field"><span>Sampling</span><select id="samplingMode"><option value="model" selected>Model defaults</option><option value="custom">Custom</option></select><small id="samplingHelp">Uses the model artifact's generation settings.</small></label>
+              <label class="field chat-sampler"><span>Temperature</span><input id="temperatureInput" type="number" min="0" max="2" step="0.05" value="0.7"></label>
+              <label class="field chat-sampler"><span>Top P</span><input id="topPInput" type="number" min="0" max="1" step="0.01" value="1"></label>
+              <label class="field chat-sampler"><span>Top K</span><input id="topKInput" type="number" min="0" max="1000000" step="1" value="0"></label>
+            </div>
+            <details id="chatSamplingAdvanced" class="sampling-disclosure chat-sampler">
+              <summary><span><strong>Advanced sampling</strong><small id="chatSamplingAdvancedSummary">Penalties off · random seed</small></span><i aria-hidden="true">⌄</i></summary>
+              <div class="sampling-disclosure-fields">
+                <label class="field"><span>Presence penalty</span><input id="presencePenaltyInput" type="number" min="-2" max="2" step="0.05" value="0"><small>Positive values discourage tokens already used.</small></label>
+                <label class="field"><span>Frequency penalty</span><input id="frequencyPenaltyInput" type="number" min="-2" max="2" step="0.05" value="0"><small>Positive values increasingly discourage repetition.</small></label>
+                <label class="field"><span>Seed</span><input id="seedInput" type="number" min="0" max="4294967295" step="1" placeholder="Random"><small>Leave blank for a runtime-selected seed.</small></label>
+              </div>
+            </details>
+          </section>
+
+          <details id="advancedControls" class="advanced">
+            <summary><span><strong>Runtime controls</strong><small id="advancedSummary">MTPLX controls</small></span><i aria-hidden="true">⌄</i></summary>
+            <div class="advanced-body">
+              <div id="sharedRuntimeControls" class="fields-row two">
+                <label class="field optimizable" data-opt-key="acceleration"><span>Acceleration</span><select id="accelerationSelect"><option value="auto">Auto</option><option value="mtp">MTP</option><option value="dflash">DFlash 2</option><option value="off">Off / AR</option></select><small id="accelerationHelp"></small></label>
+                <label class="field optimizable range-field" data-opt-key="depth">
+                  <span class="field-label"><span id="depthLabel">Speculative depth</span><output id="depthValue" for="depthInput">3</output></span>
+                  <input id="depthInput" type="range" min="1" max="8" step="1" value="3" aria-describedby="depthHelp">
+                  <small id="depthHelp">Used only by a verified speculative route.</small>
+                </label>
+              </div>
+              <div id="mtplxControls" class="backend-controls">
+                <div class="fields-row three">
+                  <label class="field optimizable" data-opt-key="profile"><span>Runtime profile</span><select id="profileSelect"><option>sustained</option><option selected>turbo</option><option>stable</option><option>exact</option><option value="performance-cold">performance-cold</option></select></label>
+                  <label class="field amber"><span>KV precision ⚠</span><select id="mtplxKv"><option value="off">Full precision</option><option value="q8">Q8</option><option value="q4">Q4</option></select><small>Manual: quantised KV may change output.</small></label>
+                  <label class="field optimizable" data-opt-key="fan"><span>Cooling</span><select id="fanSelect"><option>default</option><option selected>smart</option><option>max</option></select></label>
+                </div>
+              </div>
+              <div id="omlxControls" class="backend-controls hidden">
+                <div class="fields-row three">
+                  <label class="field optimizable" data-opt-key="burst"><span>Burst decode</span><select id="burstSelect"><option>off</option><option>light</option><option selected>balanced</option><option>aggressive</option></select><small>Changes streaming cadence, not target tokens.</small></label>
+                  <label class="field amber"><span>TurboQuant KV ⚠</span><select id="omlxKv"><option value="off">Full precision</option><option value="q8">Q8</option><option value="q6">Q6</option><option value="q4">Q4</option></select><small>Manual and never changed by optimisation.</small></label>
+                  <div class="info-tile dflash-summary"><div class="dflash-title"><strong>DFlash 2 readiness</strong><em id="dflashBadge">Checking</em></div><span id="dflashStatus" aria-live="polite">Checking runtime, target and draft…</span></div>
+                </div>
+                <div id="dflashReadiness" class="dflash-readiness" aria-label="DFlash 2 readiness checks">
+                  <div id="dflashChecks" class="dflash-checks"></div>
+                  <div class="dflash-links"><a id="dflashRuntimeLink" href="https://github.com/jundot/omlx/releases/tag/v0.6.3rc2" target="_blank" rel="noopener">oMLX rc2 notes ↗</a><a id="dflashDraftLink" href="https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2" target="_blank" rel="noopener">Compatible draft ↗</a></div>
+                  <button id="openSetupButton" type="button" class="dflash-setup-button" disabled>Open Setup Assistant <span aria-hidden="true">→</span></button>
+                </div>
+                <div id="dflashTuning" class="fields-row two dflash-tuning">
+                  <label class="field optimizable" data-opt-key="dflashVerify"><span>Verifier strategy</span><select id="dflashVerifySelect"><option value="adaptive" selected>Adaptive</option><option value="dflash">Fixed DFlash</option><option value="ddtree">DDTree</option></select><small>Adaptive can shorten blocks when acceptance falls.</small></label>
+                  <label class="field optimizable" data-opt-key="dflashDraftQuant"><span>Draft precision</span><select id="dflashDraftQuantSelect"><option value="native" selected>Native BF16</option><option value="q8">Q8</option><option value="q4">Q4</option><option value="q2">Q2</option></select><small>Quantising the draft saves memory but may reduce acceptance.</small></label>
+                </div>
+                <section id="aneReadiness" class="ane-readiness" aria-labelledby="aneReadinessTitle">
+                  <div class="ane-readiness-head"><div><strong id="aneReadinessTitle">Neural Engine prefill</strong><span id="aneStatus">Checking the checkpoint, runtime, and memory reserve…</span></div><em id="aneBadge">Checking</em></div>
+                  <div id="aneChecks" class="dflash-checks" aria-label="ANE Tuner readiness checks"></div>
+                  <div class="ane-control-row">
+                    <label class="field optimizable" data-opt-key="anePrefill"><span>ANE prefill mode ⚠</span><select id="anePrefillSelect"><option value="off" selected>Off · exact GPU path</option><option value="tuned" disabled>Use measured local split</option></select><small id="anePrefillHelp">Approximate and never enabled silently.</small></label>
+                    <div class="ane-actions-inline"><a id="aneReleaseLink" href="https://github.com/jundot/omlx/releases/tag/v0.6.3rc2" target="_blank" rel="noopener">Official rc2 notes ↗</a><button id="openAneButton" type="button" class="dflash-setup-button">Open ANE Tuner <span aria-hidden="true">→</span></button></div>
+                  </div>
+                </section>
+              </div>
+              <div id="lmstudioControls" class="backend-controls hidden">
+                <div class="fields-row two">
+                  <label class="field optimizable" data-opt-key="gpu"><span>GPU offload</span><select id="gpuSelect"><option selected>max</option><option>off</option></select></label>
+                  <label class="field optimizable range-field" data-opt-key="parallel">
+                    <span class="field-label"><span>Parallel requests</span><output id="parallelValue" for="parallelInput">1</output></span>
+                    <input id="parallelInput" type="range" min="1" max="16" step="1" value="1" aria-describedby="parallelHelp">
+                    <small id="parallelHelp">One lane is best for one coding agent.</small>
+                  </label>
+                </div>
+                <div id="lmstudioMtpTuning" class="fields-row two runtime-tuning inactive">
+                  <label class="field optimizable range-field" data-opt-key="mtpMinTokens">
+                    <span class="field-label"><span>Minimum draft size</span><output id="mtpMinTokensValue" for="mtpMinTokensInput">0</output></span>
+                    <input id="mtpMinTokensInput" type="range" min="0" max="3" step="1" value="0" aria-describedby="mtpMinTokensHelp">
+                    <small id="mtpMinTokensHelp">Drafts shorter than this are ignored; 0 keeps every non-empty draft.</small>
+                  </label>
+                  <label class="field optimizable range-field" data-opt-key="mtpMinContinueProbability">
+                    <span class="field-label"><span>Draft probability cutoff</span><output id="mtpMinContinueProbabilityValue" for="mtpMinContinueProbabilityInput">0.00</output></span>
+                    <input id="mtpMinContinueProbabilityInput" type="range" min="0" max="1" step="0.01" value="0" aria-describedby="mtpMinContinueProbabilityHelp">
+                    <small id="mtpMinContinueProbabilityHelp">Stops extending a draft below this probability; 0 disables early cutoff.</small>
+                  </label>
+                </div>
+              </div>
+              <div id="freetokenControls" class="backend-controls freetoken-controls hidden" data-ui-feature="freetoken" hidden>
+                <div id="freeTokenRemoteControls">
+                  <div class="freetoken-control-copy"><span aria-hidden="true">↗</span><div><strong>Execution stays on the connected server</strong><small>The launcher preserves your visible request contract while FreeToken owns placement and cache policy.</small></div></div>
+                  <div class="freetoken-control-facts"><span><small>Mac model load</small><b>None</b></span><span><small>Agent endpoint</small><b>Private loopback</b></span><span><small>Remote stop</small><b>Never</b></span></div>
+                </div>
+                <div id="freeTokenNativeControls" class="hidden">
+                  <div class="freetoken-control-copy native"><span aria-hidden="true">⌁</span><div><strong>Native MLX/Metal · launcher owned</strong><small>Chat Completions and streaming are available. Sampling, tools, and Responses stay disabled until the port reports them.</small></div></div>
+                  <div id="freeTokenQualificationPanel" class="freetoken-qualification hidden" role="status"><i id="freeTokenQualificationMark" aria-hidden="true">!</i><div><strong id="freeTokenQualificationTitle">Checking checkpoint evidence</strong><small id="freeTokenQualificationDetail">The launcher is validating the port-owned qualification receipt.</small><label id="freeTokenExperimentalConsentPanel" class="freetoken-experimental-consent hidden"><input id="freeTokenExperimentalConsent" type="checkbox"><span>Allow this existing local checkpoint for an explicit experimental run.</span></label></div></div>
+                  <div class="fields-row three freetoken-native-fields">
+                    <label class="field optimizable" data-opt-key="maxBatchSize"><span>Active sequences</span><select id="freeTokenBatchSelect"><option value="1" selected>1 · lowest latency</option><option value="2">2</option><option value="4">4</option><option value="8">8</option><option value="16">16</option></select><small>More lanes improve concurrent throughput, not one-chat latency.</small></label>
+                    <label class="field optimizable" data-opt-key="expertCacheSize"><span>Metal hot experts</span><input id="freeTokenExpertCacheInput" type="number" min="0" max="4096" step="1" placeholder="Resident default"><small>Blank keeps every expert on the resident fused Metal path.</small></label>
+                    <label class="field optimizable" data-opt-key="prefixCacheEntries"><span>Exact prefix cache</span><select id="freeTokenPrefixCacheSelect"><option value="0" selected>Off</option><option value="1">1 entry</option><option value="2">2 entries</option><option value="4">4 entries</option><option value="8">8 entries</option><option value="16">16 entries</option><option value="32">32 entries</option><option value="64">64 entries</option><option value="128">128 entries</option></select><small>Cannot currently be combined with more than one active sequence.</small></label>
+                  </div>
+                  <p id="freeTokenNativeControlStatus" class="freetoken-native-status" role="status">Safe single-chat defaults selected.</p>
+                </div>
+                <button id="openFreeTokenControls" type="button" class="secondary">Remote server settings</button>
+              </div>
+            </div>
+          </details>
+          </div>
+
+          <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+        </div>
+
+        <section id="chatWorkspace" class="chat-workspace hidden" aria-labelledby="chatTitle">
+          <header class="chat-header">
+            <div><p class="chat-kicker">Built-in chat <span id="chatBranchBadge" class="chat-branch-badge hidden">Branch</span></p><h2 id="chatTitle">Waiting for the model</h2><p id="chatMeta">Transcript history stays on this Mac; requests go only to the selected engine.</p></div>
+            <div class="chat-header-actions"><button id="chatSidebarToggle" type="button" class="secondary compact" aria-expanded="true" aria-controls="chatSidebar">Hide chats</button><button id="chatHistoryButton" type="button" class="secondary compact">Manage</button><button id="chatRunSettingsButton" type="button" class="secondary compact chat-run-settings-button" aria-expanded="false" aria-controls="chatRunSettingsPanel"><span aria-hidden="true">☷</span> Controls</button><button id="newChatButton" type="button" class="secondary compact">New chat</button><button id="endChatButton" type="button" class="danger">End chat</button></div>
+          </header>
+          <div id="chatLayout" class="chat-layout">
+            <aside id="chatSidebar" class="chat-sidebar" aria-label="Saved conversations">
+              <div class="chat-sidebar-head"><div><strong>Conversations</strong><small id="chatSidebarStatus">Loading local history…</small></div><button id="chatSidebarNew" type="button" title="Start a new chat" aria-label="Start a new chat">＋</button></div>
+              <div class="chat-sidebar-search"><span aria-hidden="true">⌕</span><label for="chatSidebarSearch" class="sr-only">Search conversations</label><input id="chatSidebarSearch" type="search" maxlength="120" placeholder="Search chats"><button id="chatSidebarClearSearch" type="button" aria-label="Clear conversation search" disabled>×</button></div>
+              <div id="chatSidebarList" class="chat-sidebar-list" aria-live="polite"></div>
+              <button id="chatSidebarManage" type="button" class="chat-sidebar-manage">All chat history</button>
+            </aside>
+            <div class="chat-conversation">
+              <details id="chatStatusPanel" class="chat-status-panel" data-route-state="current" data-context-state="normal">
+                <summary id="chatStatusSummary">
+                  <span class="chat-status-route"><i aria-hidden="true">◆</i><span><strong id="chatStatusModel">Waiting for a loaded route</strong><small id="chatStatusEngine">Engine and context will appear here.</small></span></span>
+                  <span class="chat-status-signals" aria-label="Chat performance status">
+                    <span id="chatStatusSpeed" class="chat-status-signal" data-state="unknown"><small>Speed</small><strong id="chatStatusSpeedValue">Not reported</strong></span>
+                    <span id="chatStatusLane" class="chat-status-signal" data-state="idle"><small>Lane</small><strong id="chatStatusLaneValue">Idle</strong></span>
+                    <span id="chatStatusCache" class="chat-status-signal" data-state="idle"><small>Cache</small><strong id="chatStatusCacheValue">Waiting</strong></span>
+                  </span>
+                  <span class="chat-status-tail"><em id="chatStatusRouteState" hidden>Route changed</em><em id="chatStatusWarning" class="warning" hidden>Context warning</em><span class="chat-status-disclosure"><b id="chatStatusDisclosureLabel">Details</b><i aria-hidden="true">⌄</i></span></span>
+                </summary>
+                <div class="chat-status-details">
+                  <section id="chatRouteCard" class="chat-route-card" data-state="current" aria-labelledby="chatRouteModel">
+                    <span class="chat-route-icon" aria-hidden="true">◆</span><div><strong id="chatRouteModel">Waiting for a loaded route</strong><small id="chatRouteDetail">Engine and limits will appear here.</small><p id="chatRouteNotice">Opening a saved transcript never swaps the loaded model behind your back.</p></div><em id="chatRouteState">Loaded route</em>
+                  </section>
+                  <div id="chatUsage" class="chat-usage" data-state="unknown" role="status" aria-live="polite"><div><span>Latest runtime token report</span><strong id="chatUsageValue">Waiting for runtime report</strong><small id="chatUsageDetail">No token estimate is invented when an engine omits usage.</small><div class="chat-activity-inline" data-state="idle"><span>Shared request lane</span><strong id="chatActivityState">Relay idle</strong><small id="chatActivityDetail">Launcher-created agent and Chat requests share the configured engine lanes.</small></div><div class="chat-cache-inline"><span>Cache observatory</span><strong id="chatCacheState">Waiting for a Chat turn</strong><small id="chatCacheDetail">Engine residency and reported prefix reuse are shown separately.</small></div><div id="chatContextActions" class="chat-context-actions hidden"><button id="chatTrimButton" type="button">Keep recent turns in a branch</button><small>The complete transcript remains saved locally.</small></div></div><div class="chat-usage-track" role="progressbar" aria-label="Latest prompt share of model context" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="chatUsageMeter"></i></div></div>
+                </div>
+              </details>
+              <nav id="chatTranscriptToolbar" class="chat-transcript-toolbar" data-empty="true" aria-label="Current transcript navigation">
+                <div class="chat-transcript-summary"><span aria-hidden="true">↕</span><span><strong id="chatTranscriptCount">No turns yet</strong><small id="chatTranscriptHint">Find and jump within this conversation.</small></span></div>
+                <button id="chatTranscriptSearchToggle" type="button" aria-expanded="false" aria-controls="chatTranscriptSearch"><span aria-hidden="true">⌕</span><strong>Find in chat</strong><kbd>⌘F</kbd></button>
+                <div id="chatTranscriptSearch" class="chat-transcript-search" hidden>
+                  <label for="chatTranscriptSearchInput"><span aria-hidden="true">⌕</span><span class="sr-only">Search the current transcript</span><input id="chatTranscriptSearchInput" type="search" maxlength="160" autocomplete="off" spellcheck="false" placeholder="Search this chat"></label>
+                  <span id="chatTranscriptSearchStatus" role="status" aria-live="polite">Type to search this conversation</span>
+                  <button id="chatTranscriptPrevious" type="button" aria-label="Previous matching message" title="Previous matching message" disabled>↑</button>
+                  <button id="chatTranscriptNext" type="button" aria-label="Next matching message" title="Next matching message" disabled>↓</button>
+                  <button id="chatTranscriptSearchClose" type="button" aria-label="Close transcript search" title="Close transcript search">×</button>
+                </div>
+              </nav>
+              <div class="chat-messages-stage">
+                <div id="chatMessages" class="chat-messages" role="log" tabindex="0" aria-label="Conversation transcript" aria-live="polite" aria-relevant="additions text">
+                  <div class="chat-empty"><span aria-hidden="true">●</span><strong>Ready when you are</strong><p>Ask the selected model anything. Responses stream directly from its chosen engine.</p></div>
+                </div>
+                <button id="chatJumpLatest" type="button" class="chat-jump-latest hidden" aria-controls="chatMessages"><span aria-hidden="true">↓</span><span><strong>Jump to latest</strong><small id="chatJumpLatestStatus">Response continues below</small></span></button>
+              </div>
+              <form id="chatForm" class="chat-composer">
+                <div id="chatQueue" class="chat-queue hidden" aria-live="polite"></div>
+                <section id="chatContextPack" class="chat-context-pack hidden" aria-labelledby="chatContextPackTitle">
+                  <div class="chat-context-pack-head"><div><strong id="chatContextPackTitle">Context</strong><span id="chatContextPackSummary">No files or workspace selected</span></div><button id="chatContextClear" type="button">Clear all</button></div>
+                  <div id="chatWorkspaceContext" class="chat-workspace-context hidden">
+                    <span aria-hidden="true">DIR</span><div><strong id="chatWorkspaceName">Workspace folder</strong><small id="chatWorkspaceSummary">Nothing indexed</small><em id="chatWorkspaceSelection">A bounded relevant subset is chosen for each message.</em></div><button id="chatWorkspaceClear" type="button">Remove</button>
+                  </div>
+                  <div id="chatContextFiles" class="chat-context-files"></div>
+                  <p>Explicit files are sent as reference data. A selected folder is indexed only in this browser tab; each message receives a bounded relevant subset. Neither is saved to History.</p>
+                </section>
+                <label for="chatInput" class="sr-only">Message</label>
+                <textarea id="chatInput" rows="2" maxlength="2000000" placeholder="Message the selected model…" disabled></textarea>
+                <div class="chat-draft-row"><span id="chatDraftStatus" role="status" aria-live="polite">Unfinished text can be recovered after a refresh in this tab.</span><button id="chatDraftClear" type="button" disabled>Clear draft</button></div>
+                <div class="composer-footer"><div class="chat-composer-tools"><input id="chatContextFileInput" class="sr-only" type="file" multiple accept="text/*,.md,.markdown,.json,.jsonl,.csv,.tsv,.yaml,.yml,.toml,.xml,.html,.css,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.rs,.go,.java,.c,.h,.cpp,.hpp,.swift,.sh,.sql,.log,.ini,.cfg"><input id="chatWorkspaceFolderInput" class="sr-only" type="file" multiple webkitdirectory directory><button id="chatAttachButton" type="button" class="chat-attach-button" disabled><span aria-hidden="true">＋</span> Add text</button><button id="chatWorkspaceButton" type="button" class="chat-attach-button" disabled><span aria-hidden="true">▣</span> Add folder</button><span id="chatComposerHint" role="status" aria-live="polite">Return sends · Shift+Return adds a line</span></div><div class="chat-composer-actions"><button id="chatStopButton" type="button" class="secondary compact hidden" title="Stop the current response; queued messages will continue">Stop response</button><button id="chatSendButton" type="submit" class="primary chat-send" disabled><span aria-hidden="true">↑</span><strong>Send</strong></button></div></div>
+              </form>
+            </div>
+            <button id="chatRunSettingsScrim" type="button" class="chat-run-settings-scrim" aria-label="Close Chat controls" tabindex="-1" hidden></button>
+            <aside id="chatRunSettingsPanel" class="chat-run-settings-panel" role="dialog" aria-modal="true" aria-labelledby="chatRunSettingsTitle" hidden>
+              <header class="chat-run-settings-head"><div><p>Active Chat</p><h3 id="chatRunSettingsTitle">Controls for the next message</h3></div><button id="chatRunSettingsClose" type="button" aria-label="Close Chat controls">×</button></header>
+              <div id="chatRunContract" class="chat-run-contract" aria-label="Locked model contract">
+                <span><small>Model</small><b id="chatRunContractModel">Loaded model</b></span><span><small>Engine</small><b id="chatRunContractEngine">Local engine</b></span><span><small>Context</small><b id="chatRunContractContext">—</b></span><span><small>Reasoning</small><b id="chatRunContractReasoning">—</b></span>
+              </div>
+              <p class="chat-run-settings-lock"><span aria-hidden="true">◆</span> Model, engine, context, response limit and reasoning stay locked until this Chat ends.</p>
+              <form id="chatRunSettingsForm" class="chat-run-settings-form">
+                <fieldset id="chatRunSettingsFields" disabled>
+                  <label class="field"><span>System prompt</span><textarea id="chatRunSystemPrompt" rows="4" maxlength="32000" autocomplete="off" placeholder="Optional instructions for this Chat"></textarea><small>Applies to future requests and is never copied into the saved transcript.</small></label>
+                  <label class="field"><span>Sampling</span><select id="chatRunSamplingMode"><option value="model">Model defaults</option><option value="custom">Custom</option></select><small id="chatRunSamplingHelp">Use the generation defaults supplied by this model.</small></label>
+                  <div id="chatRunSamplerFields" class="chat-run-sampler-fields" hidden>
+                    <label class="field"><span>Temperature</span><input id="chatRunTemperature" type="number" min="0" max="2" step="0.05" value="0.7" required></label>
+                    <label class="field"><span>Top P</span><input id="chatRunTopP" type="number" min="0" max="1" step="0.01" value="1" required></label>
+                    <label class="field"><span>Top K</span><input id="chatRunTopK" type="number" min="0" max="1000000" step="1" value="0" required></label>
+                    <details class="sampling-disclosure">
+                      <summary><span><strong>Advanced sampling</strong><small>Penalties and seed</small></span><i aria-hidden="true">⌄</i></summary>
+                      <div class="chat-run-advanced-fields">
+                        <label class="field"><span>Presence penalty</span><input id="chatRunPresencePenalty" type="number" min="-2" max="2" step="0.05" value="0" required></label>
+                        <label class="field"><span>Frequency penalty</span><input id="chatRunFrequencyPenalty" type="number" min="-2" max="2" step="0.05" value="0" required></label>
+                        <label class="field"><span>Seed</span><input id="chatRunSeed" type="number" min="0" max="4294967295" step="1" placeholder="Random"></label>
+                      </div>
+                    </details>
+                  </div>
+                </fieldset>
+                <p id="chatRunSettingsStatus" class="chat-run-settings-status" role="status" aria-live="polite">Loading the active Chat contract…</p>
+                <div class="chat-run-settings-actions"><button id="chatRunSettingsCancel" type="button" class="secondary compact">Close</button><button id="chatRunSettingsSave" type="submit" class="primary" disabled><span aria-hidden="true">✓</span><strong>Save for next message</strong></button></div>
+              </form>
+            </aside>
+          </div>
+        </section>
+
+        <section id="agentWorkspace" class="agent-workspace hidden" aria-labelledby="agentConsoleTitle">
+          <header class="agent-console-header">
+            <div><p class="chat-kicker">Launcher-owned agent</p><h2 id="agentConsoleTitle">Waiting for Hub Console</h2><p id="agentConsoleMeta">Agent-supplied terminal colour and emphasis are preserved; output stays in bounded session memory and never enters Chat history.</p></div>
+            <div class="agent-console-header-actions"><button id="agentConsoleBackButton" type="button" class="secondary compact">Launcher settings</button><button id="agentConsoleSessionsButton" type="button" class="secondary compact">Sessions</button><button id="agentConsoleRestartButton" type="button" class="secondary compact" disabled>Restart agent</button><button id="agentConsoleStopButton" type="button" class="danger" disabled>Stop agent</button></div>
+          </header>
+          <section class="agent-console-navigation" aria-label="Agent consoles">
+            <div class="agent-console-tabs-row">
+              <div id="agentConsoleTabs" class="agent-console-tabs" role="tablist" aria-label="Launcher-owned agent consoles"></div>
+              <div class="agent-console-tools"><button id="agentConsoleFindButton" type="button" class="secondary compact" aria-expanded="false" aria-controls="agentConsoleSearch">Find</button><button id="agentConsoleCopyButton" type="button" class="secondary compact" disabled>Copy visible</button></div>
+            </div>
+            <form id="agentConsoleSearch" class="agent-console-search hidden" role="search">
+              <label for="agentConsoleSearchInput" class="sr-only">Find in current Agent Console</label>
+              <input id="agentConsoleSearchInput" type="search" maxlength="200" autocomplete="off" spellcheck="false" placeholder="Find in this console…">
+              <span id="agentConsoleSearchStatus" role="status" aria-live="polite">Type to search the bounded visible console.</span>
+              <button id="agentConsoleSearchPrevious" type="button" class="secondary compact" aria-label="Previous console match" disabled>↑</button>
+              <button id="agentConsoleSearchNext" type="button" class="secondary compact" aria-label="Next console match" disabled>↓</button>
+              <button id="agentConsoleSearchClose" type="button" class="secondary compact" aria-label="Close console search">×</button>
+            </form>
+          </section>
+          <details id="agentConsoleStatusPanel" class="agent-console-status-panel" data-activity-state="idle" data-process-state="starting">
+            <summary id="agentConsoleStatusSummary">
+              <span class="agent-console-status-route"><i aria-hidden="true">▣</i><span><strong id="agentConsoleStatusSurface">Waiting for Hub Console</strong><small id="agentConsoleStatusModel">Agent, model, and project will appear here.</small></span></span>
+              <span class="agent-console-status-signals" aria-label="Agent performance status">
+                <span id="agentConsoleStatusSpeed" class="agent-console-status-signal" data-state="unknown"><small>Speed</small><strong id="agentConsoleStatusSpeedValue">Not reported</strong></span>
+                <span id="agentConsoleStatusLane" class="agent-console-status-signal" data-state="idle"><small>Lane</small><strong id="agentConsoleStatusLaneValue">Idle</strong></span>
+              </span>
+              <span class="agent-console-status-tail"><em id="agentConsoleStatusState">Starting</em><span class="agent-console-status-disclosure"><b id="agentConsoleStatusDisclosureLabel">Details</b><i aria-hidden="true">⌄</i></span></span>
+            </summary>
+            <div class="agent-console-status-details">
+              <section class="agent-console-route" aria-label="Agent route and speed">
+                <div><span>Exact route</span><strong id="agentConsoleRoute">Waiting for the active model</strong></div>
+                <div><span>Measured TPS</span><strong id="agentConsoleTps">Waiting for runtime usage</strong></div>
+                <div><span>First output</span><strong id="agentConsoleTtft">—</strong></div>
+                <div><span>Request lane</span><strong id="agentConsoleLane">Relay idle</strong></div>
+              </section>
+            </div>
+          </details>
+          <div id="agentTerminalViewport" class="agent-terminal-viewport" role="application" tabindex="0" aria-label="Interactive agent terminal. Type to send keys; use the text field below for accessible input.">
+            <pre id="agentTerminalOutput" aria-label="Agent terminal output">Hub Console will appear here when the agent starts.</pre>
+          </div>
+          <form id="agentConsoleForm" class="agent-console-composer">
+            <label for="agentConsoleInput"><span>Send text or paste</span><input id="agentConsoleInput" type="text" maxlength="65536" autocomplete="off" spellcheck="false" placeholder="Type a command or prompt…"></label>
+            <div class="agent-console-keys" aria-label="Terminal keys"><button id="agentConsoleEscapeButton" type="button" class="secondary compact">Esc</button><button id="agentConsoleInterruptButton" type="button" class="secondary compact">Ctrl-C</button><button id="agentConsoleEnterButton" type="submit" class="primary"><strong>Send + Enter</strong></button></div>
+            <p id="agentConsoleStatus" role="status" aria-live="polite">Click the terminal for direct keyboard control. Terminal output is capped at 2 MB and never persisted.</p>
+          </form>
+        </section>
+
+        <footer id="launchDock" class="launch-dock">
+          <div id="optimizationPanel" class="optimization-panel" aria-busy="false">
+            <div id="optimizerAction" class="optimizer-action">
+              <div class="optimizer-split">
+                <button id="applyOptimal" type="button" class="optimize-button" aria-describedby="optimizationNote">
+                  <span class="optimize-icon" aria-hidden="true">ϟ</span>
+                  <span><strong>Apply fastest safe settings</strong><small>Optimise the current engine</small></span>
+                </button>
+                <button id="optimizerMenuButton" type="button" class="optimizer-menu-button" aria-label="Choose the best engine or another optimisation goal" aria-haspopup="menu" aria-expanded="false" aria-controls="optimizerMenu"><strong>Best engine</strong><span aria-hidden="true">⌃</span></button>
+              </div>
+              <div id="optimizerMenu" class="optimizer-menu" role="menu" hidden>
+                <button id="optimizerVerifiedLaunch" type="button" role="menuitem"><span aria-hidden="true">▶</span><span><strong>Verified quick launch</strong><small>Choose the measured fastest engine, check its real route, then launch.</small></span></button>
+                <div class="optimizer-menu-rule" role="separator"></div>
+                <button type="button" role="menuitem" data-optimizer-scope="current"><span aria-hidden="true">ϟ</span><span><strong>Current engine settings</strong><small>Keep this engine and tune its visible speed controls.</small></span></button>
+                <button type="button" role="menuitem" data-optimizer-scope="engine" data-engine-preference="fastest"><span aria-hidden="true">◇</span><span><strong>Fastest engine + settings</strong><small>Best complete-workload result outside the noise floor.</small></span></button>
+                <button type="button" role="menuitem" data-optimizer-scope="engine" data-engine-preference="responsive"><span aria-hidden="true">↯</span><span><strong>Fastest first response</strong><small>Lowest measured time to first output.</small></span></button>
+                <button type="button" role="menuitem" data-optimizer-scope="engine" data-engine-preference="memory"><span aria-hidden="true">▱</span><span><strong>Lowest memory pressure</strong><small>Smallest measured unified-memory headroom drop.</small></span></button>
+                <button type="button" role="menuitem" data-optimizer-scope="engine" data-engine-preference="thermal"><span aria-hidden="true">≈</span><span><strong>Best thermal stability</strong><small>Same starting state; lowest worst state, then speed.</small></span></button>
+                <div class="optimizer-menu-rule" role="separator"></div>
+                <button id="optimizerCalibrate" type="button" role="menuitem"><span aria-hidden="true">◎</span><span><strong>Measure compatible engines…</strong><small>Build the exact local evidence before choosing a winner.</small></span></button>
+              </div>
+            </div>
+            <div class="optimization-copy">
+              <button id="performanceReceipt" type="button" class="performance-receipt" data-state="loading" data-action="" aria-busy="true" disabled>
+                <i id="performanceReceiptIcon" aria-hidden="true">◇</i>
+                <span><strong id="performanceReceiptTitle">Checking measurements…</strong><small id="performanceReceiptDetail">Matching the visible performance contract.</small></span>
+                <em id="performanceReceiptAction" aria-hidden="true">…</em>
+              </button>
+              <span id="optimizationBadge" class="optimization-badge" data-state="custom">Custom</span>
+              <p id="optimizationNote">Your intelligence and context controls stay untouched.</p>
+              <p id="optimizationStatus" class="optimization-status" role="status" aria-live="polite" aria-atomic="true"></p>
+            </div>
+          </div>
+          <div class="dock-actions">
+            <button id="routeCheckButton" type="button" class="secondary" title="Load this route temporarily and verify its real client protocol">Check route</button>
+            <button id="previewButton" type="button" class="secondary">Preview</button>
+            <button id="launchButton" type="button" class="primary"><span class="launch-glyph" aria-hidden="true">▶</span><span><strong id="launchLabel">Launch</strong><small id="launchSummary">Current visible settings</small></span></button>
+          </div>
+        </footer>
+      </section>
+
+      <aside class="inspector" aria-label="Session inspector">
+        <section class="inspector-card status-card">
+          <div class="section-head"><h2><span class="live-dot"></span>Run status</h2><span id="phaseBadge" class="phase" aria-live="polite">Idle</span></div>
+          <p id="statusMessage" role="status" aria-live="polite">Configure a launch.</p>
+          <div id="runFacts" class="run-facts hidden"></div>
+          <div class="status-actions"><button id="stopButton" type="button" class="danger" disabled>Stop process</button><button id="logButton" type="button" class="text-button" disabled>View log</button></div>
+        </section>
+
+        <section class="inspector-card guardrails-card">
+          <div class="section-head"><h2>Guardrails</h2><span>Always on</span></div>
+          <div class="guardrail-list"><span><i>✓</i>Context preserved</span><span><i>✓</i>Reasoning preserved</span><span><i>✓</i>Sampling preserved</span><span><i>!</i>KV stays manual</span></div>
+        </section>
+
+        <section class="inspector-card benchmark-card" aria-labelledby="benchmarkCardTitle">
+          <div class="section-head"><h2 id="benchmarkCardTitle"><span class="benchmark-dot"></span>Benchmark Lab</h2><span id="benchmarkCardBadge">Local evidence</span></div>
+          <p id="benchmarkCardSummary">Select a model to inspect its measurable acceleration routes.</p>
+          <div id="benchmarkCardModes" class="benchmark-mode-chips" aria-label="Benchmark candidates"></div>
+          <button id="openBenchmarkButton" type="button" class="benchmark-open">Open Benchmark Lab <span aria-hidden="true">→</span></button>
+        </section>
+
+        <details class="inspector-card inventory-card">
+          <summary><span>Installed tools</span><span class="inventory-summary-meta"><small id="toolCount">Checking…</small><i aria-hidden="true">⌄</i></span></summary>
+          <div id="binaryList" class="binary-list"></div>
+        </details>
+      </aside>
+    </main>
+  </div>
+
+  <dialog id="sessionDialog" class="session-dialog" aria-labelledby="sessionDialogTitle">
+    <form method="dialog"><button class="close" aria-label="Close Sessions and Capacity">×</button></form>
+    <p class="dialog-kicker">Launcher-owned routes · live Mac capacity</p>
+    <div class="session-heading"><div><h2 id="sessionDialogTitle">Sessions &amp; capacity</h2><p>See what this launcher owns and review the next model load before it starts.</p></div><span id="sessionBadge" class="setup-badge">Inspecting</span></div>
+    <div class="session-safety"><i aria-hidden="true">✓</i><p><strong>Opening this dashboard is read-only.</strong><span>It samples public macOS headroom and inspects only launcher-owned process references. It never stops an external process or loads a model.</span></p></div>
+    <div class="session-overview">
+      <section class="session-resource-card" aria-labelledby="sessionResourceTitle"><div class="session-card-head"><div><span>Mac capacity</span><h3 id="sessionResourceTitle">Unified memory</h3></div><em id="sessionResourceState">Checking</em></div><div class="session-memory-meter" role="meter" aria-label="Available unified-memory headroom" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="sessionMemoryBar"></i></div><div id="sessionResourceFacts" class="session-facts"></div><p id="sessionResourceDetail">Reading Apple’s public memory-pressure and thermal signals…</p></section>
+      <section class="session-active-card" aria-labelledby="sessionActiveTitle"><div class="session-card-head"><div><span>Launcher-owned route</span><h3 id="sessionActiveTitle">Active session</h3></div><em id="sessionActiveState">Checking</em></div><div id="sessionActiveRoute" class="session-active-route"></div><div id="sessionComponents" class="session-components"></div><p id="sessionOwnershipDetail">External engines and Terminal processes are not adopted or terminated.</p></section>
+    </div>
+    <section id="sessionActivitySection" class="session-activity" data-state="idle" aria-labelledby="sessionActivityTitle">
+      <div class="session-card-head"><div><span>Private relay evidence</span><h3 id="sessionActivityTitle">Live request scheduler</h3></div><em id="sessionActivityState">No resident model</em></div>
+      <p id="sessionActivityDetail">Every launcher-created Chat or agent request will appear here without retaining its content.</p>
+      <div id="sessionActivityFacts" class="session-activity-facts"></div>
+      <div id="sessionActivityList" class="session-activity-list"><div class="session-activity-empty"><strong>No request activity</strong><span>Start a normal model session to create its private request relay.</span></div></div>
+      <div class="session-idle-policy">
+        <label class="field"><span>Unload after idle</span><select id="sessionIdleTimeout"><option value="0">Off · keep loaded</option><option value="5">5 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">1 hour</option><option value="120">2 hours</option></select><small id="sessionIdlePolicyDetail">Off by default. Active or queued relay work pauses the timer.</small></label>
+      </div>
+      <p id="sessionActivityCoverage">Only launcher-created surfaces are observed; independent engine clients are never guessed.</p>
+    </section>
+    <section id="sessionCacheSection" class="session-cache" aria-labelledby="sessionCacheTitle">
+      <div class="session-card-head"><div><span>Runtime-reported evidence</span><h3 id="sessionCacheTitle">Cache observatory</h3></div><em id="sessionCacheState">No resident model</em></div>
+      <p id="sessionCachePolicy">A loaded engine and a confirmed prompt-prefix cache hit are different states.</p>
+      <div id="sessionCacheFacts" class="session-cache-facts"></div>
+      <div id="sessionCacheLast" class="session-cache-last"><strong>No observed Chat turns</strong><span>Built-in Chat reports appear here when the runtime exposes authoritative usage.</span></div>
+      <p id="sessionCacheCoverage">Only controller-relayed built-in Chat turns are counted; direct agent traffic is never guessed.</p>
+    </section>
+    <section id="sessionSurfaceSection" class="session-surfaces inactive" aria-labelledby="sessionSurfaceTitle">
+      <div class="session-card-head"><div><span>Reuse the loaded model</span><h3 id="sessionSurfaceTitle">Work surfaces</h3></div><em id="sessionSurfaceState">No active route</em></div>
+      <p id="sessionSurfaceDetail">Start a normal session, then open another compatible agent or Chat without loading the model weights again.</p>
+      <div id="sessionAttachmentList" class="session-attachment-list"></div>
+      <div id="sessionAttachControls" class="session-attach-controls">
+        <div class="session-attach-fields">
+          <label class="field"><span>New work surface</span><select id="sessionAttachClient"><option value="chat">Chat</option><option value="pi">Pi</option><option value="opencode">OpenCode</option><option value="codex">Codex</option></select><small>Compatibility is checked against the engine that is already running.</small></label>
+          <label id="sessionAttachHostField" class="field"><span>Agent window</span><select id="sessionAttachAgentHost"><option value="console" selected>Hub Console</option><option value="terminal">macOS Terminal</option></select><small>Hub Console stays private and launcher-owned.</small></label>
+          <label id="sessionAttachProjectField" class="field"><span>Project folder</span><input id="sessionAttachProject" type="text" autocomplete="off"><small>Used only by the new agent; the model stays loaded.</small></label>
+        </div>
+        <div id="sessionAttachChatPanel" class="session-attach-chat">
+          <label class="field"><span>System prompt</span><textarea id="sessionAttachSystemPrompt" rows="2" maxlength="32000" placeholder="Optional instructions for this attached Chat"></textarea></label>
+          <div class="session-attach-sampling">
+            <label class="field"><span>Sampling</span><select id="sessionAttachSampling"><option value="model">Model defaults</option><option value="custom">Custom</option></select></label>
+            <label class="field session-attach-sampler"><span>Temperature</span><input id="sessionAttachTemperature" type="number" value="0.7" min="0" max="2" step="0.01"></label>
+            <label class="field session-attach-sampler"><span>Top P</span><input id="sessionAttachTopP" type="number" value="1" min="0" max="1" step="0.01"></label>
+            <label class="field session-attach-sampler"><span>Top K</span><input id="sessionAttachTopK" type="number" value="40" min="0" max="1000" step="1"></label>
+          </div>
+          <details id="sessionAttachSamplingAdvanced" class="sampling-disclosure session-attach-sampler">
+            <summary><span><strong>Advanced sampling</strong><small>Portable penalties and deterministic seed</small></span><i aria-hidden="true">⌄</i></summary>
+            <div class="sampling-disclosure-fields">
+              <label class="field"><span>Presence penalty</span><input id="sessionAttachPresencePenalty" type="number" value="0" min="-2" max="2" step="0.05"></label>
+              <label class="field"><span>Frequency penalty</span><input id="sessionAttachFrequencyPenalty" type="number" value="0" min="-2" max="2" step="0.05"></label>
+              <label class="field"><span>Seed</span><input id="sessionAttachSeed" type="number" min="0" max="4294967295" step="1" placeholder="Random"></label>
+            </div>
+          </details>
+        </div>
+        <div class="session-attach-preview"><p id="sessionAttachPlanDetail">Choose a running route and compatible surface.</p><button id="sessionAttachButton" type="button" class="primary" disabled><span aria-hidden="true">＋</span><span><strong>Attach surface</strong><small>No model reload</small></span></button></div>
+        <p id="sessionAttachStatus" class="session-dashboard-status" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+    <section class="session-admission" aria-labelledby="sessionAdmissionTitle">
+      <div class="session-card-head"><div><span>Next launch</span><h3 id="sessionAdmissionTitle">Full-context capacity estimate</h3></div><em id="sessionAdmissionState">Checking</em></div>
+      <p id="sessionAdmissionDetail">Validating the current visible model route without allocating a port or creating run files.</p>
+      <div id="sessionEstimateFacts" class="session-estimate-facts"></div>
+      <div id="sessionEstimateBar" class="session-estimate-bar" aria-label="Estimated memory allocation"></div>
+      <p id="sessionEstimateBasis" class="session-estimate-basis"></p>
+    </section>
+    <label id="sessionConsentPanel" class="setup-consent inactive"><input id="sessionConsent" type="checkbox" disabled><span><strong>I reviewed this exact capacity estimate and want to launch once.</strong><small id="sessionConsentCopy">This is enabled only when the conservative estimate needs an explicit decision.</small></span></label>
+    <p id="sessionDashboardStatus" class="session-dashboard-status" role="status" aria-live="polite"></p>
+    <div class="session-actions"><button id="sessionStopButton" type="button" class="danger" disabled>Stop launcher-owned route</button><button id="sessionRefreshButton" type="button" class="secondary">Refresh capacity</button></div>
+  </dialog>
+  <dialog id="chatHistoryDialog" class="chat-history-dialog" aria-labelledby="chatHistoryTitle">
+    <form method="dialog"><button class="close" aria-label="Close chat history">×</button></form>
+    <p class="dialog-kicker">Launcher-local conversations</p>
+    <div class="session-heading"><div><h2 id="chatHistoryTitle">Previous chats</h2><p>Open on the current Chat route, or review and restart an exact saved route without guesswork.</p></div><span id="chatHistoryBadge" class="setup-badge">Loading</span></div>
+    <div class="session-safety"><i aria-hidden="true">⌂</i><p><strong>Messages stay in LLM Launcher’s local application folder.</strong><span>New resumable chats also keep validated route settings and a project-folder path. The system prompt, project contents, credentials, and unexposed hidden reasoning are never stored here.</span></p></div>
+    <div class="chat-history-search"><label for="chatHistorySearch" class="sr-only">Search previous chats</label><span aria-hidden="true">⌕</span><input id="chatHistorySearch" type="search" maxlength="160" autocomplete="off" placeholder="Search titles, models, engines, or first messages"><button id="chatHistoryClearSearch" type="button" disabled>Clear</button></div>
+    <div id="chatHistoryList" class="chat-history-list"></div>
+    <p id="chatHistoryStatus" class="session-dashboard-status" role="status" aria-live="polite"></p>
+    <div class="session-actions"><button id="chatHistoryRefresh" type="button" class="secondary">Refresh history</button></div>
+  </dialog>
+  <dialog id="chatResumeDialog" class="chat-resume-dialog" aria-labelledby="chatResumeTitle">
+    <form method="dialog"><button class="close" aria-label="Close saved Chat route review">×</button></form>
+    <p class="dialog-kicker">Saved Chat · side-effect-free route review</p>
+    <div class="session-heading"><div><h2 id="chatResumeTitle">Resume previous chat</h2><p id="chatResumeSubtitle">Checking the saved engine, model, and Chat controls…</p></div><span id="chatResumeBadge" class="setup-badge active">Checking</span></div>
+    <div class="session-safety"><i aria-hidden="true">✓</i><p><strong>Opening this review does not load a model.</strong><span>The route snapshot contains validated settings and a project-folder path, never project contents, credentials, ports, or the original system-prompt text.</span></p></div>
+    <section id="chatResumeRoute" class="chat-resume-route" aria-live="polite"><p>Reading the launcher-local route snapshot…</p></section>
+    <section id="chatResumePromptPanel" class="chat-resume-prompt hidden"><label class="chat-resume-prompt-copy" for="chatResumeSystemPrompt"><strong>Re-enter the system prompt</strong><small>This conversation used one, but its text was deliberately not stored.</small></label><textarea id="chatResumeSystemPrompt" rows="3" maxlength="32000" placeholder="Paste the original prompt, or choose continue without it below"></textarea><label class="chat-resume-without"><input id="chatResumeWithoutPrompt" type="checkbox"><span><strong>Continue without the original system prompt</strong><small>This changes future replies; the saved transcript remains unchanged.</small></span></label></section>
+    <label id="chatResumeMemoryPanel" class="setup-consent hidden"><input id="chatResumeMemoryConsent" type="checkbox"><span><strong id="chatResumeMemoryTitle">I reviewed this Mac capacity estimate.</strong><small id="chatResumeMemoryCopy">The exact estimate is shown above.</small></span></label>
+    <label id="chatResumeExperimentalPanel" class="setup-consent hidden" data-ui-feature="freetoken" hidden><input id="chatResumeExperimentalConsent" type="checkbox"><span><strong>I approve this experimental FreeToken load once.</strong><small>The checkpoint has only synthetic end-to-end qualification. This approval is not saved.</small></span></label>
+    <p id="chatResumeStatus" class="session-dashboard-status" role="status" aria-live="polite">Checking the saved route without starting anything…</p>
+    <div class="chat-resume-actions"><button id="chatResumeApply" type="button" class="secondary" disabled>Apply route only</button><button id="chatResumeStart" type="button" class="primary" disabled><span aria-hidden="true">▶</span><span><strong>Start &amp; resume</strong><small id="chatResumeStartLabel">Waiting for route review</small></span></button></div>
+  </dialog>
+  <dialog id="modelLibraryDialog" class="model-library-dialog" aria-labelledby="modelLibraryTitle">
+    <form method="dialog"><button class="close" aria-label="Close Model Library">×</button></form>
+    <p class="dialog-kicker">Detected artifacts · compatibility doctor</p>
+    <div class="model-library-heading"><div><h2 id="modelLibraryTitle">Model Library</h2><p>See what every local or connected model can run before choosing an engine or work surface.</p></div><span id="modelLibraryBadge" class="setup-badge">Loading</span></div>
+    <div class="model-library-safety"><i aria-hidden="true">✓</i><p><strong>Opening and refreshing this library are read-only.</strong><span>It scans known model folders and installed commands. It does not load a model, start an engine, use the network, download weights, or remove files.</span></p></div>
+    <div class="model-library-filters" role="search" aria-label="Filter detected models">
+      <label class="model-library-search"><span aria-hidden="true">⌕</span><span class="sr-only">Search models</span><input id="modelLibrarySearch" type="search" maxlength="160" autocomplete="off" placeholder="Search name, format, architecture, folder…"></label>
+      <label><span>Engine</span><select id="modelLibraryEngineFilter"><option value="all">All engines</option><option value="omlx">oMLX</option><option value="lmstudio">LM Studio</option><option value="mtplx">MTPLX</option><option value="freetoken" data-ui-feature="freetoken" hidden disabled>FreeToken</option></select></label>
+      <label><span>Work surface</span><select id="modelLibrarySurfaceFilter"><option value="all">All surfaces</option><option value="pi">Pi</option><option value="opencode">OpenCode</option><option value="codex">Codex</option><option value="chat">Chat</option></select></label>
+      <label><span>Doctor state</span><select id="modelLibraryStateFilter"><option value="all">All states</option><option value="ready">Ready</option><option value="attention">Review</option><option value="blocked">Blocked</option></select></label>
+    </div>
+    <div id="modelLibrarySummary" class="model-library-summary" aria-live="polite"></div>
+    <div id="modelLibraryCards" class="model-library-cards" aria-live="polite"></div>
+    <p id="modelLibraryStatus" class="model-library-status" role="status" aria-live="polite"></p>
+    <div class="model-library-actions"><button id="clearModelLibraryFilters" type="button" class="text-button" disabled>Clear filters</button><button id="openAcquisitionCenter" type="button" class="secondary">Find / download a model</button><button id="refreshModelLibrary" type="button" class="secondary">Rescan known folders</button></div>
+  </dialog>
+  <dialog id="freeTokenDialog" class="freetoken-dialog" data-ui-feature="freetoken" aria-labelledby="freeTokenDialogTitle" hidden>
+    <form method="dialog"><button class="close" aria-label="Close FreeToken connection">×</button></form>
+    <p class="dialog-kicker">Connected engine · standard model API</p>
+    <div class="freetoken-heading"><div><h2 id="freeTokenDialogTitle">FreeToken connection</h2><p>Use models served by a Linux/NVIDIA FreeToken host from this launcher.</p></div><span id="freeTokenBadge" class="setup-badge">Not connected</span></div>
+    <div class="freetoken-safety"><i aria-hidden="true">✓</i><p><strong>Discovery is read-only.</strong><span>Connect &amp; discover requests only <code>/v1/models</code>. Launches use a private loopback bridge, never expose the server key to agents, and never load, unload, or stop the remote model.</span></p></div>
+    <p id="freeTokenPlatform" class="freetoken-platform">This Mac uses FreeToken as a connected engine because its current local runtime targets Linux x86_64 and NVIDIA CUDA 13.</p>
+    <form id="freeTokenForm" class="freetoken-form">
+      <label class="field"><span>Server address</span><input id="freeTokenEndpoint" type="url" maxlength="2048" autocomplete="url" spellcheck="false" placeholder="http://192.168.1.20:1919" required><small>Enter the FreeToken origin or its <code>/v1</code> URL. HTTPS is recommended outside a trusted LAN.</small></label>
+      <div class="fields-row two">
+        <label class="field"><span>API key</span><input id="freeTokenApiKey" type="password" maxlength="4096" autocomplete="off" placeholder="Optional"><small id="freeTokenApiKeyHelp">Leave blank if the server has no key.</small></label>
+        <label class="field"><span>Advertised context</span><input id="freeTokenContext" type="number" min="1024" max="2000000" step="1024" value="131072"><small>The launcher validates visible limits against this server contract.</small></label>
+      </div>
+      <div id="freeTokenConnectionSummary" class="freetoken-connection-summary"><strong>No server connected</strong><span>Add its private address to discover available models.</span></div>
+      <p id="freeTokenStatus" class="freetoken-status" role="status" aria-live="polite">Opening this window makes no network request.</p>
+      <div class="freetoken-actions"><button id="freeTokenDisconnect" type="button" class="danger" disabled>Disconnect launcher</button><span><a id="freeTokenDocsLink" href="https://github.com/FlashML-org/FreeToken/blob/main/docs/quickstart.md" target="_blank" rel="noopener">FreeToken quick start ↗</a><a id="freeTokenInstallLink" href="https://github.com/FlashML-org/FreeToken/blob/main/docs/install.md" target="_blank" rel="noopener">Host requirements ↗</a></span><button id="freeTokenConnect" type="submit" class="primary"><span aria-hidden="true">↗</span><span><strong>Connect &amp; discover</strong><small>Read /v1/models only</small></span></button></div>
+    </form>
+  </dialog>
+  <dialog id="acquisitionDialog" class="acquisition-dialog" aria-labelledby="acquisitionTitle">
+    <form method="dialog"><button class="close" aria-label="Close Model Acquisition Center">×</button></form>
+    <p class="dialog-kicker">Public Hugging Face · pinned files</p>
+    <div class="acquisition-heading"><div><h2 id="acquisitionTitle">Model Acquisition Center</h2><p>Find a public model, inspect its exact files, and place one verified variant in a known local model folder.</p></div><span id="acquisitionBadge" class="setup-badge">Read only</span></div>
+    <div class="acquisition-safety"><i aria-hidden="true">↗</i><p><strong>Search and inspection contact the public Hugging Face Hub only when you ask.</strong><span>The launcher sends the search text or repository and revision. It disables implicit account tokens, never asks for a token, and creates no folder until you separately approve a pinned download.</span></p></div>
+    <section class="acquisition-discovery" aria-labelledby="acquisitionDiscoveryTitle">
+      <div class="acquisition-section-head"><div><span>1</span><h3 id="acquisitionDiscoveryTitle">Find or inspect a repository</h3></div><small>Search is optional</small></div>
+      <form id="acquisitionSearchForm" class="acquisition-search-form" role="search">
+        <label class="acquisition-search"><span aria-hidden="true">⌕</span><span class="sr-only">Search public Hugging Face models</span><input id="acquisitionSearch" type="search" maxlength="100" autocomplete="off" placeholder="Search public models, for example Qwen MLX 4-bit"></label>
+        <button id="acquisitionSearchButton" type="submit" class="secondary">Search public Hub</button>
+      </form>
+      <div id="acquisitionSearchResults" class="acquisition-search-results" aria-live="polite"></div>
+      <div class="acquisition-inspect-controls">
+        <label class="field"><span>Repository</span><input id="acquisitionRepoId" type="text" maxlength="160" autocomplete="off" spellcheck="false" placeholder="owner/model-name"><small>Public Hugging Face repository ID.</small></label>
+        <label class="field"><span>Revision</span><input id="acquisitionRevision" type="text" maxlength="128" autocomplete="off" spellcheck="false" placeholder="Default branch"><small>A branch, tag, or commit; inspection pins it to a commit.</small></label>
+        <label class="field"><span>Destination</span><select id="acquisitionDestination"><option value="lmstudio">LM Studio models</option><option value="omlx">oMLX models</option><option value="mtplx">MTPLX models</option><option value="documents">Documents / models</option></select><small id="acquisitionDestinationHelp">Only a fixed known model folder can be used.</small></label>
+        <button id="acquisitionInspectButton" type="button" class="secondary">Inspect exact files</button>
+      </div>
+      <label id="acquisitionVariantField" class="field acquisition-variant hidden"><span>Exact file set</span><select id="acquisitionVariant"></select><small>GGUF repositories require one quantisation or complete shard set; the launcher never downloads every variant.</small></label>
+    </section>
+    <section id="acquisitionPlan" class="acquisition-plan" aria-live="polite">
+      <div class="acquisition-empty"><strong>No repository inspected yet.</strong><span>Inspection reads public metadata and the pinned file tree. It does not download weights or start a runtime.</span></div>
+    </section>
+    <label id="acquisitionConsentPanel" class="setup-consent inactive"><input id="acquisitionConsent" type="checkbox" disabled><span><strong>I reviewed the model page, license, exact commit, file set, and destination.</strong><small id="acquisitionConsentCopy">A valid pinned plan is required before download approval is available.</small></span></label>
+    <section class="acquisition-progress" aria-live="polite">
+      <div class="benchmark-progress-head"><span id="acquisitionPhase">Ready to inspect</span><b id="acquisitionPercent">0%</b></div>
+      <div class="benchmark-progress-track" role="progressbar" aria-label="Model acquisition progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="acquisitionProgressBar"></i></div>
+      <p id="acquisitionStatus" role="status">Nothing has been downloaded or changed.</p>
+    </section>
+    <div class="acquisition-actions"><button id="acquisitionStopButton" type="button" class="danger" disabled>Stop and preserve files</button><button id="acquisitionOpenLibrary" type="button" class="secondary" disabled>Open Model Library</button><button id="acquisitionStartButton" type="button" class="primary" disabled><span aria-hidden="true">↓</span><span><strong id="acquisitionStartTitle">Download pinned files</strong><small id="acquisitionStartLabel">Waiting for a valid plan</small></span></button></div>
+  </dialog>
+  <dialog id="runtimeDialog" class="runtime-dialog" aria-labelledby="runtimeDialogTitle">
+    <form method="dialog"><button class="close" aria-label="Close Runtime Manager">×</button></form>
+    <p class="dialog-kicker">Local inspection · explicit verified installs</p>
+    <div class="setup-heading"><div><h2 id="runtimeDialogTitle">Runtime Manager</h2><p class="setup-route">See exactly which local engine each new session will use.</p></div><span id="runtimeSummaryBadge" class="setup-badge">Checking</span></div>
+    <div class="runtime-safety"><i aria-hidden="true">✓</i><p><strong>Opening this is read-only.</strong><span>It does not start LM Studio, contact an update server, install software, or replace a working runtime.</span></p></div>
+    <p id="runtimeManagerSummary" class="runtime-manager-summary" role="status" aria-live="polite">Inspecting installed runtimes…</p>
+    <div id="runtimeCards" class="runtime-cards"></div>
+    <section class="runtime-agents" aria-labelledby="runtimeAgentsTitle"><div class="section-head"><h3 id="runtimeAgentsTitle">Agent launchers</h3><span>Local commands</span></div><div id="runtimeAgents" class="runtime-agent-list"></div></section>
+    <details id="runtimeAdvancedTools" class="runtime-advanced-tools">
+      <summary><span><strong>Advanced runtime tools</strong><small>Install or compare isolated oMLX copies</small></span><em>Show tools</em></summary>
+      <div class="runtime-advanced-tools-body">
+    <section class="runtime-update-center" aria-labelledby="runtimeUpdateTitle">
+      <div class="section-head"><div><h3 id="runtimeUpdateTitle">Safe Runtime Update Center</h3><p>Install an audited oMLX release beside every existing copy. LM Studio and MTPLX remain with their own app updaters.</p></div><span id="runtimeUpdateCatalogBadge">Pinned catalog</span></div>
+      <div id="runtimeUpdateTracks" class="runtime-update-tracks" aria-live="polite"></div>
+      <div id="runtimeUpdatePlan" class="runtime-update-plan"><div class="runtime-update-empty"><strong>Choose Review exact plan.</strong><span>No network request or filesystem change happens until a reviewed plan is approved separately.</span></div></div>
+      <label id="runtimeUpdateConsentPanel" class="setup-consent inactive"><input id="runtimeUpdateConsent" type="checkbox" disabled><span><strong>I reviewed the exact release, checksum, destination, dependency policy, and rollback path.</strong><small id="runtimeUpdateConsentCopy">A valid pinned plan is required before approval is available.</small></span></label>
+      <section class="runtime-update-progress" aria-live="polite">
+        <div class="benchmark-progress-head"><span id="runtimeUpdatePhase">Ready to review</span><b id="runtimeUpdatePercent">0%</b></div>
+        <div class="benchmark-progress-track" role="progressbar" aria-label="Runtime update progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="runtimeUpdateProgressBar"></i></div>
+        <p id="runtimeUpdateStatus" role="status">No runtime update is running.</p>
+      </section>
+      <div class="runtime-update-actions"><button id="runtimeUpdateStopButton" type="button" class="danger" disabled>Stop safely</button><button id="runtimeUpdateStartButton" type="button" class="primary" disabled><span aria-hidden="true">⇩</span><span><strong id="runtimeUpdateStartTitle">Install verified copy</strong><small id="runtimeUpdateStartLabel">Waiting for a reviewed plan</small></span></button></div>
+    </section>
+    <section class="runtime-promotion-center" aria-labelledby="runtimePromotionTitle">
+      <div class="section-head"><div><h3 id="runtimePromotionTitle">Measured Runtime Promotion</h3><p>Compare an installed verified oMLX update with the selected copy before deciding which one new sessions should use.</p></div><span>Generated prompts only</span></div>
+      <div class="runtime-promotion-controls">
+        <label class="field"><span>Representative workload</span><select id="runtimePromotionSuite"><option value="quick">Quick signal · 512 and 2K prompts</option><option value="standard">Chat · 2K and 8K prompts</option><option value="agentic">Coding agent · four related turns</option><option value="thorough">Long context · up to 32K prompts</option></select><small>Choose this before pressing Measure update on an installed oMLX copy.</small></label>
+        <div class="runtime-promotion-current"><span>Current visible model</span><strong id="runtimePromotionModel">Choose a model in the launcher</strong><small>Runtime measurement forces AR, full-precision KV, no ANE tuning, and identical settings.</small></div>
+      </div>
+      <div id="runtimePromotionPlan" class="runtime-promotion-plan" aria-live="polite"><div class="runtime-promotion-empty"><strong>Install or verify a second oMLX copy, then choose Measure update.</strong><span>Planning hashes both executables and checks the model contract without loading weights.</span></div></div>
+      <label id="runtimePromotionConsentPanel" class="setup-consent inactive"><input id="runtimePromotionConsent" type="checkbox" disabled><span><strong>I reviewed both runtime copies, the model, workload, order, and promotion guards.</strong><small id="runtimePromotionConsentCopy">A valid exact comparison plan is required before measurement.</small></span></label>
+      <section class="runtime-promotion-progress" aria-live="polite">
+        <div class="benchmark-progress-head"><span id="runtimePromotionPhase">Ready to plan</span><b id="runtimePromotionPercent">0%</b></div>
+        <div class="benchmark-progress-track" role="progressbar" aria-label="Runtime promotion measurement progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="runtimePromotionProgressBar"></i></div>
+        <p id="runtimePromotionStatus" role="status">No runtime comparison is running.</p>
+      </section>
+      <div class="runtime-promotion-actions"><button id="runtimePromotionStopButton" type="button" class="danger" disabled>Stop comparison</button><button id="runtimePromotionStartButton" type="button" class="primary" disabled><span aria-hidden="true">⇄</span><span><strong>Measure both copies</strong><small id="runtimePromotionStartLabel">Waiting for an exact plan</small></span></button></div>
+    </section>
+      </div>
+    </details>
+    <p id="runtimeManagerStatus" class="runtime-manager-status" role="status" aria-live="polite"></p>
+    <div class="runtime-actions"><button id="refreshRuntimeManager" type="button" class="secondary">Refresh local checks</button></div>
+  </dialog>
+  <dialog id="profileDialog" class="profile-dialog" aria-labelledby="profileDialogTitle">
+    <form method="dialog"><button class="close" aria-label="Close Launch Profiles">×</button></form>
+    <p class="dialog-kicker">Private local presets</p>
+    <div class="profile-heading"><div><h2 id="profileDialogTitle">Launch profiles</h2><p>Save the whole visible launch contract, then apply it or start it in one click.</p></div><span id="profileCountBadge" class="setup-badge">Loading</span></div>
+    <div class="profile-privacy"><i aria-hidden="true">✓</i><p><strong>Settings only, stored on this Mac.</strong><span>A Chat profile may include its system prompt and sampling controls. Chat messages, model responses, credentials, ports, and runtime secrets are never saved.</span></p></div>
+    <form id="profileSaveForm" class="profile-save-form">
+      <div class="profile-save-fields">
+        <label class="field"><span>Profile name</span><input id="profileName" type="text" maxlength="60" autocomplete="off" placeholder="Daily coding"></label>
+        <label class="field"><span>Engine behaviour</span><select id="profilePolicySelect"><option value="fixed">Keep this engine</option><option value="measured">Auto-select from local measurements</option></select><small id="profilePolicyHelp">Reuses the selected engine and exact runtime controls.</small></label>
+        <label id="profileGoalField" class="field inactive"><span>Measured goal</span><select id="profileGoalSelect" disabled><option value="fastest">Fastest total workload</option><option value="responsive">Fastest first response</option><option value="memory">Lowest memory pressure</option><option value="thermal">Best thermal stability</option></select><small>Only switches after a complete matching local comparison clears the noise floor.</small></label>
+      </div>
+      <div class="profile-save-actions"><button id="profileCancelEdit" type="button" class="text-button hidden">Cancel update</button><button id="profileSaveButton" type="submit" class="primary"><span aria-hidden="true">＋</span><span><strong>Save current settings</strong><small>Nothing starts</small></span></button></div>
+    </form>
+    <p id="profileManagerStatus" class="profile-manager-status" role="status" aria-live="polite">Loading saved profiles…</p>
+    <div id="profileCards" class="profile-cards" aria-live="polite"></div>
+  </dialog>
+  <dialog id="sessionSetDialog" class="session-set-dialog" aria-labelledby="sessionSetDialogTitle">
+    <form method="dialog"><button class="close" aria-label="Close Session Sets">×</button></form>
+    <p class="dialog-kicker">One model · a complete saved workspace</p>
+    <div class="session-set-heading"><div><h2 id="sessionSetDialogTitle">Session Sets</h2><p>Save the agents and Chats using the current model, then reopen the whole workspace later.</p></div><span id="sessionSetCountBadge" class="setup-badge">Loading</span></div>
+    <div class="session-set-safety"><i aria-hidden="true">▤</i><p><strong>Sets remember settings, not activity.</strong><span>Saved locally: model controls, surface choices, project folders, and Chat settings. Never saved here: messages, terminal output, credentials, ports, or running-process state.</span></p></div>
+    <section class="session-set-save" aria-labelledby="sessionSetSaveTitle">
+      <div><span>Current running workspace</span><h3 id="sessionSetSaveTitle">Save these work surfaces</h3><p id="sessionSetSaveSummary">Start a normal model session to save its current agents and Chats.</p></div>
+      <div class="session-set-save-controls"><label for="sessionSetName" class="sr-only">Session Set name</label><input id="sessionSetName" type="text" maxlength="60" autocomplete="off" placeholder="e.g. Daily coding hub"><button id="sessionSetSaveButton" type="button" class="secondary" disabled>Save current session</button><button id="sessionSetCancelEdit" type="button" class="text-button hidden">Cancel update</button></div>
+    </section>
+    <p id="sessionSetStatus" class="session-dashboard-status" role="status" aria-live="polite"></p>
+    <div id="sessionSetCards" class="session-set-cards" aria-live="polite"></div>
+    <section id="sessionSetPlanPanel" class="session-set-plan hidden" aria-labelledby="sessionSetPlanTitle">
+      <div class="session-card-head"><div><span>Side-effect-free review</span><h3 id="sessionSetPlanTitle">Opening plan</h3></div><em id="sessionSetPlanState">Checking</em></div>
+      <p id="sessionSetPlanDetail">Choose a saved set to inspect exactly what will open.</p>
+      <div id="sessionSetPlanFacts" class="session-set-plan-facts"></div>
+      <div id="sessionSetPlanWarning" class="session-set-plan-warning hidden"></div>
+      <label id="sessionSetConsentPanel" class="setup-consent"><input id="sessionSetConsent" type="checkbox"><span><strong id="sessionSetConsentTitle">I reviewed this opening plan.</strong><small id="sessionSetConsentCopy">Nothing opens until you approve the exact current plan.</small></span></label>
+      <div class="session-set-plan-actions"><button id="sessionSetStopButton" type="button" class="danger hidden">Stop remaining surfaces</button><button id="sessionSetOpenButton" type="button" class="primary" disabled><span aria-hidden="true">▶</span><span><strong>Open Session Set</strong><small>One shared model route</small></span></button></div>
+    </section>
+  </dialog>
+  <dialog id="calibrationDialog" class="calibration-dialog" aria-labelledby="calibrationDialogTitle">
+    <form method="dialog"><button class="close" aria-label="Close Calibration Assistant">×</button></form>
+    <p class="dialog-kicker">Guided local measurement</p>
+    <div class="calibration-heading"><div><h2 id="calibrationDialogTitle">Calibration Assistant</h2><p>Find the best installed engine for the exact model and work you selected.</p></div><div class="calibration-heading-actions"><span id="calibrationBadge" class="setup-badge">Inspecting</span><button id="calibrationDetailToggle" type="button" class="calibration-detail-toggle" aria-expanded="false" aria-controls="calibrationPlanFacts calibrationEngineCards">Full details</button></div></div>
+    <div class="calibration-safety"><i aria-hidden="true">✓</i><p><strong>Planning is read-only.</strong><span>Measurement uses generated prompts, starts one temporary local route at a time, checks output equivalence, and stops every route before loading the next.</span></p></div>
+    <div id="calibrationOrigin" class="calibration-origin hidden" role="status" aria-live="polite"><i aria-hidden="true">→</i><p><strong id="calibrationOriginTitle"></strong><span id="calibrationOriginDetail"></span></p></div>
+    <div class="calibration-controls">
+      <label class="field"><span>Representative workload</span><select id="calibrationSuiteSelect"><option value="agentic">Coding agent · four related turns</option><option value="standard">Chat · 2K and 8K prompts</option><option value="quick">Quick signal · 512 and 2K prompts</option><option value="thorough">Long context · up to 32K prompts</option></select><small id="calibrationSuiteHelp">Measures cold prefill, prefix reuse, tool ingestion, and a warm follow-up.</small></label>
+      <label class="field"><span>Decision goal</span><select id="calibrationPreferenceSelect"><option value="fastest">Fastest total workload</option><option value="responsive">Fastest first response</option><option value="memory">Lowest memory pressure</option><option value="thermal">Best thermal stability</option></select><small id="calibrationPreferenceHelp">Uses complete-workload time and keeps leads inside 3% as ties.</small></label>
+    </div>
+    <section class="calibration-step" aria-labelledby="calibrationContractTitle"><div class="calibration-step-number" aria-hidden="true">1</div><div><div class="calibration-step-head"><h3 id="calibrationContractTitle">Lock the visible contract</h3><em id="calibrationContractState">Checking</em></div><p id="calibrationContract">Choose a ready model and work surface.</p><div id="calibrationPlanFacts" class="calibration-plan-facts"></div></div></section>
+    <section class="calibration-step" aria-labelledby="calibrationEnginesTitle"><div class="calibration-step-number" aria-hidden="true">2</div><div><div class="calibration-step-head"><h3 id="calibrationEnginesTitle">Check comparable engines</h3><em id="calibrationEngineState">Checking</em></div><div id="calibrationEngineCards" class="calibration-engine-cards"></div></div></section>
+    <section class="calibration-step" aria-labelledby="calibrationEvidenceTitle"><div class="calibration-step-number" aria-hidden="true">3</div><div><div class="calibration-step-head"><h3 id="calibrationEvidenceTitle">Measure or apply evidence</h3><em id="calibrationEvidenceState">Checking</em></div><div id="calibrationEvidence" class="calibration-evidence"></div><section class="calibration-progress" aria-live="polite"><div class="benchmark-progress-head"><span id="calibrationPhase">Ready to inspect</span><b id="calibrationPercent">0%</b></div><div class="benchmark-progress-track" role="progressbar" aria-label="Calibration progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="calibrationProgressBar"></i></div><p id="calibrationStatus">Opening this assistant does not start a model.</p></section></div></section>
+    <label id="calibrationConsentPanel" class="setup-consent inactive"><input id="calibrationConsent" type="checkbox" disabled><span><strong>I approve the temporary local calibration.</strong><small id="calibrationConsentCopy">The exact reload and request count will appear after the plan is validated.</small></span></label>
+    <section id="calibrationProfilePanel" class="calibration-profile-panel hidden"><div><strong>Keep this as a Quick Launch profile</strong><small>Saving remains optional and stores settings only.</small></div><label class="field"><span>Profile name</span><input id="calibrationProfileName" type="text" maxlength="60" autocomplete="off"></label><button id="calibrationSaveButton" type="button" class="secondary" disabled>Apply + save profile</button></section>
+    <div class="calibration-actions"><button id="calibrationStopButton" type="button" class="danger" disabled>Stop calibration</button><button id="calibrationApplyButton" type="button" class="secondary" disabled>Apply measured result</button><button id="calibrationStartButton" type="button" class="primary" disabled><span aria-hidden="true">◆</span><span><strong>Run local calibration</strong><small id="calibrationStartLabel">Waiting for a valid plan</small></span></button></div>
+  </dialog>
+  <dialog id="routeCheckDialog" class="route-check-dialog" aria-labelledby="routeCheckTitle">
+    <form method="dialog"><button class="close" aria-label="Close Route Check">×</button></form>
+    <p id="routeCheckKicker" class="dialog-kicker">Synthetic local preflight</p>
+    <div class="setup-heading"><div><h2 id="routeCheckTitle">Route Check</h2><p id="routeCheckRoute" class="setup-route">Inspecting the visible model route…</p></div><span id="routeCheckBadge" class="setup-badge">Read only</span></div>
+    <div class="route-check-safety"><i aria-hidden="true">✓</i><p><strong>Opening this plan changes nothing.</strong><span>A live check needs separate approval because it loads the selected model once. It uses fixed synthetic prompts, stores no generated text, opens no work surface, and unloads automatically.</span></p></div>
+    <div id="routeCheckFacts" class="route-check-facts"></div>
+    <div id="routeCheckChecks" class="route-check-checks" aria-live="polite"></div>
+    <label id="routeCheckConsentPanel" class="setup-consent inactive"><input id="routeCheckConsent" type="checkbox" disabled><span><strong>I approve this exact temporary route check.</strong><small id="routeCheckConsentCopy">The model-load and generated-request count will appear after the read-only plan is ready.</small></span></label>
+    <section class="benchmark-progress-panel route-check-progress" aria-live="polite">
+      <div class="benchmark-progress-head"><span id="routeCheckPhase">Planning</span><b id="routeCheckPercent">0%</b></div>
+      <div class="benchmark-progress-track" role="progressbar" aria-label="Route Check progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="routeCheckProgressBar"></i></div>
+      <p id="routeCheckStatus">Opening this plan does not start a model.</p>
+    </section>
+    <div id="routeCheckResult" class="route-check-result hidden"></div>
+    <div class="route-check-actions"><button id="routeCheckStopButton" type="button" class="danger" disabled>Stop check</button><button id="routeCheckLaunchButton" type="button" class="primary hidden" disabled><span aria-hidden="true">▶</span><span><strong>Launch checked route</strong><small id="routeCheckLaunchLabel">Complete Route Check first</small></span></button><button id="routeCheckStartButton" type="button" class="primary" disabled><span aria-hidden="true">◇</span><span><strong>Run live check</strong><small id="routeCheckStartLabel">Waiting for a valid plan</small></span></button></div>
+  </dialog>
+  <dialog id="previewDialog" aria-labelledby="previewTitle"><form method="dialog"><button class="close" aria-label="Close">×</button></form><p class="dialog-kicker">Launch preview</p><h2 id="previewTitle">Nothing has started yet.</h2><div id="previewContent"></div></dialog>
+  <dialog id="logDialog" aria-labelledby="logTitle"><form method="dialog"><button class="close" aria-label="Close">×</button></form><p class="dialog-kicker">Engine log</p><h2 id="logTitle">Latest output</h2><pre id="logContent"></pre></dialog>
+  <dialog id="benchmarkDialog" class="benchmark-dialog" aria-labelledby="benchmarkTitle">
+    <form method="dialog"><button class="close" aria-label="Close Benchmark Lab">×</button></form>
+    <p class="dialog-kicker">Measured on this Mac</p>
+    <h2 id="benchmarkTitle">Benchmark Lab</h2>
+    <p id="benchmarkRoute" class="benchmark-route">Choose a runnable model and acceleration route.</p>
+    <div class="benchmark-setup">
+      <div class="benchmark-field-stack"><label class="field"><span>Workload suite</span><select id="benchmarkSuiteSelect"><option value="agentic" selected>Agentic · prefix + tool turns</option><option value="quick">Quick · 512 + 2K prompts</option><option value="standard">Standard · 2K + 8K prompts</option><option value="thorough">Thorough · 4K + 16K + 32K prompts</option></select><small id="benchmarkSuiteHelp">Four staged coding-agent turns measure cold prefill, prefix reuse, tool ingestion, and a warm follow-up.</small></label><label class="field"><span>Engine decision goal</span><select id="benchmarkPreferenceSelect"><option value="fastest" selected>Fastest total workload</option><option value="responsive">Fastest first response</option><option value="memory">Lowest memory pressure</option><option value="thermal">Best thermal stability</option></select><small id="benchmarkPreferenceHelp">Ranks the same measurements by complete-workload speed.</small></label></div>
+      <div><span class="benchmark-label">Compared routes</span><div id="benchmarkModes" class="benchmark-mode-chips"></div><small id="benchmarkContract">Uses the visible context, reasoning, sampling, KV, and acceleration tuning controls.</small></div>
+    </div>
+    <div id="benchmarkEngineStrip" class="benchmark-engine-strip" aria-label="Compatible engines"></div>
+    <div id="benchmarkScenarioStrip" class="benchmark-scenarios" aria-label="Agentic benchmark stages"><span><i>1</i>Cold start</span><b>→</b><span><i>2</i>Shared prefix</span><b>→</b><span><i>3</i>Tool result</span><b>→</b><span><i>4</i>Warm follow-up</span></div>
+    <div class="benchmark-safety"><i aria-hidden="true">✓</i><p><strong>No leaderboard shortcuts.</strong><span id="benchmarkSafetyCopy">Generated prompts contain no project data. Each route gets the same growing synthetic conversation, exact greedy output is checked, and real token usage is required.</span></p></div>
+    <section id="benchmarkMtpTuner" class="benchmark-mtp-tuner hidden" aria-labelledby="benchmarkMtpTunerTitle">
+      <div class="benchmark-mtp-tuner-copy"><i aria-hidden="true">⌁</i><p><strong id="benchmarkMtpTunerTitle">Tune LM Studio MTP automatically</strong><span>Searches draft maximum, minimum, and continuation cutoff around the visible settings. A result is saved only after exact-output parity and comparable Mac conditions.</span><small id="benchmarkMtpTunerSummary">Up to 10 MTP candidates plus one AR reference.</small></p></div>
+      <button id="benchmarkMtpTuneButton" type="button" class="secondary"><strong>Run bounded MTP tune</strong><small>Fresh load for every candidate</small></button>
+    </section>
+    <section id="benchmarkDflashTuner" class="benchmark-mtp-tuner hidden" aria-labelledby="benchmarkDflashTunerTitle">
+      <div class="benchmark-mtp-tuner-copy"><i aria-hidden="true">ϟ</i><p><strong id="benchmarkDflashTunerTitle">Tune DFlash 2 automatically</strong><span>Searches useful block sizes, verifier modes, and draft precision around the visible setup. AR and native MTP stay in the final decision when available.</span><small id="benchmarkDflashTunerSummary">Up to 10 DFlash candidates plus reference routes.</small></p></div>
+      <button id="benchmarkDflashTuneButton" type="button" class="secondary"><strong>Run bounded DFlash tune</strong><small>Exact pair · fresh load each time</small></button>
+    </section>
+    <section id="benchmarkProgressPanel" class="benchmark-progress-panel" aria-live="polite">
+      <div class="benchmark-progress-head"><span id="benchmarkPhase">Ready</span><b id="benchmarkPercent">0%</b></div>
+      <div class="benchmark-progress-track" role="progressbar" aria-label="Benchmark progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="benchmarkProgressBar"></i></div>
+      <p id="benchmarkStatus">Nothing will start until you press Run benchmark.</p>
+      <small id="benchmarkFairness" class="benchmark-fairness">Every measured route receives a fresh model load.</small>
+    </section>
+    <details id="benchmarkHistoryPanel" class="benchmark-history">
+      <summary><span><strong>Measurement history</strong><small>Only exact-contract runs are compared</small></span><em id="benchmarkHistoryBadge">Loading…</em></summary>
+      <div class="benchmark-history-body">
+        <p id="benchmarkHistoryFreshness" class="benchmark-history-freshness">Checking saved local evidence…</p>
+        <div id="benchmarkHistoryTrend" class="benchmark-history-trend"></div>
+        <div id="benchmarkHistoryRuns" class="benchmark-history-runs"></div>
+        <div id="benchmarkHistoryOther" class="benchmark-history-other"></div>
+        <div class="benchmark-history-actions"><button id="benchmarkHistoryRerun" type="button" class="text-button" disabled>Rerun this visible contract</button></div>
+      </div>
+    </details>
+    <div id="benchmarkResults" class="benchmark-results"></div>
+    <div class="benchmark-actions"><button id="benchmarkStopButton" type="button" class="danger" disabled>Stop benchmark</button><button id="benchmarkStartButton" type="button" class="secondary benchmark-route-button"><span aria-hidden="true">◇</span><span><strong>Current engine only</strong><small id="benchmarkStartLabel">Four staged turns per route</small></span></button><button id="benchmarkShootoutButton" type="button" class="primary"><span aria-hidden="true">◆</span><span><strong>Compare all engines</strong><small id="benchmarkShootoutLabel">Build a trusted local matrix</small></span></button></div>
+  </dialog>
+  <dialog id="setupDialog" class="setup-dialog" aria-labelledby="setupTitle">
+    <form method="dialog"><button class="close" aria-label="Close Setup Assistant">×</button></form>
+    <p class="dialog-kicker">Review before any change</p>
+    <div class="setup-heading"><div><h2 id="setupTitle">DFlash 2 Setup Assistant</h2><p id="setupRoute" class="setup-route">Choose a compatible oMLX target.</p></div><span id="setupBadge" class="setup-badge">Read only</span></div>
+    <div class="setup-steps">
+      <article id="setupRuntimeStep" class="setup-step pending">
+        <div class="setup-step-icon" aria-hidden="true">1</div>
+        <div class="setup-step-copy"><div class="setup-step-head"><strong>oMLX runtime</strong><em id="setupRuntimeState">Checking</em></div><p id="setupRuntimeDetail">Inspecting the installed build…</p><a id="setupRuntimeLink" href="https://github.com/jundot/omlx/releases/tag/v0.6.3rc2" target="_blank" rel="noopener">Open official oMLX rc2 release ↗</a></div>
+      </article>
+      <article id="setupDraftStep" class="setup-step pending">
+        <div class="setup-step-icon" aria-hidden="true">2</div>
+        <div class="setup-step-copy"><div class="setup-step-head"><strong>Pinned DFlash 2 draft</strong><em id="setupDraftState">Checking</em></div><p id="setupDraftDetail">Inspecting the matching public checkpoint…</p><div class="setup-facts"><span><small>Destination</small><code id="setupDraftDestination">—</code></span><span><small>Storage check</small><b id="setupDiskDetail">—</b></span></div><a id="setupDraftLink" href="https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2" target="_blank" rel="noopener">Review model card and files ↗</a></div>
+      </article>
+      <article class="setup-step verification">
+        <div class="setup-step-icon" aria-hidden="true">3</div>
+        <div class="setup-step-copy"><div class="setup-step-head"><strong>Strict local verification</strong><em>Automatic</em></div><p>Downloaded weights are not marked ready until every pairing and tensor check passes.</p><ul id="setupVerification" class="setup-verification"></ul></div>
+      </article>
+    </div>
+    <label id="setupConsentPanel" class="setup-consent"><input id="setupConsent" type="checkbox"><span><strong>I approve this pinned public download.</strong><small id="setupConsentCopy">This creates or resumes model files only. It will not install oMLX, change agent settings, or modify existing weights.</small></span></label>
+    <section id="setupProgressPanel" class="benchmark-progress-panel setup-progress-panel" aria-live="polite">
+      <div class="benchmark-progress-head"><span id="setupPhase">Ready to review</span><b id="setupPercent">0%</b></div>
+      <div class="benchmark-progress-track" role="progressbar" aria-label="Setup download progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="setupProgressBar"></i></div>
+      <p id="setupStatus">Opening this assistant does not change your Mac.</p>
+    </section>
+    <div class="setup-actions"><button id="setupStopButton" type="button" class="danger" disabled>Stop download</button><button id="setupDownloadButton" type="button" class="primary" disabled><span aria-hidden="true">↓</span><span><strong>Download pinned draft</strong><small id="setupDownloadLabel">3.85 GB · resumable</small></span></button></div>
+  </dialog>
+  <dialog id="aneDialog" class="ane-dialog" aria-labelledby="aneTitle">
+    <form method="dialog"><button class="close" aria-label="Close ANE Tuner">×</button></form>
+    <p class="dialog-kicker">Measured locally · explicit opt-in</p>
+    <div class="setup-heading"><div><h2 id="aneTitle">Neural Engine Prefill Tuner</h2><p id="aneRoute" class="setup-route">Choose an oMLX checkpoint to inspect.</p></div><span id="aneDialogBadge" class="setup-badge">Read only</span></div>
+    <div id="aneDialogChecks" class="ane-dialog-checks"></div>
+    <div class="ane-contract">
+      <span><small>Fixed ANE shape</small><b>2,048 tokens</b></span>
+      <span><small>Measurements</small><b>GPU baseline · 2 repeats</b></span>
+      <span><small>CPU sharing</small><b id="aneCpuAssistFact">Off · ANE + GPU only</b></span>
+      <span><small>Promotion gate</small><b>≥3% + positive ANE ops</b></span>
+    </div>
+    <div class="benchmark-safety ane-warning"><i aria-hidden="true">!</i><p><strong>Experimental and approximate.</strong><span>oMLX requantises the ANE slice to INT8. Tuning measures speed, not answer equivalence, so the fastest-safe preset leaves this off. The private run never edits your global oMLX settings.</span></p></div>
+    <details id="aneAdvanced" class="ane-advanced">
+      <summary><span><strong>Advanced candidate pool</strong><small id="aneCpuAssistSummary">ANE + GPU only</small></span><i aria-hidden="true">⌄</i></summary>
+      <label id="aneCpuAssistPanel" class="setup-consent inactive"><input id="aneCpuAssist" type="checkbox" disabled><span><strong>Include CPU-sharing candidates</strong><small id="aneCpuAssistCopy">Requires a separate all-FP16 checkpoint clone and a larger memory reserve.</small></span></label>
+      <div class="ane-clone-entry"><span><strong>Need an FP16 copy?</strong><small id="aneCloneReason">Select a compatible BF16 checkpoint to inspect this option.</small></span><button id="aneClonePlanButton" type="button" class="secondary" disabled>Prepare copy…</button></div>
+    </details>
+    <label id="aneConsentPanel" class="setup-consent"><input id="aneConsent" type="checkbox"><span><strong>I approve this temporary local measurement.</strong><small>It loads the selected model, runs synthetic code prompts, may take several minutes, and stops its private oMLX process afterward.</small></span></label>
+    <section class="benchmark-progress-panel" aria-live="polite">
+      <div class="benchmark-progress-head"><span id="anePhase">Ready to inspect</span><b id="anePercent">0%</b></div>
+      <div class="benchmark-progress-track" role="progressbar" aria-label="ANE tuning progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="aneProgressBar"></i></div>
+      <p id="aneDialogStatus">Opening this tuner does not change your Mac.</p>
+    </section>
+    <div id="aneResults" class="ane-results"></div>
+    <div class="ane-dialog-actions"><button id="aneStopButton" type="button" class="danger" disabled>Stop tuning</button><button id="aneUseButton" type="button" class="secondary" disabled>Use measured result</button><button id="aneStartButton" type="button" class="primary" disabled><span aria-hidden="true">◇</span><span><strong>Run ANE Tuner</strong><small>Private engine · no global edits</small></span></button></div>
+  </dialog>
+  <dialog id="aneCloneDialog" class="ane-clone-dialog" aria-labelledby="aneCloneTitle">
+    <form method="dialog"><button class="close" aria-label="Close FP16 clone assistant">×</button></form>
+    <p class="dialog-kicker">Local copy · source preserved</p>
+    <div class="setup-heading"><div><h2 id="aneCloneTitle">Prepare FP16 CPU-sharing copy</h2><p id="aneCloneRoute" class="setup-route">Review the exact source and destination before creating anything.</p></div><span id="aneCloneBadge" class="setup-badge">Read only</span></div>
+    <div class="ane-clone-facts">
+      <span><small>Source</small><code id="aneCloneSource">—</code></span>
+      <span><small>New copy</small><code id="aneCloneDestination">—</code></span>
+      <span><small>Storage</small><b id="aneCloneStorage">—</b></span>
+      <span><small>oMLX</small><b id="aneCloneRuntime">—</b></span>
+    </div>
+    <div class="benchmark-safety ane-clone-safety"><i aria-hidden="true">✓</i><p><strong>The original stays untouched.</strong><span>Floating BF16 tensors become FP16 in a private staging folder. Packed quantised weights stay byte-for-byte typed, no network is used, and the new copy appears only after complete verification.</span></p></div>
+    <ul id="aneCloneBlockers" class="ane-clone-blockers"></ul>
+    <label id="aneCloneConsentPanel" class="setup-consent inactive"><input id="aneCloneConsent" type="checkbox" disabled><span><strong>I approve creating this separate local copy.</strong><small id="aneCloneConsentCopy">Nothing has been written.</small></span></label>
+    <section class="benchmark-progress-panel setup-progress-panel" aria-live="polite">
+      <div class="benchmark-progress-head"><span id="aneClonePhase">Ready to review</span><b id="aneClonePercent">0%</b></div>
+      <div class="benchmark-progress-track" role="progressbar" aria-label="FP16 clone progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="aneCloneProgressBar"></i></div>
+      <p id="aneCloneStatus">Opening this assistant does not change your Mac.</p>
+    </section>
+    <div class="ane-clone-actions"><button id="aneCloneStopButton" type="button" class="danger" disabled>Stop copy</button><button id="aneCloneUseButton" type="button" class="secondary" disabled>Use prepared copy</button><button id="aneCloneStartButton" type="button" class="primary" disabled><span aria-hidden="true">◇</span><span><strong>Create verified copy</strong><small id="aneCloneStartLabel">Source remains untouched</small></span></button></div>
+  </dialog>
+  <script src="workspace_context.js" defer></script>
+  <script src="route_preferences.js" defer></script>
+  <script src="chat_drafts.js" defer></script>
+  <script src="chat_queue.js" defer></script>
+  <script src="chat_scroll.js" defer></script>
+  <script src="chat_transcript.js" defer></script>
+  <script src="chat_stream.js" defer></script>
+  <script src="chat_status.js" defer></script>
+  <script src="safe_markdown.js" defer></script>
+  <script src="terminal_core.js" defer></script>
+  <script src="agent_console_tabs.js" defer></script>
+  <script src="app.js" defer></script>
+</body>
+</html>

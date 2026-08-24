@@ -1,0 +1,20 @@
+.segmented {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.segmented button:disabled {
+  cursor: not-allowed;
+  opacity: .38;
+}
+
+.segmented button.unsupported {
+  color: var(--red);
+}
+
+.compatibility-line {
+  min-height: 1.35em;
+  margin: .65rem 0 .9rem;
+  color: var(--muted);
+  font-size: .82rem;
+  line-height: 1.45;
+}

@@ -6682,7 +6682,7 @@ function renderBenchmarkHistory() {
     return `<article class="benchmark-history-series"><div><strong>${esc(series.label)}</strong><small>${esc(latest?.display || "No comparable value")}</small><em class="${changeClass}">${esc(changeText)}</em></div>${benchmarkHistorySparkline(series)}</article>`;
   }).join("") || `<p class="benchmark-history-empty">A second complete matching shootout will create per-engine trend lines.</p>`;
   const runRows = (history.runs || []).map(run => {
-    const statusLabel = ({trusted:"Trusted winner",tie:"Inside noise floor",incomplete:"Incomplete matrix","quality-mismatch":"Correctness mismatch","conditions-mismatched":"Conditions differed"})[run.status] || run.status;
+    const statusLabel = ({trusted:"Usable result",tie:"Practical tie",incomplete:"Incomplete test","workload-mismatch":"Workload mismatch","conditions-mismatched":"Conditions differed"})[run.status] || run.status;
     const engines = (run.engines || [])
       .filter(engine => uiEngineVisible(engine.backend || engine.id))
       .map(engine => `${engine.label} · ${engine.valueDisplay}`).join("  |  ");
@@ -7356,19 +7356,45 @@ function renderCalibrationPlan() {
     .map(engine => `<article class="calibration-engine ${engine.eligible ? "eligible" : "excluded"}"><header><strong>${esc(engine.label)}</strong><em>${engine.eligible ? "Comparable" : "Excluded"}</em></header><p>${esc(engine.reason)}</p><div class="calibration-engine-modes">${(engine.modes || []).map(mode => `<span>${esc(mode.label)}</span>`).join("") || ""}</div></article>`).join("");
   const evidence = plan.evidence || {};
   const evidenceReady = plan.action === "apply-existing";
+  const completedResult = calibrationOwnsBenchmark()
+    && state.benchmarkStatus?.phase === "completed"
+    ? (state.benchmarkStatus.result || {}) : null;
+  const completedDecision = completedResult
+    ? (completedResult.profiles?.[$("calibrationPreferenceSelect").value] || completedResult.decision || {})
+    : null;
+  const completedDecisionReady = Boolean(
+    completedResult?.matrixWorkloadComparable !== false
+    && ["cross-engine-local-benchmark","cross-engine-noise-floor"].includes(completedDecision?.evidenceTier),
+  );
+  const resultPending = Boolean(completedDecisionReady && !evidenceReady);
+  const shownEvidence = resultPending ? {
+    trusted:Boolean(completedDecision.trustedWinner),
+    label:completedDecision.trustedWinner
+      ? `${completedDecision.label} is fastest`
+      : `No clear winner — keep ${completedDecision.label}`,
+    backendLabel:completedDecision.label,
+    detail:completedDecision.rationale?.[0] || completedDecision.recommendation || completedResult.recommendation || "The completed result is being saved.",
+    outputWarning:completedDecision.outputWarning || completedResult.outputWarning || "",
+  } : evidence;
+  const resultReady = evidenceReady || resultPending;
   calibrationStateBadge(
     "calibrationEvidenceState",
-    evidenceReady ? (evidence.trusted ? "Winner ready" : "Decision ready") : (plan.ready ? "Measurement needed" : "Blocked"),
-    evidenceReady ? "ready" : (plan.ready ? "warning" : "blocked"),
+    resultReady ? (shownEvidence.trusted ? "Winner ready" : "Result ready") : (plan.ready ? "Ready to test" : "Blocked"),
+    resultReady ? "ready" : (plan.ready ? "" : "blocked"),
   );
   const blockers = (plan.blockers || []).join(" ");
-  $("calibrationEvidence").className = `calibration-evidence${evidenceReady ? " trusted" : plan.ready ? "" : " blocked"}`;
-  $("calibrationEvidence").innerHTML = `<i aria-hidden="true">${evidenceReady ? "◆" : plan.ready ? "◇" : "×"}</i><span><strong>${esc(evidenceReady ? evidence.label : plan.ready ? "A matching Engine Shootout is required" : "This contract cannot be calibrated yet")}</strong><small>${esc(evidenceReady ? `${evidence.backendLabel} · ${evidence.detail}` : plan.ready ? `${plan.modelReloadCount} isolated model reloads and ${plan.measuredRequestCount} generated requests will build the missing matrix.` : blockers)}</small></span>`;
+  const evidenceDetail = resultReady
+    ? [shownEvidence.detail, shownEvidence.outputWarning].filter(Boolean).join(" ")
+    : plan.ready
+      ? `${plan.eligibleEngineCount} engines will be tested one at a time using generated prompts.`
+      : blockers;
+  $("calibrationEvidence").className = `calibration-evidence${resultReady ? " trusted" : plan.ready ? "" : " blocked"}`;
+  $("calibrationEvidence").innerHTML = `<i aria-hidden="true">${resultReady ? "◆" : plan.ready ? "◇" : "×"}</i><span><strong>${esc(resultReady ? shownEvidence.label : plan.ready ? "Ready to test the engines" : "This setup cannot be tested yet")}</strong><small>${esc(evidenceDetail)}</small></span>`;
   if (state.calibrationProfileContractId !== plan.contractId) {
     state.calibrationProfileContractId = plan.contractId;
     $("calibrationProfileName").value = plan.suggestedProfileName || "Quick Launch";
   }
-  const canMeasure = plan.action === "measure" && plan.ready && !calibrationOperationBlocked();
+  const canMeasure = plan.action === "measure" && plan.ready && !resultPending && !calibrationOperationBlocked();
   $("calibrationConsent").disabled = true;
   $("calibrationConsent").checked = false;
   $("calibrationConsentPanel").classList.add("hidden");
@@ -7376,15 +7402,17 @@ function renderCalibrationPlan() {
     ? `${plan.eligibleEngineCount} engines · ${plan.modelReloadCount} isolated reloads · ${plan.measuredRequestCount} generated local requests · ${plan.calibrationCoolingLabel || "Automatic"} cooling · up to ${Math.round(plan.resourceCooldownMaxSecondsPerRoute)} seconds of cancellable settling before each route.`
     : blockers || "Resolve the engine blockers before measurement.";
   $("calibrationStartButton").disabled = !canMeasure;
-  $("calibrationStartButton").querySelector("strong").textContent = evidenceReady ? "Evidence already available" : "Run local calibration";
+  $("calibrationStartButton").querySelector("strong").textContent = evidenceReady
+    ? "Result already available" : resultPending ? "Saving result…" : "Test engines";
   $("calibrationStartLabel").textContent = evidenceReady
     ? `${evidence.backendLabel} · ${evidence.label}`
+    : resultPending ? "No second test needed"
     : plan.ready ? `${plan.eligibleEngineCount} engines · ${plan.routeCount} routes` : "Resolve the blockers above";
   const canApply = evidenceReady && !calibrationOperationBlocked();
   $("calibrationApplyButton").disabled = !canApply;
   $("calibrationApplyButton").textContent = evidence.trusted
-    ? `Apply ${evidence.backendLabel}${normalizedReasoning ? " + model default" : ""}`
-    : `Apply safe current engine${normalizedReasoning ? " + model default" : ""}`;
+    ? `Use ${evidence.backendLabel}${normalizedReasoning ? " + model default" : ""}`
+    : `Keep ${evidence.backendLabel || "current engine"}${normalizedReasoning ? " + model default" : ""}`;
   $("calibrationProfilePanel").classList.toggle("hidden", !evidenceReady || active);
   $("calibrationSaveButton").disabled = !canApply || !$("calibrationProfileName").value.trim();
 }
@@ -7409,17 +7437,17 @@ function renderCalibrationBenchmark(status = state.benchmarkStatus || {}) {
     return;
   }
   if (owns && phase === "completed") {
-    $("calibrationBadge").textContent = "Measured";
+    $("calibrationBadge").textContent = "Result ready";
     $("calibrationBadge").className = "setup-badge ready";
-    $("calibrationPhase").textContent = "Completed";
+    $("calibrationPhase").textContent = "Finished";
     $("calibrationPercent").textContent = "100%";
     $("calibrationProgressBar").style.width = "100%";
     $("calibrationProgressBar").parentElement.setAttribute("aria-valuenow", "100");
     const result = status.result || {};
     const decision = result.profiles?.[$("calibrationPreferenceSelect").value] || result.decision || {};
     $("calibrationStatus").textContent = decision.trustedWinner
-      ? `${decision.label} produced a trusted ${enginePreferenceLabels[decision.preference] || "measured"} result. Revalidating the saved evidence now…`
-      : (decision.recommendation || "The completed matrix kept the current engine because no switch cleared every evidence gate.");
+      ? `${decision.label} won for ${enginePreferenceLabels[decision.preference] || "this goal"}. You can use the result without testing again.`
+      : (decision.recommendation || "The engines finished in a practical tie, so the current engine is kept.");
     if (result.id && state.calibrationCompletionId !== result.id) {
       state.calibrationCompletionId = result.id;
       loadModels(false).then(() => loadCalibrationPlan(false)).catch(error => {
@@ -7436,13 +7464,13 @@ function renderCalibrationBenchmark(status = state.benchmarkStatus || {}) {
     return;
   }
   const plan = state.calibrationPlan;
-  $("calibrationBadge").textContent = state.calibrationLoading ? "Inspecting" : plan?.action === "apply-existing" ? "Evidence ready" : plan?.ready ? "Ready" : "Blocked";
+  $("calibrationBadge").textContent = state.calibrationLoading ? "Checking" : plan?.action === "apply-existing" ? "Result ready" : plan?.ready ? "Ready" : "Blocked";
   $("calibrationBadge").className = `setup-badge${plan?.action === "apply-existing" ? " ready" : !plan?.ready && plan ? " warning" : ""}`;
-  $("calibrationPhase").textContent = plan?.action === "apply-existing" ? "Ready to apply" : plan?.ready ? "Ready to measure" : "Ready to inspect";
+  $("calibrationPhase").textContent = plan?.action === "apply-existing" ? "Ready to use" : plan?.ready ? "Ready to test" : "Needs attention";
   if (!state.calibrationLoading) {
     $("calibrationStatus").textContent = plan?.action === "apply-existing"
-      ? "Matching local evidence is ready. Applying it still rechecks the full contract."
-      : plan?.ready ? "Review the workload above, then run the temporary local measurement." : ((plan?.blockers || ["Choose a valid comparable contract."])[0]);
+      ? "Your saved result matches these settings. No new test is needed."
+      : plan?.ready ? "Choose Test engines when you are ready." : ((plan?.blockers || ["Choose a valid comparable setup."])[0]);
   }
 }
 

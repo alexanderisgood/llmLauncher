@@ -5305,7 +5305,8 @@ class LauncherTests(unittest.TestCase):
             )
         self.assertEqual(memory_unavailable["backend"], "omlx")
         self.assertEqual(memory_unavailable["engineEvidenceTier"], "cross-engine-profile-incomplete")
-        self.assertTrue(memory_unavailable["engineNextAction"]["requiresConsent"])
+        self.assertFalse(memory_unavailable["engineNextAction"]["requiresConsent"])
+        self.assertTrue(memory_unavailable["engineNextAction"]["requiresReview"])
 
         near_tie = json.loads(json.dumps(model))
         for key in ("localBenchmark",):
@@ -5368,6 +5369,7 @@ class LauncherTests(unittest.TestCase):
         }
         base_seconds = {"omlx": 2.0, "lmstudio": 1.5, "mtplx": 1.2}
         memory_delta = {"omlx": 4 * 1024**3, "lmstudio": 2 * 1024**3, "mtplx": 3 * 1024**3}
+        baseline_headroom = {"omlx": 44.0, "lmstudio": 45.0, "mtplx": 46.0}
         thermal_state = {"omlx": 0, "lmstudio": 1, "mtplx": 0}
 
         def measured(job, _models, mode, completed, _total, gate):
@@ -5392,9 +5394,9 @@ class LauncherTests(unittest.TestCase):
                 "resourceTelemetry": {
                     "version": 1, "sampleCount": 3, "memoryAvailable": True,
                     "totalMemoryBytes": 50 * 1024**3,
-                    "baselineHeadroomPercent": 45.0,
+                    "baselineHeadroomPercent": baseline_headroom[job["backend"]],
                     "peakPressureDeltaBytes": memory_delta[job["backend"]],
-                    "minimumHeadroomPercent": 45.0 - memory_delta[job["backend"]] / (50 * 1024**3) * 100,
+                    "minimumHeadroomPercent": baseline_headroom[job["backend"]] - memory_delta[job["backend"]] / (50 * 1024**3) * 100,
                     "thermalAvailable": True,
                     "thermalStartValue": 0,
                     "thermalStart": "nominal",
@@ -5437,13 +5439,39 @@ class LauncherTests(unittest.TestCase):
             for record in records
         ))
 
+        mixed_shootouts = json.loads(json.dumps(records))
+        mixed_shootouts[-1]["shootoutId"] = "different-shootout"
+        mixed_entries = []
+        for record in mixed_shootouts:
+            measurement = launcher.cross_engine_benchmark_measurement(record)
+            self.assertIsNotNone(measurement)
+            mixed_entries.append({"backend": record["backend"], "record": record, **measurement})
+        mixed_profile = launcher.rank_cross_engine_profile(mixed_entries, "fastest")
+        self.assertFalse(mixed_profile["available"])
+        self.assertTrue(mixed_profile["conditionMismatch"])
+
         mismatch = json.loads(json.dumps(records))
         mismatch[1]["qualityFingerprint"] = "c" * 64
+        mismatch[1]["qualityCompletionTokens"] = 63
+        mismatch[1]["modes"][mismatch[1]["winner"]]["samples"][0]["promptTokens"] += 38
+        mismatch[1]["modes"][mismatch[1]["winner"]]["samples"][0]["completionTokens"] -= 1
         with mock.patch.object(launcher, "hardware_fingerprint", return_value="shootout-mac"):
-            inconclusive = manager._build_shootout_result(shootout, mismatch, [model])
+            varied = manager._build_shootout_result(shootout, mismatch, [model])
+        self.assertTrue(varied["matrixQualityPassed"])
+        self.assertFalse(varied["exactOutputMatch"])
+        self.assertTrue(varied["trustedWinner"])
+        self.assertIn("wording varied", varied["recommendation"])
+
+        material_mismatch = json.loads(json.dumps(records))
+        material_mismatch[1]["qualityFingerprint"] = "c" * 64
+        material_mismatch[1]["qualityCompletionTokens"] = 32
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value="shootout-mac"):
+            inconclusive = manager._build_shootout_result(
+                shootout, material_mismatch, [model],
+            )
         self.assertFalse(inconclusive["matrixQualityPassed"])
         self.assertFalse(inconclusive["trustedWinner"])
-        self.assertIn("different greedy", inconclusive["recommendation"])
+        self.assertIn("materially different response lengths", inconclusive["recommendation"])
 
         failed = launcher.BenchmarkManager(launcher.RunManager())
         failed.state = json.loads(json.dumps(manager.state))
@@ -7883,7 +7911,8 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('.performance-receipt[data-state="trusted"]', styles)
         self.assertIn('.choice.measured-best .choice-evidence{display:block}', styles)
         self.assertIn(':root[data-detail="focused"] #optimizationBadge', styles)
-        self.assertIn('<strong>Best engine</strong><span aria-hidden="true">⌃</span>', index)
+        self.assertIn('aria-label="More performance options"', index)
+        self.assertIn('<span aria-hidden="true">⌃</span>', index)
         self.assertIn('.agent-terminal-viewport{--terminal-background:#000;--terminal-foreground:#f5f7fa;', styles)
         self.assertIn('background:#000;color:var(--terminal-foreground);color-scheme:dark', styles)
         self.assertIn('.agent-terminal-viewport pre{min-width:max-content;margin:0;padding:0;border:0;background:transparent;color:var(--terminal-foreground)', styles)
@@ -8152,7 +8181,7 @@ class LauncherTests(unittest.TestCase):
         script = (ROOT / "app.js").read_text(encoding="utf-8")
         self.assertIn("engineNextAction", script)
         self.assertIn('source:"optimizer-result"', script)
-        self.assertIn("Measure compatible engines", index)
+        self.assertIn("Test or review engines", index)
         self.assertIn("/api/chat/history/update", script)
         self.assertIn("chatHistoryMarkdown", script)
         self.assertIn("chatEventUsage", script)
@@ -8310,8 +8339,9 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("/api/benchmark/history", script)
         self.assertIn('request.scope = "engines"', script)
         self.assertIn("request.enginePreference = enginePreference", script)
+        self.assertIn('data-engine-preference="fastest"', index)
         for preference in ("fastest", "responsive", "memory", "thermal"):
-            self.assertIn(f'data-engine-preference="{preference}"', index)
+            self.assertIn(f'<option value="{preference}">', index)
         self.assertIn("/api/setup/plan", script)
         self.assertIn("/api/setup/download-draft", script)
         self.assertIn("/api/setup/status", script)

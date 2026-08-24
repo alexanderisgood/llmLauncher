@@ -7687,7 +7687,14 @@ def benchmark_reasoning_contract(
 def cross_engine_benchmark_measurement(
     record: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Return a comparable absolute score and immutable sample contract."""
+    """Return a score plus the generated-input contract used across engines.
+
+    Exact generated text is deliberately not part of the cross-engine grouping
+    key. Backends can differ by one terminal token or make a numerically valid
+    greedy branch while still running the same model and generated workload.
+    Observed token counts remain available for the bounded comparability check
+    below; runtime promotion keeps its stricter byte-for-byte parity gate.
+    """
     quality_fingerprint = record.get("qualityFingerprint")
     quality_tokens = record.get("qualityCompletionTokens")
     if (
@@ -7707,6 +7714,7 @@ def cross_engine_benchmark_measurement(
         return None
     workload = str(record.get("workloadKind") or "throughput")
     sample_contract: list[dict[str, Any]] = []
+    observed_sample_tokens: list[dict[str, Any]] = []
     total_seconds = 0.0
     completion_tokens = 0
     first_token_seconds: list[float] = []
@@ -7731,16 +7739,17 @@ def cross_engine_benchmark_measurement(
         total_seconds += float(seconds)
         completion_tokens += generated
         first_token_seconds.append(float(ttft))
-        base = {
-            "promptTokens": prompt_tokens,
-            "completionTokens": generated,
-            "targetPromptTokens": sample.get("targetPromptTokens"),
-        }
+        base = {"targetPromptTokens": sample.get("targetPromptTokens")}
         if workload == "agentic":
             base["scenario"] = sample.get("scenario")
         else:
             base["repetition"] = sample.get("repetition")
         sample_contract.append(base)
+        observed_sample_tokens.append({
+            **base,
+            "promptTokens": prompt_tokens,
+            "completionTokens": generated,
+        })
     if workload == "agentic":
         score = total_seconds
         metric = "agentic-total-seconds"
@@ -7765,8 +7774,6 @@ def cross_engine_benchmark_measurement(
         "contextMax": record.get("contextMax"),
         "outputMin": record.get("outputMin"),
         "outputMax": record.get("outputMax"),
-        "qualityFingerprint": quality_fingerprint,
-        "qualityCompletionTokens": quality_tokens,
         "samples": sample_contract,
     }
     signature = hashlib.sha256(json.dumps(
@@ -7815,6 +7822,9 @@ def cross_engine_benchmark_measurement(
     return {
         "signature": signature, "score": score, "metric": metric,
         "display": display, "higherIsBetter": higher_is_better,
+        "qualityFingerprint": quality_fingerprint,
+        "qualityCompletionTokens": quality_tokens,
+        "observedSampleTokens": observed_sample_tokens,
         "firstTokenSeconds": round(statistics.median(first_token_seconds), 4),
         "peakPressureDeltaBytes": memory_delta,
         "baselineHeadroomPercent": baseline_headroom,
@@ -7829,6 +7839,86 @@ def cross_engine_benchmark_measurement(
         "resourceCooldownStatus": (
             result.get("resourceCooldown", {}).get("status")
             if isinstance(result.get("resourceCooldown"), dict) else None
+        ),
+    }
+
+
+def cross_engine_workload_compatibility(
+    group: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Separate a real workload mismatch from harmless backend output drift."""
+    if len(group) < 2:
+        return {
+            "comparable": False, "exactOutputMatch": False,
+            "warning": "At least two completed engine measurements are required.",
+        }
+    if len({str(item.get("signature") or "") for item in group}) != 1:
+        return {
+            "comparable": False, "exactOutputMatch": False,
+            "warning": "The engines did not run the same generated input schedule.",
+        }
+
+    def bounded(values: list[int], *, minimum: int, ratio: float) -> bool:
+        if not values or any(value <= 0 for value in values):
+            return False
+        limit = max(minimum, math.ceil(max(values) * ratio))
+        return max(values) - min(values) <= limit
+
+    quality_tokens = [int(item["qualityCompletionTokens"]) for item in group]
+    if not bounded(quality_tokens, minimum=2, ratio=0.02):
+        return {
+            "comparable": False, "exactOutputMatch": False,
+            "warning": (
+                "The deterministic probe produced materially different response lengths "
+                "across engines, so their timings are not comparable."
+            ),
+        }
+
+    observed = [item.get("observedSampleTokens") for item in group]
+    if any(not isinstance(samples, list) or not samples for samples in observed):
+        return {
+            "comparable": False, "exactOutputMatch": False,
+            "warning": "One engine returned incomplete token accounting for the measured workload.",
+        }
+    assert all(isinstance(samples, list) for samples in observed)
+    sample_count = len(observed[0])
+    if any(len(samples) != sample_count for samples in observed):
+        return {
+            "comparable": False, "exactOutputMatch": False,
+            "warning": "The engines completed different numbers of generated workload stages.",
+        }
+    for index in range(sample_count):
+        prompt_tokens = [int(samples[index]["promptTokens"]) for samples in observed]
+        completion_tokens = [int(samples[index]["completionTokens"]) for samples in observed]
+        if not bounded(prompt_tokens, minimum=64, ratio=0.01):
+            return {
+                "comparable": False, "exactOutputMatch": False,
+                "warning": (
+                    "The engines tokenised a generated prompt too differently for a fair "
+                    "performance comparison."
+                ),
+            }
+        if not bounded(completion_tokens, minimum=2, ratio=0.02):
+            return {
+                "comparable": False, "exactOutputMatch": False,
+                "warning": (
+                    "The engines generated materially different amounts of measured output, "
+                    "so their complete-workload times are not comparable."
+                ),
+            }
+
+    quality_contracts = {
+        (item.get("qualityFingerprint"), item.get("qualityCompletionTokens"))
+        for item in group
+    }
+    exact_output = len(quality_contracts) == 1
+    return {
+        "comparable": True,
+        "exactOutputMatch": exact_output,
+        "warning": "" if exact_output else (
+            "Generated wording varied slightly across engines. The result remains usable: "
+            "the model, generated inputs and settings matched, and token counts stayed within "
+            "the comparison tolerance."
         ),
     }
 
@@ -7926,9 +8016,20 @@ def rank_cross_engine_profile(
         and not isinstance(item.get("baselineHeadroomBytes"), bool)
         and int(item["baselineHeadroomBytes"]) >= 0
     ]
+    cooldown_statuses = [str(item.get("resourceCooldownStatus") or "") for item in group]
+    shootout_ids = {
+        str(item.get("record", {}).get("shootoutId") or "")
+        for item in group if isinstance(item.get("record"), dict)
+    }
+    shared_gate_passed = bool(
+        len(cooldown_statuses) == len(group)
+        and all(status in {"ready", "reference-ready"} for status in cooldown_statuses)
+        and len(shootout_ids) == 1 and "" not in shootout_ids
+    )
     if (
         len(baseline_bytes) == len(group)
         and max(baseline_bytes) - min(baseline_bytes) > BENCHMARK_MEMORY_MEANINGFUL_BYTES
+        and not shared_gate_passed
     ):
         starts = ", ".join(
             f"{BACKEND_LABELS[item['backend']]} {float(item.get('baselineHeadroomPercent') or 0):.0f}%"
@@ -8127,7 +8228,7 @@ def engine_selection_next_action(
     labels = {
         "apply": f"Apply {BACKEND_LABELS[backend]}",
         "keep-current": f"Keep {BACKEND_LABELS[backend]}",
-        "calibrate": "Measure compatible engines",
+        "calibrate": "Test engines",
     }
     return {
         "id": action,
@@ -8138,7 +8239,8 @@ def engine_selection_next_action(
         "backendLabel": BACKEND_LABELS[backend],
         "reason": reason,
         "requiresCalibration": action == "calibrate",
-        "requiresConsent": action == "calibrate",
+        "requiresConsent": False,
+        "requiresReview": action == "calibrate",
         "recommendedSuite": "standard" if client == "chat" else "agentic",
         "missingEngines": copy.deepcopy(missing_engines or []),
     }
@@ -8233,7 +8335,48 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         current["rationale"] = current["engineRationale"] + list(current.get("rationale") or [])
         return current
 
-    chosen_group = max(complete, key=lambda group: _cross_engine_group_rank(group, client))
+    comparable_complete = [
+        (group, cross_engine_workload_compatibility(group))
+        for group in complete
+    ]
+    usable_complete = [
+        (group, quality) for group, quality in comparable_complete
+        if quality.get("comparable") is True
+    ]
+    if not usable_complete:
+        newest_group, quality = max(
+            comparable_complete, key=lambda item: _cross_engine_group_rank(item[0], client),
+        )
+        mismatch_reason = str(
+            quality.get("warning")
+            or "The completed engine measurements did not perform comparable amounts of work."
+        )
+        current.update({
+            "engineChanged": False,
+            "engineEvidenceTier": "cross-engine-workload-mismatch",
+            "engineEvidenceLabel": "Completed results need review",
+            "comparedEngines": [
+                {"backend": item["backend"], "label": BACKEND_LABELS[item["backend"]]}
+                for item in newest_group
+            ],
+            "missingEngines": [],
+            "engineRationale": [
+                mismatch_reason,
+                "The completed measurements were kept, but no automatic engine switch was made.",
+            ],
+            "engineDecision": {**engine_meta, "workloadComparison": copy.deepcopy(quality)},
+            "enginePreference": preference,
+            "engineNextAction": engine_selection_next_action(
+                "calibrate", preference, current_backend, client, mismatch_reason,
+            ),
+        })
+        current["rationale"] = current["engineRationale"] + list(current.get("rationale") or [])
+        return current
+
+    chosen_group, workload_comparison = max(
+        usable_complete, key=lambda item: _cross_engine_group_rank(item[0], client),
+    )
+    engine_meta["workloadComparison"] = copy.deepcopy(workload_comparison)
     profile = rank_cross_engine_profile(chosen_group, preference)
     ranked = profile.get("ranked") if profile.get("available") else _speed_ranked_entries(chosen_group)
     compared = [
@@ -8297,15 +8440,18 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
     winner = profile["winner"]
     if not profile.get("trusted"):
         tie_reason = str(profile.get("tieReason") or "The measured difference did not clear the switch threshold.")
+        rationale = [
+            tie_reason,
+            "The current engine was kept to avoid switching on measurement noise.",
+        ]
+        if workload_comparison.get("warning"):
+            rationale.append(str(workload_comparison["warning"]))
         current.update({
             "engineChanged": False,
             "engineEvidenceTier": "cross-engine-noise-floor",
             "engineEvidenceLabel": f"{ENGINE_PREFERENCE_LABELS[preference]} tied · current kept",
             "comparedEngines": compared, "missingEngines": [],
-            "engineRationale": [
-                tie_reason,
-                "The current engine was kept to avoid switching on measurement noise.",
-            ],
+            "engineRationale": rationale,
             "engineDecision": engine_meta,
             "enginePreference": preference,
             "engineNextAction": engine_selection_next_action(
@@ -8319,16 +8465,21 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
     result = _optimizer_with_forced_record(
         payload, models, model, winning_backend, winner["record"], evidence,
     )
+    winner_rationale = [
+        str(profile["winnerReason"]),
+        "The comparison preserved this model, Mac, workload, context, response limit, reasoning, sampling, and KV precision.",
+    ]
+    if workload_comparison.get("warning"):
+        winner_rationale.append(str(workload_comparison["warning"]))
     result.update({
         "engineChanged": winning_backend != current_backend,
         "originalBackend": current_backend,
         "engineEvidenceTier": "cross-engine-local-benchmark",
         "engineEvidenceLabel": f"{ENGINE_PREFERENCE_LABELS[preference]} · locally measured",
         "comparedEngines": compared, "missingEngines": [],
-        "engineRationale": [
-            str(profile["winnerReason"]),
-            "The comparison preserved this model, Mac, workload, context, response limit, reasoning, sampling, and KV precision.",
-        ],
+        "engineRationale": winner_rationale,
+        "engineOutputWarning": str(workload_comparison.get("warning") or ""),
+        "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
         "engineDecision": engine_meta,
         "enginePreference": preference,
         "enginePreferenceMetric": profile["metric"],
@@ -9258,15 +9409,23 @@ def benchmark_history_request(
                 entries.append({"backend": candidate, "record": record, **measurement})
         complete = set(comparable_records) == set(eligible) and len(entries) == len(eligible) and len(entries) >= 2
         signatures_match = complete and len({str(item["signature"]) for item in entries}) == 1
+        workload_comparison = (
+            cross_engine_workload_compatibility(entries)
+            if signatures_match else {
+                "comparable": False, "exactOutputMatch": False,
+                "warning": "The engines did not run the same generated input schedule.",
+            }
+        )
         profile: dict[str, Any] | None = (
-            rank_cross_engine_profile(entries, preference) if signatures_match else None
+            rank_cross_engine_profile(entries, preference)
+            if workload_comparison.get("comparable") is True else None
         )
         if not complete:
             status = "incomplete"
             summary = "This run does not contain every engine compatible with the current contract."
-        elif not signatures_match:
-            status = "quality-mismatch"
-            summary = "Greedy correctness output differed across engines, so this run is not trend evidence."
+        elif workload_comparison.get("comparable") is not True:
+            status = "workload-mismatch"
+            summary = str(workload_comparison.get("warning") or "The measured workloads were not comparable.")
         elif not profile or not profile.get("available"):
             status = "conditions-mismatched"
             summary = str((profile or {}).get("reason") or "The selected metric is incomplete for this run.")
@@ -9276,6 +9435,8 @@ def benchmark_history_request(
         else:
             status = "trusted"
             summary = str(profile["winnerReason"])
+            if workload_comparison.get("warning"):
+                summary += " " + str(workload_comparison["warning"])
         execution_order = next(
             (
                 list(record.get("shootoutExecutionOrder") or [])
@@ -9312,6 +9473,8 @@ def benchmark_history_request(
             "winnerLabel": BACKEND_LABELS[profile["winner"]["backend"]] if status == "trusted" and profile else None,
             "metric": profile.get("metric") if profile else None,
             "engines": engine_rows,
+            "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
+            "outputWarning": str(workload_comparison.get("warning") or ""),
             "_profileAvailable": bool(profile and profile.get("available")),
         })
     evaluated.sort(key=lambda item: str(item.get("createdAt") or ""), reverse=True)
@@ -11365,6 +11528,10 @@ def calibration_plan(
     }
     resolved_backend = str(decision.get("backend") or request["backend"])
     rationale = list(decision.get("engineRationale") or decision.get("rationale") or [])
+    workload_comparison = (
+        decision.get("engineDecision", {}).get("workloadComparison", {})
+        if isinstance(decision.get("engineDecision"), dict) else {}
+    )
     contract_value = {
         "modelId": request["modelId"], "client": request["client"],
         "context": request["context"], "output": request["output"],
@@ -11417,6 +11584,11 @@ def calibration_plan(
             "backend": resolved_backend,
             "backendLabel": BACKEND_LABELS[resolved_backend],
             "detail": str(rationale[0]) if rationale else "No matching cross-engine winner is available yet.",
+            "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
+            "outputWarning": str(
+                decision.get("engineOutputWarning")
+                or workload_comparison.get("warning") or ""
+            ),
         },
         "suggestedProfileName": suggested_name,
         "privacy": {
@@ -15390,6 +15562,8 @@ def build_runtime_promotion_result(
         and selected_result.get("qualityCompletionTokens")
         == candidate_result.get("qualityCompletionTokens")
         and selected_measurement["signature"] == candidate_measurement["signature"]
+        and selected_measurement["observedSampleTokens"]
+        == candidate_measurement["observedSampleTokens"]
     )
 
     selected_samples = selected_result.get("samples")
@@ -16705,11 +16879,15 @@ class BenchmarkManager:
         self, shootout: dict[str, Any], records: list[dict[str, Any]],
         models: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        quality_contracts = {
-            (record.get("qualityFingerprint"), record.get("qualityCompletionTokens"))
-            for record in records
-        }
-        matrix_quality_passed = len(quality_contracts) == 1
+        measurements: list[dict[str, Any]] = []
+        for record in records:
+            measurement = cross_engine_benchmark_measurement(record)
+            if measurement:
+                measurements.append({
+                    "backend": record["backend"], "record": record, **measurement,
+                })
+        workload_comparison = cross_engine_workload_compatibility(measurements)
+        matrix_quality_passed = workload_comparison.get("comparable") is True
         reference_quality = (
             (records[0].get("qualityFingerprint"), records[0].get("qualityCompletionTokens"))
             if records else (None, None)
@@ -16754,10 +16932,9 @@ class BenchmarkManager:
             tier = str(decision.get("engineEvidenceTier") or "")
             trusted = tier == "cross-engine-local-benchmark" and matrix_quality_passed
             if not matrix_quality_passed:
-                recommendation = (
-                    "The engines produced different greedy correctness fingerprints. No engine switch "
-                    "was trusted; review runtime/model equivalence before comparing speed."
-                )
+                recommendation = str(workload_comparison.get("warning") or (
+                    "The completed engine routes did not perform comparable amounts of work."
+                ))
             else:
                 recommendation = " ".join(str(item) for item in decision.get("engineRationale") or [])
             profiles[preference] = {
@@ -16771,6 +16948,8 @@ class BenchmarkManager:
                 "missingEngines": copy.deepcopy(decision.get("missingEngines") or []),
                 "rationale": copy.deepcopy(decision.get("engineRationale") or []),
                 "trustedWinner": trusted, "recommendation": recommendation,
+                "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
+                "outputWarning": str(workload_comparison.get("warning") or ""),
             }
         selected_preference = str(shootout["request"].get("enginePreference") or "fastest")
         public_decision = profiles.get(selected_preference) or profiles["fastest"]
@@ -16779,6 +16958,9 @@ class BenchmarkManager:
             "modelId": shootout["modelId"], "model": shootout["model"],
             "suite": shootout["suite"], "workloadKind": shootout["workloadKind"],
             "engines": engines, "matrixQualityPassed": matrix_quality_passed,
+            "matrixWorkloadComparable": matrix_quality_passed,
+            "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
+            "outputWarning": str(workload_comparison.get("warning") or ""),
             "reasoningContract": copy.deepcopy(shootout["reasoningContract"]),
             "profiles": profiles, "selectedPreference": selected_preference,
             "executionOrder": list(shootout["executionOrder"]),

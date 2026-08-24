@@ -6,6 +6,7 @@ All notable public changes are recorded here.
 
 - Cooling is now a user-owned safety setting. Apply fastest preserves it, Calibration defaults to Automatic, and maximum fans requires an explicit loud-mode selection.
 - Calibration evidence includes the selected cooling policy, preventing maximum-fan results from being applied to normal-cooling routes.
+- LM Studio MLX models now load through the canonical identifier in its local model index, including quantised aliases such as `model@6bit`; stale catalog failures now give an actionable Rescan message.
 
 ## 1.66.0-alpha.2 - 2026-08-24
 

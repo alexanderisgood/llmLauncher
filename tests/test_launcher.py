@@ -428,6 +428,50 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(len([item for item in scanned if item["name"] == "with-config"]), 1)
         self.assertCountEqual(gguf_record["origins"], ["A", "B"])
 
+    def test_lmstudio_index_resolves_canonical_load_keys_without_starting_the_daemon(self) -> None:
+        catalog = Path(self.temp.name) / "lmstudio" / "models"
+        six_bit = catalog / "lmstudio-community" / "Qwen3.8-27B-MLX-6bit"
+        six_bit.mkdir(parents=True)
+        external = Path(self.temp.name) / "outside" / "Model"
+        external.mkdir(parents=True)
+        index_path = Path(self.temp.name) / "model-index-cache.json"
+        index_path.write_text(json.dumps({"models": [
+            {
+                "concreteModelDirAbsolutePath": str(six_bit),
+                "defaultIdentifier": "qwen3.8-27b-mlx@6bit",
+            },
+            {
+                "concreteModelDirAbsolutePath": str(external),
+                "defaultIdentifier": "outside-model",
+            },
+            {
+                "concreteModelDirAbsolutePath": str(six_bit),
+                "defaultIdentifier": "invalid\nidentifier",
+            },
+        ]}), encoding="utf-8")
+
+        keys = launcher.lmstudio_model_load_key_index(index_path, catalog)
+
+        self.assertEqual(keys, {str(six_bit.resolve()): "qwen3.8-27b-mlx@6bit"})
+
+    def test_lmstudio_model_not_found_failure_is_actionable(self) -> None:
+        plan = launcher.normalized_request(
+            self.payload("lmstudio", "pi", self.models[0]), self.models,
+        )
+        plan.options["_sharedServerWasRunning"] = True
+        log_path = Path(self.temp.name) / "lmstudio-load.log"
+        log_path.write_text(
+            'Model not found\nNo model found that matches model key "old/key".\n',
+            encoding="utf-8",
+        )
+        manager = launcher.RunManager()
+        cancel_event = threading.Event()
+        manager.plan = plan
+        manager.cancel_event = cancel_event
+        with mock.patch.object(manager, "_run_owned_command", return_value=1):
+            with self.assertRaisesRegex(RuntimeError, "Rescan models"):
+                manager._start_lmstudio(plan, log_path, {}, cancel_event)
+
     def test_lmstudio_mtp_probe_and_benchmark_identity_fail_closed(self) -> None:
         required_flags = (
             "--speculative-draft-mtp",

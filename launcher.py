@@ -5280,9 +5280,64 @@ def verified_mtplx_runtime(path: Path, runtime: dict[str, Any], config: dict[str
     return True
 
 
+def lmstudio_model_load_key_index(
+    index_path: Path | None = None,
+    catalog_root: Path | None = None,
+) -> dict[str, str]:
+    """Map resolved LM Studio model folders to canonical CLI load keys.
+
+    LM Studio's current MLX catalog can expose a default identifier such as
+    ``qwen3.8-27b-mlx@6bit`` while retaining a case-preserved Hub folder name.
+    The CLI lookup is not guaranteed to accept that folder spelling. Reading
+    this local index is side-effect free; malformed or out-of-catalog entries
+    are ignored and scanning retains its portable lowercase fallback.
+    """
+    root = (catalog_root or (Path.home() / ".lmstudio" / "models")).expanduser()
+    source = index_path or (Path.home() / ".lmstudio" / ".internal" / "model-index-cache.json")
+    raw = read_json(source)
+    models = raw.get("models") if isinstance(raw, dict) else None
+    if not isinstance(models, list):
+        return {}
+    try:
+        resolved_root = root.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return {}
+    result: dict[str, str] = {}
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        identifier = item.get("defaultIdentifier")
+        folder = item.get("concreteModelDirAbsolutePath")
+        if (
+            not isinstance(identifier, str)
+            or not 0 < len(identifier) <= 512
+            or any(ord(char) < 32 for char in identifier)
+            or not isinstance(folder, str)
+            or not folder
+        ):
+            continue
+        try:
+            catalog_path = Path(folder).expanduser()
+            catalog_path.relative_to(root)
+            resolved_path = catalog_path.resolve(strict=False)
+            resolved_path.relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError):
+            # A normal in-catalog symlink may resolve outside the catalog. It
+            # is still owned by this exact indexed catalog entry, so retain the
+            # resolved alias only after the unresolved path passed containment.
+            try:
+                catalog_path.relative_to(root)
+                resolved_path = catalog_path.resolve(strict=False)
+            except (OSError, RuntimeError, ValueError):
+                continue
+        result[str(resolved_path)] = identifier
+    return result
+
+
 def scan_models() -> list[dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
     roots = model_roots()
+    lmstudio_load_keys = lmstudio_model_load_key_index()
     benchmark_records = load_benchmark_records()
     ane_tuning_records = load_ane_tuning_records()
     machine_fingerprint = hardware_fingerprint() if benchmark_records or ane_tuning_records else ""
@@ -5460,13 +5515,23 @@ def scan_models() -> list[dict[str, Any]]:
         mtplx_verified = verified_mtplx_runtime(real, runtime, config)
         mtp_depth = runtime.get("mtp_depth_default") if isinstance(runtime.get("mtp_depth_default"), int) else 3
         mtp_depth_max = runtime.get("mtp_depth_max") if mtplx_verified else 1
-        try:
-            lm_relative = real.relative_to(Path.home() / ".lmstudio" / "models")
-            lm_key = "/".join(lm_relative.parts[:2]) if len(lm_relative.parts) >= 2 else lm_relative.name
+        # `lms load` resolves LM Studio's canonical/default identifier,
+        # not necessarily the case-preserved catalog path. Recent MLX entries
+        # may also use `model@6bit` aliases that a folder name cannot recreate.
+        canonical_lm_key = lmstudio_load_keys.get(str(real))
+        if canonical_lm_key:
+            lm_key = canonical_lm_key
             lm_catalogued = True
-        except ValueError:
-            lm_key = str(artifact)
-            lm_catalogued = False
+        else:
+            try:
+                lm_relative = real.relative_to(Path.home() / ".lmstudio" / "models")
+            except ValueError:
+                lm_key = str(artifact)
+                lm_catalogued = False
+            else:
+                derived_lm_key = "/".join(lm_relative.parts[:2]) if len(lm_relative.parts) >= 2 else lm_relative.name
+                lm_key = derived_lm_key.lower()
+                lm_catalogued = True
         omlx_mtp = ready and fmt == "mlx" and integrated_mtp and not sidecar_mtp and model_type.startswith(("qwen3_5", "qwen3_6", "deepseek_v4"))
         lmstudio_mtp_artifact = bool(
             ready and lm_catalogued and sidecar_mtp and mtplx_verified
@@ -14226,6 +14291,19 @@ class RunManager:
                     self.lm_loaded_id = plan.model["servedId"]
             returncode = self._run_owned_command(plan.engine_argv, plan, env, log_handle, cancel_event, 900)
             if returncode != 0:
+                log_handle.flush()
+                detail = ""
+                try:
+                    with open(log_path, "rb") as failure_log:
+                        failure_log.seek(max(0, log_path.stat().st_size - 16_384))
+                        detail = failure_log.read(16_384).decode("utf-8", errors="replace")
+                except OSError:
+                    pass
+                if "Model not found" in detail or "No model found that matches model key" in detail:
+                    raise RuntimeError(
+                        "LM Studio no longer recognises the selected model in its local catalog. "
+                        "Open LM Studio once, then Rescan models and retry calibration."
+                    )
                 raise RuntimeError("LM Studio could not load the selected model. Open the run log for details.")
 
     def _wait_ready(self, plan: LaunchPlan, cancel_event: threading.Event) -> None:

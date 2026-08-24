@@ -2153,17 +2153,14 @@ function renderRouteCheck() {
     ? `<strong>${esc(result.verdict === "pass" ? "Route passed." : result.verdict === "advisory" ? "Route passed with advisories." : "Route failed.")}</strong> ${esc(result.summary || "Review the individual checks.")}${esc(receiptDetail)}<br><small>No generated response text was stored and no work surface was opened.</small>`
     : "";
 
-  const consentEnabled = Boolean(plan?.ready && visibleMatches && !active && !state.routeCheckLoading && !receiptReady && !acquisitionIsActive());
-  $("routeCheckConsent").disabled = !consentEnabled;
-  if (!consentEnabled) $("routeCheckConsent").checked = false;
-  $("routeCheckConsentPanel").classList.toggle("inactive", !consentEnabled);
-  $("routeCheckConsentPanel").classList.toggle("hidden", receiptReady);
+  const canStart = Boolean(plan?.ready && visibleMatches && !active && !state.routeCheckLoading && !receiptReady && !acquisitionIsActive());
+  $("routeCheckConsent").disabled = true;
+  $("routeCheckConsent").checked = false;
+  $("routeCheckConsentPanel").classList.add("hidden");
   $("routeCheckConsentCopy").textContent = work
     ? `${work.modelLoads} temporary model load · ${work.generatedRequests} generated request${work.generatedRequests === 1 ? "" : "s"} · at most ${work.maxGeneratedTokensPerRequest} tokens each · automatic unload.`
     : "The model-load and generated-request count will appear after the read-only plan is ready.";
-  $("routeCheckStartButton").disabled = !(
-    consentEnabled && $("routeCheckConsent").checked && plan?.contractId
-  );
+  $("routeCheckStartButton").disabled = !(canStart && plan?.contractId);
   $("routeCheckStartButton").classList.toggle("hidden", receiptReady);
   $("routeCheckStopButton").disabled = !active;
   $("routeCheckStartLabel").textContent = plan?.ready
@@ -2184,7 +2181,6 @@ async function loadRouteCheckPlan() {
   const generation = ++state.routeCheckGeneration;
   state.routeCheckLoading = true;
   state.routeCheckPlan = null;
-  $("routeCheckConsent").checked = false;
   renderRouteCheck();
   try {
     const request = gather("custom", false);
@@ -2216,7 +2212,7 @@ async function openRouteCheck(intent = "inspect") {
 
 async function startRouteCheck() {
   const plan = state.routeCheckPlan;
-  if (!plan?.ready || !plan.contractId || !routeCheckVisibleMatches() || !$("routeCheckConsent").checked || routeCheckIsActive()) return;
+  if (!plan?.ready || !plan.contractId || !routeCheckVisibleMatches() || routeCheckIsActive()) return;
   try {
     const request = JSON.parse(JSON.stringify(plan.request));
     request.confirmation = plan.contractId;
@@ -2229,7 +2225,6 @@ async function startRouteCheck() {
       message:"Route Check accepted. Preparing the temporary local model route…",
       job:data.routeCheck, checks:plan.checks, result:null,
     };
-    $("routeCheckConsent").checked = false;
     renderRouteCheck();
     refreshLaunchability();
   } catch (error) {
@@ -7330,7 +7325,8 @@ function renderCalibrationPlan() {
     $("calibrationEvidence").className = "calibration-evidence blocked";
     $("calibrationEvidence").innerHTML = `<i aria-hidden="true">!</i><span><strong>${state.calibrationLoading ? "Inspecting the visible contract…" : "A valid calibration plan is not available."}</strong><small>${esc($("calibrationStatus").textContent || "Choose a ready model and valid settings.")}</small></span>`;
     $("calibrationConsent").disabled = true;
-    $("calibrationConsentPanel").classList.add("inactive");
+    $("calibrationConsent").checked = false;
+    $("calibrationConsentPanel").classList.add("hidden");
     $("calibrationStartButton").disabled = true;
     $("calibrationApplyButton").disabled = true;
     $("calibrationProfilePanel").classList.add("hidden");
@@ -7373,12 +7369,13 @@ function renderCalibrationPlan() {
     $("calibrationProfileName").value = plan.suggestedProfileName || "Quick Launch";
   }
   const canMeasure = plan.action === "measure" && plan.ready && !calibrationOperationBlocked();
-  $("calibrationConsent").disabled = !canMeasure;
-  $("calibrationConsentPanel").classList.toggle("inactive", !canMeasure);
+  $("calibrationConsent").disabled = true;
+  $("calibrationConsent").checked = false;
+  $("calibrationConsentPanel").classList.add("hidden");
   $("calibrationConsentCopy").textContent = plan.ready
     ? `${plan.eligibleEngineCount} engines · ${plan.modelReloadCount} isolated reloads · ${plan.measuredRequestCount} generated local requests · ${plan.calibrationCoolingLabel || "Automatic"} cooling · up to ${Math.round(plan.resourceCooldownMaxSecondsPerRoute)} seconds of cancellable settling before each route.`
     : blockers || "Resolve the engine blockers before measurement.";
-  $("calibrationStartButton").disabled = !canMeasure || !$("calibrationConsent").checked;
+  $("calibrationStartButton").disabled = !canMeasure;
   $("calibrationStartButton").querySelector("strong").textContent = evidenceReady ? "Evidence already available" : "Run local calibration";
   $("calibrationStartLabel").textContent = evidenceReady
     ? `${evidence.backendLabel} · ${evidence.label}`
@@ -7445,7 +7442,7 @@ function renderCalibrationBenchmark(status = state.benchmarkStatus || {}) {
   if (!state.calibrationLoading) {
     $("calibrationStatus").textContent = plan?.action === "apply-existing"
       ? "Matching local evidence is ready. Applying it still rechecks the full contract."
-      : plan?.ready ? "Review the exact workload above, then approve the temporary local run." : ((plan?.blockers || ["Choose a valid comparable contract."])[0]);
+      : plan?.ready ? "Review the workload above, then run the temporary local measurement." : ((plan?.blockers || ["Choose a valid comparable contract."])[0]);
   }
 }
 
@@ -7475,7 +7472,6 @@ async function loadCalibrationPlan(resetJob = true) {
     state.calibrationJobId = "";
     state.calibrationCompletionId = "";
   }
-  $("calibrationConsent").checked = false;
   $("calibrationStatus").textContent = "Inspecting installed engines and exact-contract evidence without starting a model…";
   renderCalibration();
   try {
@@ -7513,7 +7509,6 @@ async function openCalibrationAssistant(options = {}) {
   $("calibrationSuiteSelect").value = recommendedSuite;
   $("calibrationPreferenceSelect").value = preference;
   $("calibrationCoolingSelect").value = "smart";
-  $("calibrationConsent").checked = false;
   if (!$("calibrationDialog").open) $("calibrationDialog").showModal();
   await pollBenchmarkStatus();
   await loadCalibrationPlan(!calibrationBenchmarkActive());
@@ -7521,7 +7516,7 @@ async function openCalibrationAssistant(options = {}) {
 
 async function startCalibration() {
   const plan = state.calibrationPlan;
-  if (!plan?.ready || plan.action !== "measure" || !$("calibrationConsent").checked || calibrationOperationBlocked()) return;
+  if (!plan?.ready || plan.action !== "measure" || calibrationOperationBlocked()) return;
   try {
     const request = calibrationPlanRequest();
     request.scope = "engines";
@@ -7529,7 +7524,6 @@ async function startCalibration() {
     state.calibrationJobId = data.benchmark.id;
     state.calibrationCompletionId = "";
     state.benchmarkPhase = "queued";
-    $("calibrationConsent").checked = false;
     const engines = Object.fromEntries((data.benchmark.engines || [])
       .filter(engine => uiEngineVisible(engine.backend))
       .map(engine => [engine.backend, {...engine, phase:"queued", modes:{}, record:null}]));
@@ -8381,9 +8375,10 @@ function updateAneControls() {
     ? "On · measured CPU candidates"
     : "Off · ANE + GPU only";
   if (cpuInput.checked) $("aneAdvanced").open = true;
-  $("aneConsent").disabled = !canStart;
-  $("aneConsentPanel").classList.toggle("inactive", !canStart);
-  $("aneStartButton").disabled = !canStart || !$("aneConsent").checked;
+  $("aneConsent").disabled = true;
+  $("aneConsent").checked = false;
+  $("aneConsentPanel").classList.add("hidden");
+  $("aneStartButton").disabled = !canStart;
   $("aneStopButton").disabled = !active;
   const record = aneVisibleRecord();
   $("aneUseButton").disabled = active || !record?.accepted;
@@ -8395,7 +8390,7 @@ function updateAneControls() {
     badge.textContent = "Measured result ready";
     badge.className = "setup-badge ready";
   } else if (readiness.ready) {
-    badge.textContent = "Consent required";
+    badge.textContent = "Ready";
     badge.className = "setup-badge";
   } else {
     badge.textContent = "Read only";
@@ -8459,7 +8454,6 @@ async function pollAneStatus() {
 }
 
 async function openAneTuner() {
-  $("aneConsent").checked = false;
   if (!aneIsActive()) $("aneCpuAssist").checked = false;
   renderAneDialogSetup();
   renderAneResults(state.aneStatus || {});
@@ -8469,7 +8463,7 @@ async function openAneTuner() {
 
 async function startAneTuning() {
   const model = selectedModel();
-  if (!model || !$("aneConsent").checked) return;
+  if (!model || aneIsActive()) return;
   try {
     const data = await api("/api/ane/start", {
       method:"POST",
@@ -9273,7 +9267,11 @@ function renderSessionSetPlan() {
   }
   warning.textContent = warnings.join(" ");
   warning.classList.toggle("hidden", warnings.length === 0);
-  const needsConsent = plan.ready && plan.mode !== "already-open";
+  const needsConsent = Boolean(
+    plan.ready
+    && plan.mode !== "already-open"
+    && (plan.requiresExperimentalApproval || plan.admission?.requiresAcknowledgement)
+  );
   consentPanel.classList.toggle("hidden", !needsConsent);
   $("sessionSetConsentTitle").textContent = plan.requiresExperimentalApproval
     ? plan.admission?.requiresAcknowledgement
@@ -9281,7 +9279,7 @@ function renderSessionSetPlan() {
       : "I reviewed the evidence and approve this explicit experimental FreeToken run."
     : plan.admission?.requiresAcknowledgement
       ? "I accept this current memory estimate and exact opening plan."
-      : "I reviewed this exact opening plan.";
+      : "I accept this exceptional opening plan.";
   $("sessionSetConsentCopy").textContent = plan.requiresExperimentalApproval
     ? "This one approval is bound to the current opening plan and is never saved back into the Session Set."
     : plan.mode === "launch"
@@ -9519,7 +9517,10 @@ async function planSessionSet(setId) {
 async function openPlannedSessionSet() {
   const plan = state.sessionSetPlan;
   if (!plan?.ready || state.sessionSetBusy || sessionSetIsActive()) return;
-  const needsConsent = plan.mode !== "already-open";
+  const needsConsent = Boolean(
+    plan.mode !== "already-open"
+    && (plan.requiresExperimentalApproval || plan.admission?.requiresAcknowledgement)
+  );
   if (needsConsent && !$("sessionSetConsent").checked) {
     setSessionSetMessage("Review and approve the exact opening plan first.", "error");
     return;
@@ -9533,7 +9534,7 @@ async function openPlannedSessionSet() {
   }
   state.sessionSetBusy = true;
   renderSessionSets();
-  setSessionSetMessage(plan.mode === "already-open" ? "Confirming the resident workspace…" : "Opening the approved Session Set…");
+  setSessionSetMessage(plan.mode === "already-open" ? "Confirming the resident workspace…" : "Opening the Session Set…");
   try {
     const data = await api("/api/session-sets/open", {method:"POST", body:JSON.stringify(body)});
     state.sessionSetPlan = null;
@@ -10374,10 +10375,9 @@ function runtimePromotionResultMarkup() {
   </section>`;
 }
 
-function renderRuntimePromotionPlan(plan, resetConsent = false) {
+function renderRuntimePromotionPlan(plan) {
   state.runtimePromotionPlan = plan || null;
   syncRuntimeAdvancedDetailMode();
-  if (resetConsent) $("runtimePromotionConsent").checked = false;
   if (!plan) {
     $("runtimePromotionPlan").innerHTML = '<div class="runtime-promotion-empty"><strong>Install or verify a second oMLX copy, then choose Measure update.</strong><span>Planning hashes both executables and checks the model contract without loading weights.</span></div>' + runtimePromotionResultMarkup();
     updateRuntimePromotionControls();
@@ -10410,9 +10410,10 @@ function renderRuntimePromotionPlan(plan, resetConsent = false) {
 function updateRuntimePromotionControls() {
   const plan = state.runtimePromotionPlan;
   const active = runtimePromotionIsActive();
-  const canStart = Boolean(plan?.canStart && $("runtimePromotionConsent").checked && !active && !state.runtimePromotionLoading);
-  $("runtimePromotionConsent").disabled = !plan?.canStart || active || state.runtimePromotionLoading;
-  $("runtimePromotionConsentPanel").classList.toggle("inactive", !plan?.canStart || active);
+  const canStart = Boolean(plan?.canStart && !active && !state.runtimePromotionLoading);
+  $("runtimePromotionConsent").disabled = true;
+  $("runtimePromotionConsent").checked = false;
+  $("runtimePromotionConsentPanel").classList.add("hidden");
   $("runtimePromotionStartButton").disabled = !canStart;
   $("runtimePromotionStopButton").disabled = !active;
   $("runtimePromotionSuite").disabled = active || state.runtimePromotionLoading;
@@ -10465,14 +10466,13 @@ async function pollRuntimePromotionStatus() {
 async function inspectRuntimePromotion(candidateId) {
   if (state.runtimePromotionLoading || runtimePromotionIsActive()) return;
   state.runtimePromotionLoading = true;
-  $("runtimePromotionConsent").checked = false;
   $("runtimePromotionStatus").textContent = "Hashing both installed executable revisions and validating the visible model contract…";
   updateRuntimePromotionControls();
   try {
     const data = await api("/api/runtime/promotion/plan", {
       method:"POST", body:JSON.stringify(runtimePromotionRequest(candidateId)),
     });
-    renderRuntimePromotionPlan(data.plan, true);
+    renderRuntimePromotionPlan(data.plan);
     $("runtimePromotionPhase").textContent = "Plan ready";
     $("runtimePromotionStatus").textContent = "Exact comparison plan ready. Review both copies and every promotion guard.";
   } catch (error) {
@@ -10485,7 +10485,7 @@ async function inspectRuntimePromotion(candidateId) {
 
 async function startRuntimePromotion() {
   const plan = state.runtimePromotionPlan;
-  if (!plan?.canStart || !$("runtimePromotionConsent").checked || runtimePromotionIsActive()) return;
+  if (!plan?.canStart || runtimePromotionIsActive()) return;
   state.runtimePromotionLoading = true;
   updateRuntimePromotionControls();
   try {
@@ -10493,9 +10493,8 @@ async function startRuntimePromotion() {
       method:"POST",
       body:JSON.stringify({planId:plan.id, confirmation:plan.confirmation, reviewed:true}),
     });
-    $("runtimePromotionConsent").checked = false;
     renderRuntimePromotionStatus({runtimePromotion:{
-      phase:"queued", progress:0, message:"Runtime comparison approved. Revalidating both exact copies…",
+      phase:"queued", progress:0, message:"Runtime comparison started. Revalidating both exact copies…",
       plan:data.plan, result:null, modes:{}, runtimes:{}, events:[],
     }});
   } catch (error) {
@@ -10797,7 +10796,6 @@ $("themeMenu").addEventListener("keydown", event => {
 });
 $("interfaceDetailButton").addEventListener("click", toggleInterfaceDetail);
 $("routeCheckButton").addEventListener("click", () => openRouteCheck("inspect"));
-$("routeCheckConsent").addEventListener("change", renderRouteCheck);
 $("routeCheckStartButton").addEventListener("click", startRouteCheck);
 $("routeCheckStopButton").addEventListener("click", stopRouteCheck);
 $("routeCheckLaunchButton").addEventListener("click", launchCheckedRoute);
@@ -10929,7 +10927,6 @@ $("calibrationPreferenceSelect").addEventListener("change", () => {
   }
   loadCalibrationPlan(true);
 });
-$("calibrationConsent").addEventListener("change", renderCalibration);
 $("calibrationProfileName").addEventListener("input", renderCalibrationPlan);
 $("calibrationStartButton").addEventListener("click", startCalibration);
 $("calibrationStopButton").addEventListener("click", stopCalibration);
@@ -10979,7 +10976,6 @@ $("setupConsent").addEventListener("change", updateSetupControls);
 $("setupDownloadButton").addEventListener("click", startSetupDownload);
 $("setupStopButton").addEventListener("click", stopSetup);
 $("openAneButton").addEventListener("click", openAneTuner);
-$("aneConsent").addEventListener("change", updateAneControls);
 $("aneCpuAssist").addEventListener("change", updateAneControls);
 $("aneStartButton").addEventListener("click", startAneTuning);
 $("aneStopButton").addEventListener("click", stopAneTuning);
@@ -11042,12 +11038,10 @@ $("runtimeAdvancedTools").addEventListener("toggle", renderRuntimeAdvancedDisclo
 $("runtimeUpdateConsent").addEventListener("change", updateRuntimeUpdateControls);
 $("runtimeUpdateStartButton").addEventListener("click", startRuntimeUpdate);
 $("runtimeUpdateStopButton").addEventListener("click", stopRuntimeUpdate);
-$("runtimePromotionConsent").addEventListener("change", updateRuntimePromotionControls);
 $("runtimePromotionStartButton").addEventListener("click", startRuntimePromotion);
 $("runtimePromotionStopButton").addEventListener("click", stopRuntimePromotion);
 $("runtimePromotionSuite").addEventListener("change", () => {
   if (runtimePromotionIsActive()) return;
-  $("runtimePromotionConsent").checked = false;
   renderRuntimePromotionPlan(null);
   $("runtimePromotionStatus").textContent = "Workload changed. Choose Measure update again to create an exact plan.";
 });

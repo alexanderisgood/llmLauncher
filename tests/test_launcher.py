@@ -8080,6 +8080,22 @@ class LauncherTests(unittest.TestCase):
             "routeCheckStopButton", "routeCheckLaunchButton", "routeCheckResult",
         ):
             self.assertIn(f'id="{element_id}"', index)
+        for removed_gate in (
+            '!$("routeCheckConsent").checked',
+            '!$("calibrationConsent").checked',
+            '!$("aneConsent").checked',
+            '!$("runtimePromotionConsent").checked',
+        ):
+            self.assertNotIn(removed_gate, script)
+        for hidden_panel in (
+            "routeCheckConsentPanel", "calibrationConsentPanel",
+            "aneConsentPanel", "runtimePromotionConsentPanel",
+        ):
+            self.assertIn(f'id="{hidden_panel}" class="setup-consent hidden"', index)
+        self.assertIn(
+            "plan.requiresExperimentalApproval || plan.admission?.requiresAcknowledgement",
+            script,
+        )
         for element_id in (
             "chatHistoryButton", "openChatHistoryTop", "chatStopButton", "chatQueue", "chatHistoryDialog",
             "chatHistoryList", "chatHistoryRefresh", "chatHistorySearch",

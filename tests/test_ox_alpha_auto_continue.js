@@ -2,7 +2,6 @@
 
 const assert = require("node:assert/strict");
 const path = require("node:path");
-const {createJiti} = require("/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.cjs");
 
 let nextTimer = 1;
 const timers = new Map();
@@ -23,8 +22,9 @@ function takeTimer(delay) {
 }
 
 try {
-  const jiti = createJiti(__filename);
-  const extension = jiti(path.resolve(__dirname, "../pi-extensions/ox-alpha-auto-continue.ts")).default;
+  // Node 24+ strips erasable TypeScript syntax natively, keeping this test
+  // independent from a contributor's global Pi or Homebrew installation.
+  const extension = require(path.resolve(__dirname, "../pi-extensions/ox-alpha-auto-continue.ts")).default;
   const handlers = new Map();
   const commands = new Map();
   const sent = [];

@@ -70,7 +70,7 @@ Nothing is uploaded by the launcher. Model downloads happen only after a separat
 
 ## Development
 
-The core launcher uses the Python standard library. Some optional runtime operations use libraries already installed with the selected engine.
+The core launcher uses the Python standard library. The JavaScript suite uses Node.js 24+ for its native erasable-TypeScript support. Some optional runtime operations use libraries already installed with the selected engine.
 
 ```bash
 node --check app.js

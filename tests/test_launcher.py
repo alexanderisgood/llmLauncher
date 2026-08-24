@@ -8156,6 +8156,10 @@ class LauncherTests(unittest.TestCase):
             "Apache License",
             (ROOT / "LICENSE").read_text(encoding="utf-8"),
         )
+        self.assertNotIn(
+            "/opt/homebrew",
+            (ROOT / "tests" / "test_ox_alpha_auto_continue.js").read_text(encoding="utf-8"),
+        )
         self.assertIn("memory-only receipt", (ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8"))
         self.assertIn("/api/session/plan", script)
         self.assertIn("/api/session/attachment-plan", script)

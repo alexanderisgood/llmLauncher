@@ -2,7 +2,7 @@
 
 All notable public changes are recorded here.
 
-## 1.66.0-alpha.1 - 2026-08-24
+## 1.66.0-alpha.2 - 2026-08-24
 
 First public alpha.
 

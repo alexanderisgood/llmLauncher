@@ -11,7 +11,7 @@ LLM Launcher is an alpha macOS project. Bug reports, compatibility findings, doc
 
 ## Development setup
 
-The launcher itself requires Python 3.10+ and Node.js for the JavaScript tests. A real model runtime is not required for the normal unit suite.
+The launcher itself requires Python 3.10+ and Node.js 24+ for the JavaScript tests. A real model runtime is not required for the normal unit suite.
 
 ```bash
 git clone https://github.com/alexanderisgood/llmLauncher.git

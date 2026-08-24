@@ -1924,7 +1924,7 @@ async function animateOptimalControl(key, value, generation) {
   setTimeout(() => field.classList.remove("optimized"), 600);
 }
 
-async function applyOptimal(scope = "current", enginePreference = "fastest") {
+async function applyOptimal(scope = "current", enginePreference = "fastest", openCalibrationOnMissing = true) {
   const model = selectedModel();
   if (!model || state.applyingOptimal) return false;
   closeOptimizerMenu();
@@ -2036,7 +2036,7 @@ async function applyOptimal(scope = "current", enginePreference = "fastest") {
       if (applyError) showNotice(applyError, true);
     }
   }
-  if (calibrationFallback && generation === state.optimizationGeneration) {
+  if (openCalibrationOnMissing && calibrationFallback && generation === state.optimizationGeneration) {
     await openCalibrationAssistant({
       source:"optimizer-result",
       preference:calibrationFallback.preference,
@@ -7042,9 +7042,10 @@ function renderEngineShootoutResults(status) {
     const thermalText = engine.thermalWorst && engine.thermalWorst !== "unavailable"
       ? (engine.thermalStart && engine.thermalStart !== "unavailable" ? `${engine.thermalStart} → ${engine.thermalWorst}` : engine.thermalWorst)
       : "Not measured";
-    const cooldownText = ({"reference-ready":"Reference ready",ready:"Comparable",timeout:"Timed out","condition-improved":"Conditions changed",unavailable:"Unavailable"})[engine.resourceCooldownStatus] || "Not measured";
+    const cooldownText = ({"reference-ready":"Reference ready",ready:"Comparable",timeout:"Timed out","condition-improved":"Higher headroom",unavailable:"Unavailable"})[engine.resourceCooldownStatus] || "Not measured";
+    const decodeTps = finiteMetric(engine.decodeTokensPerSecond);
     const badge = winner ? enginePreferenceLabels[preference] : (profileComparison?.profileDisplay || engine.display || "Queued");
-    return `<article class="benchmark-result engine-result ${winner ? "winner" : ""}"><div class="benchmark-result-head"><strong>${esc(engine.label || backendName(engine.backend))}</strong><em>${esc(badge)}</em></div><div class="benchmark-metrics"><span>Fastest safe route<b>${esc(modeLabel)}</b></span><span>Workload result<b>${esc(engine.display || "Measuring…")}</b></span><span>First output<b>${esc(ttftText)}</b></span><span>Memory pressure<b>${esc(memoryText)}</b></span><span>Thermal state<b>${esc(thermalText)}</b></span><span>Start gate<b>${esc(cooldownText)}</b></span></div>${engine.runtimeVersion ? `<p class="benchmark-runtime">${esc(engine.runtimeVersion)}</p>` : ""}<p class="benchmark-quality ${result && !engine.qualityMatchesMatrix ? "bad" : ""}">${qualityText}</p></article>`;
+    return `<article class="benchmark-result engine-result ${winner ? "winner" : ""}"><div class="benchmark-result-head"><strong>${esc(engine.label || backendName(engine.backend))}</strong><em>${esc(badge)}</em></div><div class="benchmark-metrics"><span>Fastest safe route<b>${esc(modeLabel)}</b></span><span>Workload result<b>${esc(engine.display || "Measuring…")}</b></span><span>Generation speed<b>${decodeTps === null ? "Not measured" : `${decodeTps.toFixed(1)} tok/s`}</b></span><span>First output<b>${esc(ttftText)}</b></span><span>Memory pressure<b>${esc(memoryText)}</b></span><span>Thermal state<b>${esc(thermalText)}</b></span><span>Start gate<b>${esc(cooldownText)}</b></span></div>${engine.runtimeVersion ? `<p class="benchmark-runtime">${esc(engine.runtimeVersion)}</p>` : ""}<p class="benchmark-quality ${result && !engine.qualityMatchesMatrix ? "bad" : ""}">${qualityText}</p></article>`;
   }).join("");
   const recommendationText = profile?.recommendation || result?.recommendation;
   const recommendation = recommendationText
@@ -7322,6 +7323,8 @@ function renderCalibrationPlan() {
     calibrationStateBadge("calibrationEvidenceState", "Waiting", "");
     $("calibrationPlanFacts").innerHTML = "";
     $("calibrationEngineCards").innerHTML = "";
+    $("calibrationResults").innerHTML = "";
+    $("calibrationResults").classList.add("hidden");
     $("calibrationEvidence").className = "calibration-evidence blocked";
     $("calibrationEvidence").innerHTML = `<i aria-hidden="true">!</i><span><strong>${state.calibrationLoading ? "Inspecting the visible contract…" : "A valid calibration plan is not available."}</strong><small>${esc($("calibrationStatus").textContent || "Choose a ready model and valid settings.")}</small></span>`;
     $("calibrationConsent").disabled = true;
@@ -7375,6 +7378,7 @@ function renderCalibrationPlan() {
     backendLabel:completedDecision.label,
     detail:completedDecision.rationale?.[0] || completedDecision.recommendation || completedResult.recommendation || "The completed result is being saved.",
     outputWarning:completedDecision.outputWarning || completedResult.outputWarning || "",
+    comparedEngines:completedDecision.comparedEngines || completedResult.engines || [],
   } : evidence;
   const resultReady = evidenceReady || resultPending;
   calibrationStateBadge(
@@ -7390,6 +7394,20 @@ function renderCalibrationPlan() {
       : blockers;
   $("calibrationEvidence").className = `calibration-evidence${resultReady ? " trusted" : plan.ready ? "" : " blocked"}`;
   $("calibrationEvidence").innerHTML = `<i aria-hidden="true">${resultReady ? "◆" : plan.ready ? "◇" : "×"}</i><span><strong>${esc(resultReady ? shownEvidence.label : plan.ready ? "Ready to test the engines" : "This setup cannot be tested yet")}</strong><small>${esc(evidenceDetail)}</small></span>`;
+  const measuredDecision = completedDecision || (evidenceReady ? evidence : null);
+  const measuredEngines = Array.isArray(measuredDecision?.comparedEngines)
+    ? measuredDecision.comparedEngines : [];
+  const measuredDecisionReady = Boolean(completedDecision
+    ? ["cross-engine-local-benchmark", "cross-engine-noise-floor"]
+      .includes(completedDecision.evidenceTier)
+    : evidenceReady);
+  $("calibrationResults").classList.toggle("hidden", measuredEngines.length === 0);
+  $("calibrationResults").innerHTML = measuredEngines.length ? `<strong>Measured engine results</strong><div>${measuredEngines.map((engine, index) => {
+    const selected = measuredDecisionReady && engine.backend === (measuredDecision.backend || shownEvidence.backend);
+    const mode = engine.mode === "dflash2" ? "DFlash 2" : engine.mode === "mtp" ? "MTP" : "AR";
+    const decodeTps = finiteMetric(engine.decodeTokensPerSecond);
+    return `<article class="${selected ? "selected" : ""}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(mode)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong>${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${selected ? "Best result" : `#${index + 1}`}</em></article>`;
+  }).join("")}</div>` : "";
   if (state.calibrationProfileContractId !== plan.contractId) {
     state.calibrationProfileContractId = plan.contractId;
     $("calibrationProfileName").value = plan.suggestedProfileName || "Quick Launch";
@@ -7430,6 +7448,16 @@ function renderCalibrationBenchmark(status = state.benchmarkStatus || {}) {
   $("calibrationProgressBar").style.width = `${percent}%`;
   $("calibrationProgressBar").parentElement.setAttribute("aria-valuenow", String(percent));
   $("calibrationStopButton").disabled = !(active && owns);
+  const liveTps = finiteMetric(status.liveMetric?.decodeTokensPerSecond);
+  const showLiveTps = Boolean(active && owns);
+  $("calibrationLiveTps").classList.toggle("hidden", !showLiveTps);
+  $("calibrationLiveTps").textContent = showLiveTps
+    ? liveTps === null ? "Generation TPS: measuring…" : `Generation TPS: ${liveTps.toFixed(1)}`
+    : "";
+  $("calibrationLiveTps").title = showLiveTps
+    ? [status.liveMetric?.backendLabel, status.liveMetric?.modeLabel, status.liveMetric?.stageLabel]
+      .filter(Boolean).join(" · ")
+    : "";
   if (active) {
     $("calibrationBadge").textContent = owns ? "Measuring" : "Benchmark busy";
     $("calibrationBadge").className = "setup-badge active";
@@ -7539,7 +7567,6 @@ async function openCalibrationAssistant(options = {}) {
   closeOptimizerMenu();
   $("calibrationSuiteSelect").value = recommendedSuite;
   $("calibrationPreferenceSelect").value = preference;
-  $("calibrationCoolingSelect").value = "smart";
   if (!$("calibrationDialog").open) $("calibrationDialog").showModal();
   await pollBenchmarkStatus();
   await loadCalibrationPlan(!calibrationBenchmarkActive());
@@ -7605,7 +7632,7 @@ async function applyCalibrationResult(saveProfile = false) {
     if (!coolingOption) throw new Error("The calibrated cooling setting is no longer available.");
     $("fanSelect").value = measuredCooling;
     coolingChanged = measuredCooling !== previousCooling;
-    const applied = await applyOptimal("engine", plan.preference);
+    const applied = await applyOptimal("engine", plan.preference, false);
     if (!applied) throw new Error("The measured decision no longer matches the visible contract, so nothing was saved.");
     routeApplied = true;
     if (saveProfile) {

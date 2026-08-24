@@ -4,6 +4,7 @@ All notable public changes are recorded here.
 
 ## Unreleased
 
+- Calibration now shows every engine's measured result and generation TPS, keeps live generation TPS visible while testing, and preserves the chosen cooling mode when reopened. Saved evidence is grouped by one completed shootout instead of mixing newer routes from another run, and a route that starts with more free memory than the shared reference remains usable. Apply no longer reopens Calibration in those cases; worse memory, thermal drift, power-mode changes, and cooldown timeouts still fail closed.
 - Keep an explicit **Retest engines** action after Calibration finds a saved result, while making **Use result** the primary action.
 - Calibration now turns completed engine measurements into a usable result even when backends differ by one terminal token or choose different valid greedy wording. Exact parity remains required inside each engine before an accelerator can win; cross-engine results instead require the same model/input contract and tightly bounded token-count drift.
 - The final ranking now honours the resource-settling gate that every route already passed, instead of rejecting the matrix again with a stricter pairwise memory check. Existing matching measurements become usable without rerunning them.

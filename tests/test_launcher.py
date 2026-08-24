@@ -5211,6 +5211,32 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(result["engineNextAction"]["requiresCalibration"])
         self.assertEqual(result["options"]["fan"], "smart")
 
+        separated_runs = json.loads(json.dumps(model))
+        for backend in ("omlx", "lmstudio", "mtplx"):
+            old = separated_runs["backends"][backend]["localBenchmark"]
+            old.update({"shootoutId": "complete-run", "createdAt": "2026-08-22T12:00:00Z"})
+            separated_runs["backends"][backend]["localBenchmarks"] = [old]
+        for backend in ("omlx", "lmstudio"):
+            latest = json.loads(json.dumps(separated_runs["backends"][backend]["localBenchmark"]))
+            latest.update({
+                "id": f"partial-{backend}", "shootoutId": "partial-newer-run",
+                "createdAt": "2026-08-23T12:00:00Z",
+            })
+            if backend == "omlx":
+                for sample in latest["modes"]["mtp"]["samples"]:
+                    sample["totalSeconds"] = 0.1
+                    sample["ttftSeconds"] = 0.025
+            separated_runs["backends"][backend]["localBenchmark"] = latest
+            separated_runs["backends"][backend]["localBenchmarks"].append(latest)
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+            separated = launcher.best_engine_request(payload, [separated_runs])
+        self.assertEqual(separated["backend"], "mtplx")
+        self.assertEqual(separated["engineEvidenceTier"], "cross-engine-local-benchmark")
+        self.assertEqual(
+            {item["createdAt"] for item in separated["comparedEngines"]},
+            {"2026-08-22T12:00:00Z"},
+        )
+
         with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
             responsive = launcher.best_engine_request(dict(payload, enginePreference="responsive"), [model])
             memory = launcher.best_engine_request(dict(payload, enginePreference="memory"), [model])
@@ -5438,6 +5464,22 @@ class LauncherTests(unittest.TestCase):
             record["comparisonContractVersion"] == launcher.BENCHMARK_COMPARISON_CONTRACT_VERSION
             for record in records
         ))
+
+        improved_conditions = json.loads(json.dumps(records))
+        for index, record in enumerate(improved_conditions):
+            winning_mode = record["modes"][record["winner"]]
+            winning_mode["resourceCooldown"]["status"] = (
+                "reference-ready" if index == 0 else "condition-improved"
+            )
+            winning_mode["resourceTelemetry"]["baselineHeadroomPercent"] = 80.0 + index * 5
+        improved_entries = []
+        for record in improved_conditions:
+            measurement = launcher.cross_engine_benchmark_measurement(record)
+            self.assertIsNotNone(measurement)
+            self.assertGreater(measurement["decodeTokensPerSecond"], 0)
+            improved_entries.append({"backend": record["backend"], "record": record, **measurement})
+        improved_profile = launcher.rank_cross_engine_profile(improved_entries, "fastest")
+        self.assertTrue(improved_profile["available"])
 
         mixed_shootouts = json.loads(json.dumps(records))
         mixed_shootouts[-1]["shootoutId"] = "different-shootout"
@@ -8103,10 +8145,12 @@ class LauncherTests(unittest.TestCase):
             "calibrationPreferenceSelect", "calibrationCoolingSelect", "calibrationCoolingHelp",
             "calibrationEngineCards", "calibrationConsent",
             "calibrationStartButton", "calibrationApplyButton", "calibrationSaveButton",
-            "calibrationProgressBar", "calibrationStatus", "calibrationOrigin",
+            "calibrationProgressBar", "calibrationStatus", "calibrationResults", "calibrationLiveTps", "calibrationOrigin",
             "calibrationOriginTitle", "calibrationOriginDetail",
         ):
             self.assertIn(f'id="{element_id}"', index)
+        self.assertIn("Generation TPS: measuring…", script)
+        self.assertIn("decodeTokensPerSecond", script)
         for element_id in (
             "openSessionDashboard", "sessionDialog", "sessionResourceFacts",
             "sessionActiveRoute", "sessionComponents", "sessionEstimateFacts",
@@ -8342,6 +8386,9 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('["measure", "apply-existing"].includes(plan.action)', script)
         self.assertIn('? "Retest engines"', script)
         self.assertIn('? "Replace this saved measurement"', script)
+        self.assertIn('applyOptimal("engine", plan.preference, false)', script)
+        self.assertIn("Measured engine results", script)
+        self.assertNotIn('$("calibrationCoolingSelect").value = "smart";', script)
         self.assertIn('data-engine-preference="fastest"', index)
         for preference in ("fastest", "responsive", "memory", "thermal"):
             self.assertIn(f'<option value="{preference}">', index)

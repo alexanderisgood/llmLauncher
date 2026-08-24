@@ -7826,6 +7826,13 @@ def cross_engine_benchmark_measurement(
         "qualityCompletionTokens": quality_tokens,
         "observedSampleTokens": observed_sample_tokens,
         "firstTokenSeconds": round(statistics.median(first_token_seconds), 4),
+        "decodeTokensPerSecond": (
+            round(float(result["medianDecodeTokensPerSecond"]), 3)
+            if isinstance(result.get("medianDecodeTokensPerSecond"), (int, float))
+            and not isinstance(result.get("medianDecodeTokensPerSecond"), bool)
+            and math.isfinite(float(result["medianDecodeTokensPerSecond"]))
+            and float(result["medianDecodeTokensPerSecond"]) > 0 else None
+        ),
         "peakPressureDeltaBytes": memory_delta,
         "baselineHeadroomPercent": baseline_headroom,
         "baselineHeadroomBytes": baseline_headroom_bytes,
@@ -8023,7 +8030,10 @@ def rank_cross_engine_profile(
     }
     shared_gate_passed = bool(
         len(cooldown_statuses) == len(group)
-        and all(status in {"ready", "reference-ready"} for status in cooldown_statuses)
+        and all(
+            status in {"ready", "reference-ready", "condition-improved"}
+            for status in cooldown_statuses
+        )
         and len(shootout_ids) == 1 and "" not in shootout_ids
     )
     if (
@@ -8278,7 +8288,12 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
     entries = verified_cross_engine_entries(model, eligible, evidence)
     groups: dict[str, dict[str, dict[str, Any]]] = {}
     for entry in entries:
-        group = groups.setdefault(entry["signature"], {})
+        shootout_id = str(entry.get("record", {}).get("shootoutId") or "")
+        group_key = (
+            f"{entry['signature']}\x00{shootout_id}"
+            if shootout_id else str(entry["signature"])
+        )
+        group = groups.setdefault(group_key, {})
         backend = entry["backend"]
         existing = group.get(backend)
         if not existing or str(entry["record"].get("createdAt") or "") > str(existing["record"].get("createdAt") or ""):
@@ -8386,6 +8401,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             "score": round(float(item["score"]), 4),
             "metric": item["metric"], "display": item["display"],
             "firstTokenSeconds": item.get("firstTokenSeconds"),
+            "decodeTokensPerSecond": item.get("decodeTokensPerSecond"),
             "peakPressureDeltaBytes": item.get("peakPressureDeltaBytes"),
             "baselineHeadroomPercent": item.get("baselineHeadroomPercent"),
             "minimumHeadroomPercent": item.get("minimumHeadroomPercent"),
@@ -11589,6 +11605,7 @@ def calibration_plan(
                 decision.get("engineOutputWarning")
                 or workload_comparison.get("warning") or ""
             ),
+            "comparedEngines": copy.deepcopy(decision.get("comparedEngines") or []),
         },
         "suggestedProfileName": suggested_name,
         "privacy": {
@@ -16008,8 +16025,7 @@ class BenchmarkManager:
             )
         elif status == "condition-improved":
             self._event(
-                f"The Mac's resource conditions improved beyond the comparison tolerance before {route_label}; measurement will continue, but mismatched starts cannot produce a trusted winner.",
-                "warning",
+                f"The Mac's resource conditions improved before {route_label}; the higher-headroom start was recorded and the shared resource gate passed.",
             )
         else:
             self._event(
@@ -16084,9 +16100,14 @@ class BenchmarkManager:
             "chat": job["chat"],
         }
 
-    def _update_progress(self, completed: int, total: int, message: str) -> None:
+    def _update_progress(
+        self, completed: int, total: int, message: str,
+        live_metric: dict[str, Any] | None = None,
+    ) -> None:
         with self.lock:
             self.state["progress"] = round(completed / max(1, total), 4)
+            if live_metric is not None:
+                self.state["liveMetric"] = copy.deepcopy(live_metric)
         self._event(message)
 
     def _measure_mode(
@@ -16101,6 +16122,7 @@ class BenchmarkManager:
         )
         with self.lock:
             self.state["phase"] = "starting"
+            self.state["liveMetric"] = None
             if shootout and job["backend"] in self.state.get("engines", {}):
                 self.state["engines"][job["backend"]]["phase"] = "starting"
         self._event(f"Loading {route_label} for a cache-isolated benchmark pass…")
@@ -16159,7 +16181,14 @@ class BenchmarkManager:
                     self._update_progress(
                         completed, total,
                         f"{route_label}: {case['label']} reached first output in "
-                        f"{sample['ttftSeconds']:.2f}s{cache_note}.",
+                        f"{sample['ttftSeconds']:.2f}s · {sample['decodeTokensPerSecond']:.1f} "
+                        f"generation tok/s{cache_note}.",
+                        {
+                            "backend": job["backend"], "backendLabel": BACKEND_LABELS[job["backend"]],
+                            "mode": mode, "modeLabel": label, "stageLabel": case["label"],
+                            "decodeTokensPerSecond": sample["decodeTokensPerSecond"],
+                            "endToEndTokensPerSecond": sample["endToEndTokensPerSecond"],
+                        },
                     )
             else:
                 for prompt_index, target in enumerate(job["suite"]["promptTokens"]):
@@ -16175,7 +16204,15 @@ class BenchmarkManager:
                         self._update_progress(
                             completed, total,
                             f"{route_label}: measured {sample['promptTokens']:,} prompt tokens at "
-                            f"{sample['endToEndTokensPerSecond']:.1f} output tok/s.",
+                            f"{sample['decodeTokensPerSecond']:.1f} generation tok/s · "
+                            f"{sample['endToEndTokensPerSecond']:.1f} end-to-end tok/s.",
+                            {
+                                "backend": job["backend"], "backendLabel": BACKEND_LABELS[job["backend"]],
+                                "mode": mode, "modeLabel": label,
+                                "stageLabel": f"{sample['promptTokens']:,} prompt tokens",
+                                "decodeTokensPerSecond": sample["decodeTokensPerSecond"],
+                                "endToEndTokensPerSecond": sample["endToEndTokensPerSecond"],
+                            },
                         )
             result = {
                 "label": label,
@@ -16907,6 +16944,7 @@ class BenchmarkManager:
                 "metric": measurement["metric"] if measurement else None,
                 "display": measurement["display"] if measurement else "Not comparable",
                 "firstTokenSeconds": measurement.get("firstTokenSeconds") if measurement else None,
+                "decodeTokensPerSecond": measurement.get("decodeTokensPerSecond") if measurement else None,
                 "peakPressureDeltaBytes": measurement.get("peakPressureDeltaBytes") if measurement else None,
                 "baselineHeadroomPercent": measurement.get("baselineHeadroomPercent") if measurement else None,
                 "minimumHeadroomPercent": measurement.get("minimumHeadroomPercent") if measurement else None,

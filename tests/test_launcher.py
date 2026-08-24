@@ -8339,6 +8339,9 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("/api/benchmark/history", script)
         self.assertIn('request.scope = "engines"', script)
         self.assertIn("request.enginePreference = enginePreference", script)
+        self.assertIn('["measure", "apply-existing"].includes(plan.action)', script)
+        self.assertIn('? "Retest engines"', script)
+        self.assertIn('? "Replace this saved measurement"', script)
         self.assertIn('data-engine-preference="fastest"', index)
         for preference in ("fastest", "responsive", "memory", "thermal"):
             self.assertIn(f'<option value="{preference}">', index)

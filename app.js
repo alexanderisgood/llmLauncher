@@ -7394,7 +7394,8 @@ function renderCalibrationPlan() {
     state.calibrationProfileContractId = plan.contractId;
     $("calibrationProfileName").value = plan.suggestedProfileName || "Quick Launch";
   }
-  const canMeasure = plan.action === "measure" && plan.ready && !resultPending && !calibrationOperationBlocked();
+  const canMeasure = ["measure", "apply-existing"].includes(plan.action)
+    && plan.ready && !resultPending && !calibrationOperationBlocked();
   $("calibrationConsent").disabled = true;
   $("calibrationConsent").checked = false;
   $("calibrationConsentPanel").classList.add("hidden");
@@ -7403,13 +7404,15 @@ function renderCalibrationPlan() {
     : blockers || "Resolve the engine blockers before measurement.";
   $("calibrationStartButton").disabled = !canMeasure;
   $("calibrationStartButton").querySelector("strong").textContent = evidenceReady
-    ? "Result already available" : resultPending ? "Saving result…" : "Test engines";
+    ? "Retest engines" : resultPending ? "Saving result…" : "Test engines";
   $("calibrationStartLabel").textContent = evidenceReady
-    ? `${evidence.backendLabel} · ${evidence.label}`
+    ? "Replace this saved measurement"
     : resultPending ? "No second test needed"
     : plan.ready ? `${plan.eligibleEngineCount} engines · ${plan.routeCount} routes` : "Resolve the blockers above";
   const canApply = evidenceReady && !calibrationOperationBlocked();
   $("calibrationApplyButton").disabled = !canApply;
+  $("calibrationApplyButton").className = evidenceReady ? "primary" : "secondary";
+  $("calibrationStartButton").className = evidenceReady ? "secondary" : "primary";
   $("calibrationApplyButton").textContent = evidence.trusted
     ? `Use ${evidence.backendLabel}${normalizedReasoning ? " + model default" : ""}`
     : `Keep ${evidence.backendLabel || "current engine"}${normalizedReasoning ? " + model default" : ""}`;
@@ -7544,7 +7547,7 @@ async function openCalibrationAssistant(options = {}) {
 
 async function startCalibration() {
   const plan = state.calibrationPlan;
-  if (!plan?.ready || plan.action !== "measure" || calibrationOperationBlocked()) return;
+  if (!plan?.ready || !["measure", "apply-existing"].includes(plan.action) || calibrationOperationBlocked()) return;
   try {
     const request = calibrationPlanRequest();
     request.scope = "engines";

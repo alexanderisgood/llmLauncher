@@ -4,6 +4,7 @@ All notable public changes are recorded here.
 
 ## Unreleased
 
+- Keep an explicit **Retest engines** action after Calibration finds a saved result, while making **Use result** the primary action.
 - Calibration now turns completed engine measurements into a usable result even when backends differ by one terminal token or choose different valid greedy wording. Exact parity remains required inside each engine before an accelerator can win; cross-engine results instead require the same model/input contract and tightly bounded token-count drift.
 - The final ranking now honours the resource-settling gate that every route already passed, instead of rejecting the matrix again with a stricter pairwise memory check. Existing matching measurements become usable without rerunning them.
 - Calibration has one clear Result area in Focused mode, never presents “completed” and “measurement needed” together, and disables the test button while a completed result is being reloaded. Its performance drop-up is reduced to fastest engine, test/review, and checked launch choices; the other ranking goals remain in Calibration.

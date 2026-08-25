@@ -5574,6 +5574,24 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(update["auditedAt"], launcher.RUNTIME_RELEASE_CATALOG_AUDITED_AT)
         self.assertEqual(update["releaseUrl"], "https://github.com/youssofal/MTPLX/releases/tag/v2.9.1")
 
+        old_model = json.loads(json.dumps(self.models[0]))
+        old_model["backends"]["mtplx"]["runtimeVersion"] = "mtplx 2.8.3 (2.8.3)"
+        advisory = launcher.launch_runtime_advisory("mtplx", old_model)
+        self.assertEqual(advisory["id"], "mtplx-long-agent-update")
+        self.assertIn("near 19K tokens", advisory["detail"])
+        request = self.payload("mtplx", "pi", old_model)
+        request["agentHost"] = "console"
+        plan = launcher.normalized_request(request, [old_model])
+        self.assertEqual(plan.public()["runtimeAdvisory"], advisory)
+        self.assertEqual(
+            launcher.SurfaceAttachment(plan.run_id, plan, primary=True).public()["runtimeAdvisory"],
+            advisory,
+        )
+
+        fixed_model = json.loads(json.dumps(old_model))
+        fixed_model["backends"]["mtplx"]["runtimeVersion"] = "mtplx 2.9.1 (2.9.1)"
+        self.assertIsNone(launcher.launch_runtime_advisory("mtplx", fixed_model))
+
     def test_mtplx_290_turbo_benchmark_evidence_requires_retest(self) -> None:
         legacy = {"backend": "mtplx", "runtimeVersion": "mtplx 2.9.0"}
         turbo = {
@@ -7833,6 +7851,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('panel.open = detail === "detailed"', script)
         self.assertIn('function updateChatStatusSummaryLabel()', script)
         self.assertIn('function updateAgentConsoleStatusSummaryLabel()', script)
+        self.assertIn('runtimeAdvisory', script)
         self.assertIn('syncAgentConsoleStatusDetailMode(detail)', script)
         self.assertIn('id="runtimeAdvancedTools"', index)
         self.assertLess(index.index('id="runtimeCards"'), index.index('id="runtimeAdvancedTools"'))
@@ -7846,6 +7865,8 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('.chat-status-panel>summary{display:grid', styles)
         self.assertIn('.chat-status-panel[data-route-state="changed"],.chat-status-panel[data-context-state="warning"]', styles)
         self.assertIn('.agent-console-status-panel>summary{display:grid', styles)
+        self.assertIn('.agent-console-composer>p.warning{color:var(--warning)}', styles)
+        self.assertIn(':not(.error):not(.warning)', styles)
         for element_id in (
             "focusedRunStatus", "focusedRunPhase", "focusedRunMessage",
             "focusedStopButton", "focusedLogButton",

@@ -6237,6 +6237,7 @@ function renderAgentConsole() {
     state.agentConsoleMeta = view.meta;
   }
   const meta = view?.meta || attachment;
+  const runtimeAdvisory = meta.runtimeAdvisory || state.runStatus?.run?.runtimeAdvisory || null;
   const surface = meta.surface || clientName(meta.client) || "Agent";
   const stateLabel = String(meta.state || meta.status || "starting");
   $("agentConsoleTitle").textContent = `${surface} · Hub Console`;
@@ -6298,8 +6299,8 @@ function renderAgentConsole() {
   $("agentConsoleStopButton").disabled = state.agentConsoleBusy || !(meta.canStop ?? ["starting","running","stopping"].includes(stateLabel));
   $("agentConsoleRestartButton").disabled = state.agentConsoleBusy || !(meta.canRestart ?? ["exited","stopped","failed"].includes(stateLabel));
   const dropped = Number(meta.droppedBytes || 0);
-  $("agentConsoleStatus").textContent = `${view?.recovering ? "Restoring the latest console screen… " : ""}${meta.detail || `Hub Console is ${stateLabel}.`}${dropped ? ` Earlier output was discarded after the 2 MB memory cap (${formatBytes(dropped)} dropped).` : ""}`;
-  $("agentConsoleStatus").className = stateLabel === "failed" ? "error" : "";
+  $("agentConsoleStatus").textContent = `${view?.recovering ? "Restoring the latest console screen… " : ""}${meta.detail || `Hub Console is ${stateLabel}.`}${runtimeAdvisory?.detail ? ` ${runtimeAdvisory.detail}` : ""}${dropped ? ` Earlier output was discarded after the 2 MB memory cap (${formatBytes(dropped)} dropped).` : ""}`;
+  $("agentConsoleStatus").className = stateLabel === "failed" ? "error" : runtimeAdvisory ? "warning" : "";
   renderAgentConsoleTabs();
 }
 

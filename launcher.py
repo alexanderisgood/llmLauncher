@@ -1318,6 +1318,31 @@ def audited_runtime_release(runtime: str, installed_version: str | None) -> dict
     return release
 
 
+def launch_runtime_advisory(backend: str, model: dict[str, Any]) -> dict[str, Any] | None:
+    """Expose a bounded route warning only when an installed runtime has a known session risk."""
+    capability = model.get("backends", {}).get(backend, {})
+    runtime_version = str(capability.get("runtimeVersion") or "")[:160]
+    version_match = re.search(r"(?<![\d.])\d+\.\d+\.\d+(?:rc\d+)?", runtime_version, re.IGNORECASE)
+    version_label = version_match.group(0) if version_match else runtime_version
+    if (
+        backend == "mtplx"
+        and semantic_version_key(runtime_version) < semantic_version_key(MTPLX_FLIGHT_MINIMUM_RUNTIME)
+        and semantic_version_key(runtime_version) != (-1, -1, -1, -1)
+    ):
+        return {
+            "id": "mtplx-long-agent-update",
+            "level": "warning",
+            "title": "Update MTPLX for long agent sessions",
+            "detail": (
+                f"MTPLX {version_label} is selected. Upstream {MTPLX_FLIGHT_MINIMUM_RUNTIME} "
+                "fixes a long-agent truncation and crash near 19K tokens; open Tools → Runtimes "
+                "before relying on a long Pi, OpenCode, or Codex session."
+            ),
+            "releaseUrl": RUNTIME_RELEASE_CATALOG["mtplx"]["releaseUrl"],
+        }
+    return None
+
+
 def omlx_kernel_artifacts(binary: str | None) -> list[Path]:
     """Find the native Qwen kernel extension without importing Metal."""
     if not binary:
@@ -9962,6 +9987,7 @@ class LaunchPlan:
             if self.backend == "freetoken" and self.model.get("nativeFreetoken") is True else
             "local"
         )
+        capability = self.model.get("backends", {}).get(self.backend, {})
         return {
             "runId": self.run_id,
             "backend": self.backend,
@@ -9977,6 +10003,8 @@ class LaunchPlan:
             "mode": self.mode,
             "agentHost": "launcher" if self.client == "chat" else self.agent_host,
             "purpose": self.purpose,
+            "runtimeVersion": str(capability.get("runtimeVersion") or "")[:160],
+            "runtimeAdvisory": launch_runtime_advisory(self.backend, self.model),
             "options": {key: value for key, value in self.options.items() if not key.startswith("_")},
             "chat": copy.deepcopy(self.chat),
             "engineCommand": shell_join_redacted(self.engine_argv),
@@ -10001,6 +10029,7 @@ class SurfaceAttachment:
     def public(self) -> dict[str, Any]:
         surface = CLIENT_LABELS.get(self.plan.client, self.plan.client)
         console = self.plan.client != "chat" and self.plan.agent_host == "console"
+        capability = self.plan.model.get("backends", {}).get(self.plan.backend, {})
         chat = {
             "sampling": str(self.plan.chat.get("sampling") or "model"),
             "hasSystemPrompt": bool(self.plan.chat.get("systemPrompt")),
@@ -10031,6 +10060,8 @@ class SurfaceAttachment:
             "detail": self.detail,
             "attachedAt": self.attached_at,
             "agentHost": "launcher" if self.plan.client == "chat" else self.plan.agent_host,
+            "runtimeVersion": str(capability.get("runtimeVersion") or "")[:160],
+            "runtimeAdvisory": launch_runtime_advisory(self.plan.backend, self.plan.model),
             "ownership": "launcher" if self.plan.client == "chat" or console else "terminal-handoff",
             "reusesLoadedEngine": not self.primary,
             "loadsWeights": False,

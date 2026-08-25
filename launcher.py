@@ -1752,7 +1752,7 @@ def build_runtime_update_plan(channel: Any) -> dict[str, Any]:
             "networkDetail": "Official GitHub wheel, four audited full-commit GitHub sources, and public dependency wheels." if action == "install" else "No network request.",
             "startsServer": False, "startsModel": False,
             "replacesExisting": False, "autoSelects": False,
-            "catalogAuditedAt": "2026-08-23",
+            "catalogAuditedAt": RUNTIME_RELEASE_CATALOG_AUDITED_AT,
         },
     }
 
@@ -1775,7 +1775,7 @@ def runtime_update_overview() -> dict[str, Any]:
         })
     return {
         "schemaVersion": RUNTIME_UPDATE_SCHEMA_VERSION,
-        "catalogAuditedAt": "2026-08-23", "networkChecked": False,
+        "catalogAuditedAt": RUNTIME_RELEASE_CATALOG_AUDITED_AT, "networkChecked": False,
         "releases": releases,
         "ownership": {
             "omlx": "Launcher-managed side-by-side install",

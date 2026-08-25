@@ -60,6 +60,8 @@ assert.deepEqual(themes.writeDetail(blockedStorage, "detailed"), {detail:"detail
 const styles = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
 assert.match(styles, /--mac-control-height:34px/);
 assert.match(styles, /--mac-action-height:42px/);
+assert.match(styles, /:root\[data-detail="focused"\] \.setup-grid>\.config-section\{margin-top:0\}/);
+assert.match(styles, /:root\[data-theme="frost"\] \.app-workspace\{width:100%;max-width:1440px;height:100%;margin:0 auto/);
 assert.match(styles, /\.focused-run-status,\s*\n:root\[data-theme="frost"\] \.interface-detail-button,\s*\n:root\[data-theme="frost"\] \.local-chip\{height:var\(--mac-control-height\)/);
 assert.match(styles, /\.optimize-button,\s*\n:root\[data-theme="frost"\] \.optimizer-menu-button,\s*\n:root\[data-theme="frost"\] \.performance-receipt/);
 assert.match(styles, /\.calibration-actions,\.route-check-actions,\.benchmark-actions/);

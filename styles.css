@@ -600,6 +600,7 @@ dialog,.modal,.dialog,.runtime-card,.chat-history-card,.profile-card,.calibratio
 :root[data-detail="focused"] .config-section+.config-section,
 :root[data-detail="focused"] .setup-grid+.config-section,
 :root[data-detail="focused"] .config-section+.advanced{margin-top:9px}
+:root[data-detail="focused"] .setup-grid>.config-section{margin-top:0}
 :root[data-detail="focused"] .setup-grid{gap:9px}
 :root[data-detail="focused"] .config-scroll .section-head>span,
 :root[data-detail="focused"] .choice small,
@@ -808,7 +809,7 @@ dialog,.modal,.dialog,.runtime-card,.chat-history-card,.profile-card,.calibratio
 :root[data-theme="frost"] .toolbar-separator{height:18px;margin:0 5px}
 
 /* A native-feeling content split sits directly below the unified toolbar. */
-:root[data-theme="frost"] .app-workspace{width:100%;height:100%;margin:0;overflow:hidden;border:0;border-radius:0;background:#f5f5f7;box-shadow:none}
+:root[data-theme="frost"] .app-workspace{width:100%;max-width:1440px;height:100%;margin:0 auto;overflow:hidden;border:0;border-right:1px solid var(--mac-hairline-soft);border-left:1px solid var(--mac-hairline-soft);border-radius:0;background:#f5f5f7;box-shadow:none}
 :root[data-theme="frost"] .pane-heading{min-height:68px;padding:13px 20px;border-bottom-color:var(--mac-hairline-soft);background:rgba(250,250,252,.9)}
 :root[data-theme="frost"] .pane-heading h1{font-size:16px;font-weight:700}
 :root[data-theme="frost"] .pane-heading p{margin-top:3px;font-size:10px}

@@ -5806,6 +5806,11 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(plan["destination"]["path"], str(managed_root / "omlx-0.6.2"))
         self.assertFalse(plan["rollback"]["automaticSelection"])
         self.assertFalse(plan["review"]["replacesExisting"])
+        self.assertEqual(plan["review"]["catalogAuditedAt"], launcher.RUNTIME_RELEASE_CATALOG_AUDITED_AT)
+        self.assertEqual(
+            launcher.runtime_update_overview()["catalogAuditedAt"],
+            launcher.RUNTIME_RELEASE_CATALOG_AUDITED_AT,
+        )
         self.assertFalse(managed_root.exists(), "planning must not create the runtime root")
 
     def test_runtime_update_audits_full_commit_sources_inside_official_wheel(self) -> None:

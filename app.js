@@ -6792,6 +6792,7 @@ function performanceReceiptRequest() {
   const request = gather("custom");
   request.suite = performanceReceiptSuite();
   request.enginePreference = "throughput";
+  request.reasoningPolicy = "all-engines-model-default";
   return request;
 }
 
@@ -6807,6 +6808,7 @@ function performanceReceiptRequestKey(request) {
   return JSON.stringify({
     modelId:request.modelId, backend:request.backend, client:request.client,
     context:request.context, output:request.output, reasoning:request.reasoning,
+    reasoningPolicy:request.reasoningPolicy || "exact",
     kv:request.options?.kv || "off", sampling,
     suite:request.suite, enginePreference:request.enginePreference,
   });
@@ -6826,6 +6828,10 @@ function performanceReceiptView(receipt) {
   const suite = receipt?.suiteLabel || (performanceReceiptSuite() === "agentic" ? "Agentic Route Lab" : "Standard");
   const eligible = Array.isArray(receipt?.eligibleBackends)
     ? receipt.eligibleBackends.filter(uiEngineVisible) : [];
+  const reasoningNormalized = receipt?.reasoningContract?.normalized === true;
+  const reasoningLabel = reasoningNormalized
+    ? `${receipt.reasoningContract.label || "Model default"} reasoning`
+    : "";
   const age = performanceReceiptAge(receipt);
   const firstOutput = finiteMetric(receipt?.firstTokenSeconds);
   const measured = [
@@ -6836,6 +6842,16 @@ function performanceReceiptView(receipt) {
   const measuredTitle = [receipt?.backendLabel, receipt?.modeLabel].filter(Boolean).join(" · ");
   const fullSummary = [receipt?.summary, measured].filter(Boolean).join(" ");
   if (["trusted-engine", "trusted-route"].includes(receipt?.state)) {
+    if (receipt.fresh && reasoningNormalized) return {
+      state:"trusted", icon:"◆",
+      title:focused
+        ? (receipt.state === "trusted-engine" ? `Best measured · ${receipt.backendLabel || "engine"}` : `Best setting · ${receipt.modeLabel || "verified route"}`)
+        : `Measured · ${measuredTitle || "verified route"}`,
+      detail:focused
+        ? [receipt.state === "trusted-engine" ? receipt.modeLabel : receipt.backendLabel, receipt.workloadDisplay, reasoningLabel, age].filter(Boolean).join(" · ")
+        : [measured, reasoningLabel, "review before applying"].filter(Boolean).join(" · "),
+      action:"Review", actionId:"review-normalized", titleText:fullSummary,
+    };
     if (receipt.fresh) return {
       state:"trusted", icon:"◆",
       title:focused
@@ -7020,6 +7036,7 @@ async function activatePerformanceReceipt() {
   if (action === "apply-engine") return applyOptimal("engine", "throughput");
   if (action === "apply-route") return applyOptimal("current");
   if (action === "measure-engine") return openCalibrationAssistant({source:"performance-receipt", preference:"throughput"});
+  if (action === "review-normalized") return openCalibrationAssistant({source:"performance-receipt", preference:"throughput"});
   if (["measure-route", "rerun-lab", "review-lab"].includes(action)) return openPerformanceBenchmarkLab();
 }
 

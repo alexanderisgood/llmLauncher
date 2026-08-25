@@ -9414,16 +9414,21 @@ def benchmark_history_request(
     records: list[dict[str, Any]] | None = None, now: datetime | None = None,
 ) -> dict[str, Any]:
     """Summarise repeat measurements for the exact visible contract without promoting stale data."""
-    current = optimal_request(payload, models)
-    model_id = str(current["modelId"])
-    model = next(item for item in models if item.get("id") == model_id)
+    model_id = str(payload.get("modelId") or "")
+    model = next((item for item in models if item.get("id") == model_id), None)
+    if not model:
+        raise ValueError("The selected model is no longer in the scanned catalog. Refresh models.")
+    reasoning_contract = benchmark_reasoning_contract(payload, model)
+    comparison_payload = copy.deepcopy(payload)
+    comparison_payload["reasoning"] = reasoning_contract["measured"]
+    current = optimal_request(comparison_payload, models)
     backend = str(payload.get("backend") or current["backend"])
     client = str(payload.get("client") or "")
-    reasoning = str(payload.get("reasoning") or "auto")
-    options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    reasoning = str(comparison_payload.get("reasoning") or "auto")
+    options = comparison_payload.get("options") if isinstance(comparison_payload.get("options"), dict) else {}
     kv = str(options.get("kv") or "off")
-    context, output = validated_limits(model, payload)
-    chat = validated_chat_settings(model, payload, client)
+    context, output = validated_limits(model, comparison_payload)
+    chat = validated_chat_settings(model, comparison_payload, client)
     evidence = optimizer_evidence(model, context, output, client, reasoning, kv, chat)
     suite_name = str(payload.get("suite") or "agentic")
     suite = BENCHMARK_SUITES.get(suite_name)
@@ -9434,7 +9439,7 @@ def benchmark_history_request(
         raise ValueError("Choose a supported benchmark history goal.")
     eligible: list[str] = []
     for candidate in ENGINE_ADAPTERS:
-        allowed, _reason = optimizer_backend_eligibility(
+        allowed, _reason = benchmark_backend_eligibility(
             model, candidate, client, reasoning, kv, chat,
         )
         if allowed:
@@ -9761,6 +9766,7 @@ def benchmark_history_request(
     receipt["eligibleBackends"] = [
         {"backend": item, "label": BACKEND_LABELS[item]} for item in eligible
     ]
+    receipt["reasoningContract"] = copy.deepcopy(reasoning_contract)
 
     public_runs = []
     for run in evaluated[:BENCHMARK_HISTORY_VISIBLE_RUNS]:
@@ -9774,6 +9780,7 @@ def benchmark_history_request(
             "modelId": model_id, "model": model.get("name"),
             "client": client, "suite": suite_name, "suiteLabel": suite["label"],
             "context": context, "output": output, "reasoning": reasoning, "kv": kv,
+            "reasoningContract": copy.deepcopy(reasoning_contract),
             "eligibleBackends": [
                 {"backend": item, "label": BACKEND_LABELS[item]} for item in eligible
             ],

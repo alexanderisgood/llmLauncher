@@ -6722,6 +6722,26 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(inclusive["request"]["reasoning"], "auto")
         self.assertTrue(inclusive["reasoningContract"]["normalized"])
 
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value="reasoning-test-mac"):
+            strict_history = launcher.benchmark_history_request(request, [model], [])
+            inclusive_history = launcher.benchmark_history_request({
+                **request,
+                "reasoningPolicy": launcher.BENCHMARK_REASONING_POLICY_ALL_ENGINES,
+            }, [model], [])
+        self.assertEqual(
+            [item["backend"] for item in strict_history["receipt"]["eligibleBackends"]],
+            ["omlx", "mtplx"],
+        )
+        self.assertEqual(
+            [item["backend"] for item in inclusive_history["receipt"]["eligibleBackends"]],
+            ["omlx", "lmstudio", "mtplx"],
+        )
+        self.assertEqual(inclusive_history["contract"]["reasoning"], "auto")
+        self.assertTrue(inclusive_history["receipt"]["reasoningContract"]["normalized"])
+        self.assertEqual(
+            inclusive_history["receipt"]["reasoningContract"]["requested"], "medium",
+        )
+
         loud = launcher.validated_engine_shootout_request({
             **request,
             "reasoningPolicy": launcher.BENCHMARK_REASONING_POLICY_ALL_ENGINES,
@@ -7983,6 +8003,8 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("function performanceReceiptRequestKey", script)
         self.assertIn("function renderPerformanceReceipt", script)
         self.assertIn("function renderEngineEvidenceChoices", script)
+        self.assertIn('request.reasoningPolicy = "all-engines-model-default"', script)
+        self.assertIn('actionId:"review-normalized"', script)
         self.assertIn('receipt?.state === "trusted-engine" && receipt?.fresh', script)
         self.assertIn('button.classList.toggle("measured-best", best)', script)
         self.assertIn('title:focused ? "Compare compatible engines" : "No exact engine result"', script)

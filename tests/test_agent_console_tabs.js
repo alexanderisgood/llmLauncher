@@ -41,6 +41,39 @@ assert.deepEqual(tabs.allowedSurfaceIds(["valid-one", "bad/id", "valid-one", "va
 assert.equal(tabs.safeOffset(true), 0);
 assert.equal(tabs.safeOffset(-1), 0);
 
+const liveConsole = {
+  startedAt:"2026-08-25T10:00:00Z", state:"running",
+  bufferBaseOffset:0, bufferEnd:500, outputRevision:500, nextOffset:500,
+};
+const delayedStatus = {
+  startedAt:"2026-08-25T10:00:00Z", state:"running",
+  bufferBaseOffset:0, bufferEnd:220, outputRevision:220, nextOffset:220,
+};
+const monotonic = tabs.reconcileConsoleMeta(liveConsole, delayedStatus);
+assert.equal(monotonic.meta.bufferEnd, 500);
+assert.equal(monotonic.meta.nextOffset, 500);
+assert.equal(monotonic.stale, true);
+assert.equal(tabs.consoleNeedsReplay(monotonic.meta, 500), false);
+assert.equal(tabs.consoleNeedsReplay({bufferBaseOffset:600, bufferEnd:900}, 500), true);
+assert.equal(tabs.consoleNeedsReplay({bufferBaseOffset:0, bufferEnd:220}, 500), false);
+
+const restarted = tabs.reconcileConsoleMeta(liveConsole, {
+  startedAt:"2026-08-25T10:01:00Z", state:"running",
+  bufferBaseOffset:0, bufferEnd:20, outputRevision:20, nextOffset:20,
+});
+assert.equal(restarted.generationChanged, true);
+assert.equal(restarted.meta.bufferEnd, 20);
+const staleGeneration = tabs.reconcileConsoleMeta(restarted.meta, liveConsole);
+assert.equal(staleGeneration.stale, true);
+assert.equal(staleGeneration.meta.startedAt, "2026-08-25T10:01:00Z");
+assert.equal(staleGeneration.meta.bufferEnd, 20);
+
+const noPayloadRetention = tabs.reconcileConsoleMeta(liveConsole, {
+  bufferEnd:520, nextOffset:510, data:"large private terminal chunk", reset:true,
+});
+assert.equal(Object.prototype.hasOwnProperty.call(noPayloadRetention.meta, "data"), false);
+assert.equal(Object.prototype.hasOwnProperty.call(noPayloadRetention.meta, "reset"), false);
+
 const matches = tabs.findMatches("Alpha beta ALPHA alpha", "alpha");
 assert.deepEqual(matches.ranges, [{start:0, end:5}, {start:11, end:16}, {start:17, end:22}]);
 assert.equal(matches.truncated, false);

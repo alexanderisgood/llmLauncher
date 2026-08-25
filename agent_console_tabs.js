@@ -22,6 +22,62 @@
     return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
   };
 
+  const consoleBaseOffset = value => safeOffset(
+    value?.bufferBaseOffset ?? value?.baseOffset ?? value?.droppedBytes,
+  );
+
+  const consoleEndOffset = value => safeOffset(
+    value?.bufferEnd ?? value?.outputRevision ?? value?.nextOffset,
+  );
+
+  function reconcileConsoleMeta(previousValue, incomingValue) {
+    const previous = previousValue && typeof previousValue === "object" ? previousValue : {};
+    const incoming = incomingValue && typeof incomingValue === "object" ? incomingValue : {};
+    const {data:ignoredPreviousData, reset:ignoredPreviousReset, ...safePrevious} = previous;
+    const previousStartedAt = String(previous.startedAt || "");
+    const incomingStartedAt = String(incoming.startedAt || "");
+    const generationsDiffer = Boolean(
+      previousStartedAt && incomingStartedAt && previousStartedAt !== incomingStartedAt,
+    );
+    if (generationsDiffer) {
+      const previousTime = Date.parse(previousStartedAt);
+      const incomingTime = Date.parse(incomingStartedAt);
+      const incomingIsNewer = Number.isFinite(incomingTime) && (
+        !Number.isFinite(previousTime) || incomingTime > previousTime
+      );
+      if (!incomingIsNewer) return {meta:{...safePrevious}, generationChanged:false, stale:true};
+      const {data:ignoredData, reset:ignoredReset, ...safeIncoming} = incoming;
+      return {meta:{...safePrevious, ...safeIncoming}, generationChanged:true, stale:false};
+    }
+
+    const sameNamedGeneration = Boolean(
+      previousStartedAt && incomingStartedAt && previousStartedAt === incomingStartedAt,
+    );
+    if (sameNamedGeneration && consoleEndOffset(incoming) < consoleEndOffset(previous)) {
+      return {meta:{...safePrevious}, generationChanged:false, stale:true};
+    }
+
+    const {data:ignoredData, reset:ignoredReset, ...safeIncoming} = incoming;
+    const meta = {...safePrevious, ...safeIncoming};
+    const base = Math.max(consoleBaseOffset(previous), consoleBaseOffset(incoming));
+    const end = Math.max(base, consoleEndOffset(previous), consoleEndOffset(incoming));
+    meta.baseOffset = base;
+    meta.bufferBaseOffset = base;
+    meta.droppedBytes = base;
+    meta.bufferEnd = end;
+    meta.outputRevision = end;
+    meta.nextOffset = Math.max(
+      base,
+      safeOffset(previous.nextOffset),
+      safeOffset(incoming.nextOffset),
+    );
+    return {meta, generationChanged:false, stale:false};
+  }
+
+  function consoleNeedsReplay(meta, readOffset) {
+    return safeOffset(readOffset) < consoleBaseOffset(meta);
+  }
+
   function allowedSurfaceIds(values) {
     const result = [];
     const seen = new Set();
@@ -163,7 +219,8 @@
 
   return {
     VERSION, MAX_TABS, MAX_QUERY, MAX_MATCHES,
-    safeId, safeOffset, allowedSurfaceIds,
+    safeId, safeOffset, consoleBaseOffset, consoleEndOffset,
+    reconcileConsoleMeta, consoleNeedsReplay, allowedSurfaceIds,
     normalizeRecovery, buildRecovery,
     findMatches, nextMatchIndex, tabPresentation,
   };

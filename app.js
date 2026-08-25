@@ -5768,6 +5768,7 @@ function createAgentConsoleView(meta = {}, savedSeenEnd = null) {
     seenEnd:savedSeenEnd === null ? end : AgentConsoleTabsCore.safeOffset(savedSeenEnd),
     renderedText:"",
     loaded:false,
+    recovering:false,
     unreadBytes:0,
     inputQueue:[],
     inputSending:false,
@@ -5778,22 +5779,36 @@ function currentAgentConsoleView() {
   return state.agentConsoleViews[state.agentConsoleSurfaceId] || null;
 }
 
-function resetAgentConsoleTerminal(view = currentAgentConsoleView(), baseOffset = null) {
+function reconcileAgentConsoleViewMeta(view, incoming = {}) {
+  if (!view) return {meta:{...incoming}, generationChanged:false, stale:false};
+  const result = AgentConsoleTabsCore.reconcileConsoleMeta(view.meta, incoming);
+  view.meta = result.meta;
+  return result;
+}
+
+function resetAgentConsoleTerminal(
+  view = currentAgentConsoleView(), baseOffset = null,
+  {renderPlaceholder = true, clearInput = true} = {},
+) {
   if (!view) {
     $("agentTerminalOutput").textContent = "Waiting for agent output…";
     $("agentTerminalOutput").removeAttribute("data-console-surface");
+    $("agentConsoleJumpLatest").hidden = true;
     return;
   }
   const base = baseOffset === null ? agentConsoleBaseOffset(view.meta) : AgentConsoleTabsCore.safeOffset(baseOffset);
-  view.terminal = new TerminalCore.TerminalBuffer(100, 30, 2000);
+  const cols = view.terminal?.cols || Number(view.meta?.cols) || 100;
+  const rows = view.terminal?.rows || Number(view.meta?.rows) || 30;
+  view.terminal = new TerminalCore.TerminalBuffer(cols, rows, 2000);
   view.decoder = new TextDecoder("utf-8", {fatal:false});
   view.offset = base;
   view.renderedText = "";
   view.loaded = false;
-  view.inputQueue = [];
-  if (view === currentAgentConsoleView()) {
+  if (clearInput) view.inputQueue = [];
+  if (renderPlaceholder && view === currentAgentConsoleView()) {
     $("agentTerminalOutput").textContent = "Waiting for agent output…";
     $("agentTerminalOutput").dataset.consoleSurface = state.agentConsoleSurfaceId;
+    $("agentConsoleJumpLatest").hidden = true;
   }
 }
 
@@ -5915,10 +5930,12 @@ function syncAgentConsoleViews(status = state.runStatus, run = status?.run, phas
         ? recovery.seen[id] : null;
       view = createAgentConsoleView(descriptor.meta, savedSeen);
       state.agentConsoleViews[id] = view;
-    } else view.meta = {...view.meta, ...descriptor.meta};
-    const base = agentConsoleBaseOffset(view.meta);
-    const end = agentConsoleBufferEnd(view.meta);
-    if (view.offset < base || view.offset > end) resetAgentConsoleTerminal(view, base);
+    } else {
+      const reconciliation = reconcileAgentConsoleViewMeta(view, descriptor.meta);
+      if (reconciliation.generationChanged || AgentConsoleTabsCore.consoleNeedsReplay(view.meta, view.offset)) {
+        view.recovering = true;
+      }
+    }
   }
 
   const primary = descriptors.find(item => item.attachment.primary) || null;
@@ -5957,9 +5974,7 @@ function enterAgentConsole(attachment) {
   if (!state.agentConsoleViews[surfaceId]) {
     state.agentConsoleViews[surfaceId] = createAgentConsoleView(attachment);
   } else {
-    state.agentConsoleViews[surfaceId].meta = {
-      ...state.agentConsoleViews[surfaceId].meta, ...attachment,
-    };
+    reconcileAgentConsoleViewMeta(state.agentConsoleViews[surfaceId], attachment);
   }
   selectAgentConsole(surfaceId, {focus:true, show:true});
   if ($("sessionDialog")?.open) $("sessionDialog").close();
@@ -6096,6 +6111,22 @@ function applyAgentTerminalStyle(element, style = {}) {
   if (background) element.style.backgroundColor = background;
 }
 
+function agentConsoleNearBottom(viewport = $("agentTerminalViewport")) {
+  return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 64;
+}
+
+function updateAgentConsoleScrollUi() {
+  const button = $("agentConsoleJumpLatest");
+  button.hidden = !currentAgentConsoleView() || agentConsoleNearBottom();
+}
+
+function scrollAgentConsoleToLatest() {
+  const viewport = $("agentTerminalViewport");
+  viewport.scrollTop = viewport.scrollHeight;
+  updateAgentConsoleScrollUi();
+  viewport.focus({preventScroll:true});
+}
+
 function renderAgentTerminalOutput({preserveScroll = true, focusMatch = false} = {}) {
   const view = currentAgentConsoleView();
   const viewport = $("agentTerminalViewport");
@@ -6103,9 +6134,10 @@ function renderAgentTerminalOutput({preserveScroll = true, focusMatch = false} =
   if (!view) {
     output.textContent = "No launcher-owned Agent Console is available.";
     output.removeAttribute("data-console-surface");
+    $("agentConsoleJumpLatest").hidden = true;
     return;
   }
-  const nearBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 64;
+  const nearBottom = agentConsoleNearBottom(viewport);
   const text = view.terminal.toString();
   const styledRuns = view.terminal.toStyledRuns?.() || [
     {text, styleKey:"", style:TerminalCore.DEFAULT_STYLE},
@@ -6154,6 +6186,7 @@ function renderAgentTerminalOutput({preserveScroll = true, focusMatch = false} =
   } else if (!preserveScroll || nearBottom) {
     viewport.scrollTop = viewport.scrollHeight;
   }
+  requestAnimationFrame(updateAgentConsoleScrollUi);
 }
 
 function setAgentConsoleSearch(open) {
@@ -6198,13 +6231,16 @@ function renderAgentConsole() {
   const attachment = currentAgentConsoleAttachment() || view?.meta || state.agentConsoleMeta || {};
   const record = currentAgentConsoleRecord();
   if (view) {
-    view.meta = {...view.meta, ...attachment, ...(record || {})};
+    reconcileAgentConsoleViewMeta(view, attachment);
+    if (record) reconcileAgentConsoleViewMeta(view, record);
     state.agentConsoleMeta = view.meta;
   }
   const meta = view?.meta || attachment;
   const surface = meta.surface || clientName(meta.client) || "Agent";
   const stateLabel = String(meta.state || meta.status || "starting");
   $("agentConsoleTitle").textContent = `${surface} · Hub Console`;
+  $("agentConsoleInputLabel").textContent = `Message ${surface}`;
+  $("agentConsoleInput").placeholder = `Ask ${surface}…`;
   $("agentConsoleMeta").textContent = meta.project
     ? `${meta.project} · agent-supplied terminal styling is preserved; output is bounded in memory and never saved by the launcher.`
     : "Agent-supplied terminal styling is preserved; output stays in bounded session memory and never enters Chat history.";
@@ -6261,7 +6297,7 @@ function renderAgentConsole() {
   $("agentConsoleStopButton").disabled = state.agentConsoleBusy || !(meta.canStop ?? ["starting","running","stopping"].includes(stateLabel));
   $("agentConsoleRestartButton").disabled = state.agentConsoleBusy || !(meta.canRestart ?? ["exited","stopped","failed"].includes(stateLabel));
   const dropped = Number(meta.droppedBytes || 0);
-  $("agentConsoleStatus").textContent = `${meta.detail || `Hub Console is ${stateLabel}.`}${dropped ? ` Earlier output was discarded after the 2 MB memory cap (${formatBytes(dropped)} dropped).` : ""}`;
+  $("agentConsoleStatus").textContent = `${view?.recovering ? "Restoring the latest console screen… " : ""}${meta.detail || `Hub Console is ${stateLabel}.`}${dropped ? ` Earlier output was discarded after the 2 MB memory cap (${formatBytes(dropped)} dropped).` : ""}`;
   $("agentConsoleStatus").className = stateLabel === "failed" ? "error" : "";
   renderAgentConsoleTabs();
 }
@@ -6324,12 +6360,17 @@ async function readAgentConsole() {
     const view = state.agentConsoleViews[surfaceId];
     if (!view || ownerRunId !== state.agentConsoleOwnerRunId) return;
     const output = data.console;
-    if (output.reset) resetAgentConsoleTerminal(view, output.baseOffset);
+    if (output.reset) {
+      resetAgentConsoleTerminal(view, output.baseOffset, {
+        renderPlaceholder:false, clearInput:false,
+      });
+    }
     const decoded = decodeAgentConsoleChunk(view, output.data);
     if (decoded) view.terminal.write(decoded);
     view.offset = AgentConsoleTabsCore.safeOffset(output.nextOffset ?? view.offset);
     view.loaded = true;
-    view.meta = {...view.meta, ...output};
+    view.recovering = false;
+    reconcileAgentConsoleViewMeta(view, output);
     const stillActive = surfaceId === state.agentConsoleSurfaceId && state.agentConsoleVisible;
     if (stillActive) {
       view.seenEnd = Math.max(view.seenEnd, view.offset);
@@ -6396,7 +6437,7 @@ async function flushAgentConsoleInput(view, ownerRunId, surfaceId) {
         method:"POST", body:JSON.stringify({ownerRunId, surfaceId, data:value}),
       });
       if (state.agentConsoleViews[surfaceId] === view && ownerRunId === state.agentConsoleOwnerRunId) {
-        view.meta = {...view.meta, ...data.console};
+        reconcileAgentConsoleViewMeta(view, data.console);
       }
       if (surfaceId === state.agentConsoleSurfaceId) {
         state.agentConsoleMeta = view.meta;
@@ -6446,7 +6487,7 @@ async function resizeAgentConsole() {
       }),
     });
     if (view) {
-      view.meta = {...view.meta, ...data.console};
+      reconcileAgentConsoleViewMeta(view, data.console);
       view.terminal.resize(size.cols, size.rows);
       state.agentConsoleMeta = view.meta;
       renderAgentTerminalOutput();
@@ -6470,7 +6511,7 @@ async function stopAgentConsoleSurface(attachment = null) {
     syncAgentConsoleViews(state.runStatus, state.runStatus?.run, state.runPhase);
     const targetId = target.id || target.surfaceId;
     const view = state.agentConsoleViews[targetId];
-    if (view) view.meta = {...view.meta, ...data.console};
+    if (view) reconcileAgentConsoleViewMeta(view, data.console);
     if (targetId === state.agentConsoleSurfaceId && view) state.agentConsoleMeta = view.meta;
     renderAgentConsole();
     if ($("sessionDialog")?.open) await loadSessionDashboard();
@@ -6499,7 +6540,7 @@ async function restartAgentConsoleSurface(attachment = null) {
     const targetId = target.id || target.surfaceId;
     const view = state.agentConsoleViews[targetId];
     if (view) {
-      view.meta = {...view.meta, ...data.console};
+      reconcileAgentConsoleViewMeta(view, data.console);
       view.seenEnd = 0;
       resetAgentConsoleTerminal(view, 0);
     }
@@ -10935,6 +10976,8 @@ $("agentConsoleSearchInput").addEventListener("keydown", event => {
 $("agentConsoleSearchPrevious").addEventListener("click", () => moveAgentConsoleSearch(-1));
 $("agentConsoleSearchNext").addEventListener("click", () => moveAgentConsoleSearch(1));
 $("agentConsoleSearchClose").addEventListener("click", () => setAgentConsoleSearch(false));
+$("agentConsoleJumpLatest").addEventListener("click", scrollAgentConsoleToLatest);
+$("agentTerminalViewport").addEventListener("scroll", updateAgentConsoleScrollUi, {passive:true});
 $("agentConsoleForm").addEventListener("submit", event => {
   event.preventDefault();
   const value = $("agentConsoleInput").value;

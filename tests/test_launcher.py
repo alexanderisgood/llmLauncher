@@ -2719,6 +2719,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn(b"ready", decoded)
         self.assertIn(b"got:hello", decoded)
         self.assertEqual(output["version"], launcher.AGENT_CONSOLE_VERSION)
+        self.assertEqual(output["startedAt"], console.started_at)
         self.assertEqual(output["bufferBaseOffset"], output["baseOffset"])
         self.assertEqual(output["bufferEnd"], output["outputRevision"])
         self.assertGreaterEqual(output["bufferEnd"], output["nextOffset"])

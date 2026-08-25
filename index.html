@@ -329,7 +329,7 @@
         <section id="agentWorkspace" class="agent-workspace hidden" aria-labelledby="agentConsoleTitle">
           <header class="agent-console-header">
             <div><p class="chat-kicker">Launcher-owned agent</p><h2 id="agentConsoleTitle">Waiting for Hub Console</h2><p id="agentConsoleMeta">Agent-supplied terminal colour and emphasis are preserved; output stays in bounded session memory and never enters Chat history.</p></div>
-            <div class="agent-console-header-actions"><button id="agentConsoleBackButton" type="button" class="secondary compact">Launcher settings</button><button id="agentConsoleSessionsButton" type="button" class="secondary compact">Sessions</button><button id="agentConsoleRestartButton" type="button" class="secondary compact" disabled>Restart agent</button><button id="agentConsoleStopButton" type="button" class="danger" disabled>Stop agent</button></div>
+            <div class="agent-console-header-actions"><button id="agentConsoleBackButton" type="button" class="secondary compact" aria-label="Back to launcher settings">Back</button><button id="agentConsoleSessionsButton" type="button" class="secondary compact">Sessions</button><button id="agentConsoleRestartButton" type="button" class="secondary compact" disabled>Restart</button><button id="agentConsoleStopButton" type="button" class="danger" disabled>Stop</button></div>
           </header>
           <section class="agent-console-navigation" aria-label="Agent consoles">
             <div class="agent-console-tabs-row">
@@ -363,12 +363,15 @@
               </section>
             </div>
           </details>
-          <div id="agentTerminalViewport" class="agent-terminal-viewport" role="application" tabindex="0" aria-label="Interactive agent terminal. Type to send keys; use the text field below for accessible input.">
-            <pre id="agentTerminalOutput" aria-label="Agent terminal output">Hub Console will appear here when the agent starts.</pre>
+          <div class="agent-terminal-shell">
+            <div id="agentTerminalViewport" class="agent-terminal-viewport" role="application" tabindex="0" aria-label="Interactive agent terminal. Type to send keys; use the text field below for accessible input.">
+              <pre id="agentTerminalOutput" aria-label="Agent terminal output">Hub Console will appear here when the agent starts.</pre>
+            </div>
+            <button id="agentConsoleJumpLatest" type="button" class="agent-console-jump-latest" hidden>↓ Latest output</button>
           </div>
           <form id="agentConsoleForm" class="agent-console-composer">
-            <label for="agentConsoleInput"><span>Send text or paste</span><input id="agentConsoleInput" type="text" maxlength="65536" autocomplete="off" spellcheck="false" placeholder="Type a command or prompt…"></label>
-            <div class="agent-console-keys" aria-label="Terminal keys"><button id="agentConsoleEscapeButton" type="button" class="secondary compact">Esc</button><button id="agentConsoleInterruptButton" type="button" class="secondary compact">Ctrl-C</button><button id="agentConsoleEnterButton" type="submit" class="primary"><strong>Send + Enter</strong></button></div>
+            <label for="agentConsoleInput"><span id="agentConsoleInputLabel">Message agent</span><input id="agentConsoleInput" type="text" maxlength="65536" autocomplete="off" spellcheck="false" placeholder="Send a prompt…"></label>
+            <div class="agent-console-keys" aria-label="Terminal keys"><button id="agentConsoleEscapeButton" type="button" class="secondary compact" title="Send the Escape key">Esc</button><button id="agentConsoleInterruptButton" type="button" class="secondary compact" title="Interrupt the current agent action">Ctrl-C</button><button id="agentConsoleEnterButton" type="submit" class="primary"><strong>Send</strong></button></div>
             <p id="agentConsoleStatus" role="status" aria-live="polite">Click the terminal for direct keyboard control. Terminal output is capped at 2 MB and never persisted.</p>
           </form>
         </section>

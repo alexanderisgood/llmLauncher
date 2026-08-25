@@ -10010,6 +10010,7 @@ class AgentConsole:
                 "version": AGENT_CONSOLE_VERSION,
                 "ownerRunId": self.owner_run_id,
                 "surfaceId": self.plan.run_id,
+                "startedAt": self.started_at,
                 "baseOffset": self.base_offset,
                 "bufferBaseOffset": self.base_offset,
                 "nextOffset": next_offset,

@@ -2301,6 +2301,7 @@ async function preview() {
     showNotice("");
     const data = await api("/api/preview", {method:"POST", body:JSON.stringify(gather("custom"))});
     const plan = data.plan;
+    const warnings = [plan.runtimeAdvisory?.detail, ...(plan.warnings || [])].filter(Boolean);
     const chatSampling = plan.client === "chat"
       ? ` · ${plan.chat.sampling === "custom" ? `temperature ${plan.chat.temperature}, top P ${plan.chat.topP}, top K ${plan.chat.topK}, presence ${plan.chat.presencePenalty}, frequency ${plan.chat.frequencyPenalty}${plan.chat.seed === null ? "" : `, seed ${plan.chat.seed}`}` : "model sampling defaults"}`
       : "";
@@ -2308,7 +2309,7 @@ async function preview() {
       <div class="preview-row"><span>Engine</span><code>${esc(plan.engineCommand)}</code></div>
       <div class="preview-row"><span>Work surface</span><code>${esc(plan.clientCommand)}</code></div>
       <div class="preview-row"><span>Contract</span><code>${esc(`${formatNumber(plan.context)} context · ${formatNumber(plan.output)} output · ${plan.reasoning} reasoning${chatSampling} · model localhost:${plan.port}${plan.clientPort !== plan.port ? ` · ${plan.purpose === "session" ? "private session relay" : "compatibility guard"} localhost:${plan.clientPort}` : ""}`)}</code></div>
-      ${plan.warnings.length ? `<ul class="warning-list">${plan.warnings.map(warning => `<li>${esc(warning)}</li>`).join("")}</ul>` : ""}`;
+      ${warnings.length ? `<ul class="warning-list">${warnings.map(warning => `<li>${esc(warning)}</li>`).join("")}</ul>` : ""}`;
     $("previewDialog").showModal();
   } catch (error) { showNotice(error.message, true); }
 }

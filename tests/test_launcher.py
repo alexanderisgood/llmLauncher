@@ -7852,6 +7852,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('function updateChatStatusSummaryLabel()', script)
         self.assertIn('function updateAgentConsoleStatusSummaryLabel()', script)
         self.assertIn('runtimeAdvisory', script)
+        self.assertIn('const warnings = [plan.runtimeAdvisory?.detail, ...(plan.warnings || [])]', script)
         self.assertIn('syncAgentConsoleStatusDetailMode(detail)', script)
         self.assertIn('id="runtimeAdvancedTools"', index)
         self.assertLess(index.index('id="runtimeCards"'), index.index('id="runtimeAdvancedTools"'))

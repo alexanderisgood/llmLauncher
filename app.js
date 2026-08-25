@@ -237,6 +237,7 @@ const optimizerKeys = {
   freetoken: ["maxBatchSize", "expertCacheSize", "prefixCacheEntries"],
 };
 const enginePreferenceLabels = {
+  throughput:"Highest generation TPS",
   fastest:"Fastest total", responsive:"Fastest first response",
   memory:"Lowest memory pressure", thermal:"Best thermal stability",
 };
@@ -1924,7 +1925,7 @@ async function animateOptimalControl(key, value, generation) {
   setTimeout(() => field.classList.remove("optimized"), 600);
 }
 
-async function applyOptimal(scope = "current", enginePreference = "fastest", openCalibrationOnMissing = true) {
+async function applyOptimal(scope = "current", enginePreference = "throughput", openCalibrationOnMissing = true) {
   const model = selectedModel();
   if (!model || state.applyingOptimal) return false;
   closeOptimizerMenu();
@@ -2046,7 +2047,7 @@ async function applyOptimal(scope = "current", enginePreference = "fastest", ope
   return applied;
 }
 
-async function prepareVerifiedQuickLaunch(enginePreference = "fastest") {
+async function prepareVerifiedQuickLaunch(enginePreference = "throughput") {
   if (state.applyingOptimal || routeCheckIsActive()) return;
   const applied = await applyOptimal("engine", enginePreference);
   if (!applied) return;
@@ -6790,7 +6791,7 @@ function performanceReceiptSuite() {
 function performanceReceiptRequest() {
   const request = gather("custom");
   request.suite = performanceReceiptSuite();
-  request.enginePreference = "fastest";
+  request.enginePreference = "throughput";
   return request;
 }
 
@@ -7007,7 +7008,7 @@ function schedulePerformanceReceipt(force = false) {
 
 async function openPerformanceBenchmarkLab(receipt = state.performanceReceipt) {
   $("benchmarkSuiteSelect").value = receipt?.suite || performanceReceiptSuite();
-  $("benchmarkPreferenceSelect").value = "fastest";
+  $("benchmarkPreferenceSelect").value = "throughput";
   await openBenchmarkLab();
 }
 
@@ -7016,9 +7017,9 @@ async function activatePerformanceReceipt() {
   if (button.disabled) return;
   const action = button.dataset.action;
   if (action === "retry") return loadPerformanceReceipt(true);
-  if (action === "apply-engine") return applyOptimal("engine", "fastest");
+  if (action === "apply-engine") return applyOptimal("engine", "throughput");
   if (action === "apply-route") return applyOptimal("current");
-  if (action === "measure-engine") return openCalibrationAssistant({source:"performance-receipt", preference:"fastest"});
+  if (action === "measure-engine") return openCalibrationAssistant({source:"performance-receipt", preference:"throughput"});
   if (["measure-route", "rerun-lab", "review-lab"].includes(action)) return openPerformanceBenchmarkLab();
 }
 
@@ -7042,6 +7043,7 @@ function benchmarkSuiteChanged() {
 function benchmarkPreferenceChanged() {
   const preference = $("benchmarkPreferenceSelect").value;
   const help = {
+    throughput:"Ranks each engine's correctness-verified safe route by median generation TPS; leads below 3% remain ties.",
     fastest:"Ranks aggregate output speed for ordinary suites or total staged time for Agentic.",
     responsive:"Ranks the median measured time to first output; a lead below 3% remains a tie.",
     memory:"Ranks the smallest system-wide unified-memory headroom drop; differences below 512 MB remain a tie.",
@@ -7307,6 +7309,7 @@ function updateCalibrationHelp() {
     thorough:"Measures 4K, 16K, and 32K prompts with repeated passes and many model reloads.",
   })[suite] || "Uses generated local prompts.";
   $("calibrationPreferenceHelp").textContent = ({
+    throughput:"Ranks each engine's correctness-verified safe route by median generation TPS; leads below 3% remain ties.",
     fastest:"Uses complete-workload time and keeps leads inside 3% as ties.",
     responsive:"Uses measured time to first output and keeps leads inside 3% as ties.",
     memory:"Uses system-wide unified-memory headroom and requires at least a 512 MB advantage.",
@@ -7638,7 +7641,7 @@ async function loadCalibrationPlan(resetJob = true) {
 async function openCalibrationAssistant(options = {}) {
   const preference = Object.prototype.hasOwnProperty.call(enginePreferenceLabels, options.preference)
     ? options.preference
-    : "fastest";
+    : "throughput";
   const recommendedSuite = options.decision?.engineNextAction?.recommendedSuite
     || (state.client === "chat" ? "standard" : "agentic");
   state.calibrationEntry = options.source ? {
@@ -9064,7 +9067,7 @@ function resetProfileEditor(clearName = true) {
   state.profileEditingId = "";
   if (clearName) $("profileName").value = "";
   $("profilePolicySelect").value = "fixed";
-  $("profileGoalSelect").value = "fastest";
+  $("profileGoalSelect").value = "throughput";
   renderProfiles();
 }
 
@@ -9232,7 +9235,7 @@ async function saveCurrentProfile() {
     state.profileEditingId = "";
     $("profileName").value = "";
     $("profilePolicySelect").value = "fixed";
-    $("profileGoalSelect").value = "fastest";
+    $("profileGoalSelect").value = "throughput";
     setProfileStatus(editing ? "Profile updated. Nothing was started." : "Profile saved privately on this Mac. Nothing was started.", "success");
   } catch (error) {
     setProfileStatus(error.message, "error");
@@ -10956,9 +10959,9 @@ $("previewButton").addEventListener("click", preview);
 $("applyOptimal").addEventListener("click", () => applyOptimal("current"));
 $("performanceReceipt").addEventListener("click", activatePerformanceReceipt);
 $("optimizerMenuButton").addEventListener("click", toggleOptimizerMenu);
-$("optimizerVerifiedLaunch").addEventListener("click", () => prepareVerifiedQuickLaunch("fastest"));
-document.querySelectorAll("[data-optimizer-scope]").forEach(button => button.addEventListener("click", () => applyOptimal(button.dataset.optimizerScope, button.dataset.enginePreference || "fastest")));
-$("optimizerCalibrate").addEventListener("click", () => openCalibrationAssistant({source:"optimizer-menu", preference:"fastest"}));
+$("optimizerVerifiedLaunch").addEventListener("click", () => prepareVerifiedQuickLaunch("throughput"));
+document.querySelectorAll("[data-optimizer-scope]").forEach(button => button.addEventListener("click", () => applyOptimal(button.dataset.optimizerScope, button.dataset.enginePreference || "throughput")));
+$("optimizerCalibrate").addEventListener("click", () => openCalibrationAssistant({source:"optimizer-menu", preference:"throughput"}));
 document.addEventListener("click", event => {
   if (state.optimizerMenuOpen && !$("optimizerAction").contains(event.target)) closeOptimizerMenu();
   if (state.themeMenuOpen && !$("themeMenuButton").closest(".theme-control").contains(event.target)) closeThemeMenu();

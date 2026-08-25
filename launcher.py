@@ -7542,6 +7542,7 @@ def optimal_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> di
 
 
 ENGINE_PREFERENCE_LABELS = {
+    "throughput": "Highest generation TPS",
     "fastest": "Fastest total",
     "responsive": "Fastest first response",
     "memory": "Lowest memory pressure",
@@ -7989,7 +7990,10 @@ def rank_cross_engine_profile(
 ) -> dict[str, Any]:
     """Rank one complete matrix using only profile-specific measured evidence."""
     if preference not in ENGINE_PREFERENCE_LABELS:
-        raise ValueError("Choose Fastest total, Fastest first response, Lowest memory pressure, or Best thermal stability.")
+        raise ValueError(
+            "Choose Highest generation TPS, Fastest total, Fastest first response, "
+            "Lowest memory pressure, or Best thermal stability."
+        )
     speed_ranked = _speed_ranked_entries(group)
     thermal_starts = [
         int(item["thermalStartValue"]) for item in group
@@ -8062,7 +8066,38 @@ def rank_cross_engine_profile(
     missing: list[str] = []
     metric = ""
     displays: dict[str, str] = {}
-    if preference == "fastest":
+    if preference == "throughput":
+        missing = [
+            str(item["backend"]) for item in group
+            if not isinstance(item.get("decodeTokensPerSecond"), (int, float))
+            or isinstance(item.get("decodeTokensPerSecond"), bool)
+            or not math.isfinite(float(item["decodeTokensPerSecond"]))
+            or float(item["decodeTokensPerSecond"]) <= 0
+        ]
+        if missing:
+            return {"available": False, "missing": missing, "preference": preference}
+        ranked = sorted(
+            group, key=lambda item: float(item["decodeTokensPerSecond"]), reverse=True,
+        )
+        winner, runner_up = ranked[0], ranked[1]
+        lead = float(winner["decodeTokensPerSecond"]) / max(
+            float(runner_up["decodeTokensPerSecond"]), 0.000_001,
+        )
+        trusted = lead >= BENCHMARK_MINIMUM_SPEEDUP
+        metric = "median-decode-tokens-per-second"
+        displays = {
+            item["backend"]: f"{float(item['decodeTokensPerSecond']):.1f} tok/s generation"
+            for item in ranked
+        }
+        winner_reason = (
+            f"{BACKEND_LABELS[winner['backend']]} generated tokens {(lead - 1) * 100:.1f}% faster "
+            "than the next engine's correctness-verified safe route."
+        )
+        tie_reason = (
+            f"{BACKEND_LABELS[winner['backend']]} led generation TPS by only {(lead - 1) * 100:.1f}%, "
+            f"below the {int((BENCHMARK_MINIMUM_SPEEDUP - 1) * 100)}% switch threshold."
+        )
+    elif preference == "fastest":
         ranked = speed_ranked
         winner, runner_up = ranked[0], ranked[1]
         lead = _speed_lead(winner, runner_up)
@@ -9352,6 +9387,14 @@ def _benchmark_created_at(value: Any) -> datetime | None:
 def _benchmark_history_value(
     measurement: dict[str, Any], preference: str,
 ) -> tuple[float | None, str, bool]:
+    if preference == "throughput":
+        value = measurement.get("decodeTokensPerSecond")
+        return (
+            (float(value), f"{float(value):.1f} tok/s generation", False)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(float(value)) and float(value) > 0
+            else (None, "Unavailable", False)
+        )
     if preference == "fastest":
         return float(measurement["score"]), str(measurement["display"]), not bool(measurement["higherIsBetter"])
     if preference == "responsive":

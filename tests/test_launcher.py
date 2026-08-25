@@ -5118,6 +5118,7 @@ class LauncherTests(unittest.TestCase):
         )
         memory_delta = {"omlx": 3 * 1024**3, "lmstudio": 1 * 1024**3, "mtplx": 2 * 1024**3}
         thermal_state = {"omlx": 0, "lmstudio": 1, "mtplx": 0}
+        generation_tps = {"omlx": 150.0, "lmstudio": 125.0, "mtplx": 100.0}
 
         def record(backend: str, seconds: float) -> dict:
             capability = model["backends"][backend]
@@ -5135,7 +5136,7 @@ class LauncherTests(unittest.TestCase):
                     "targetPromptTokens": target, "repetition": 1,
                     "promptTokens": target, "completionTokens": 128,
                     "ttftSeconds": seconds / 4, "totalSeconds": seconds,
-                    "decodeTokensPerSecond": 100.0,
+                    "decodeTokensPerSecond": generation_tps[backend],
                     "endToEndTokensPerSecond": 128 / seconds,
                 }
                 for target in (512, 2_048)
@@ -5154,9 +5155,13 @@ class LauncherTests(unittest.TestCase):
                 "promptTokensMin": 512, "promptTokensMax": 2_048,
                 "comparedModes": ["ar", "mtp"],
                 "modes": {
-                    "ar": {"samples": ar_samples},
+                    "ar": {
+                        "samples": ar_samples,
+                        "medianDecodeTokensPerSecond": generation_tps[backend] / 1.1,
+                    },
                     "mtp": {
                         "samples": samples,
+                        "medianDecodeTokensPerSecond": generation_tps[backend],
                         "resourceTelemetry": {
                             "version": 1, "memoryAvailable": True,
                             "totalMemoryBytes": 50 * 1024**3,
@@ -5241,9 +5246,13 @@ class LauncherTests(unittest.TestCase):
         )
 
         with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+            throughput = launcher.best_engine_request(dict(payload, enginePreference="throughput"), [model])
             responsive = launcher.best_engine_request(dict(payload, enginePreference="responsive"), [model])
             memory = launcher.best_engine_request(dict(payload, enginePreference="memory"), [model])
             thermal = launcher.best_engine_request(dict(payload, enginePreference="thermal"), [model])
+        self.assertEqual(throughput["backend"], "omlx")
+        self.assertEqual(throughput["enginePreferenceMetric"], "median-decode-tokens-per-second")
+        self.assertEqual(throughput["comparedEngines"][0]["decodeTokensPerSecond"], 150.0)
         self.assertEqual(responsive["backend"], "mtplx")
         self.assertEqual(memory["backend"], "lmstudio")
         self.assertEqual(thermal["backend"], "mtplx")
@@ -5275,6 +5284,11 @@ class LauncherTests(unittest.TestCase):
                 [model], history_records + [stale_runtime],
                 now=datetime(2026, 8, 23, tzinfo=timezone.utc),
             )
+            throughput_history = launcher.benchmark_history_request(
+                dict(payload, suite="quick", enginePreference="throughput"),
+                [model], history_records + [stale_runtime],
+                now=datetime(2026, 8, 23, tzinfo=timezone.utc),
+            )
         self.assertEqual(history["freshness"], "current")
         self.assertEqual(history["shootoutCount"], 2)
         self.assertEqual(history["runs"][0]["winnerBackend"], "mtplx")
@@ -5290,6 +5304,9 @@ class LauncherTests(unittest.TestCase):
         self.assertGreater(mtplx_series["improvementPercent"], 10)
         self.assertEqual(history["otherEvidence"]["reasons"], [{"label": "Runtime changed", "count": 1}])
         self.assertNotIn("outputHash", json.dumps(history))
+        self.assertEqual(throughput_history["preferenceLabel"], "Highest generation TPS")
+        self.assertEqual(throughput_history["runs"][0]["winnerBackend"], "omlx")
+        self.assertFalse(throughput_history["series"][0]["lowerIsBetter"])
 
         route_record = json.loads(json.dumps(history_records[-3]))
         route_record.pop("shootoutId")
@@ -5454,6 +5471,7 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(status["result"]["matrixQualityPassed"])
         self.assertTrue(status["result"]["trustedWinner"])
         self.assertEqual(status["result"]["recommendedBackend"], "mtplx")
+        self.assertEqual(status["result"]["profiles"]["throughput"]["backend"], "mtplx")
         self.assertEqual(status["result"]["profiles"]["responsive"]["backend"], "mtplx")
         self.assertEqual(status["result"]["profiles"]["memory"]["backend"], "lmstudio")
         self.assertTrue(status["result"]["profiles"]["memory"]["trustedWinner"])
@@ -8413,8 +8431,10 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('applyOptimal("engine", plan.preference, false)', script)
         self.assertIn("Measured engine results", script)
         self.assertNotIn('$("calibrationCoolingSelect").value = "smart";', script)
-        self.assertIn('data-engine-preference="fastest"', index)
-        for preference in ("fastest", "responsive", "memory", "thermal"):
+        self.assertIn('data-engine-preference="throughput"', index)
+        self.assertIn('request.enginePreference = "throughput"', script)
+        self.assertIn('preference:"throughput"', script)
+        for preference in ("throughput", "fastest", "responsive", "memory", "thermal"):
             self.assertIn(f'<option value="{preference}">', index)
         self.assertIn("/api/setup/plan", script)
         self.assertIn("/api/setup/download-draft", script)

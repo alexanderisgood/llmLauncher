@@ -4,6 +4,7 @@ All notable public changes are recorded here.
 
 ## Unreleased
 
+- Engine Calibration now reloads MTPLX at every verified MTP draft depth (D1 through the artifact maximum), correctness-gates each depth against AR, and compares the fastest valid depth with the other engines. The read-only plan includes those extra reloads/requests, live status names the active depth, completed results show the exact winning depth, and Apply fastest restores that measured depth instead of reverting to the artifact default.
 - Calibration now shows every engine's measured result and generation TPS, keeps live generation TPS visible while testing, and preserves the chosen cooling mode when reopened. Saved evidence is grouped by one completed shootout instead of mixing newer routes from another run, and a route that starts with more free memory than the shared reference remains usable. Apply no longer reopens Calibration in those cases; worse memory, thermal drift, power-mode changes, and cooldown timeouts still fail closed.
 - Keep an explicit **Retest engines** action after Calibration finds a saved result, while making **Use result** the primary action.
 - Calibration now turns completed engine measurements into a usable result even when backends differ by one terminal token or choose different valid greedy wording. Exact parity remains required inside each engine before an accelerator can win; cross-engine results instead require the same model/input contract and tightly bounded token-count drift.

@@ -286,6 +286,8 @@ BENCHMARK_REASONING_POLICY_ALL_ENGINES = "all-engines-model-default"
 BENCHMARK_MTP_TUNER_VERSION = 1
 BENCHMARK_MTP_TUNER_MAX_CANDIDATES = 10
 BENCHMARK_MTP_TUNER_CUTOFFS = (0.0, 0.25, 0.50, 0.75)
+MTPLX_MTP_DEPTH_SWEEP_VERSION = 1
+MTPLX_MTP_DEPTH_SWEEP_MAX_CANDIDATES = 8
 BENCHMARK_DFLASH_TUNER_VERSION = 1
 BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES = 10
 BENCHMARK_DFLASH_TUNER_VERIFY_MODES = ("adaptive", "dflash", "ddtree")
@@ -3735,6 +3737,78 @@ def mtp_benchmark_settings_verified(
     )
 
 
+def mtplx_mtp_depth_candidates(capability: dict[str, Any]) -> list[int]:
+    """Return every verified MTPLX draft depth, with the artifact default first."""
+    maximum = bounded_integer(
+        capability.get("depthMax"), 1, 1,
+        MTPLX_MTP_DEPTH_SWEEP_MAX_CANDIDATES, "MTPLX MTP maximum depth",
+    )
+    default = bounded_integer(
+        capability.get("depth"), maximum, 1, maximum, "MTPLX MTP default depth",
+    )
+    return _ordered_unique([default, *range(1, maximum + 1)])
+
+
+def mtplx_mtp_depth_sweep_verified(
+    capability: dict[str, Any], benchmark: dict[str, Any], mode_settings: Any,
+) -> bool:
+    """Require a complete, untampered D1…Dmax search before trusting its winner."""
+    sweep = benchmark.get("mtpDepthSweep")
+    if not isinstance(sweep, dict):
+        return False
+    try:
+        expected_depths = mtplx_mtp_depth_candidates(capability)
+    except (TypeError, ValueError):
+        return False
+    selected_settings = mode_settings.get("mtp") if isinstance(mode_settings, dict) else None
+    candidates = sweep.get("candidates")
+    if (
+        sweep.get("version") != MTPLX_MTP_DEPTH_SWEEP_VERSION
+        or sweep.get("strategy") != "exhaustive-verified-depths"
+        or sweep.get("complete") is not True
+        or sweep.get("resourceComparable") is not True
+        or sweep.get("depthCandidates") != expected_depths
+        or sweep.get("candidateCount") != len(expected_depths)
+        or sweep.get("maximumCandidates") != MTPLX_MTP_DEPTH_SWEEP_MAX_CANDIDATES
+        or sweep.get("selectedSettings") != selected_settings
+        or not isinstance(candidates, list)
+        or len(candidates) != len(expected_depths)
+    ):
+        return False
+    seen: set[int] = set()
+    selected = 0
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            return False
+        depth = candidate.get("depth")
+        settings = candidate.get("settings")
+        if (
+            isinstance(depth, bool) or not isinstance(depth, int)
+            or depth in seen or depth not in expected_depths
+            or settings != {"depth": depth}
+            or candidate.get("qualityMatchesAR") not in {True, False}
+            or candidate.get("resourceComparable") is not True
+            or candidate.get("selected") not in {True, False}
+        ):
+            return False
+        seen.add(depth)
+        for metric in (
+            "medianSpeedupVsAR", "worstCaseSpeedupVsAR",
+            "medianEndToEndTokensPerSecond",
+        ):
+            value = candidate.get(metric)
+            if (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(float(value)) or float(value) <= 0
+            ):
+                return False
+        if candidate.get("selected") is True:
+            selected += 1
+            if settings != selected_settings or depth != sweep.get("selectedDepth"):
+                return False
+    return seen == set(expected_depths) and selected == 1
+
+
 def dflash2_tuning_controls(
     options: dict[str, Any], capability: dict[str, Any],
 ) -> dict[str, Any]:
@@ -4008,6 +4082,11 @@ def _local_benchmark_record_verified(
             return False
     if benchmark.get("kind") == "lmstudio-mtp-tuning" and not lmstudio_mtp_tuning_sweep_verified(
         capability, benchmark, mode_settings,
+    ):
+        return False
+    if "mtpDepthSweep" in benchmark and (
+        backend != "mtplx"
+        or not mtplx_mtp_depth_sweep_verified(capability, benchmark, mode_settings)
     ):
         return False
     if benchmark.get("kind") == "omlx-dflash2-tuning" and not dflash2_tuning_sweep_verified(
@@ -6528,12 +6607,21 @@ def fastest_safe_options(
         selected_fan = str(before.get("fan") or "smart")
         options["fan"] = selected_fan if selected_fan in {"default", "smart", "max"} else "smart"
         if preferred == "mtp":
+            measured_settings = (
+                local_benchmark.get("settings")
+                if local_verified and local_benchmark.get("winner") == "mtp"
+                else None
+            )
             options["depth"] = safe_int(
-                capability.get("depth"), 1, 1, int(capability.get("depthMax") or 1)
+                measured_settings.get("depth") if isinstance(measured_settings, dict) else capability.get("depth"),
+                int(capability.get("depth") or 1),
+                1, int(capability.get("depthMax") or 1),
             )
             if not local_verified:
                 evidence_tier = "artifact-benchmark"
                 evidence_label = "Artifact-backed speed preset"
+            else:
+                rationale.append("Reuse the exact MTPLX draft depth that won the matching local measurement.")
         rationale.append(
             "Reuse the measured MTPLX profile while preserving your visible cooling choice."
             if measured_engine_settings else
@@ -8385,6 +8473,34 @@ def benchmark_engine_settings_label(backend: str, settings: Any) -> str:
     return ""
 
 
+def benchmark_route_settings_label(
+    backend: str, mode: Any, settings: Any,
+) -> str:
+    """Describe the exact winning accelerator controls without exposing raw JSON."""
+    route = str(mode or "ar")
+    values = settings if isinstance(settings, dict) else {}
+    if route == "mtp":
+        depth = values.get("depth")
+        if isinstance(depth, int) and not isinstance(depth, bool):
+            if backend == "lmstudio":
+                minimum = values.get("mtpMinTokens")
+                cutoff = values.get("mtpMinContinueProbability")
+                if (
+                    isinstance(minimum, int) and not isinstance(minimum, bool)
+                    and isinstance(cutoff, (int, float)) and not isinstance(cutoff, bool)
+                ):
+                    return f"MTP D{depth} · min {minimum} · cutoff {float(cutoff):.2f}"
+            return f"MTP depth D{depth}"
+    if route == "dflash2":
+        block = values.get("blockSize")
+        verify = values.get("verifyMode")
+        quant = values.get("draftQuant")
+        if isinstance(block, int) and not isinstance(block, bool):
+            extras = [str(value) for value in (verify, quant) if value]
+            return f"DFlash block {block}" + (f" · {' · '.join(extras)}" if extras else "")
+    return "AR"
+
+
 def model_acceleration_family(model: dict[str, Any]) -> str:
     """Return a conservative name family used only to suggest explicit model alternatives."""
     name = str(model.get("name") or "").strip().lower()
@@ -8589,6 +8705,10 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             ),
             "settingsLabel": benchmark_engine_settings_label(
                 item["backend"], item["record"].get("engineSettings"),
+            ),
+            "routeSettingsLabel": benchmark_route_settings_label(
+                item["backend"], item["record"].get("winner"),
+                item["record"].get("settings"),
             ),
             "score": round(float(item["score"]), 4),
             "metric": item["metric"], "display": item["display"],
@@ -11361,6 +11481,40 @@ def _ordered_unique(values: list[Any]) -> list[Any]:
     return result
 
 
+def benchmark_job_measurement_routes(job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expand public modes into the exact fresh-load routes a shootout will run."""
+    routes: list[dict[str, Any]] = []
+    for mode in job.get("modes") or []:
+        if mode == "mtp" and job.get("backend") == "mtplx":
+            capability = job["model"]["backends"]["mtplx"]
+            for depth in mtplx_mtp_depth_candidates(capability):
+                routes.append({
+                    "mode": "mtp", "label": f"MTP D{depth}",
+                    "stateKey": f"mtp-d{depth}", "settings": {"depth": depth},
+                })
+            continue
+        routes.append({
+            "mode": str(mode), "label": BenchmarkManager._mode_label(str(mode)),
+            "stateKey": str(mode), "settings": {},
+        })
+    return routes
+
+
+def benchmark_job_public_modes(job: dict[str, Any]) -> list[dict[str, str]]:
+    """Keep calibration route disclosure compact while showing an MTPLX depth search."""
+    modes: list[dict[str, str]] = []
+    for mode in job.get("modes") or []:
+        label = BenchmarkManager._mode_label(str(mode))
+        if mode == "mtp" and job.get("backend") == "mtplx":
+            depths = mtplx_mtp_depth_candidates(
+                job["model"]["backends"]["mtplx"],
+            )
+            if len(depths) > 1:
+                label = f"MTP D1–D{max(depths)}"
+        modes.append({"id": str(mode), "label": label})
+    return modes
+
+
 def lmstudio_mtp_tuning_candidate_key(settings: dict[str, Any]) -> str:
     """Return the stable public identity for one exact LM Studio MTP load."""
     return (
@@ -11692,10 +11846,26 @@ def calibration_plan(
         if job is not None:
             jobs.append(job)
         measured_modes = list(job.get("modes") or []) if job is not None else []
+        measurement_routes = (
+            benchmark_job_measurement_routes(job) if job is not None else []
+        )
         engine_settings = (
             job.get("evidence", {}).get("engineSettings")
             if job is not None else {}
         )
+        mode_detail = (
+            benchmark_mode_summary(model, backend, measured_modes or ["ar"])
+            if job is not None else ""
+        )
+        if job is not None and backend == "mtplx" and "mtp" in measured_modes:
+            depths = mtplx_mtp_depth_candidates(
+                job["model"]["backends"]["mtplx"],
+            )
+            if len(depths) > 1:
+                mode_detail += (
+                    f" MTPLX is reloaded at every verified draft depth (D1–D{max(depths)}); "
+                    "only the fastest AR-matching depth is kept."
+                )
         engines.append({
             "backend": backend,
             "label": BACKEND_LABELS[backend],
@@ -11712,14 +11882,9 @@ def calibration_plan(
                 "Preserves this exact model, work surface, reasoning, sampling, limits, and KV precision."
                 if job is not None else str(reason)
             ),
-            "modes": [
-                {"id": mode, "label": BenchmarkManager._mode_label(mode)}
-                for mode in measured_modes
-            ],
-            "modeDetail": (
-                benchmark_mode_summary(model, backend, measured_modes or ["ar"])
-                if job is not None else ""
-            ),
+            "modes": benchmark_job_public_modes(job) if job is not None else [],
+            "measurementRouteCount": len(measurement_routes),
+            "modeDetail": mode_detail,
             "accelerationReason": (
                 benchmark_acceleration_reason(model, backend, measured_modes)
                 if job is not None else ""
@@ -11747,9 +11912,12 @@ def calibration_plan(
             "Compatible engines do not expose one matching model-artifact fingerprint, so their speeds cannot be compared safely."
         )
     ready = not blockers
-    route_count = sum(len(job["modes"]) for job in jobs) if ready else 0
+    route_count = sum(
+        len(benchmark_job_measurement_routes(job)) for job in jobs
+    ) if ready else 0
     measured_requests = sum(
-        len(job["modes"]) * (2 + benchmark_measurement_count(job["suite"]))
+        len(benchmark_job_measurement_routes(job))
+        * (2 + benchmark_measurement_count(job["suite"]))
         for job in jobs
     ) if ready else 0
     prompt_schedule = (
@@ -16042,7 +16210,10 @@ class BenchmarkManager:
                         {
                             "backend": item["backend"],
                             "label": BACKEND_LABELS[item["backend"]],
-                            "modes": item["modes"],
+                            "modes": benchmark_job_public_modes(item),
+                            "measurementRouteCount": len(
+                                benchmark_job_measurement_routes(item)
+                            ),
                         }
                         for item in shootout["jobs"]
                     ],
@@ -16324,7 +16495,12 @@ class BenchmarkManager:
                 requested = {} if job.get("shootoutId") else options
                 options.update(lmstudio_mtp_controls(requested, capability))
             else:
-                requested_depth = None if job.get("shootoutId") else options.get("depth")
+                forced_depth = job.get("_benchmarkMtpDepth")
+                requested_depth = (
+                    forced_depth
+                    if isinstance(forced_depth, int) and not isinstance(forced_depth, bool)
+                    else None if job.get("shootoutId") else options.get("depth")
+                )
                 options["depth"] = safe_int(
                     requested_depth, int(capability.get("depth") or 1),
                     1, int(capability.get("depthMax") or 1),
@@ -16467,7 +16643,7 @@ class BenchmarkManager:
                 result["agenticMetrics"] = summarize_agentic_samples(samples)
             with self.lock:
                 if shootout and job["backend"] in self.state.get("engines", {}):
-                    self.state["engines"][job["backend"]]["modes"][mode] = copy.deepcopy(result)
+                    self.state["engines"][job["backend"]]["modes"][state_key or mode] = copy.deepcopy(result)
                 else:
                     self.state["modes"][state_key or mode] = copy.deepcopy(result)
             return result, completed
@@ -16628,6 +16804,56 @@ class BenchmarkManager:
             ),
             "selected": False,
             "_result": result,
+        }
+
+    @staticmethod
+    def _mtplx_depth_candidate_summary(
+        baseline: dict[str, Any], result: dict[str, Any], depth: int,
+        resource_status: str,
+    ) -> dict[str, Any]:
+        """Compare one exact MTPLX depth with the engine's single AR reference."""
+        baseline_samples = baseline.get("samples")
+        samples = result.get("samples")
+        settings = result.get("settings")
+        if (
+            not isinstance(baseline_samples, list) or not baseline_samples
+            or not isinstance(samples, list) or len(samples) != len(baseline_samples)
+            or settings != {"depth": depth}
+        ):
+            raise RuntimeError(
+                f"MTPLX D{depth} did not return the complete requested measurement contract."
+            )
+        ratios: list[float] = []
+        for sample, reference in zip(samples, baseline_samples):
+            try:
+                measured = float(sample["endToEndTokensPerSecond"])
+                baseline_speed = float(reference["endToEndTokensPerSecond"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise RuntimeError(f"MTPLX D{depth} returned invalid speed telemetry.") from error
+            if (
+                not math.isfinite(measured) or measured <= 0
+                or not math.isfinite(baseline_speed) or baseline_speed <= 0
+            ):
+                raise RuntimeError(f"MTPLX D{depth} returned non-positive speed telemetry.")
+            ratios.append(measured / baseline_speed)
+        resource_comparable = resource_status in {
+            "reference-ready", "ready", "condition-improved", "unavailable",
+        }
+        return {
+            "depth": depth, "settings": {"depth": depth},
+            "qualityMatchesAR": bool(
+                result.get("qualityHash") == baseline.get("qualityHash")
+                and result.get("qualityCompletionTokens")
+                == baseline.get("qualityCompletionTokens")
+            ),
+            "resourceComparable": resource_comparable,
+            "resourceCooldownStatus": resource_status,
+            "medianSpeedupVsAR": round(statistics.median(ratios), 4),
+            "worstCaseSpeedupVsAR": round(min(ratios), 4),
+            "medianEndToEndTokensPerSecond": round(
+                float(result.get("medianEndToEndTokensPerSecond") or 0), 3,
+            ),
+            "selected": False, "_result": result,
         }
 
     @staticmethod
@@ -17196,6 +17422,11 @@ class BenchmarkManager:
                 "settingsLabel": benchmark_engine_settings_label(
                     str(record["backend"]), record.get("engineSettings"),
                 ),
+                "routeSettingsLabel": benchmark_route_settings_label(
+                    str(record["backend"]), record.get("winner"),
+                    record.get("settings"),
+                ),
+                "mtpDepthSweep": copy.deepcopy(record.get("mtpDepthSweep")),
                 "score": round(float(measurement["score"]), 4) if measurement else None,
                 "metric": measurement["metric"] if measurement else None,
                 "display": measurement["display"] if measurement else "Not comparable",
@@ -17276,7 +17507,8 @@ class BenchmarkManager:
     ) -> None:
         jobs = shootout["jobs"]
         total = sum(
-            (2 + benchmark_measurement_count(job["suite"])) * len(job["modes"])
+            (2 + benchmark_measurement_count(job["suite"]))
+            * len(benchmark_job_measurement_routes(job))
             for job in jobs
         )
         completed = 0
@@ -17287,20 +17519,107 @@ class BenchmarkManager:
                 if self.cancel_event.is_set():
                     raise LaunchCancelled("Engine Shootout cancelled.")
                 results: dict[str, dict[str, Any]] = {}
-                for mode in job["modes"]:
+                mtplx_depth_candidates: list[dict[str, Any]] = []
+                for route in benchmark_job_measurement_routes(job):
                     if self.cancel_event.is_set():
                         raise LaunchCancelled("Engine Shootout cancelled.")
-                    route_label = f"{BACKEND_LABELS[job['backend']]} · {self._mode_label(mode)}"
+                    mode = str(route["mode"])
+                    route_label = f"{BACKEND_LABELS[job['backend']]} · {route['label']}"
                     gate = self._wait_for_resource_baseline(
                         route_label, str(job["backend"]), resource_reference,
                     )
                     if resource_reference is None and gate.get("status") != "unavailable":
                         resource_reference = copy.deepcopy(gate.get("reference"))
+                    candidate_job = job
+                    route_settings = route.get("settings")
+                    if (
+                        job["backend"] == "mtplx" and mode == "mtp"
+                        and isinstance(route_settings, dict)
+                        and isinstance(route_settings.get("depth"), int)
+                    ):
+                        candidate_job = copy.deepcopy(job)
+                        candidate_job["_benchmarkMtpDepth"] = int(route_settings["depth"])
                     result, completed = self._measure_mode(
-                        job, models, mode, completed, total, gate,
+                        candidate_job, models, mode, completed, total, gate,
+                        display_label=str(route["label"]),
+                        state_key=str(route["stateKey"]),
                     )
+                    if candidate_job is not job:
+                        if "ar" not in results:
+                            raise RuntimeError(
+                                "MTPLX depth tuning started before its AR correctness reference."
+                            )
+                        mtplx_depth_candidates.append(
+                            self._mtplx_depth_candidate_summary(
+                                results["ar"], result,
+                                int(route_settings["depth"]),
+                                str(gate.get("status") or ""),
+                            )
+                        )
+                        with self.lock:
+                            engine = self.state.get("engines", {}).get("mtplx")
+                            if isinstance(engine, dict):
+                                engine["depthSweep"] = [
+                                    {
+                                        key: copy.deepcopy(value)
+                                        for key, value in candidate.items()
+                                        if key != "_result"
+                                    }
+                                    for candidate in mtplx_depth_candidates
+                                ]
+                        continue
                     results[mode] = result
+                if mtplx_depth_candidates:
+                    if not all(
+                        candidate.get("resourceComparable") is True
+                        for candidate in mtplx_depth_candidates
+                    ):
+                        raise RuntimeError(
+                            "MTPLX depth candidates did not start under comparable Mac conditions. "
+                            "Nothing was saved; retry when the Mac is idle."
+                        )
+                    best_depth = self._best_tuning_candidate(mtplx_depth_candidates)
+                    best_depth["selected"] = True
+                    results["mtp"] = best_depth["_result"]
                 record = self._build_record(job, results)
+                if mtplx_depth_candidates:
+                    public_candidates = [
+                        {
+                            key: copy.deepcopy(value)
+                            for key, value in candidate.items()
+                            if key != "_result"
+                        }
+                        for candidate in mtplx_depth_candidates
+                    ]
+                    selected = next(
+                        candidate for candidate in public_candidates
+                        if candidate["selected"] is True
+                    )
+                    record["mtpDepthSweep"] = {
+                        "version": MTPLX_MTP_DEPTH_SWEEP_VERSION,
+                        "strategy": "exhaustive-verified-depths",
+                        "complete": True,
+                        "resourceComparable": True,
+                        "depthCandidates": mtplx_mtp_depth_candidates(
+                            job["model"]["backends"]["mtplx"],
+                        ),
+                        "candidateCount": len(public_candidates),
+                        "maximumCandidates": MTPLX_MTP_DEPTH_SWEEP_MAX_CANDIDATES,
+                        "selectedDepth": selected["depth"],
+                        "selectedSettings": copy.deepcopy(selected["settings"]),
+                        "candidates": public_candidates,
+                    }
+                    if record["winner"] == "mtp":
+                        record["recommendation"] = (
+                            f"Use MTP D{selected['depth']}: it was the fastest verified MTPLX "
+                            f"depth and cleared exact AR parity plus the "
+                            f"{BENCHMARK_MINIMUM_SPEEDUP:.2f}× median/worst-case noise floor."
+                        )
+                    else:
+                        record["recommendation"] = (
+                            f"Keep AR: none of the {len(public_candidates)} verified MTPLX "
+                            "depths cleared exact parity and the speed noise floor."
+                        )
                 records.append(record)
                 with self.lock:
                     engine = self.state.get("engines", {}).get(job["backend"])

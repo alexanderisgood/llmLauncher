@@ -5418,8 +5418,13 @@ class LauncherTests(unittest.TestCase):
         baseline_headroom = {"omlx": 44.0, "lmstudio": 45.0, "mtplx": 46.0}
         thermal_state = {"omlx": 0, "lmstudio": 1, "mtplx": 0}
 
-        def measured(job, _models, mode, completed, _total, gate):
-            seconds = base_seconds[job["backend"]] * (0.8 if mode == "mtp" else 1.0)
+        def measured(job, _models, mode, completed, _total, gate, **_kwargs):
+            mtplx_depth = job.get("_benchmarkMtpDepth")
+            if job["backend"] == "mtplx" and mode == "mtp":
+                depth_factor = {1: 0.92, 2: 0.70, 3: 0.82}[mtplx_depth]
+            else:
+                depth_factor = 0.8 if mode == "mtp" else 1.0
+            seconds = base_seconds[job["backend"]] * depth_factor
             samples = []
             for prompt_index, target in enumerate(job["suite"]["promptTokens"]):
                 for repetition in range(int(job["suite"]["repetitions"])):
@@ -5454,6 +5459,8 @@ class LauncherTests(unittest.TestCase):
                     key: value for key, value in gate.items() if key != "_initialSnapshot"
                 },
             }
+            if job["backend"] == "mtplx" and mode == "mtp":
+                result["settings"] = {"depth": mtplx_depth}
             return result, completed + 2 + len(samples)
 
         ready_gate = {
@@ -5467,7 +5474,7 @@ class LauncherTests(unittest.TestCase):
         ), mock.patch.object(launcher, "save_benchmark_records") as saved:
             manager._shootout_worker(shootout, [model])
         status = manager.snapshot()
-        self.assertEqual(status["phase"], "completed")
+        self.assertEqual(status["phase"], "completed", status.get("message"))
         self.assertTrue(status["result"]["matrixQualityPassed"])
         self.assertTrue(status["result"]["trustedWinner"])
         self.assertTrue(status["result"]["persistence"]["saved"])
@@ -5495,6 +5502,40 @@ class LauncherTests(unittest.TestCase):
             record["comparisonContractVersion"] == launcher.BENCHMARK_COMPARISON_CONTRACT_VERSION
             for record in records
         ))
+        mtplx_record = next(record for record in records if record["backend"] == "mtplx")
+        self.assertEqual(mtplx_record["winner"], "mtp")
+        self.assertEqual(mtplx_record["settings"], {"depth": 2})
+        self.assertEqual(mtplx_record["mtpDepthSweep"]["depthCandidates"], [3, 1, 2])
+        self.assertEqual(mtplx_record["mtpDepthSweep"]["selectedDepth"], 2)
+        self.assertEqual(mtplx_record["mtpDepthSweep"]["candidateCount"], 3)
+        mtplx_result = next(
+            item for item in status["result"]["engines"]
+            if item["backend"] == "mtplx"
+        )
+        self.assertEqual(mtplx_result["routeSettingsLabel"], "MTP depth D2")
+        mtplx_job = next(job for job in shootout["jobs"] if job["backend"] == "mtplx")
+        mtplx_capability = model["backends"]["mtplx"]
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value="shootout-mac"):
+            self.assertTrue(launcher._local_benchmark_record_verified(
+                mtplx_capability, mtplx_record, mtplx_job["evidence"],
+            ))
+            optimiser_capability = copy.deepcopy(mtplx_capability)
+            optimiser_capability["localBenchmark"] = copy.deepcopy(mtplx_record)
+            optimiser_capability["localBenchmarks"] = [copy.deepcopy(mtplx_record)]
+            optimised = launcher.fastest_safe_options(
+                "mtplx", optimiser_capability, payload["options"], mtplx_job["evidence"],
+            )
+        self.assertEqual(optimised["options"]["acceleration"], "mtp")
+        self.assertEqual(optimised["options"]["depth"], 2)
+        self.assertTrue(any(
+            "exact MTPLX draft depth" in item for item in optimised["rationale"]
+        ))
+        tampered = copy.deepcopy(mtplx_record)
+        tampered["mtpDepthSweep"]["candidates"].pop()
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value="shootout-mac"):
+            self.assertFalse(launcher._local_benchmark_record_verified(
+                mtplx_capability, tampered, mtplx_job["evidence"],
+            ))
 
         improved_conditions = json.loads(json.dumps(records))
         for index, record in enumerate(improved_conditions):
@@ -5555,6 +5596,36 @@ class LauncherTests(unittest.TestCase):
             failed._shootout_worker(shootout, [model])
         self.assertEqual(failed.snapshot()["phase"], "failed")
         partial_save.assert_not_called()
+
+    def test_mtplx_shootout_depth_routes_load_the_exact_candidate(self) -> None:
+        model = copy.deepcopy(self.models[0])
+        model["backends"]["mtplx"].update({
+            "benchmarkModelFingerprint": "exact-depth-model",
+            "runtimeVersion": "mtplx exact-depth runtime",
+            "depth": 3, "depthMax": 3,
+        })
+        payload = self.payload("mtplx", "pi", model)
+        payload.update({"suite": "quick", "reasoning": "auto"})
+        job = launcher.validated_benchmark_request(payload, [model])
+        job["shootoutId"] = "exact-depth-shootout"
+        self.assertEqual(
+            launcher.benchmark_job_measurement_routes(job),
+            [
+                {"mode": "ar", "label": "AR", "stateKey": "ar", "settings": {}},
+                {"mode": "mtp", "label": "MTP D3", "stateKey": "mtp-d3", "settings": {"depth": 3}},
+                {"mode": "mtp", "label": "MTP D1", "stateKey": "mtp-d1", "settings": {"depth": 1}},
+                {"mode": "mtp", "label": "MTP D2", "stateKey": "mtp-d2", "settings": {"depth": 2}},
+            ],
+        )
+        candidate = copy.deepcopy(job)
+        candidate["_benchmarkMtpDepth"] = 2
+        manager = launcher.BenchmarkManager(launcher.RunManager())
+        request = manager._mode_payload(candidate, "mtp")
+        self.assertEqual(request["options"]["depth"], 2)
+        plan = launcher.normalized_request(request, [model], purpose="benchmark")
+        depth_index = plan.engine_argv.index("--depth")
+        self.assertEqual(plan.engine_argv[depth_index + 1], "2")
+        self.assertIn("--mtp", plan.engine_argv)
 
     def test_audited_runtime_release_states_are_static_and_fail_closed(self) -> None:
         with mock.patch.object(
@@ -6679,9 +6750,9 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(plan["ready"])
         self.assertEqual(plan["action"], "measure")
         self.assertEqual(plan["eligibleEngineCount"], 3)
-        self.assertEqual(plan["routeCount"], 6)
-        self.assertEqual(plan["modelReloadCount"], 6)
-        self.assertEqual(plan["measuredRequestCount"], 36)
+        self.assertEqual(plan["routeCount"], 8)
+        self.assertEqual(plan["modelReloadCount"], 8)
+        self.assertEqual(plan["measuredRequestCount"], 48)
         self.assertEqual(plan["request"]["reasoning"], "auto")
         self.assertEqual(plan["request"]["options"]["fan"], "smart")
         self.assertEqual(plan["calibrationCooling"], "smart")
@@ -6697,6 +6768,11 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(lmstudio["settingsLabel"], "Full GPU · 1 request lane")
         mtplx = next(item for item in plan["engines"] if item["backend"] == "mtplx")
         self.assertEqual(mtplx["settingsLabel"], "Sustained profile · automatic cooling")
+        self.assertEqual(mtplx["measurementRouteCount"], 4)
+        self.assertEqual(
+            [item["label"] for item in mtplx["modes"]], ["AR", "MTP D1–D3"],
+        )
+        self.assertIn("every verified draft depth (D1–D3)", mtplx["modeDetail"])
         self.assertEqual(
             [item["id"] for item in plan["suite"]["promptSchedule"]],
             ["cold", "warmPrefix", "toolIngest", "steadyTurn"],
@@ -8266,6 +8342,8 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("Saved locally; no second test is needed.", script)
         self.assertIn("calibration-engine-settings", styles)
         self.assertIn("calibration-result-settings", styles)
+        self.assertIn("engine.mtpDepthSweep", script)
+        self.assertIn("engine.routeSettingsLabel", script)
         self.assertIn('Routes: ${routePreview}.', script)
         self.assertIn("Use saved result", script)
         self.assertIn("no verified accelerator in this artifact", script)

@@ -7091,7 +7091,8 @@ function renderEngineShootoutResults(status) {
   const cards = engines.map(engine => {
     const winner = Boolean(trustedWinner && engine.backend === recommended);
     const profileComparison = profileComparisons.get(engine.backend);
-    const modeLabel = engine.modeLabel || (engine.mode ? benchmarkWinnerLabel(engine.mode) : "Measuring…");
+    const modeLabel = engine.routeSettingsLabel
+      || engine.modeLabel || (engine.mode ? benchmarkWinnerLabel(engine.mode) : "Measuring…");
     const qualityText = !result
       ? "Waiting for the complete matrix"
       : engine.qualityMatchesMatrix
@@ -7531,10 +7532,18 @@ function renderCalibrationPlan() {
     const mode = engine.mode === "dflash2" ? "DFlash 2" : engine.mode === "mtp" ? "MTP" : "AR";
     const testedModes = Array.isArray(engine.testedModes) && engine.testedModes.length
       ? engine.testedModes : [engine.mode || "ar"];
+    const depthCandidates = Array.isArray(engine.mtpDepthSweep?.depthCandidates)
+      ? engine.mtpDepthSweep.depthCandidates : [];
+    const testedRoutes = testedModes.map(item => (
+      item === "mtp" && depthCandidates.length > 1
+        ? `MTP D1–D${Math.max(...depthCandidates.map(Number))}`
+        : benchmarkWinnerLabel(item)
+    ));
     const testedLabel = testedModes.length > 1
-      ? `Tested ${testedModes.map(benchmarkWinnerLabel).join(" + ")}`
+      ? `Tested ${testedRoutes.join(" + ")}`
       : `Tested AR only · ${engine.accelerationReason || "no verified accelerator in this artifact"}`;
-    const modeLabel = testedModes.length > 1 ? `Winner: ${mode}` : "AR only";
+    const exactRoute = engine.routeSettingsLabel || mode;
+    const modeLabel = testedModes.length > 1 ? `Winner: ${exactRoute}` : "AR only";
     const decodeTps = finiteMetric(engine.decodeTokensPerSecond);
     return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${engine.settingsLabel ? `<small class="calibration-result-settings">Setup · ${esc(engine.settingsLabel)}</small>` : ""}${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${selected ? "Best result" : `#${index + 1}`}</em></article>`;
   }).join("")}</div>` : "";

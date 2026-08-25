@@ -7415,10 +7415,22 @@ function calibrationRoutePreview(plan) {
     .filter(engine => engine.eligible && uiEngineVisible(engine.backend || engine.id))
     .map(engine => {
       const modes = (engine.modes || []).map(mode => mode.label).filter(Boolean);
-      const route = modes.length > 1 ? modes.join(" + ") : `${modes[0] || "AR"} only`;
+      const unavailable = modes.length <= 1 && engine.accelerationReason
+        ? ` (${String(engine.accelerationReason).replace(/^This model /, "model ").replace(/[.]$/, "")})`
+        : "";
+      const route = modes.length > 1 ? modes.join(" + ") : `${modes[0] || "AR"} only${unavailable}`;
       return `${engine.label}: ${route}`;
     })
     .join(" · ");
+}
+
+function calibrationAlternativeMarkup(plan, engine, controlsLocked) {
+  if (engine.backend !== plan?.request?.backend) return "";
+  const alternative = (engine.acceleratedAlternatives || [])[0];
+  if (!alternative) return "";
+  const modes = (alternative.modes || []).join(" + ") || "acceleration";
+  const details = [alternative.quantization, alternative.sizeLabel].filter(Boolean).join(" · ");
+  return `<div class="calibration-engine-alternative"><small>${esc(modes)} is installed on <b>${esc(alternative.name)}</b>${details ? ` (${esc(details)})` : ""}. It is a different model artifact, so calibration will never substitute it silently.</small><button type="button" class="text-button" data-calibration-model="${esc(alternative.id)}" ${controlsLocked ? "disabled" : ""}>Switch to ${esc(modes)} model</button></div>`;
 }
 
 function renderCalibrationPlan() {
@@ -7467,7 +7479,7 @@ function renderCalibrationPlan() {
   );
   $("calibrationEngineCards").innerHTML = (plan.engines || [])
     .filter(engine => uiEngineVisible(engine.backend || engine.id))
-    .map(engine => `<article class="calibration-engine ${engine.eligible ? "eligible" : "excluded"}"><header><strong>${esc(engine.label)}</strong><em>${engine.eligible ? "Comparable" : "Excluded"}</em></header><p>${esc(engine.modeDetail || engine.reason)}</p><div class="calibration-engine-modes">${(engine.modes || []).map(mode => `<span>${esc(mode.label)}</span>`).join("") || ""}</div></article>`).join("");
+    .map(engine => `<article class="calibration-engine ${engine.eligible ? "eligible" : "excluded"}"><header><strong>${esc(engine.label)}</strong><em>${engine.eligible ? "Comparable" : "Excluded"}</em></header><p>${esc(engine.modeDetail || engine.reason)}</p>${engine.settingsLabel ? `<small class="calibration-engine-settings">Test setup · ${esc(engine.settingsLabel)}</small>` : ""}<div class="calibration-engine-modes">${(engine.modes || []).map(mode => `<span>${esc(mode.label)}</span>`).join("") || ""}</div>${calibrationAlternativeMarkup(plan, engine, controlsLocked)}</article>`).join("");
   const evidence = plan.evidence || {};
   const evidenceReady = plan.action === "apply-existing";
   const completedResult = calibrationOwnsBenchmark()
@@ -7521,10 +7533,10 @@ function renderCalibrationPlan() {
       ? engine.testedModes : [engine.mode || "ar"];
     const testedLabel = testedModes.length > 1
       ? `Tested ${testedModes.map(benchmarkWinnerLabel).join(" + ")}`
-      : "Tested AR only · no verified accelerator in this artifact";
+      : `Tested AR only · ${engine.accelerationReason || "no verified accelerator in this artifact"}`;
     const modeLabel = testedModes.length > 1 ? `Winner: ${mode}` : "AR only";
     const decodeTps = finiteMetric(engine.decodeTokensPerSecond);
-    return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${selected ? "Best result" : `#${index + 1}`}</em></article>`;
+    return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${engine.settingsLabel ? `<small class="calibration-result-settings">Setup · ${esc(engine.settingsLabel)}</small>` : ""}${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${selected ? "Best result" : `#${index + 1}`}</em></article>`;
   }).join("")}</div>` : "";
   if (state.calibrationProfileContractId !== plan.contractId) {
     state.calibrationProfileContractId = plan.contractId;
@@ -7595,9 +7607,10 @@ function renderCalibrationBenchmark(status = state.benchmarkStatus || {}) {
     $("calibrationProgressBar").parentElement.setAttribute("aria-valuenow", "100");
     const result = status.result || {};
     const decision = result.profiles?.[$("calibrationPreferenceSelect").value] || result.decision || {};
+    const saved = result.persistence?.saved === true ? " Saved locally; no second test is needed." : " You can use the result without testing again.";
     $("calibrationStatus").textContent = decision.trustedWinner
-      ? `${decision.label} won for ${enginePreferenceLabels[decision.preference] || "this goal"}. You can use the result without testing again.`
-      : (decision.recommendation || "The engines finished in a practical tie, so the current engine is kept.");
+      ? `${decision.label} won for ${enginePreferenceLabels[decision.preference] || "this goal"}.${saved}`
+      : `${decision.recommendation || "The engines finished in a practical tie, so the current engine is kept."}${saved}`;
     if (promoteCompletedCalibrationResult(status)) renderCalibrationPlan();
     if (result.id && state.calibrationCompletionId !== result.id) {
       state.calibrationCompletionId = result.id;
@@ -7687,6 +7700,22 @@ async function openCalibrationAssistant(options = {}) {
   if (!$("calibrationDialog").open) $("calibrationDialog").showModal();
   await pollBenchmarkStatus();
   await loadCalibrationPlan(!calibrationBenchmarkActive());
+}
+
+async function selectCalibrationAlternative(modelId) {
+  if (calibrationOperationBlocked()) return;
+  const option = [...$("modelSelect").options]
+    .find(item => item.value === String(modelId || "") && !item.disabled);
+  if (!option) {
+    showNotice("That accelerated model is no longer available. Rescan models and try again.", true);
+    return;
+  }
+  $("modelSelect").value = option.value;
+  modelChanged();
+  scheduleBenchmarkHistory();
+  state.calibrationEntry = null;
+  await loadCalibrationPlan(true);
+  showNotice(`Selected ${selectedModel()?.name || "the accelerated model"}. Review its quantisation and measured routes before testing.`);
 }
 
 async function startCalibration() {
@@ -11103,6 +11132,10 @@ $("openCalibrationAssistant").addEventListener("click", () => openCalibrationAss
 $("calibrationDetailToggle").addEventListener("click", () => {
   state.calibrationDetailsOpen = !state.calibrationDetailsOpen;
   renderCalibration();
+});
+$("calibrationEngineCards").addEventListener("click", event => {
+  const button = event.target.closest("[data-calibration-model]");
+  if (button && !button.disabled) void selectCalibrationAlternative(button.dataset.calibrationModel);
 });
 $("calibrationSuiteSelect").addEventListener("change", () => loadCalibrationPlan(true));
 $("calibrationCoolingSelect").addEventListener("change", () => loadCalibrationPlan(true));

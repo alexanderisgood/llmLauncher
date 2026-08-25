@@ -8345,6 +8345,99 @@ def benchmark_mode_summary(
     return f"AR only for this selected model artifact. {reason}"
 
 
+def benchmark_acceleration_reason(
+    model: dict[str, Any], backend: str, modes: list[Any] | tuple[Any, ...],
+) -> str:
+    """Return a compact, truthful reason when an engine can measure only AR."""
+    tested = {str(mode) for mode in modes}
+    if tested.intersection({"mtp", "dflash2"}):
+        return ""
+    capability = model.get("backends", {}).get(backend, {})
+    mtp_reason = str(capability.get("mtpReason") or "").strip().rstrip(".")
+    if backend == "lmstudio" and "sidecar" in mtp_reason.lower():
+        return "This model has no MTP sidecar"
+    if backend == "mtplx" and "mtp" in mtp_reason.lower():
+        return "This model has no verified MTPLX MTP weights"
+    if backend == "omlx":
+        return "This model has no verified oMLX accelerator"
+    return mtp_reason or "This model has no verified accelerator"
+
+
+def benchmark_engine_settings_label(backend: str, settings: Any) -> str:
+    """Describe the fixed engine-owned controls used beside each acceleration route."""
+    values = settings if isinstance(settings, dict) else {}
+    if backend == "omlx":
+        burst = str(values.get("burst") or "balanced")
+        parts = [f"{burst.replace('-', ' ').title()} burst"]
+        if values.get("anePrefill") == "tuned":
+            parts.append("measured ANE prefill")
+        return " · ".join(parts)
+    if backend == "lmstudio":
+        gpu = "Full GPU" if values.get("gpu", "max") == "max" else "CPU only"
+        lanes = max(1, safe_int(values.get("parallel"), 1, 1, 16))
+        return f"{gpu} · {lanes} request lane{'s' if lanes != 1 else ''}"
+    if backend == "mtplx":
+        profile = str(values.get("profile") or "sustained").replace("-", " ").title()
+        cooling = {
+            "default": "system cooling", "smart": "automatic cooling", "max": "maximum fans",
+        }.get(str(values.get("fan") or "smart"), "automatic cooling")
+        return f"{profile} profile · {cooling}"
+    return ""
+
+
+def model_acceleration_family(model: dict[str, Any]) -> str:
+    """Return a conservative name family used only to suggest explicit model alternatives."""
+    name = str(model.get("name") or "").strip().lower()
+    if not name:
+        return ""
+    family = re.split(r"-(?:mtplx|mlx)(?:-|$)", name, maxsplit=1)[0]
+    return re.sub(r"[^a-z0-9.]+", "-", family).strip("-")
+
+
+def accelerated_model_alternatives(
+    selected: dict[str, Any], backend: str, models: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Suggest installed accelerated siblings without ever substituting one silently."""
+    family = model_acceleration_family(selected)
+    if not family:
+        return []
+    selected_id = str(selected.get("id") or "")
+    architecture = str(selected.get("architecture") or "")
+    model_type = str(selected.get("modelType") or "")
+    candidates: list[dict[str, Any]] = []
+    for candidate in models:
+        capability = candidate.get("backends", {}).get(backend, {})
+        if (
+            str(candidate.get("id") or "") == selected_id
+            or candidate.get("ready") is not True
+            or capability.get("runnable") is not True
+            or model_acceleration_family(candidate) != family
+            or str(candidate.get("architecture") or "") != architecture
+            or str(candidate.get("modelType") or "") != model_type
+        ):
+            continue
+        modes = []
+        if capability.get("mtp") is True:
+            modes.append("MTP")
+        if backend == "omlx" and capability.get("dflash") is True:
+            modes.append("DFlash 2")
+        if not modes:
+            continue
+        candidates.append({
+            "id": str(candidate.get("id") or ""),
+            "name": str(candidate.get("name") or "Installed accelerated model"),
+            "quantization": str(candidate.get("quantization") or "Unknown"),
+            "sizeLabel": str(candidate.get("sizeLabel") or ""),
+            "modes": modes,
+            "differentArtifact": True,
+        })
+    candidates.sort(key=lambda item: (
+        0 if "optimized-speed" in item["name"].lower() else 1,
+        item["name"].lower(),
+    ))
+    return candidates[:2]
+
+
 def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> dict[str, Any]:
     """Choose an engine only when a complete, like-for-like local matrix proves it."""
     current = optimal_request(payload, models)
@@ -8490,6 +8583,12 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             "testedModes": copy.deepcopy(item["record"].get("comparedModes") or ["ar"]),
             "modeDetail": benchmark_mode_summary(
                 model, item["backend"], item["record"].get("comparedModes") or ["ar"],
+            ),
+            "accelerationReason": benchmark_acceleration_reason(
+                model, item["backend"], item["record"].get("comparedModes") or ["ar"],
+            ),
+            "settingsLabel": benchmark_engine_settings_label(
+                item["backend"], item["record"].get("engineSettings"),
             ),
             "score": round(float(item["score"]), 4),
             "metric": item["metric"], "display": item["display"],
@@ -11592,6 +11691,11 @@ def calibration_plan(
                 reason = str(error)
         if job is not None:
             jobs.append(job)
+        measured_modes = list(job.get("modes") or []) if job is not None else []
+        engine_settings = (
+            job.get("evidence", {}).get("engineSettings")
+            if job is not None else {}
+        )
         engines.append({
             "backend": backend,
             "label": BACKEND_LABELS[backend],
@@ -11610,11 +11714,24 @@ def calibration_plan(
             ),
             "modes": [
                 {"id": mode, "label": BenchmarkManager._mode_label(mode)}
-                for mode in (job.get("modes") if job else [])
+                for mode in measured_modes
             ],
             "modeDetail": (
-                benchmark_mode_summary(model, backend, job.get("modes") or ["ar"])
+                benchmark_mode_summary(model, backend, measured_modes or ["ar"])
                 if job is not None else ""
+            ),
+            "accelerationReason": (
+                benchmark_acceleration_reason(model, backend, measured_modes)
+                if job is not None else ""
+            ),
+            "settingsLabel": (
+                benchmark_engine_settings_label(backend, engine_settings)
+                if job is not None else ""
+            ),
+            "acceleratedAlternatives": (
+                accelerated_model_alternatives(model, backend, models)
+                if job is not None and not set(measured_modes).intersection({"mtp", "dflash2"})
+                else []
             ),
             "runtimeVersion": str(job.get("runtimeVersion") or "") if job else "",
         })
@@ -17068,6 +17185,17 @@ class BenchmarkManager:
                     str(record["backend"]),
                     record.get("comparedModes") or ["ar"],
                 ),
+                "accelerationReason": benchmark_acceleration_reason(
+                    next(
+                        item for item in models
+                        if item.get("id") == shootout["modelId"]
+                    ),
+                    str(record["backend"]),
+                    record.get("comparedModes") or ["ar"],
+                ),
+                "settingsLabel": benchmark_engine_settings_label(
+                    str(record["backend"]), record.get("engineSettings"),
+                ),
                 "score": round(float(measurement["score"]), 4) if measurement else None,
                 "metric": measurement["metric"] if measurement else None,
                 "display": measurement["display"] if measurement else "Not comparable",
@@ -17190,6 +17318,12 @@ class BenchmarkManager:
                 raise LaunchCancelled("Engine Shootout cancelled before its matrix was committed.")
             save_benchmark_records(records)
             result = self._build_shootout_result(shootout, records, models)
+            result["persistence"] = {
+                "saved": True,
+                "scope": "local",
+                "recordCount": len(records),
+                "savedAt": datetime.now(timezone.utc).isoformat(),
+            }
             with self.lock:
                 self.state["phase"] = "completed"
                 self.state["progress"] = 1.0

@@ -5470,6 +5470,8 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(status["phase"], "completed")
         self.assertTrue(status["result"]["matrixQualityPassed"])
         self.assertTrue(status["result"]["trustedWinner"])
+        self.assertTrue(status["result"]["persistence"]["saved"])
+        self.assertEqual(status["result"]["persistence"]["recordCount"], 3)
         self.assertEqual(status["result"]["recommendedBackend"], "mtplx")
         self.assertEqual(status["result"]["profiles"]["throughput"]["backend"], "mtplx")
         self.assertEqual(status["result"]["profiles"]["responsive"]["backend"], "mtplx")
@@ -5482,6 +5484,8 @@ class LauncherTests(unittest.TestCase):
         )
         self.assertEqual(lmstudio_result["testedModes"], ["ar"])
         self.assertIn("AR only", lmstudio_result["modeDetail"])
+        self.assertEqual(lmstudio_result["accelerationReason"], "This model has no MTP sidecar")
+        self.assertEqual(lmstudio_result["settingsLabel"], "Full GPU · 1 request lane")
         saved.assert_called_once()
         records = saved.call_args.args[0]
         self.assertEqual(len(records), 3)
@@ -6690,6 +6694,9 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(lmstudio["eligible"])
         self.assertIn("model-controlled reasoning", lmstudio["reason"])
         self.assertNotIn("no reasoning", lmstudio["reason"].lower())
+        self.assertEqual(lmstudio["settingsLabel"], "Full GPU · 1 request lane")
+        mtplx = next(item for item in plan["engines"] if item["backend"] == "mtplx")
+        self.assertEqual(mtplx["settingsLabel"], "Sustained profile · automatic cooling")
         self.assertEqual(
             [item["id"] for item in plan["suite"]["promptSchedule"]],
             ["cold", "warmPrefix", "toolIngest", "steadyTurn"],
@@ -6703,11 +6710,29 @@ class LauncherTests(unittest.TestCase):
             "mtp": False,
             "mtpReason": "No matching MTP weights have been verified by MTPLX.",
         })
-        ar_only_plan = launcher.calibration_plan(request, [ar_only_model])
+        accelerated_sibling = json.loads(json.dumps(model))
+        accelerated_sibling.update({
+            "id": "synthetic-qwen38-mtplx-speed",
+            "name": "Synthetic-Qwen3.8-27B-MTPLX-Optimized-Speed",
+            "quantization": "4-bit",
+            "sizeLabel": "19.0 GB",
+        })
+        ar_only_plan = launcher.calibration_plan(
+            request, [ar_only_model, accelerated_sibling],
+        )
         mtplx = next(item for item in ar_only_plan["engines"] if item["backend"] == "mtplx")
         self.assertEqual([item["id"] for item in mtplx["modes"]], ["ar"])
         self.assertIn("AR only for this selected model artifact", mtplx["modeDetail"])
         self.assertIn("matching MTP weights", mtplx["modeDetail"])
+        self.assertEqual(
+            mtplx["accelerationReason"],
+            "This model has no verified MTPLX MTP weights",
+        )
+        self.assertEqual(
+            mtplx["acceleratedAlternatives"][0]["id"],
+            accelerated_sibling["id"],
+        )
+        self.assertTrue(mtplx["acceleratedAlternatives"][0]["differentArtifact"])
 
         loud_request = json.loads(json.dumps(request))
         loud_request["calibrationCooling"] = "max"
@@ -8235,6 +8260,12 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("decodeTokensPerSecond", script)
         self.assertIn("promoteCompletedCalibrationResult", script)
         self.assertIn("function calibrationRoutePreview", script)
+        self.assertIn("function calibrationAlternativeMarkup", script)
+        self.assertIn("function selectCalibrationAlternative", script)
+        self.assertIn("data-calibration-model", script)
+        self.assertIn("Saved locally; no second test is needed.", script)
+        self.assertIn("calibration-engine-settings", styles)
+        self.assertIn("calibration-result-settings", styles)
         self.assertIn('Routes: ${routePreview}.', script)
         self.assertIn("Use saved result", script)
         self.assertIn("no verified accelerator in this artifact", script)

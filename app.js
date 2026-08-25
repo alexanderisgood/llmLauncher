@@ -7351,6 +7351,43 @@ function renderCalibrationEntry() {
     : "Review the exact engines, workload, reload count, and request count before anything runs.");
 }
 
+function completedCalibrationDecision(status = state.benchmarkStatus || {}) {
+  if (!calibrationOwnsBenchmark(status) || status.phase !== "completed") return null;
+  const result = status.result || {};
+  if (result.matrixWorkloadComparable === false) return null;
+  const decision = result.profiles?.[$("calibrationPreferenceSelect").value] || result.decision || {};
+  if (!["cross-engine-local-benchmark", "cross-engine-noise-floor"].includes(decision.evidenceTier)) return null;
+  return {result, decision};
+}
+
+function promoteCompletedCalibrationResult(status = state.benchmarkStatus || {}) {
+  const completed = completedCalibrationDecision(status);
+  if (!completed || !state.calibrationPlan) return false;
+  const {result, decision} = completed;
+  const backend = String(decision.backend || "");
+  const backendLabel = decision.label || backendName(backend);
+  state.calibrationPlan = {
+    ...state.calibrationPlan,
+    action:"apply-existing",
+    evidence:{
+      ...(state.calibrationPlan.evidence || {}),
+      trusted:Boolean(decision.trustedWinner),
+      decisionReady:true,
+      tier:decision.evidenceTier,
+      label:decision.trustedWinner
+        ? `${backendLabel} is fastest`
+        : `No clear winner — keep ${backendLabel}`,
+      backend,
+      backendLabel,
+      detail:decision.rationale?.[0] || decision.recommendation || result.recommendation || "The measured result is ready.",
+      exactOutputMatch:decision.exactOutputMatch === true || result.exactOutputMatch === true,
+      outputWarning:decision.outputWarning || result.outputWarning || "",
+      comparedEngines:decision.comparedEngines || result.engines || [],
+    },
+  };
+  return true;
+}
+
 function renderCalibrationPlan() {
   const plan = state.calibrationPlan;
   const active = calibrationBenchmarkActive();
@@ -7397,7 +7434,7 @@ function renderCalibrationPlan() {
   );
   $("calibrationEngineCards").innerHTML = (plan.engines || [])
     .filter(engine => uiEngineVisible(engine.backend || engine.id))
-    .map(engine => `<article class="calibration-engine ${engine.eligible ? "eligible" : "excluded"}"><header><strong>${esc(engine.label)}</strong><em>${engine.eligible ? "Comparable" : "Excluded"}</em></header><p>${esc(engine.reason)}</p><div class="calibration-engine-modes">${(engine.modes || []).map(mode => `<span>${esc(mode.label)}</span>`).join("") || ""}</div></article>`).join("");
+    .map(engine => `<article class="calibration-engine ${engine.eligible ? "eligible" : "excluded"}"><header><strong>${esc(engine.label)}</strong><em>${engine.eligible ? "Comparable" : "Excluded"}</em></header><p>${esc(engine.modeDetail || engine.reason)}</p><div class="calibration-engine-modes">${(engine.modes || []).map(mode => `<span>${esc(mode.label)}</span>`).join("") || ""}</div></article>`).join("");
   const evidence = plan.evidence || {};
   const evidenceReady = plan.action === "apply-existing";
   const completedResult = calibrationOwnsBenchmark()
@@ -7446,8 +7483,14 @@ function renderCalibrationPlan() {
   $("calibrationResults").innerHTML = measuredEngines.length ? `<strong>Measured engine results</strong><div>${measuredEngines.map((engine, index) => {
     const selected = measuredDecisionReady && engine.backend === (measuredDecision.backend || shownEvidence.backend);
     const mode = engine.mode === "dflash2" ? "DFlash 2" : engine.mode === "mtp" ? "MTP" : "AR";
+    const testedModes = Array.isArray(engine.testedModes) && engine.testedModes.length
+      ? engine.testedModes : [engine.mode || "ar"];
+    const testedLabel = testedModes.length > 1
+      ? `Tested ${testedModes.map(benchmarkWinnerLabel).join(" + ")}`
+      : "Tested AR only · no verified accelerator in this artifact";
+    const modeLabel = testedModes.length > 1 ? `Winner: ${mode}` : "AR only";
     const decodeTps = finiteMetric(engine.decodeTokensPerSecond);
-    return `<article class="${selected ? "selected" : ""}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(mode)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong>${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${selected ? "Best result" : `#${index + 1}`}</em></article>`;
+    return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${selected ? "Best result" : `#${index + 1}`}</em></article>`;
   }).join("")}</div>` : "";
   if (state.calibrationProfileContractId !== plan.contractId) {
     state.calibrationProfileContractId = plan.contractId;
@@ -7455,18 +7498,19 @@ function renderCalibrationPlan() {
   }
   const canMeasure = ["measure", "apply-existing"].includes(plan.action)
     && plan.ready && !resultPending && !calibrationOperationBlocked();
+  const canRefreshResult = resultPending && !calibrationOperationBlocked();
   $("calibrationConsent").disabled = true;
   $("calibrationConsent").checked = false;
   $("calibrationConsentPanel").classList.add("hidden");
   $("calibrationConsentCopy").textContent = plan.ready
     ? `${plan.eligibleEngineCount} engines · ${plan.modelReloadCount} isolated reloads · ${plan.measuredRequestCount} generated local requests · ${plan.calibrationCoolingLabel || "Automatic"} cooling · up to ${Math.round(plan.resourceCooldownMaxSecondsPerRoute)} seconds of cancellable settling before each route.`
     : blockers || "Resolve the engine blockers before measurement.";
-  $("calibrationStartButton").disabled = !canMeasure;
+  $("calibrationStartButton").disabled = !(canMeasure || canRefreshResult);
   $("calibrationStartButton").querySelector("strong").textContent = evidenceReady
-    ? "Retest engines" : resultPending ? "Saving result…" : "Test engines";
+    ? "Retest engines" : resultPending ? "Use saved result" : "Test engines";
   $("calibrationStartLabel").textContent = evidenceReady
     ? "Replace this saved measurement"
-    : resultPending ? "No second test needed"
+    : resultPending ? "The test is complete — this will not run it again"
     : plan.ready ? `${plan.eligibleEngineCount} engines · ${plan.routeCount} routes` : "Resolve the blockers above";
   const canApply = evidenceReady && !calibrationOperationBlocked();
   $("calibrationApplyButton").disabled = !canApply;
@@ -7520,11 +7564,9 @@ function renderCalibrationBenchmark(status = state.benchmarkStatus || {}) {
     $("calibrationStatus").textContent = decision.trustedWinner
       ? `${decision.label} won for ${enginePreferenceLabels[decision.preference] || "this goal"}. You can use the result without testing again.`
       : (decision.recommendation || "The engines finished in a practical tie, so the current engine is kept.");
+    if (promoteCompletedCalibrationResult(status)) renderCalibrationPlan();
     if (result.id && state.calibrationCompletionId !== result.id) {
       state.calibrationCompletionId = result.id;
-      loadModels(false).then(() => loadCalibrationPlan(false)).catch(error => {
-        $("calibrationStatus").textContent = error.message;
-      });
     }
     return;
   }
@@ -7615,6 +7657,11 @@ async function openCalibrationAssistant(options = {}) {
 
 async function startCalibration() {
   const plan = state.calibrationPlan;
+  if (completedCalibrationDecision() && plan?.action !== "apply-existing") {
+    promoteCompletedCalibrationResult();
+    renderCalibration();
+    return;
+  }
   if (!plan?.ready || !["measure", "apply-existing"].includes(plan.action) || calibrationOperationBlocked()) return;
   try {
     const request = calibrationPlanRequest();

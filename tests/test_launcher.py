@@ -5206,6 +5206,8 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(result["engineChanged"])
         self.assertEqual(result["engineEvidenceTier"], "cross-engine-local-benchmark")
         self.assertEqual([item["backend"] for item in result["comparedEngines"]], ["mtplx", "lmstudio", "omlx"])
+        self.assertEqual(result["comparedEngines"][0]["testedModes"], ["ar", "mtp"])
+        self.assertIn("Tests AR + MTP", result["comparedEngines"][0]["modeDetail"])
         self.assertEqual(result["options"]["kv"], "off")
         self.assertEqual(result["engineNextAction"]["id"], "apply")
         self.assertEqual(result["engineNextAction"]["backend"], "mtplx")
@@ -5456,6 +5458,12 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(status["result"]["profiles"]["memory"]["backend"], "lmstudio")
         self.assertTrue(status["result"]["profiles"]["memory"]["trustedWinner"])
         self.assertEqual(status["result"]["profiles"]["thermal"]["backend"], "mtplx")
+        lmstudio_result = next(
+            item for item in status["result"]["engines"]
+            if item["backend"] == "lmstudio"
+        )
+        self.assertEqual(lmstudio_result["testedModes"], ["ar"])
+        self.assertIn("AR only", lmstudio_result["modeDetail"])
         saved.assert_called_once()
         records = saved.call_args.args[0]
         self.assertEqual(len(records), 3)
@@ -6653,6 +6661,17 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(plan["privacy"]["usesProjectData"])
         self.assertFalse(plan["privacy"]["storesGeneratedText"])
         self.assertFalse(self.state.exists(), "planning calibration must not create launcher state")
+
+        ar_only_model = json.loads(json.dumps(model))
+        ar_only_model["backends"]["mtplx"].update({
+            "mtp": False,
+            "mtpReason": "No matching MTP weights have been verified by MTPLX.",
+        })
+        ar_only_plan = launcher.calibration_plan(request, [ar_only_model])
+        mtplx = next(item for item in ar_only_plan["engines"] if item["backend"] == "mtplx")
+        self.assertEqual([item["id"] for item in mtplx["modes"]], ["ar"])
+        self.assertIn("AR only for this selected model artifact", mtplx["modeDetail"])
+        self.assertIn("matching MTP weights", mtplx["modeDetail"])
 
         loud_request = json.loads(json.dumps(request))
         loud_request["calibrationCooling"] = "max"
@@ -8152,6 +8171,10 @@ class LauncherTests(unittest.TestCase):
             self.assertIn(f'id="{element_id}"', index)
         self.assertIn("Generation TPS: measuring…", script)
         self.assertIn("decodeTokensPerSecond", script)
+        self.assertIn("promoteCompletedCalibrationResult", script)
+        self.assertIn("Use saved result", script)
+        self.assertIn("no verified accelerator in this artifact", script)
+        self.assertNotIn("Saving result…", script)
         for element_id in (
             "openSessionDashboard", "sessionDialog", "sessionResourceFacts",
             "sessionActiveRoute", "sessionComponents", "sessionEstimateFacts",

@@ -5709,7 +5709,11 @@ def scan_models() -> list[dict[str, Any]]:
                     "runnable": ready and fmt == "mlx",
                     "reason": "MLX artifact; MTPLX validates again before loading" if ready and fmt == "mlx" else "MTPLX requires a complete compatible MLX artifact",
                     "mtp": mtplx_verified,
-                    "mtpReason": "Verified MTPLX runtime contract" if mtplx_verified else "AR only until MTPLX verifies matching MTP weights",
+                    "mtpReason": (
+                        "Verified MTPLX runtime contract"
+                        if mtplx_verified else
+                        "No matching MTP weights have been verified by MTPLX."
+                    ),
                     "dflash": False,
                     "dflashVersion": None,
                     "dflashReason": f"{mtplx_version} serves native MTP or AR; DFlash 2 is not a serving mode.",
@@ -8256,6 +8260,31 @@ def engine_selection_next_action(
     }
 
 
+def benchmark_mode_summary(
+    model: dict[str, Any], backend: str, modes: list[Any] | tuple[Any, ...],
+) -> str:
+    """Explain which verified routes an exact model artifact can actually compare."""
+    capability = model.get("backends", {}).get(backend, {})
+    tested = [str(mode) for mode in modes if str(mode) in {"ar", "mtp", "dflash2"}]
+    labels = [BenchmarkManager._mode_label(mode) for mode in tested]
+    accelerators = labels[1:] if tested[:1] == ["ar"] else [
+        label for mode, label in zip(tested, labels) if mode != "ar"
+    ]
+    if accelerators:
+        return (
+            f"Tests {' + '.join(labels)} for this selected model artifact; "
+            "the fastest correctness-verified route wins."
+        )
+    reason = str(capability.get("mtpReason") or "No verified matching acceleration weights were found.")
+    if backend == "omlx" and capability.get("dflash") is not True:
+        dflash_reason = str(capability.get("dflashReason") or "")
+        if dflash_reason and dflash_reason != reason:
+            reason = f"{reason} {dflash_reason}"
+    if reason and reason[-1] not in ".!?":
+        reason += "."
+    return f"AR only for this selected model artifact. {reason}"
+
+
 def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> dict[str, Any]:
     """Choose an engine only when a complete, like-for-like local matrix proves it."""
     current = optimal_request(payload, models)
@@ -8398,6 +8427,10 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         {
             "backend": item["backend"], "label": BACKEND_LABELS[item["backend"]],
             "mode": str(item["record"].get("winner") or "ar"),
+            "testedModes": copy.deepcopy(item["record"].get("comparedModes") or ["ar"]),
+            "modeDetail": benchmark_mode_summary(
+                model, item["backend"], item["record"].get("comparedModes") or ["ar"],
+            ),
             "score": round(float(item["score"]), 4),
             "metric": item["metric"], "display": item["display"],
             "firstTokenSeconds": item.get("firstTokenSeconds"),
@@ -11498,6 +11531,10 @@ def calibration_plan(
                 {"id": mode, "label": BenchmarkManager._mode_label(mode)}
                 for mode in (job.get("modes") if job else [])
             ],
+            "modeDetail": (
+                benchmark_mode_summary(model, backend, job.get("modes") or ["ar"])
+                if job is not None else ""
+            ),
             "runtimeVersion": str(job.get("runtimeVersion") or "") if job else "",
         })
 
@@ -16941,6 +16978,15 @@ class BenchmarkManager:
                 "label": BACKEND_LABELS[record["backend"]],
                 "mode": record["winner"],
                 "modeLabel": self._mode_label(str(record["winner"])),
+                "testedModes": copy.deepcopy(record.get("comparedModes") or ["ar"]),
+                "modeDetail": benchmark_mode_summary(
+                    next(
+                        item for item in models
+                        if item.get("id") == shootout["modelId"]
+                    ),
+                    str(record["backend"]),
+                    record.get("comparedModes") or ["ar"],
+                ),
                 "score": round(float(measurement["score"]), 4) if measurement else None,
                 "metric": measurement["metric"] if measurement else None,
                 "display": measurement["display"] if measurement else "Not comparable",

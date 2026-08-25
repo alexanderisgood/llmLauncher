@@ -2774,6 +2774,121 @@ class LauncherTests(unittest.TestCase):
         self.assertIsNone(manager.plan)
         self.assertEqual(manager.state["phase"], "idle")
 
+    def test_pi_hub_uses_rpc_for_stable_history_thinking_and_queue_input(self) -> None:
+        payload = self.payload("mtplx", "pi", self.models[0])
+        payload["agentHost"] = "console"
+        plan = launcher.normalized_request(payload, self.models)
+        self.assertIn(["--mode", "rpc"], [
+            plan.client_argv[index:index + 2]
+            for index in range(len(plan.client_argv) - 1)
+        ])
+
+        fake_rpc = """
+import json, sys
+prompt_count = 0
+for line in sys.stdin:
+    command = json.loads(line.rstrip("\\r\\n"))
+    kind = command.get("type")
+    if kind == "get_messages":
+        print(json.dumps({"type":"response","command":"get_messages","success":True,"data":{"messages":[{"role":"user","content":"Earlier question"},{"role":"assistant","content":[{"type":"thinking","thinking":"Earlier thought"},{"type":"text","text":"Earlier answer"}]}]}}), flush=True)
+    elif kind == "get_state":
+        print(json.dumps({"type":"response","command":"get_state","success":True,"data":{"isStreaming":False,"pendingMessageCount":0}}), flush=True)
+    elif kind == "prompt":
+        prompt_count += 1
+        print(json.dumps({"type":"response","command":"prompt","success":True,"id":command.get("id")}), flush=True)
+        print(json.dumps({"type":"agent_start"}), flush=True)
+        print(json.dumps({"type":"message_start","message":{"role":"user","content":command["message"]}}), flush=True)
+        print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0}}), flush=True)
+        print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"live thought"}}), flush=True)
+        print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":1}}), flush=True)
+        print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"live answer"}}), flush=True)
+        print(json.dumps({"type":"agent_end","messages":[],"willRetry":False}), flush=True)
+        print(json.dumps({"type":"agent_settled"}), flush=True)
+        if prompt_count == 2:
+            break
+"""
+        plan.client_argv = [
+            sys.executable, "-u", "-c", fake_rpc, "--mode", "rpc",
+        ]
+        manager = launcher.RunManager()
+        manager.plan = plan
+        manager.state = {
+            "phase": "running", "message": "Running", "run": plan.public(), "events": [],
+        }
+        manager.attachments[plan.run_id] = launcher.SurfaceAttachment(
+            owner_run_id=plan.run_id, plan=plan, primary=True,
+        )
+        with mock.patch.dict(launcher.BINARIES, {"pi": sys.executable}):
+            console = manager._launch_agent_console(plan, manager.cancel_event)
+            self.assertEqual(console.protocol, "pi-rpc")
+            manager.write_agent_console({
+                "ownerRunId": plan.run_id, "surfaceId": plan.run_id,
+                "command": "prompt", "message": "New question",
+            })
+            queued = manager.write_agent_console({
+                "ownerRunId": plan.run_id, "surfaceId": plan.run_id,
+                "command": "prompt", "message": "Queued question",
+            })
+            self.assertEqual(queued["pendingMessages"], 1)
+            deadline = time.monotonic() + 3
+            while console.process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            deadline = time.monotonic() + 1
+            while b"live answer" not in console.output and time.monotonic() < deadline:
+                time.sleep(0.01)
+        transcript = bytes(console.output).decode("utf-8", errors="replace")
+        self.assertIn("SESSION HISTORY", transcript)
+        self.assertIn("Earlier question", transcript)
+        self.assertIn("Earlier thought", transcript)
+        self.assertIn("Earlier answer", transcript)
+        self.assertIn("New question", transcript)
+        self.assertIn("Queued question", transcript)
+        self.assertIn("STARTING QUEUED MESSAGE", transcript)
+        self.assertIn("THINKING", transcript)
+        self.assertIn("live thought", transcript)
+        self.assertIn("RESPONSE", transcript)
+        self.assertIn("live answer", transcript)
+        self.assertNotIn('"streamingBehavior"', transcript, "RPC input echo must be disabled")
+        public = console.public()
+        self.assertEqual(public["protocol"], "pi-rpc")
+        self.assertTrue(public["supportsQueue"])
+        self.assertFalse(public["supportsDirectKeys"])
+
+        console.state = "running"
+        process = mock.Mock()
+        process.poll.return_value = None
+        console.process = process
+        console.rpc_streaming = True
+        manager._write_pi_rpc_console(console, {
+            "command": "prompt", "message": "Discard me",
+        })
+        self.assertEqual(console.rpc_pending_messages, 1)
+        cleared = manager._write_pi_rpc_console(console, {"command": "clear_queue"})
+        self.assertEqual(cleared["pendingMessages"], 0)
+        self.assertEqual(console.rpc_follow_up_queue, [])
+
+    def test_pi_rpc_transcript_never_executes_model_supplied_terminal_controls(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        rendered = launcher.pi_rpc_event_output(console, {
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "text_delta", "contentIndex": 0,
+                "delta": "keep this\x1b[2Jand this",
+            },
+        })
+        self.assertIn("keep this", rendered.decode("utf-8"))
+        self.assertIn("and this", rendered.decode("utf-8"))
+        self.assertNotIn(b"\x1b[2J", rendered)
+        self.assertIn("␛[2J", rendered.decode("utf-8"))
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Hub Console parser test")
     def test_hub_console_javascript_terminal_core(self) -> None:
         result = subprocess.run(

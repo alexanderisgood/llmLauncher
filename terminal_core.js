@@ -265,13 +265,14 @@
 
     _eraseDisplay(mode) {
       const screen = this.screen;
-      if (mode === 2 || mode === 3) {
+      if (mode === 3) {
+        this.scrollback = [];
+        this.scrollbackStyled = [];
+        return;
+      }
+      if (mode === 2) {
         screen.lines = Array.from({length:this.rows}, () => blankLine(this.cols));
         screen.styles = Array.from({length:this.rows}, () => blankStyleLine(this.cols));
-        if (mode === 3) {
-          this.scrollback = [];
-          this.scrollbackStyled = [];
-        }
         return;
       }
       if (mode === 1) {

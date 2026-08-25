@@ -6238,15 +6238,18 @@ function renderAgentConsole() {
     state.agentConsoleMeta = view.meta;
   }
   const meta = view?.meta || attachment;
+  const structuredPi = meta.protocol === "pi-rpc";
   const runtimeAdvisory = meta.runtimeAdvisory || state.runStatus?.run?.runtimeAdvisory || null;
   const surface = meta.surface || clientName(meta.client) || "Agent";
   const stateLabel = String(meta.state || meta.status || "starting");
   $("agentConsoleTitle").textContent = `${surface} · Hub Console`;
   $("agentConsoleInputLabel").textContent = `Message ${surface}`;
   $("agentConsoleInput").placeholder = `Ask ${surface}…`;
-  $("agentConsoleMeta").textContent = meta.project
-    ? `${meta.project} · agent-supplied terminal styling is preserved; output is bounded in memory and never saved by the launcher.`
-    : "Agent-supplied terminal styling is preserved; output stays in bounded session memory and never enters Chat history.";
+  $("agentConsoleMeta").textContent = structuredPi
+    ? `${meta.project || "Current project"} · stable Pi transcript with separate thinking, responses, tools, and follow-up queue; session output remains memory-only in the launcher.`
+    : meta.project
+      ? `${meta.project} · agent-supplied terminal styling is preserved; output is bounded in memory and never saved by the launcher.`
+      : "Agent-supplied terminal styling is preserved; output stays in bounded session memory and never enters Chat history.";
   $("agentConsoleRoute").textContent = meta.backend
     ? `${backendName(meta.backend)} → ${surface} · ${meta.model || "Local model"}`
     : "Waiting for the active model";
@@ -6258,6 +6261,8 @@ function renderAgentConsole() {
   ].join(" · ");
 
   const activity = agentConsoleRequestActivity();
+  const activelyResponding = Boolean(activity.current || meta.streaming);
+  const pendingMessages = Math.max(0, Number(meta.pendingMessages) || 0);
   const compactActivity = ChatStatusCore.activitySummary(activity.report, state.agentConsoleSurfaceId);
   const currentMeasured = requestTps(activity.current);
   const latestMeasured = requestTps(activity.latest);
@@ -6299,8 +6304,30 @@ function renderAgentConsole() {
   $("agentConsoleInterruptButton").disabled = !canInput || state.agentConsoleBusy;
   $("agentConsoleStopButton").disabled = state.agentConsoleBusy || !(meta.canStop ?? ["starting","running","stopping"].includes(stateLabel));
   $("agentConsoleRestartButton").disabled = state.agentConsoleBusy || !(meta.canRestart ?? ["exited","stopped","failed"].includes(stateLabel));
+  $("agentConsoleInputLabel").textContent = structuredPi && activelyResponding
+    ? "Queue a follow-up" : `Message ${surface}`;
+  $("agentConsoleEnterButton").querySelector("strong").textContent = structuredPi && activelyResponding
+    ? "Queue" : "Send";
+  $("agentConsoleEscapeButton").textContent = structuredPi ? "Clear queue" : "Esc";
+  $("agentConsoleEscapeButton").title = structuredPi
+    ? "Remove queued Pi follow-up messages" : "Send the Escape key";
+  $("agentConsoleEscapeButton").disabled = !canInput || state.agentConsoleBusy || (structuredPi && pendingMessages < 1);
+  $("agentConsoleInterruptButton").textContent = structuredPi ? "Stop response" : "Ctrl-C";
+  $("agentConsoleInterruptButton").title = structuredPi
+    ? "Abort Pi's current response" : "Interrupt the current agent action";
+  $("agentConsoleInterruptButton").disabled = !canInput || state.agentConsoleBusy || (structuredPi && !activelyResponding);
+  $("agentTerminalViewport").setAttribute("role", structuredPi ? "document" : "application");
+  $("agentTerminalViewport").setAttribute("aria-label", structuredPi
+    ? "Pi conversation transcript. Use the message field below to send or queue a prompt."
+    : "Interactive agent terminal. Type to send keys; use the text field below for accessible input.");
   const dropped = Number(meta.droppedBytes || 0);
-  $("agentConsoleStatus").textContent = `${view?.recovering ? "Restoring the latest console screen… " : ""}${meta.detail || `Hub Console is ${stateLabel}.`}${runtimeAdvisory?.detail ? ` ${runtimeAdvisory.detail}` : ""}${dropped ? ` Earlier output was discarded after the 2 MB memory cap (${formatBytes(dropped)} dropped).` : ""}`;
+  const interactionDetail = structuredPi
+    ? pendingMessages
+      ? `${pendingMessages} follow-up message${pendingMessages === 1 ? " is" : "s are"} queued.`
+      : activelyResponding ? "Pi is responding; Send adds a follow-up without interrupting it."
+        : "Pi is ready; session history and new output stay visible in this transcript."
+    : "";
+  $("agentConsoleStatus").textContent = `${view?.recovering ? "Restoring the latest console screen… " : ""}${interactionDetail || meta.detail || `Hub Console is ${stateLabel}.`}${runtimeAdvisory?.detail ? ` ${runtimeAdvisory.detail}` : ""}${dropped ? ` Earlier output was discarded after the 2 MB memory cap (${formatBytes(dropped)} dropped).` : ""}`;
   $("agentConsoleStatus").className = stateLabel === "failed" ? "error" : runtimeAdvisory ? "warning" : "";
   renderAgentConsoleTabs();
 }
@@ -6402,8 +6429,12 @@ async function readAgentConsole() {
 function queueAgentConsoleInput(value) {
   const view = currentAgentConsoleView();
   if (!value || !view || !state.agentConsoleOwnerRunId || !state.agentConsoleSurfaceId) return;
-  view.inputQueue.push(String(value));
+  view.inputQueue.push(typeof value === "object" ? {...value} : String(value));
   void flushAgentConsoleInput(view, state.agentConsoleOwnerRunId, state.agentConsoleSurfaceId);
+}
+
+function agentConsoleUsesStructuredPi(view = currentAgentConsoleView()) {
+  return view?.meta?.protocol === "pi-rpc";
 }
 
 function agentConsoleKeyData(event) {
@@ -6432,8 +6463,23 @@ async function flushAgentConsoleInput(view, ownerRunId, surfaceId) {
   view.inputSending = true;
   try {
     while (view.inputQueue.length) {
+      const first = view.inputQueue[0];
+      if (first && typeof first === "object") {
+        view.inputQueue.shift();
+        const data = await api("/api/agent-console/input", {
+          method:"POST", body:JSON.stringify({ownerRunId, surfaceId, ...first}),
+        });
+        if (state.agentConsoleViews[surfaceId] === view && ownerRunId === state.agentConsoleOwnerRunId) {
+          reconcileAgentConsoleViewMeta(view, data.console);
+        }
+        if (surfaceId === state.agentConsoleSurfaceId) {
+          state.agentConsoleMeta = view.meta;
+          renderAgentConsole();
+        }
+        continue;
+      }
       let value = "";
-      while (view.inputQueue.length && value.length < 60000) {
+      while (view.inputQueue.length && typeof view.inputQueue[0] !== "object" && value.length < 60000) {
         value += view.inputQueue.shift();
       }
       const data = await api("/api/agent-console/input", {
@@ -11107,14 +11153,25 @@ $("agentConsoleForm").addEventListener("submit", event => {
   event.preventDefault();
   const value = $("agentConsoleInput").value;
   if (!value || $("agentConsoleInput").disabled) return;
-  queueAgentConsoleInput(`${value}\r`);
+  queueAgentConsoleInput(agentConsoleUsesStructuredPi()
+    ? {command:"prompt", message:value} : `${value}\r`);
   $("agentConsoleInput").value = "";
   $("agentTerminalViewport").focus();
 });
-$("agentConsoleEscapeButton").addEventListener("click", () => queueAgentConsoleInput("\u001b"));
-$("agentConsoleInterruptButton").addEventListener("click", () => queueAgentConsoleInput("\u0003"));
+$("agentConsoleEscapeButton").addEventListener("click", () => queueAgentConsoleInput(
+  agentConsoleUsesStructuredPi() ? {command:"clear_queue"} : "\u001b",
+));
+$("agentConsoleInterruptButton").addEventListener("click", () => queueAgentConsoleInput(
+  agentConsoleUsesStructuredPi() ? {command:"abort"} : "\u0003",
+));
 $("agentTerminalViewport").addEventListener("keydown", event => {
   if (event.isComposing) return;
+  if (agentConsoleUsesStructuredPi()) {
+    if (event.key?.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      $("agentConsoleInput").focus();
+    }
+    return;
+  }
   const value = agentConsoleKeyData(event);
   if (value === null) return;
   event.preventDefault();
@@ -11123,6 +11180,12 @@ $("agentTerminalViewport").addEventListener("keydown", event => {
 $("agentTerminalViewport").addEventListener("paste", event => {
   const value = event.clipboardData?.getData("text");
   if (!value) return;
+  if (agentConsoleUsesStructuredPi()) {
+    event.preventDefault();
+    $("agentConsoleInput").value += value;
+    $("agentConsoleInput").focus();
+    return;
+  }
   event.preventDefault();
   queueAgentConsoleInput(value.replaceAll("\n", "\r"));
 });

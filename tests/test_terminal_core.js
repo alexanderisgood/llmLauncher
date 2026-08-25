@@ -57,6 +57,18 @@ assert.deepEqual(overwritten.toStyledRuns()[0].style.foreground, {mode:"indexed"
 overwritten.write("\x1b[1G\x1b[2Kplain");
 assert.equal(overwritten.toStyledRuns()[0].styleKey, "", "erasing a line must clear stale cell styling");
 
+const scrollbackOnlyErase = new TerminalBuffer(40, 12, 4);
+scrollbackOnlyErase.write(Array.from({length:14}, (_, index) => `history-${index}`).join("\r\n"));
+assert.ok(scrollbackOnlyErase.scrollback.length > 0);
+const visibleBeforeScrollbackErase = scrollbackOnlyErase.screen.lines.map(line => line.join(""));
+scrollbackOnlyErase.write("\x1b[3J");
+assert.equal(scrollbackOnlyErase.scrollback.length, 0, "CSI 3J clears scrollback");
+assert.deepEqual(
+  scrollbackOnlyErase.screen.lines.map(line => line.join("")),
+  visibleBeforeScrollbackErase,
+  "CSI 3J must preserve the visible screen",
+);
+
 const styledScrollback = new TerminalBuffer(40, 12, 4);
 styledScrollback.write("\x1b[35mviolet\x1b[0m\r\n" + Array.from({length:13}, (_, index) => `line-${index}`).join("\r\n"));
 assert.equal(styledScrollback.toStyledRuns().map(run => run.text).join(""), styledScrollback.toString());

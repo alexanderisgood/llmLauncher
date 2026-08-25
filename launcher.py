@@ -87,7 +87,7 @@ CHAT_CONTINUE_INSTRUCTION = (
 )
 DEFAULT_CONTEXT = 131_072
 DEFAULT_OUTPUT = 16_384
-VERSION = "1.66.0-alpha.3"
+VERSION = "1.66.0-alpha.4"
 ADAPTER_SCHEMA_VERSION = 1
 MODEL_LIBRARY_SCHEMA_VERSION = 1
 MODEL_ACQUISITION_SCHEMA_VERSION = 1
@@ -350,10 +350,12 @@ OMLX_ADMIN_SESSION_MAX = 4_096
 MTPLX_FLIGHT_TELEMETRY_VERSION = 1
 MTPLX_FLIGHT_MINIMUM_RUNTIME = "2.9.1"
 MTPLX_FLIGHT_MAX_RESPONSE = 256 * 1024
-AGENT_CONSOLE_VERSION = 2
+AGENT_CONSOLE_VERSION = 3
 AGENT_CONSOLE_MAX_BUFFER = 2 * 1024 * 1024
 AGENT_CONSOLE_MAX_READ = 128 * 1024
 AGENT_CONSOLE_MAX_INPUT = 64 * 1024
+PI_RPC_MAX_QUEUED_MESSAGES = 32
+PI_RPC_MAX_QUEUED_BYTES = 512 * 1024
 AGENT_CONSOLE_COLS = (40, 240)
 AGENT_CONSOLE_ROWS = (12, 100)
 SESSION_IDLE_TIMEOUT_CHOICES = {0, 5, 15, 30, 60, 120}
@@ -10350,6 +10352,16 @@ class AgentConsole:
     base_offset: int = 0
     last_output_at: str | None = None
     output: bytearray = field(default_factory=bytearray, repr=False)
+    protocol: str = "terminal"
+    rpc_line_buffer: bytearray = field(default_factory=bytearray, repr=False)
+    rpc_streaming: bool = False
+    rpc_prompt_inflight: bool = False
+    rpc_pending_messages: int = 0
+    rpc_external_pending_messages: int = 0
+    rpc_follow_up_queue: list[str] = field(default_factory=list, repr=False)
+    rpc_section: str = ""
+    rpc_history_loaded: bool = False
+    rpc_last_queue_count: int = -1
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def append(self, value: bytes) -> None:
@@ -10391,6 +10403,9 @@ class AgentConsole:
                 "exitCode": self.exit_code,
                 "lastOutputAt": self.last_output_at,
                 "detail": self.detail,
+                "protocol": self.protocol,
+                "streaming": self.rpc_streaming,
+                "pendingMessages": self.rpc_pending_messages,
             }
 
     def public(self) -> dict[str, Any]:
@@ -10421,11 +10436,237 @@ class AgentConsole:
                 "outputRevision": self.base_offset + len(self.output),
                 "lastOutputAt": self.last_output_at,
                 "hasOutput": bool(self.output),
+                "protocol": self.protocol,
+                "streaming": self.rpc_streaming,
+                "pendingMessages": self.rpc_pending_messages,
                 "persistent": False,
                 "canInput": self.state == "running" and self.process.poll() is None,
                 "canStop": self.state in {"starting", "running", "stopping"} and self.process.poll() is None,
                 "canRestart": self.state in {"exited", "stopped", "failed"} or self.process.poll() is not None,
+                "supportsQueue": self.protocol == "pi-rpc",
+                "supportsDirectKeys": self.protocol != "pi-rpc",
             }
+
+
+def safe_agent_transcript_text(value: Any, limit: int = 64 * 1024) -> str:
+    """Make model/tool text printable without allowing it to redraw the host UI."""
+    text = str(value or "")[:limit].replace("\r\n", "\n").replace("\r", "\n")
+    cleaned: list[str] = []
+    for character in text:
+        if character == "\n":
+            cleaned.append("\r\n")
+        elif character == "\t" or character >= " ":
+            cleaned.append(character)
+        elif character == "\x1b":
+            cleaned.append("␛")
+        else:
+            cleaned.append("�")
+    return "".join(cleaned)
+
+
+def pi_rpc_message_text(message: Any, *, include_thinking: bool = True) -> list[tuple[str, str]]:
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content")
+    if isinstance(content, str):
+        return [("text", safe_agent_transcript_text(content))]
+    blocks: list[tuple[str, str]] = []
+    if not isinstance(content, list):
+        return blocks
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get("type") or "")
+        if kind == "text":
+            blocks.append(("text", safe_agent_transcript_text(block.get("text"))))
+        elif kind == "thinking" and include_thinking:
+            blocks.append(("thinking", safe_agent_transcript_text(block.get("thinking"))))
+        elif kind == "toolCall":
+            name = safe_agent_transcript_text(block.get("name") or "tool", 160)
+            arguments = block.get("arguments")
+            try:
+                detail = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+            except (TypeError, ValueError):
+                detail = str(arguments or "")
+            blocks.append(("tool", f"{name} {safe_agent_transcript_text(detail, 8_192)}".rstrip()))
+    return blocks
+
+
+def pi_rpc_heading(label: str, colour: str) -> bytes:
+    return f"\r\n\x1b[1;{colour}m{label}\x1b[0m\r\n".encode("utf-8")
+
+
+def pi_rpc_render_history(messages: Any) -> bytes:
+    if not isinstance(messages, list) or not messages:
+        return b""
+    output = bytearray()
+    output.extend(pi_rpc_heading("SESSION HISTORY", "38;5;75"))
+    for message in messages[-200:]:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        if role == "user":
+            output.extend(pi_rpc_heading("YOU", "38;5;75"))
+        elif role == "assistant":
+            pass
+        elif role == "toolResult":
+            output.extend(pi_rpc_heading(
+                f"TOOL RESULT · {safe_agent_transcript_text(message.get('toolName') or 'tool', 160)}",
+                "38;5;214",
+            ))
+        else:
+            continue
+        for kind, text in pi_rpc_message_text(message):
+            if not text:
+                continue
+            if role == "assistant" and kind == "thinking":
+                output.extend(pi_rpc_heading("THINKING", "38;5;141"))
+                output.extend(f"\x1b[2;38;5;183m{text}\x1b[0m".encode("utf-8"))
+            elif role == "assistant" and kind == "text":
+                output.extend(pi_rpc_heading("RESPONSE", "38;5;84"))
+                output.extend(text.encode("utf-8"))
+            elif kind == "tool":
+                output.extend(pi_rpc_heading("TOOL", "38;5;214"))
+                output.extend(text.encode("utf-8"))
+            else:
+                output.extend(text.encode("utf-8"))
+    output.extend(pi_rpc_heading("LIVE", "38;5;75"))
+    return bytes(output)
+
+
+def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
+    """Translate Pi's structured RPC events into a stable append-only transcript."""
+    if not isinstance(event, dict):
+        return b""
+    event_type = str(event.get("type") or "")
+    output = bytearray()
+
+    def section(name: str, label: str, colour: str) -> None:
+        if console.rpc_section != name:
+            output.extend(pi_rpc_heading(label, colour))
+            console.rpc_section = name
+
+    if event_type == "response":
+        command = str(event.get("command") or "")
+        if event.get("success") is False:
+            section("error", "PI ERROR", "38;5;203")
+            output.extend(safe_agent_transcript_text(
+                event.get("error") or f"{command} failed",
+            ).encode("utf-8"))
+            if command == "prompt":
+                console.rpc_prompt_inflight = False
+                console.rpc_streaming = False
+        elif command == "get_messages" and not console.rpc_history_loaded:
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            output.extend(pi_rpc_render_history(data.get("messages")))
+            console.rpc_history_loaded = True
+            console.rpc_section = ""
+        elif command == "get_state":
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            try:
+                external_pending = max(0, min(1_000, int(data.get("pendingMessageCount") or 0)))
+            except (TypeError, ValueError):
+                external_pending = 0
+            console.rpc_external_pending_messages = external_pending
+            console.rpc_pending_messages = len(console.rpc_follow_up_queue) + external_pending
+            console.rpc_streaming = data.get("isStreaming") is True or console.rpc_prompt_inflight
+        return bytes(output)
+
+    if event_type == "agent_start":
+        console.rpc_prompt_inflight = True
+        console.rpc_streaming = True
+        return b""
+    if event_type == "agent_end":
+        console.rpc_section = ""
+        if event.get("willRetry") is True:
+            console.rpc_streaming = True
+            console.rpc_prompt_inflight = True
+        return b""
+    if event_type == "agent_settled":
+        console.rpc_streaming = False
+        console.rpc_prompt_inflight = False
+        return b""
+    if event_type == "queue_update":
+        steering = event.get("steering") if isinstance(event.get("steering"), list) else []
+        follow_up = event.get("followUp") if isinstance(event.get("followUp"), list) else []
+        count = len(steering) + len(follow_up)
+        console.rpc_external_pending_messages = count
+        console.rpc_pending_messages = len(console.rpc_follow_up_queue) + count
+        total_count = console.rpc_pending_messages
+        if total_count and total_count != console.rpc_last_queue_count:
+            section("queue", "QUEUED", "38;5;214")
+            output.extend(
+                f"{total_count} message{'s' if total_count != 1 else ''} waiting".encode("utf-8")
+            )
+        console.rpc_last_queue_count = total_count
+        return bytes(output)
+    if event_type == "message_start":
+        message = event.get("message")
+        if isinstance(message, dict) and message.get("role") == "user":
+            section("user", "YOU", "38;5;75")
+            for _kind, text in pi_rpc_message_text(message, include_thinking=False):
+                output.extend(text.encode("utf-8"))
+        return bytes(output)
+    if event_type == "message_update":
+        update = event.get("assistantMessageEvent")
+        if not isinstance(update, dict):
+            return b""
+        update_type = str(update.get("type") or "")
+        if update_type.startswith("thinking_"):
+            section("thinking", "THINKING", "38;5;141")
+            if update_type == "thinking_delta":
+                text = safe_agent_transcript_text(update.get("delta"))
+                output.extend(f"\x1b[2;38;5;183m{text}\x1b[0m".encode("utf-8"))
+        elif update_type.startswith("text_"):
+            section("response", "RESPONSE", "38;5;84")
+            if update_type == "text_delta":
+                output.extend(safe_agent_transcript_text(update.get("delta")).encode("utf-8"))
+        elif update_type == "toolcall_end":
+            tool = update.get("toolCall") if isinstance(update.get("toolCall"), dict) else {}
+            section(
+                "tool", f"TOOL · {safe_agent_transcript_text(tool.get('name') or 'tool', 160)}",
+                "38;5;214",
+            )
+            try:
+                arguments = json.dumps(tool.get("arguments"), ensure_ascii=False, indent=2)
+            except (TypeError, ValueError):
+                arguments = str(tool.get("arguments") or "")
+            output.extend(safe_agent_transcript_text(arguments, 16_384).encode("utf-8"))
+        return bytes(output)
+    if event_type == "tool_execution_start":
+        section(
+            "tool-running",
+            f"RUNNING · {safe_agent_transcript_text(event.get('toolName') or 'tool', 160)}",
+            "38;5;214",
+        )
+        return bytes(output)
+    if event_type == "tool_execution_end":
+        label = "TOOL FAILED" if event.get("isError") is True else "TOOL RESULT"
+        colour = "38;5;203" if event.get("isError") is True else "38;5;109"
+        section(
+            "tool-result",
+            f"{label} · {safe_agent_transcript_text(event.get('toolName') or 'tool', 160)}",
+            colour,
+        )
+        result = event.get("result")
+        if isinstance(result, dict):
+            for _kind, text in pi_rpc_message_text(
+                {"content": result.get("content")}, include_thinking=False,
+            ):
+                output.extend(text.encode("utf-8"))
+        return bytes(output)
+    if event_type == "compaction_start":
+        section("status", "COMPACTING CONTEXT", "38;5;75")
+        return bytes(output)
+    if event_type == "auto_retry_start":
+        section("status", "RETRYING", "38;5;214")
+        output.extend(safe_agent_transcript_text(event.get("errorMessage"), 2_000).encode("utf-8"))
+        return bytes(output)
+    if event_type == "extension_ui_request":
+        section("action", "PI NEEDS INPUT", "38;5;214")
+        title = event.get("title") or event.get("message") or event.get("method") or "Extension request"
+        output.extend(safe_agent_transcript_text(title, 2_000).encode("utf-8"))
+    return bytes(output)
 
 
 def shell_join_redacted(argv: list[str]) -> str:
@@ -11097,6 +11338,10 @@ def build_pi_client(plan: LaunchPlan, route: ClientRoute) -> None:
     }
     plan.client_env["LLM_LAUNCHER_PI_PROVIDER"] = json.dumps(provider_data, separators=(",", ":"))
     plan.client_argv = [BINARIES["pi"], "--extension", str(APP_DIR / "pi-provider.js"), "--provider", route.provider, "--model", route.served]
+    if plan.agent_host == "console":
+        # Hub Console owns the UI, so consume Pi's supported append-only JSONL
+        # protocol instead of attempting to reconstruct its redraw-based TUI.
+        plan.client_argv.extend(["--mode", "rpc"])
     if plan.reasoning != "auto":
         plan.client_argv.extend(["--thinking", plan.reasoning])
 
@@ -15250,11 +15495,22 @@ class RunManager:
         if not Path(plan.project).is_dir():
             raise ValueError("The project folder disappeared before Hub Console opened.")
 
+        protocol = (
+            "pi-rpc"
+            if plan.client == "pi" and any(
+                plan.client_argv[index:index + 2] == ["--mode", "rpc"]
+                for index in range(len(plan.client_argv) - 1)
+            ) else "terminal"
+        )
         cols, rows = 100, 30
         master_fd, slave_fd = pty.openpty()
         process: subprocess.Popen[Any] | None = None
         try:
             self._set_agent_console_size(slave_fd, cols, rows)
+            if protocol == "pi-rpc":
+                attributes = termios.tcgetattr(slave_fd)
+                attributes[3] &= ~(termios.ECHO | termios.ECHONL)
+                termios.tcsetattr(slave_fd, termios.TCSANOW, attributes)
             env = os.environ.copy()
             env.update(plan.client_env)
             env.update({
@@ -15291,6 +15547,7 @@ class RunManager:
             master_fd=master_fd,
             cols=cols,
             rows=rows,
+            protocol=protocol,
         )
         accepted = False
         with self.lifecycle_lock:
@@ -15322,6 +15579,17 @@ class RunManager:
             name=f"agent-console-{plan.run_id[:8]}",
         )
         reader.start()
+        if protocol == "pi-rpc":
+            console.append(
+                pi_rpc_heading("PI HUB", "38;5;75")
+                + b"Stable transcript ready. Thinking, responses, tools, and queued messages stay visible.\r\n"
+            )
+            self._write_pi_rpc_command(console, {
+                "id": "launcher-history", "type": "get_messages",
+            })
+            self._write_pi_rpc_command(console, {
+                "id": "launcher-state", "type": "get_state",
+            })
         return console
 
     def _read_agent_console(self, console: AgentConsole) -> None:
@@ -15337,7 +15605,60 @@ class RunManager:
                     break
                 if not value:
                     break
-                console.append(value)
+                if console.protocol != "pi-rpc":
+                    console.append(value)
+                    continue
+                with console.lock:
+                    console.rpc_line_buffer.extend(value)
+                    lines: list[bytes] = []
+                    while b"\n" in console.rpc_line_buffer:
+                        line, _, remainder = console.rpc_line_buffer.partition(b"\n")
+                        console.rpc_line_buffer = bytearray(remainder)
+                        lines.append(line.rstrip(b"\r"))
+                for line in lines:
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        console.append(
+                            pi_rpc_heading("PI NOTICE", "38;5;214")
+                            + safe_agent_transcript_text(
+                                line.decode("utf-8", errors="replace"), 4_000,
+                            ).encode("utf-8")
+                        )
+                        continue
+                    with console.lock:
+                        rendered = pi_rpc_event_output(console, event)
+                    console.append(rendered)
+                    if event.get("type") == "agent_settled":
+                        with console.lock:
+                            next_message = (
+                                console.rpc_follow_up_queue.pop(0)
+                                if console.rpc_follow_up_queue else None
+                            )
+                            console.rpc_pending_messages = (
+                                len(console.rpc_follow_up_queue)
+                                + console.rpc_external_pending_messages
+                            )
+                            if next_message is not None:
+                                console.rpc_prompt_inflight = True
+                                console.rpc_streaming = True
+                        if next_message is not None:
+                            console.append(pi_rpc_heading("STARTING QUEUED MESSAGE", "38;5;214"))
+                            try:
+                                self._write_pi_rpc_command(console, {
+                                    "id": f"launcher-prompt-{secrets.token_hex(8)}",
+                                    "type": "prompt", "message": next_message,
+                                })
+                            except ValueError as error:
+                                with console.lock:
+                                    console.rpc_prompt_inflight = False
+                                    console.rpc_streaming = False
+                                console.append(
+                                    pi_rpc_heading("PI ERROR", "38;5;203")
+                                    + safe_agent_transcript_text(error, 2_000).encode("utf-8")
+                                )
         finally:
             try:
                 exit_code = console.process.wait(timeout=1)
@@ -15384,6 +15705,8 @@ class RunManager:
 
     def write_agent_console(self, payload: dict[str, Any]) -> dict[str, Any]:
         console = self._agent_console_for_payload(payload)
+        if console.protocol == "pi-rpc":
+            return self._write_pi_rpc_console(console, payload)
         value = payload.get("data")
         if not isinstance(value, str):
             raise ValueError("Hub Console input must be text or terminal control keys.")
@@ -15400,6 +15723,105 @@ class RunManager:
                 written += os.write(fd, encoded[written:])
         except OSError as error:
             raise ValueError(f"Could not send input to the agent: {error}") from error
+        return console.public()
+
+    @staticmethod
+    def _write_pi_rpc_command(console: AgentConsole, command: dict[str, Any]) -> None:
+        encoded = (
+            json.dumps(command, ensure_ascii=False, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        if len(encoded) > AGENT_CONSOLE_MAX_INPUT:
+            raise ValueError("Pi Hub input must be at most 64 KB.")
+        with console.lock:
+            if (
+                console.state != "running" or console.process.poll() is not None
+                or console.master_fd < 0
+            ):
+                raise ValueError("That agent is no longer accepting input.")
+            fd = console.master_fd
+        written = 0
+        try:
+            while written < len(encoded):
+                written += os.write(fd, encoded[written:])
+        except OSError as error:
+            raise ValueError(f"Could not send input to Pi: {error}") from error
+
+    def _write_pi_rpc_console(
+        self, console: AgentConsole, payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        command = str(payload.get("command") or "")
+        if not command:
+            legacy = payload.get("data")
+            if not isinstance(legacy, str):
+                raise ValueError("Pi Hub input must be a message or control action.")
+            if legacy == "\x03":
+                command = "abort"
+            elif legacy == "\x1b":
+                command = "clear_queue"
+            else:
+                command = "prompt"
+                payload = {**payload, "message": legacy.rstrip("\r\n")}
+        if command == "prompt":
+            message = payload.get("message")
+            if not isinstance(message, str) or not message.strip():
+                raise ValueError("Enter a message for Pi.")
+            if len(message.encode("utf-8")) > AGENT_CONSOLE_MAX_INPUT - 256:
+                raise ValueError("Pi Hub messages must be smaller than 64 KB.")
+            with console.lock:
+                is_busy = console.rpc_streaming or console.rpc_prompt_inflight
+                if is_busy:
+                    queued_bytes = sum(
+                        len(item.encode("utf-8")) for item in console.rpc_follow_up_queue
+                    )
+                    if len(console.rpc_follow_up_queue) >= PI_RPC_MAX_QUEUED_MESSAGES:
+                        raise ValueError("Pi Hub can queue at most 32 follow-up messages.")
+                    if queued_bytes + len(message.encode("utf-8")) > PI_RPC_MAX_QUEUED_BYTES:
+                        raise ValueError("Pi Hub's follow-up queue has reached its 512 KB memory limit.")
+                    console.rpc_follow_up_queue.append(message)
+                    console.rpc_pending_messages = (
+                        len(console.rpc_follow_up_queue)
+                        + console.rpc_external_pending_messages
+                    )
+                    pending = console.rpc_pending_messages
+                else:
+                    console.rpc_prompt_inflight = True
+                    console.rpc_streaming = True
+                    pending = 0
+            if is_busy:
+                console.append(
+                    pi_rpc_heading("QUEUED", "38;5;214")
+                    + f"{pending} follow-up message{'s' if pending != 1 else ''} waiting".encode("utf-8")
+                )
+                return console.public()
+            rpc_command = {
+                "id": f"launcher-prompt-{secrets.token_hex(8)}",
+                "type": "prompt",
+                "message": message,
+            }
+        elif command == "abort":
+            rpc_command = {
+                "id": f"launcher-abort-{secrets.token_hex(6)}", "type": "abort",
+            }
+        elif command == "clear_queue":
+            with console.lock:
+                cleared = len(console.rpc_follow_up_queue)
+                console.rpc_follow_up_queue.clear()
+                console.rpc_pending_messages = console.rpc_external_pending_messages
+            console.append(
+                pi_rpc_heading("QUEUE CLEARED", "38;5;109")
+                + f"Removed {cleared} launcher-queued follow-up message{'s' if cleared != 1 else ''}.".encode("utf-8")
+            )
+            return console.public()
+        else:
+            raise ValueError("Unknown Pi Hub action.")
+        try:
+            self._write_pi_rpc_command(console, rpc_command)
+        except ValueError:
+            if command == "prompt":
+                with console.lock:
+                    console.rpc_prompt_inflight = False
+                    console.rpc_streaming = False
+            raise
         return console.public()
 
     def resize_agent_console(self, payload: dict[str, Any]) -> dict[str, Any]:

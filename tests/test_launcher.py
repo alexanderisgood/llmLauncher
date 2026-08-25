@@ -921,12 +921,12 @@ class LauncherTests(unittest.TestCase):
         capability = model["backends"]["omlx"]
         capability.update({
             "benchmarkModelFingerprint": "dflash-tuner-model",
-            "runtimeVersion": "omlx 0.6.3rc2",
+            "runtimeVersion": "omlx 0.6.3rc3",
             "dflash": True, "dflashVersion": "2",
             "dflashReason": "Verified DFlash pair",
             "dflashDraftPath": "/test/Qwen3.8-27B-DFlash2",
             "dflashPairFingerprint": "dflash-pair",
-            "dflashRuntimeVersion": "omlx 0.6.3rc2",
+            "dflashRuntimeVersion": "omlx 0.6.3rc3",
             "dflashBlockSize": 8, "dflashMaxBlockSize": 8,
             "dflashReadiness": {"runtimeRecommended": True},
             "depth": 3, "depthMax": 3,
@@ -939,7 +939,7 @@ class LauncherTests(unittest.TestCase):
         })
         before = copy.deepcopy(payload)
         with mock.patch.object(
-            launcher, "command_version", return_value="omlx 0.6.3rc2",
+            launcher, "command_version", return_value="omlx 0.6.3rc3",
         ), mock.patch.object(
             launcher, "dflash2_capability_valid", return_value=True,
         ) as pairing_check:
@@ -977,12 +977,12 @@ class LauncherTests(unittest.TestCase):
         capability = model["backends"]["omlx"]
         capability.update({
             "benchmarkModelFingerprint": "dflash-tuner-worker-model",
-            "runtimeVersion": "omlx 0.6.3rc2",
+            "runtimeVersion": "omlx 0.6.3rc3",
             "dflash": True, "dflashVersion": "2",
             "dflashReason": "Verified DFlash pair",
             "dflashDraftPath": "/test/Qwen3.8-27B-DFlash2",
             "dflashPairFingerprint": "dflash-worker-pair",
-            "dflashRuntimeVersion": "omlx 0.6.3rc2",
+            "dflashRuntimeVersion": "omlx 0.6.3rc3",
             "dflashBlockSize": 8, "dflashMaxBlockSize": 8,
             "dflashReadiness": {"runtimeRecommended": True},
             "depth": 3, "depthMax": 3,
@@ -994,7 +994,7 @@ class LauncherTests(unittest.TestCase):
             "dflashVerify": "adaptive", "dflashDraftQuant": "native",
         })
         with mock.patch.object(
-            launcher, "command_version", return_value="omlx 0.6.3rc2",
+            launcher, "command_version", return_value="omlx 0.6.3rc3",
         ), mock.patch.object(
             launcher, "dflash2_capability_valid", return_value=True,
         ):
@@ -3736,7 +3736,8 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(launcher.omlx_supports_dflash2("omlx 0.6.2"))
         self.assertTrue(launcher.omlx_supports_dflash2("omlx 0.6.3rc1"))
         self.assertFalse(launcher.omlx_has_recommended_dflash2_runtime("omlx 0.6.3rc1"))
-        self.assertTrue(launcher.omlx_has_recommended_dflash2_runtime("omlx 0.6.3rc2"))
+        self.assertFalse(launcher.omlx_has_recommended_dflash2_runtime("omlx 0.6.3rc2"))
+        self.assertTrue(launcher.omlx_has_recommended_dflash2_runtime("omlx 0.6.3rc3"))
         self.assertTrue(launcher.omlx_has_recommended_dflash2_runtime("omlx 0.6.3"))
         root = Path(self.temp.name) / "dflash-models"
         target = root / "owner" / "Qwen3.8-27B-target"
@@ -3852,7 +3853,7 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn(draft.name, {item["name"] for item in stable_scan})
 
         with mock.patch.object(launcher, "model_roots", return_value=[("Test", root)]), mock.patch.object(
-            launcher, "command_version", return_value="omlx 0.6.3rc2",
+            launcher, "command_version", return_value="omlx 0.6.3rc3",
         ):
             preview_scan = launcher.scan_models()
             preview_target = next(item for item in preview_scan if item["name"] == target.name)
@@ -3911,7 +3912,7 @@ class LauncherTests(unittest.TestCase):
         )["options"]
         custom_payload = self.payload("omlx", "pi", preview_target)
         custom_payload["options"] = visible
-        with mock.patch.object(launcher, "command_version", return_value="omlx 0.6.3rc2"):
+        with mock.patch.object(launcher, "command_version", return_value="omlx 0.6.3rc3"):
             fastest_plan = launcher.normalized_request(fastest_payload, preview_scan)
             custom_plan = launcher.normalized_request(custom_payload, preview_scan)
         fastest_settings = json.loads((fastest_plan.run_dir / "omlx" / "model_settings.json").read_text())
@@ -5631,7 +5632,8 @@ class LauncherTests(unittest.TestCase):
         with mock.patch.object(
             urllib.request, "urlopen", side_effect=AssertionError("release comparison used the network"),
         ):
-            current = launcher.audited_runtime_release("omlx", "omlx 0.6.3rc2")
+            previous = launcher.audited_runtime_release("omlx", "omlx 0.6.3rc2")
+            current = launcher.audited_runtime_release("omlx", "omlx 0.6.3rc3")
             update = launcher.audited_runtime_release("mtplx", "mtplx 2.8.3 (2.8.3)")
             affected = launcher.audited_runtime_release("mtplx", "mtplx 2.9.0")
             newer = launcher.audited_runtime_release("mtplx", "mtplx 2.10.0")
@@ -5639,6 +5641,7 @@ class LauncherTests(unittest.TestCase):
             missing = launcher.audited_runtime_release("lms", None)
         self.assertEqual(current["state"], "current")
         self.assertTrue(current["catalogCurrent"])
+        self.assertEqual(previous["state"], "update-available")
         self.assertEqual(update["state"], "update-available")
         self.assertTrue(update["updateAvailable"])
         self.assertEqual(affected["activeAdvisory"]["affectedVersion"], "2.9.0")
@@ -5647,7 +5650,17 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(unknown["state"], "unknown-local-version")
         self.assertEqual(missing["state"], "not-installed")
         self.assertEqual(update["auditedAt"], launcher.RUNTIME_RELEASE_CATALOG_AUDITED_AT)
-        self.assertEqual(update["releaseUrl"], "https://github.com/youssofal/MTPLX/releases/tag/v2.9.1")
+        self.assertEqual(update["releaseUrl"], "https://github.com/youssofal/MTPLX/releases/tag/v2.9.2")
+        self.assertEqual(launcher.RUNTIME_RELEASE_CATALOG_AUDITED_AT, "2026-08-25")
+        self.assertEqual(launcher.RUNTIME_UPDATE_CATALOG["preview"]["version"], "0.6.3rc3")
+        self.assertEqual(
+            launcher.RUNTIME_UPDATE_CATALOG["preview"]["sha256"],
+            "53578cc8e8a1bba3600363bc3273ace3f36c56f3b6516a7862665c66b301175f",
+        )
+        self.assertEqual(
+            launcher.RUNTIME_UPDATE_CATALOG["preview"]["directSources"][-1]["commit"],
+            "c55324c86540c369f6818a0f47eae544d405475b",
+        )
 
         old_model = json.loads(json.dumps(self.models[0]))
         old_model["backends"]["mtplx"]["runtimeVersion"] = "mtplx 2.8.3 (2.8.3)"
@@ -5884,9 +5897,9 @@ class LauncherTests(unittest.TestCase):
 
     def test_runtime_update_adopts_only_matching_official_wheel_provenance(self) -> None:
         managed_root = Path(self.temp.name) / "runtimes"
-        target = managed_root / "omlx-0.6.3rc2"
+        target = managed_root / "omlx-0.6.3rc3"
         binary = target / "bin" / "omlx"
-        direct = target / "lib" / "python3.11" / "site-packages" / "omlx-0.6.3rc2.dist-info" / "direct_url.json"
+        direct = target / "lib" / "python3.11" / "site-packages" / "omlx-0.6.3rc3.dist-info" / "direct_url.json"
         binary.parent.mkdir(parents=True)
         direct.parent.mkdir(parents=True)
         binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -5898,7 +5911,7 @@ class LauncherTests(unittest.TestCase):
         }), encoding="utf-8")
         python = {"ready": True, "path": "/python3.11", "version": "3.11.15"}
         with mock.patch.object(launcher, "MANAGED_RUNTIMES_DIR", managed_root), mock.patch.object(
-            launcher, "command_version", return_value="oMLX 0.6.3rc2",
+            launcher, "command_version", return_value="oMLX 0.6.3rc3",
         ), mock.patch.object(
             launcher, "runtime_update_python", return_value=python,
         ), mock.patch.object(
@@ -5922,7 +5935,7 @@ class LauncherTests(unittest.TestCase):
     def test_runtime_verification_writes_manifest_without_switching_selection(self) -> None:
         managed_root = Path(self.temp.name) / "runtimes"
         update_root = Path(self.temp.name) / "runtime-updates"
-        target = managed_root / "omlx-0.6.3rc2"
+        target = managed_root / "omlx-0.6.3rc3"
         target.mkdir(parents=True)
         selected = "/rollback/omlx"
         release = copy.deepcopy(launcher.RUNTIME_UPDATE_CATALOG["preview"])
@@ -5935,7 +5948,7 @@ class LauncherTests(unittest.TestCase):
             },
         }
         smoke = {
-            "version": "oMLX 0.6.3rc2", "packageVersion": "0.6.3rc2",
+            "version": "oMLX 0.6.3rc3", "packageVersion": "0.6.3rc3",
             "nativeKernel": {"ready": True}, "serverStarted": False, "modelLoaded": False,
         }
         manager = launcher.RuntimeUpdateManager(launcher.RunManager(), launcher.BenchmarkManager(launcher.RunManager()))
@@ -5948,7 +5961,7 @@ class LauncherTests(unittest.TestCase):
         ), mock.patch.object(
             manager, "_smoke_runtime", return_value=smoke,
         ), mock.patch.object(
-            manager, "_dependency_inventory", return_value=[{"name": "omlx", "version": "0.6.3rc2"}],
+            manager, "_dependency_inventory", return_value=[{"name": "omlx", "version": "0.6.3rc3"}],
         ), mock.patch.object(
             launcher, "runtime_candidates", return_value=[candidate],
         ), mock.patch.dict(launcher.BINARIES, {"omlx": selected}, clear=False):
@@ -8312,8 +8325,8 @@ class LauncherTests(unittest.TestCase):
         ):
             self.assertIn(f'id="{element_id}"', index)
         self.assertIn("developers.openai.com/codex/config-reference", manual)
-        self.assertIn("github.com/jundot/omlx/releases/tag/v0.6.3rc2", manual)
-        self.assertIn("github.com/youssofal/MTPLX/releases/tag/v2.9.1", manual)
+        self.assertIn("github.com/jundot/omlx/releases/tag/v0.6.3rc3", manual)
+        self.assertIn("github.com/youssofal/MTPLX/releases/tag/v2.9.2", manual)
         self.assertIn("lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.21", manual)
         self.assertIn("huggingface.co/z-lab/Qwen3.8-27B-DFlash2", manual)
         self.assertIn("github.com/FlashML-org/FreeToken/blob/main/docs/quickstart.md", index)

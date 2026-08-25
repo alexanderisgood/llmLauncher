@@ -1,6 +1,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const themes = require("../theme.js");
 
 assert.equal(themes.DEFAULT_THEME, "graphite");
@@ -55,4 +57,11 @@ assert.deepEqual(themes.writeTheme(blockedStorage, "midnight"), {theme:"midnight
 assert.equal(themes.readDetail(blockedStorage), "focused");
 assert.deepEqual(themes.writeDetail(blockedStorage, "detailed"), {detail:"detailed", stored:false});
 
-console.log("Theme validation, persistence, and blocked-storage fallback passed; interface detail passed.");
+const styles = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
+assert.match(styles, /--mac-control-height:34px/);
+assert.match(styles, /--mac-action-height:42px/);
+assert.match(styles, /\.focused-run-status,\s*\n:root\[data-theme="frost"\] \.interface-detail-button,\s*\n:root\[data-theme="frost"\] \.local-chip\{height:var\(--mac-control-height\)/);
+assert.match(styles, /\.optimize-button,\s*\n:root\[data-theme="frost"\] \.optimizer-menu-button,\s*\n:root\[data-theme="frost"\] \.performance-receipt/);
+assert.match(styles, /\.calibration-actions,\.route-check-actions,\.benchmark-actions/);
+
+console.log("Theme validation, persistence, and blocked-storage fallback passed; Frost control alignment passed.");

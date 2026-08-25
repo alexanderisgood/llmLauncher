@@ -87,7 +87,7 @@ CHAT_CONTINUE_INSTRUCTION = (
 )
 DEFAULT_CONTEXT = 131_072
 DEFAULT_OUTPUT = 16_384
-VERSION = "1.66.0-alpha.2"
+VERSION = "1.66.0-alpha.3"
 ADAPTER_SCHEMA_VERSION = 1
 MODEL_LIBRARY_SCHEMA_VERSION = 1
 MODEL_ACQUISITION_SCHEMA_VERSION = 1
@@ -186,39 +186,39 @@ RUNTIME_UPDATE_CATALOG: dict[str, dict[str, Any]] = {
     },
     "preview": {
         "runtime": "omlx", "channel": "preview", "label": "Preview",
-        "version": "0.6.3rc2", "tag": "v0.6.3rc2",
-        "commit": "4cb5516d3de3184209cdfaa53369c8c33b6a91ba",
-        "releasedAt": "2026-08-20T15:52:00Z", "preview": True,
-        "fileName": "omlx-0.6.3rc2-cp311-cp311-macosx_15_0_universal2.whl",
-        "url": "https://github.com/jundot/omlx/releases/download/v0.6.3rc2/omlx-0.6.3rc2-cp311-cp311-macosx_15_0_universal2.whl",
-        "sha256": "9b89285d4b5322bc2f0430d4307c15b38d515e85e84904a83500e60cdeca52b8",
-        "sizeLabel": "35.9 MB",
-        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.3rc2",
-        "summary": "Release candidate with DFlash 2 fixes and experimental Qwen ANE prefill improvements.",
+        "version": "0.6.3rc3", "tag": "v0.6.3rc3",
+        "commit": "8662ad0998985a73dc04f2542cf8afb22600fa4f",
+        "releasedAt": "2026-08-24T18:27:30Z", "preview": True,
+        "fileName": "omlx-0.6.3rc3-cp311-cp311-macosx_15_0_universal2.whl",
+        "url": "https://github.com/jundot/omlx/releases/download/v0.6.3rc3/omlx-0.6.3rc3-cp311-cp311-macosx_15_0_universal2.whl",
+        "sha256": "53578cc8e8a1bba3600363bc3273ace3f36c56f3b6516a7862665c66b301175f",
+        "sizeLabel": "37.7 MB",
+        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3",
+        "summary": "Release candidate with restored Lightning MTP, fused Qwen ANE prefill, and cache/reliability fixes.",
         "directSources": [
             {"name": "mlx-lm", "repository": "ml-explore/mlx-lm", "commit": "ab1806e8f5d6aa035973af194a1b9198ab4754dc"},
             {"name": "mlx-embeddings", "repository": "Blaizzy/mlx-embeddings", "commit": "32981fa4e8064ed664b52071789dd18271fe4206"},
             {"name": "mlx-vlm", "repository": "Blaizzy/mlx-vlm", "commit": "78b96eb5462141447b9a6b4943ef553891da56dd"},
-            {"name": "dflash-mlx", "repository": "jundot/dflash-mlx", "commit": "b7f625504a733216d9e06caa3f7847a048241d94"},
+            {"name": "dflash-mlx", "repository": "jundot/dflash-mlx", "commit": "c55324c86540c369f6818a0f47eae544d405475b"},
         ],
     },
 }
 RUNTIME_RELEASE_CATALOG_VERSION = 1
-RUNTIME_RELEASE_CATALOG_AUDITED_AT = "2026-08-23"
+RUNTIME_RELEASE_CATALOG_AUDITED_AT = "2026-08-25"
 RUNTIME_RELEASE_CATALOG: dict[str, dict[str, Any]] = {
     "omlx": {
-        "version": "0.6.3rc2", "displayVersion": "0.6.3rc2",
-        "channel": "preview", "releasedAt": "2026-08-20T15:52:00Z",
-        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.3rc2",
-        "summary": "Current release candidate with DFlash 2 fixes and the guarded Qwen ANE prefill path.",
+        "version": "0.6.3rc3", "displayVersion": "0.6.3rc3",
+        "channel": "preview", "releasedAt": "2026-08-24T18:27:30Z",
+        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3",
+        "summary": "Current release candidate with restored Lightning MTP, fused Qwen ANE prefill, and long-session cache fixes.",
         "highlights": [
-            {"value": "DFlash 2", "label": "runtime support"},
-            {"value": "ANE + GPU", "label": "prefill tuning"},
+            {"value": "MTP + DFlash", "label": "decode paths"},
+            {"value": "Fused ANE", "label": "Qwen prefill"},
             {"value": "Preview", "label": "release channel"},
         ],
         "workflow": [
             "Keep the checksum-verified side-by-side copy until a final 0.6.3 release is audited.",
-            "Use Measured Runtime Promotion before changing which installed oMLX copy launches.",
+            "Compare rc3 with the selected copy through Measured Runtime Promotion before switching.",
         ],
     },
     "lms": {
@@ -236,17 +236,17 @@ RUNTIME_RELEASE_CATALOG: dict[str, dict[str, Any]] = {
         ],
     },
     "mtplx": {
-        "version": "2.9.1", "displayVersion": "2.9.1",
-        "channel": "stable", "releasedAt": "2026-08-22T10:41:00Z",
-        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.9.1",
+        "version": "2.9.2", "displayVersion": "2.9.2",
+        "channel": "stable", "releasedAt": "2026-08-25T11:47:00Z",
+        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.9.2",
         "summary": (
-            "Correctness update for long agent sessions, truthful Turbo configuration, "
-            "large-context cache reuse, and local flight-recorder telemetry."
+            "Agent transcripts now pass through by default, greedy decode is faster below "
+            "12K context, and the model forge no longer collapses draft acceptance."
         ),
         "highlights": [
-            {"value": "Full context", "label": "agent-session fix"},
-            {"value": "Turbo", "label": "profile self-check"},
-            {"value": "Live trace", "label": "local telemetry"},
+            {"value": "Passthrough", "label": "agent transcripts"},
+            {"value": "+2.5–9.8%", "label": "reported greedy decode"},
+            {"value": "Forge fix", "label": "draft acceptance"},
         ],
         "advisories": [{
             "affectedVersion": "2.9.0",
@@ -257,9 +257,9 @@ RUNTIME_RELEASE_CATALOG: dict[str, dict[str, Any]] = {
             ),
         }],
         "workflow": [
-            "Keep any representative 2.8.3 baseline, but skip 2.9.0 and update directly to 2.9.1.",
+            "Keep representative 2.8.3 or 2.9.1 evidence, but skip affected 2.9.0 Turbo results.",
             "Update the app-managed engine through MTPLX's signed app updater or official DMG.",
-            "Run mtplx models --check, then repeat the same local benchmark on 2.9.1 before preferring it as fastest.",
+            "Run mtplx models --check, then repeat the same local benchmark on 2.9.2 before preferring it as fastest.",
         ],
     },
 }
@@ -310,10 +310,10 @@ BENCHMARK_SUITES = {
     },
 }
 DFLASH2_MINIMUM_RUNTIME = "0.6.3rc1"
-DFLASH2_RECOMMENDED_RUNTIME = "0.6.3rc2"
+DFLASH2_RECOMMENDED_RUNTIME = "0.6.3rc3"
 DFLASH2_DRAFT_REPO = "z-lab/Qwen3.8-27B-DFlash2"
 DFLASH2_DRAFT_URL = "https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2"
-DFLASH2_RELEASE_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.3rc2"
+DFLASH2_RELEASE_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3"
 DFLASH2_DRAFT_SIZE_LABEL = "3.85 GB"
 DFLASH2_DRAFT_REVISION = "ac04198556d7e8867853cbc356807b969f311b05"
 DFLASH2_DRAFT_BYTES = 3_850_000_000
@@ -323,7 +323,7 @@ SETUP_DOWNLOAD_RESERVE_BYTES = 2 * 1024**3
 ANE_TUNER_STORE_VERSION = 1
 ANE_TUNER_MAX_RECORDS = 32
 ANE_TUNER_MINIMUM_RUNTIME = "0.6.3rc2"
-ANE_TUNER_RELEASE_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.3rc2"
+ANE_TUNER_RELEASE_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3"
 ANE_TUNER_SEQUENCE_LENGTH = 2_048
 ANE_TUNER_REPEATS = 2
 ANE_TUNER_RESERVE_BYTES = 8 * 1024**3
@@ -360,7 +360,7 @@ SESSION_IDLE_TIMEOUT_CHOICES = {0, 5, 15, 30, 60, 120}
 SESSION_RUNTIME_BASE_RESERVE_BYTES = 3 * 1024**3
 SESSION_OS_RESERVE_MIN_BYTES = 4 * 1024**3
 SESSION_OS_RESERVE_FRACTION = 0.10
-OMLX_INSTALL_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.3rc2"
+OMLX_INSTALL_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3"
 OMLX_INSTALL_DOCS_URL = "https://github.com/jundot/omlx#install"
 LMSTUDIO_RUNTIME_DOCS_URL = "https://lmstudio.ai/docs/cli/runtime/runtime"
 LMSTUDIO_UPDATE_DOCS_URL = "https://lmstudio.ai/docs/app/offline"
@@ -1243,7 +1243,7 @@ def omlx_supports_dflash2(version_text: str) -> bool:
 
 
 def omlx_has_recommended_dflash2_runtime(version_text: str) -> bool:
-    """rc2 contains the first round of DFlash/ANE field-test fixes."""
+    """rc3 is the currently audited DFlash/Lightning-MTP preview build."""
     return omlx_version_at_least(version_text, DFLASH2_RECOMMENDED_RUNTIME)
 
 
@@ -1859,8 +1859,13 @@ def runtime_inventory() -> dict[str, Any]:
         omlx_level, omlx_headline = "blocked", "oMLX is not installed."
     elif omlx_selected.get("aneReady"):
         omlx_level, omlx_headline = "ready", "Selected oMLX can run DFlash 2 and the guarded ANE tuner."
-    elif omlx_selected.get("recommendedDflashBuild"):
-        omlx_level, omlx_headline = "advisory", "DFlash 2 is available, but the native Qwen kernel is not verified for ANE."
+    elif omlx_selected.get("dflashReady"):
+        omlx_level = "advisory"
+        omlx_headline = (
+            f"Selected oMLX supports DFlash 2; audited {omlx_release['displayVersion']} is available."
+            if omlx_release["updateAvailable"] else
+            "DFlash 2 is available, but the native Qwen kernel is not verified for ANE."
+        )
     else:
         omlx_level, omlx_headline = "advisory", "Core oMLX is runnable; DFlash 2 and ANE still need a newer verified installation."
     if omlx_selected and omlx_level == "ready" and omlx_release["needsReview"]:
@@ -1937,7 +1942,22 @@ def runtime_inventory() -> dict[str, Any]:
             "checks": [
                 {"label": "Core server", "ready": bool(omlx_selected), "detail": str(omlx_selected.get("version") if omlx_selected else "Not installed")},
                 {"label": "Audited upstream release", "ready": omlx_release["catalogCurrent"], "advisory": bool(omlx_selected), "detail": omlx_release["detail"]},
-                {"label": "DFlash 2 runtime", "ready": bool(omlx_selected and omlx_selected.get("recommendedDflashBuild")), "detail": f"Requires {DFLASH2_RECOMMENDED_RUNTIME} or newer for the current fixes."},
+                {
+                    "label": "DFlash 2 runtime",
+                    "ready": bool(omlx_selected and omlx_selected.get("dflashReady")),
+                    "advisory": bool(
+                        omlx_selected and omlx_selected.get("dflashReady")
+                        and not omlx_selected.get("recommendedDflashBuild")
+                    ),
+                    "detail": (
+                        f"Supported by the selected build; audited {DFLASH2_RECOMMENDED_RUNTIME} is available."
+                        if omlx_selected and omlx_selected.get("dflashReady")
+                        and not omlx_selected.get("recommendedDflashBuild") else
+                        "Selected build matches the current audited DFlash preview."
+                        if omlx_selected and omlx_selected.get("recommendedDflashBuild") else
+                        f"Requires {DFLASH2_MINIMUM_RUNTIME} or newer."
+                    ),
+                },
                 {"label": "Native Qwen kernel", "ready": bool(omlx_selected and omlx_selected.get("kernel", {}).get("ready")), "detail": str((omlx_selected or {}).get("kernel", {}).get("reason") or "No selected runtime.")},
             ],
             "update": {
@@ -1948,7 +1968,7 @@ def runtime_inventory() -> dict[str, Any]:
                     "The documented Homebrew custom-kernel path tracks HEAD and needs full Xcode."
                 ),
                 "primaryUrl": OMLX_INSTALL_URL,
-                "primaryLabel": "Open official oMLX rc2 release",
+                "primaryLabel": "Open official oMLX rc3 release",
                 "docsUrl": OMLX_INSTALL_DOCS_URL,
                 "developerCommand": "brew install omlx --HEAD --with-custom-kernel",
                 "developerCommandReady": bool(metal.get("ready")),
@@ -2000,14 +2020,15 @@ def runtime_inventory() -> dict[str, Any]:
             "update": {
                 "mode": "in-app", "automatic": False,
                 "headline": (
-                    f"MTPLX {mtplx_release['displayVersion']} fixes long agent sessions and Turbo profile reporting."
+                    f"MTPLX {mtplx_release['displayVersion']} is the audited agent and decode update."
                     if mtplx_release["updateAvailable"] else
                     "Prefer the app-managed engine and inspect duplicate CLI installs separately."
                 ),
                 "detail": (
-                    "Upstream says 2.9.1 fixes the near-19k-token agent crash, restores the intended "
-                    "Turbo fast path, and adds local flight telemetry. Preserve a valid 2.8.3 baseline, "
-                    "then measure 2.9.1 locally before calling it faster on this Mac."
+                    "Upstream says 2.9.2 makes agent transcripts passthrough by default, enables a "
+                    "bounded greedy-draft fast path below 12K context, and fixes forge output whose "
+                    "draft acceptance had collapsed. Preserve valid older evidence, then measure "
+                    "2.9.2 locally before calling it faster on this Mac."
                     if mtplx_release["updateAvailable"] else
                     "The MTPLX app refreshes its managed engine; a Homebrew or user CLI can remain at a different version without affecting the selected path."
                 ),
@@ -2016,7 +2037,7 @@ def runtime_inventory() -> dict[str, Any]:
                 "docsUrl": MTPLX_INSTALL_DOCS_URL,
                 "release": mtplx_release,
                 "rollback": (
-                    "The vendor app updater replaces its app-managed engine. Existing 2.8.3 results stay version-bound; 2.9.0 Turbo results cannot drive fastest-route choices."
+                    "The vendor app updater replaces its app-managed engine. Existing results stay version-bound; 2.9.0 Turbo results cannot drive fastest-route choices."
                     if mtplx_release["updateAvailable"] else
                     "Switching candidates changes only which installed executable new launcher sessions use. It never uninstalls the other copy."
                 ),
@@ -4246,7 +4267,7 @@ def build_dflash2_setup_plan(
             "detail": (
                 "The installed runtime has the recommended DFlash 2 fixes."
                 if runtime_recommended else
-                "A supported runtime is installed; rc2 contains the current field-test fixes."
+                f"A supported runtime is installed; {DFLASH2_RECOMMENDED_RUNTIME} is the current audited preview."
                 if runtime_ready else
                 "Upgrade through the official oMLX release flow. The launcher will not replace a runtime automatically."
             ),

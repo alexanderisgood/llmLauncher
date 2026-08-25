@@ -783,6 +783,130 @@ dialog,.modal,.dialog,.runtime-card,.chat-history-card,.profile-card,.calibratio
 .theme-swatch.frost{--swatch-bg:#f3f3f6;--swatch-main:#168bf3;--swatch-second:#5e5ce6;border-color:#c8c9ce}.theme-swatch.frost b{background:#1d1d1f}
 @media(max-width:1000px){:root[data-theme="frost"] .app-workspace{width:100%;height:auto;margin:0;border:0;border-radius:0;box-shadow:none}}
 
+/* Frost precision pass: one spacing and control system instead of per-screen sizing. */
+:root[data-theme="frost"]{
+  --mac-hairline:rgba(60,60,67,.18);
+  --mac-hairline-soft:rgba(60,60,67,.11);
+  --mac-control-height:34px;
+  --mac-compact-height:30px;
+  --mac-action-height:42px;
+  --mac-control-radius:8px;
+  --mac-card-radius:11px;
+}
+:root[data-theme="frost"] body{background:#ececef;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif}
+:root[data-theme="frost"] .app-shell{grid-template-rows:52px minmax(0,1fr)}
+:root[data-theme="frost"] .app-bar{padding:0 16px;background:rgba(247,247,249,.9);box-shadow:0 1px 0 rgba(255,255,255,.82)}
+:root[data-theme="frost"] .brandmark{width:28px;height:28px;border-radius:7px;box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 2px 7px rgba(8,120,232,.2)}
+:root[data-theme="frost"] .app-title{gap:9px}
+:root[data-theme="frost"] .app-title strong{font-size:13px;font-weight:680}
+:root[data-theme="frost"] .app-title small{font-size:10px}
+:root[data-theme="frost"] .app-toolbar{gap:3px}
+:root[data-theme="frost"] .toolbar-button,
+:root[data-theme="frost"] .status-pill{height:var(--mac-compact-height);border-radius:7px}
+:root[data-theme="frost"] .toolbar-button{padding:0 8px;font-size:11px;font-weight:560}
+:root[data-theme="frost"] .status-pill{padding:0 9px;font-size:9px}
+:root[data-theme="frost"] .toolbar-separator{height:18px;margin:0 5px}
+
+/* A native-feeling content split sits directly below the unified toolbar. */
+:root[data-theme="frost"] .app-workspace{width:100%;height:100%;margin:0;overflow:hidden;border:0;border-radius:0;background:#f5f5f7;box-shadow:none}
+:root[data-theme="frost"] .pane-heading{min-height:68px;padding:13px 20px;border-bottom-color:var(--mac-hairline-soft);background:rgba(250,250,252,.9)}
+:root[data-theme="frost"] .pane-heading h1{font-size:16px;font-weight:700}
+:root[data-theme="frost"] .pane-heading p{margin-top:3px;font-size:10px}
+:root[data-theme="frost"] .pane-heading-actions{align-items:center;gap:7px}
+:root[data-theme="frost"] .focused-run-status,
+:root[data-theme="frost"] .interface-detail-button,
+:root[data-theme="frost"] .local-chip{height:var(--mac-control-height);margin:0;border-radius:var(--mac-control-radius)}
+:root[data-theme="frost"] .focused-run-status{padding:3px 4px 3px 9px;border-color:var(--mac-hairline);background:rgba(238,238,242,.88)}
+:root[data-theme="frost"] .focused-run-action{height:26px;border-color:var(--mac-hairline);border-radius:6px;background:rgba(255,255,255,.84)}
+:root[data-theme="frost"] .interface-detail-button{padding:0 10px;border-color:var(--mac-hairline);background:rgba(255,255,255,.82)}
+:root[data-theme="frost"] .local-chip{display:inline-flex;align-items:center;padding:0 9px;border-color:rgba(var(--success-rgb),.24);font-size:8px}
+:root[data-theme="frost"] .config-scroll{padding:15px 18px 24px}
+:root[data-theme="frost"] .config-section,
+:root[data-theme="frost"] .advanced{border-color:var(--mac-hairline-soft);border-radius:var(--mac-card-radius);box-shadow:0 1px 1px rgba(40,40,45,.035)}
+:root[data-theme="frost"] .config-section{padding:14px}
+:root[data-theme="frost"] .config-section+.config-section,
+:root[data-theme="frost"] .setup-grid+.config-section,
+:root[data-theme="frost"] .config-section+.advanced{margin-top:10px}
+:root[data-theme="frost"] .setup-grid{gap:10px}
+:root[data-theme="frost"] .section-head{margin-bottom:10px}
+:root[data-theme="frost"] .section-head h2,
+:root[data-theme="frost"] .section-head h3{font-size:11px;font-weight:680}
+:root[data-theme="frost"] .choice{min-height:46px;padding:7px;border-radius:9px;box-shadow:none;transform:none!important}
+:root[data-theme="frost"] .choice:hover:not(:disabled){box-shadow:none}
+:root[data-theme="frost"] .choice-icon{width:28px;height:28px;border-radius:7px}
+:root[data-theme="frost"] .segmented{min-height:42px;border-radius:9px}
+:root[data-theme="frost"] .segmented button{height:34px;border-radius:6px;font-size:11px}
+:root[data-theme="frost"] .field input[type="text"],
+:root[data-theme="frost"] .field input[type="number"],
+:root[data-theme="frost"] .field input[type="url"],
+:root[data-theme="frost"] .field input[type="password"],
+:root[data-theme="frost"] .field select{height:var(--mac-control-height);border-radius:var(--mac-control-radius)}
+
+/* Dock controls share a top edge and a 42px action height. */
+:root[data-theme="frost"] .launch-dock{align-items:start;gap:10px;padding:9px 14px;border-top-color:var(--mac-hairline);background:rgba(248,248,250,.94);box-shadow:0 -1px 0 rgba(255,255,255,.75),0 -8px 24px rgba(40,40,45,.055)}
+:root[data-theme="frost"] .optimization-panel{align-items:start;gap:8px}
+:root[data-theme="frost"] .optimizer-split,
+:root[data-theme="frost"] .dock-actions{height:var(--mac-action-height)}
+:root[data-theme="frost"] .optimize-button,
+:root[data-theme="frost"] .optimizer-menu-button,
+:root[data-theme="frost"] .performance-receipt,
+:root[data-theme="frost"] .dock-actions>.primary,
+:root[data-theme="frost"] .dock-actions>.secondary{height:var(--mac-action-height);margin:0;border-radius:9px;box-shadow:none}
+:root[data-theme="frost"] .optimizer-split .optimize-button{border-radius:9px 0 0 9px}
+:root[data-theme="frost"] .optimizer-menu-button{border-radius:0 9px 9px 0}
+:root[data-theme="frost"] .performance-receipt{min-height:0;padding:4px 7px}
+:root[data-theme="frost"] .dock-actions{align-items:stretch;gap:7px}
+:root[data-theme="frost"] .dock-actions>.primary{min-width:164px}
+:root[data-theme="frost"] .optimization-status{margin-top:3px;font-size:8px;line-height:1.25}
+
+/* Every dialog action row uses one baseline and one outer height. */
+:root[data-theme="frost"] :is(.setup-actions,.ane-dialog-actions,.calibration-actions,.route-check-actions,.benchmark-actions,.acquisition-actions,.runtime-update-actions,.runtime-promotion-actions,.session-set-plan-actions,.freetoken-actions,.ane-clone-actions){align-items:stretch;gap:7px}
+:root[data-theme="frost"] :is(.setup-actions,.ane-dialog-actions,.calibration-actions,.route-check-actions,.benchmark-actions,.acquisition-actions,.runtime-update-actions,.runtime-promotion-actions,.session-set-plan-actions,.freetoken-actions,.ane-clone-actions)>button{height:var(--mac-action-height);margin:0;border-radius:9px}
+:root[data-theme="frost"] :is(.session-actions,.runtime-actions,.model-library-actions,.chat-run-settings-actions,.chat-header-actions,.agent-console-header-actions){align-items:center;gap:6px}
+:root[data-theme="frost"] :is(.session-actions,.runtime-actions,.model-library-actions,.chat-run-settings-actions,.chat-header-actions)>button{height:var(--mac-control-height);margin:0;border-radius:var(--mac-control-radius)}
+:root[data-theme="frost"] .secondary.compact,
+:root[data-theme="frost"] .chat-header-actions .danger{height:var(--mac-compact-height);border-radius:7px}
+:root[data-theme="frost"] .primary,
+:root[data-theme="frost"] .secondary,
+:root[data-theme="frost"] .danger{box-shadow:none}
+:root[data-theme="frost"] .primary{border-color:#0071e3;background:#0071e3}
+:root[data-theme="frost"] .primary:hover{border-color:#0077ed;background:#0077ed}
+:root[data-theme="frost"] .secondary{border-color:var(--mac-hairline);background:rgba(255,255,255,.82)}
+:root[data-theme="frost"] .danger{border-color:rgba(209,59,66,.2);background:rgba(209,59,66,.06)}
+
+/* Sheets use quiet titlebars, aligned status controls, and an unobtrusive close affordance. */
+:root[data-theme="frost"] dialog{padding:20px;border-color:var(--mac-hairline);border-radius:14px;background:rgba(250,250,252,.985);box-shadow:0 28px 80px rgba(30,30,35,.24),0 2px 8px rgba(30,30,35,.08)}
+:root[data-theme="frost"] dialog .close{top:12px;right:12px;width:26px;height:26px;border-radius:50%;font-size:17px}
+:root[data-theme="frost"] :is(.setup-heading,.session-heading,.profile-heading,.calibration-heading,.model-library-heading,.acquisition-heading,.freetoken-heading,.session-set-heading){padding-right:30px}
+:root[data-theme="frost"] .calibration-heading-actions{height:28px;align-items:stretch;gap:6px}
+:root[data-theme="frost"] .calibration-heading-actions .setup-badge,
+:root[data-theme="frost"] .calibration-detail-toggle{height:28px;display:inline-flex;align-items:center;margin:0;border-radius:7px}
+:root[data-theme="frost"] .setup-badge{display:inline-flex;min-height:22px;align-items:center}
+:root[data-theme="frost"] .optimizer-menu,
+:root[data-theme="frost"] .theme-menu,
+:root[data-theme="frost"] .hub-tools-menu{border-radius:11px;box-shadow:0 18px 48px rgba(40,40,45,.2),0 2px 7px rgba(40,40,45,.07)}
+:root[data-theme="frost"] .theme-menu button,
+:root[data-theme="frost"] .hub-tools-menu button,
+:root[data-theme="frost"] .hub-tools-menu a,
+:root[data-theme="frost"] .optimizer-menu button{border-radius:7px}
+
+/* Chat controls follow the same compact toolbar rhythm. */
+:root[data-theme="frost"] .chat-header{min-height:68px;padding:12px 16px}
+:root[data-theme="frost"] .chat-composer{padding:10px 14px 12px}
+:root[data-theme="frost"] .chat-composer textarea{border-radius:10px;box-shadow:none}
+:root[data-theme="frost"] .composer-footer{min-height:34px;margin-top:7px}
+:root[data-theme="frost"] .chat-composer-tools,
+:root[data-theme="frost"] .chat-composer-actions{align-items:center}
+:root[data-theme="frost"] .chat-attach-button,
+:root[data-theme="frost"] .chat-send{height:var(--mac-control-height);margin:0;border-radius:var(--mac-control-radius)}
+:root[data-theme="frost"] .chat-reasoning{border-radius:9px}
+
+@media(max-width:720px){
+  :root[data-theme="frost"] .app-shell{grid-template-rows:52px minmax(0,1fr)}
+  :root[data-theme="frost"] .launch-dock{align-items:stretch}
+  :root[data-theme="frost"] .optimization-panel{align-items:stretch}
+}
+
 /* Hub Console is a terminal surface, so its complete workspace stays black in every theme. */
 .agent-workspace{background:#000!important;color:#f5f7fa}
 .agent-workspace .agent-console-header,.agent-workspace .agent-console-navigation,.agent-workspace .agent-console-status-panel,.agent-workspace .agent-console-composer{border-color:#262a31;background:#090a0c!important;color:#f5f7fa;box-shadow:none}

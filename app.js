@@ -944,8 +944,8 @@ function renderDflashReadiness(cap = {}) {
   const runtimeReady = Boolean(readiness.runtimeReady);
   const draftReady = Boolean(readiness.draftInstalled);
   const runtimeDetail = runtimeReady
-    ? `${readiness.runtimeDetected || "oMLX"}${readiness.runtimeRecommended ? " · current recommended build" : ` · supported; ${readiness.recommendedRuntime || "rc2"} recommended`}`
-    : `${readiness.runtimeDetected || "Not installed"} · needs ${readiness.recommendedRuntime || "0.6.3rc2"}`;
+    ? `${readiness.runtimeDetected || "oMLX"}${readiness.runtimeRecommended ? " · current recommended build" : ` · supported; ${readiness.recommendedRuntime || "rc3"} recommended`}`
+    : `${readiness.runtimeDetected || "Not installed"} · needs ${readiness.recommendedRuntime || "0.6.3rc3"}`;
   const draftDetail = draftReady
     ? `${readiness.draftRepo || "Matching draft"} installed`
     : readiness.draftDetected
@@ -996,7 +996,7 @@ function renderAneReadiness(cap = {}) {
   $("anePrefillHelp").textContent = verified
     ? "Exact model/runtime/Mac match; still approximate and explicit."
     : "Approximate and never enabled silently; run the local tuner first.";
-  $("aneReleaseLink").href = readiness.releaseUrl || "https://github.com/jundot/omlx/releases/tag/v0.6.3rc2";
+  $("aneReleaseLink").href = readiness.releaseUrl || "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3";
   $("openAneButton").disabled = !(state.backend === "omlx" && selectedModel());
 }
 

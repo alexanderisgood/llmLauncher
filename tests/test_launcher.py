@@ -8212,6 +8212,8 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("Generation TPS: measuring…", script)
         self.assertIn("decodeTokensPerSecond", script)
         self.assertIn("promoteCompletedCalibrationResult", script)
+        self.assertIn("function calibrationRoutePreview", script)
+        self.assertIn('Routes: ${routePreview}.', script)
         self.assertIn("Use saved result", script)
         self.assertIn("no verified accelerator in this artifact", script)
         self.assertNotIn("Saving result…", script)

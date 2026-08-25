@@ -7408,6 +7408,17 @@ function promoteCompletedCalibrationResult(status = state.benchmarkStatus || {})
   return true;
 }
 
+function calibrationRoutePreview(plan) {
+  return (plan?.engines || [])
+    .filter(engine => engine.eligible && uiEngineVisible(engine.backend || engine.id))
+    .map(engine => {
+      const modes = (engine.modes || []).map(mode => mode.label).filter(Boolean);
+      const route = modes.length > 1 ? modes.join(" + ") : `${modes[0] || "AR"} only`;
+      return `${engine.label}: ${route}`;
+    })
+    .join(" · ");
+}
+
 function renderCalibrationPlan() {
   const plan = state.calibrationPlan;
   const active = calibrationBenchmarkActive();
@@ -7485,10 +7496,11 @@ function renderCalibrationPlan() {
     resultReady ? "ready" : (plan.ready ? "" : "blocked"),
   );
   const blockers = (plan.blockers || []).join(" ");
+  const routePreview = calibrationRoutePreview(plan);
   const evidenceDetail = resultReady
     ? [shownEvidence.detail, shownEvidence.outputWarning].filter(Boolean).join(" ")
     : plan.ready
-      ? `${plan.eligibleEngineCount} engines will be tested one at a time using generated prompts.`
+      ? `${plan.eligibleEngineCount} engines will be tested one at a time using generated prompts.${routePreview ? ` Routes: ${routePreview}.` : ""}`
       : blockers;
   $("calibrationEvidence").className = `calibration-evidence${resultReady ? " trusted" : plan.ready ? "" : " blocked"}`;
   $("calibrationEvidence").innerHTML = `<i aria-hidden="true">${resultReady ? "◆" : plan.ready ? "◇" : "×"}</i><span><strong>${esc(resultReady ? shownEvidence.label : plan.ready ? "Ready to test the engines" : "This setup cannot be tested yet")}</strong><small>${esc(evidenceDetail)}</small></span>`;

@@ -10,6 +10,7 @@
   const DEFAULT_THEME = "graphite";
   const DEFAULT_DETAIL = "focused";
   const THEMES = Object.freeze([
+    Object.freeze({id:"frost", label:"Frost", detail:"Polished light materials with a calm Mac-style hierarchy."}),
     Object.freeze({id:"graphite", label:"Graphite", detail:"Neutral charcoal with amber and sage accents."}),
     Object.freeze({id:"daylight", label:"Daylight", detail:"A clean light workspace with blue and jade accents."}),
     Object.freeze({id:"ember", label:"Ember", detail:"Warm cocoa surfaces with soft coral accents."}),

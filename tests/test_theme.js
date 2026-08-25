@@ -5,9 +5,10 @@ const themes = require("../theme.js");
 
 assert.equal(themes.DEFAULT_THEME, "graphite");
 assert.equal(themes.DEFAULT_DETAIL, "focused");
-assert.deepEqual(themes.THEMES.map(theme => theme.id), ["graphite", "daylight", "ember", "midnight"]);
+assert.deepEqual(themes.THEMES.map(theme => theme.id), ["frost", "graphite", "daylight", "ember", "midnight"]);
 assert.deepEqual(themes.DETAIL_LEVELS.map(level => level.id), ["focused", "detailed"]);
 assert.equal(themes.normaliseTheme(" DAYLIGHT "), "daylight");
+assert.equal(themes.normaliseTheme(" FROST "), "frost");
 assert.equal(themes.normaliseTheme(" EMBER "), "ember");
 assert.equal(themes.normaliseTheme("unknown"), "graphite");
 assert.equal(themes.normaliseTheme({secret:true}), "graphite");

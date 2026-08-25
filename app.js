@@ -7470,7 +7470,8 @@ function renderCalibrationPlan() {
   $("calibrationPlanFacts").innerHTML = [
     ["Workload", plan.suite.label], ["Goal", plan.preferenceLabel],
     ["Reasoning", normalizedReasoning ? `Model default (from ${reasoningContract.requested})` : request.reasoning], ["KV precision", kv],
-    ["Model reloads", String(plan.modelReloadCount)], ["Measured requests", String(plan.measuredRequestCount)],
+    [plan.countsAreMaximum ? "Max model reloads" : "Model reloads", String(plan.modelReloadCount)],
+    [plan.countsAreMaximum ? "Max measured requests" : "Measured requests", String(plan.measuredRequestCount)],
     ["Compared engines", String(plan.eligibleEngineCount)], ["Cooling", plan.calibrationCoolingLabel || "Automatic"],
   ].map(([label,value]) => `<span><small>${esc(label)}</small><b title="${esc(value)}">${esc(value)}</b></span>`).join("");
   calibrationStateBadge(
@@ -7534,9 +7535,14 @@ function renderCalibrationPlan() {
       ? engine.testedModes : [engine.mode || "ar"];
     const depthCandidates = Array.isArray(engine.mtpDepthSweep?.depthCandidates)
       ? engine.mtpDepthSweep.depthCandidates : [];
+    const tuningCount = Number(engine.tuningSweep?.candidateCount || 0);
     const testedRoutes = testedModes.map(item => (
       item === "mtp" && depthCandidates.length > 1
         ? `MTP D1–D${Math.max(...depthCandidates.map(Number))}`
+        : item === "mtp" && engine.backend === "lmstudio" && tuningCount > 0
+          ? `MTP tuned (${tuningCount} candidates)`
+          : item === "dflash2" && engine.backend === "omlx" && tuningCount > 0
+            ? `DFlash tuned (${tuningCount} candidates)`
         : benchmarkWinnerLabel(item)
     ));
     const testedLabel = testedModes.length > 1
@@ -7558,7 +7564,7 @@ function renderCalibrationPlan() {
   $("calibrationConsent").checked = false;
   $("calibrationConsentPanel").classList.add("hidden");
   $("calibrationConsentCopy").textContent = plan.ready
-    ? `${plan.eligibleEngineCount} engines · ${plan.modelReloadCount} isolated reloads · ${plan.measuredRequestCount} generated local requests · ${plan.calibrationCoolingLabel || "Automatic"} cooling · up to ${Math.round(plan.resourceCooldownMaxSecondsPerRoute)} seconds of cancellable settling before each route.`
+    ? `${plan.eligibleEngineCount} engines · ${plan.countsAreMaximum ? "up to " : ""}${plan.modelReloadCount} isolated reloads · ${plan.countsAreMaximum ? "up to " : ""}${plan.measuredRequestCount} generated local requests · ${plan.calibrationCoolingLabel || "Automatic"} cooling · up to ${Math.round(plan.resourceCooldownMaxSecondsPerRoute)} seconds of cancellable settling before each route.`
     : blockers || "Resolve the engine blockers before measurement.";
   $("calibrationStartButton").disabled = !(canMeasure || canRefreshResult);
   $("calibrationStartButton").querySelector("strong").textContent = evidenceReady
@@ -7566,7 +7572,7 @@ function renderCalibrationPlan() {
   $("calibrationStartLabel").textContent = evidenceReady
     ? "Replace this saved measurement"
     : resultPending ? "The test is complete — this will not run it again"
-    : plan.ready ? `${plan.eligibleEngineCount} engines · ${plan.routeCount} routes` : "Resolve the blockers above";
+    : plan.ready ? `${plan.eligibleEngineCount} engines · ${plan.countsAreMaximum ? "up to " : ""}${plan.routeCount} routes` : "Resolve the blockers above";
   const canApply = evidenceReady && !calibrationOperationBlocked();
   $("calibrationApplyButton").disabled = !canApply;
   $("calibrationApplyButton").className = evidenceReady ? "primary" : "secondary";

@@ -18,6 +18,7 @@ It currently supports **oMLX**, **LM Studio**, and **MTPLX**. Instead of treatin
 - Measures like-for-like engine and accelerator performance before claiming a fastest option.
 - Keeps cooling user-owned: optimisation and Calibration use automatic cooling by default and never select maximum fans without an explicit choice.
 - Supports streaming thinking, message queues, history, branching, TPS, warm-route reuse, and resumable local Chat.
+- Includes a polished light **Frost** appearance plus Focused progressive disclosure for a calmer Mac-style interface; the Hub Console remains a black terminal workspace in every appearance.
 - Keeps generated routes on authenticated loopback addresses and stops only launcher-owned processes.
 - Provides profiles, Session Sets, model acquisition, runtime inspection, route checks, and capacity controls.
 

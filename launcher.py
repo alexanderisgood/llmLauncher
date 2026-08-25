@@ -11500,17 +11500,35 @@ def benchmark_job_measurement_routes(job: dict[str, Any]) -> list[dict[str, Any]
     return routes
 
 
+def benchmark_job_maximum_route_count(job: dict[str, Any]) -> int:
+    """Return the disclosed upper bound for adaptive or exhaustive shootout loads."""
+    tuning = job.get("calibrationTuningPlan")
+    if isinstance(tuning, dict):
+        return int(tuning.get("maximumModelLoads") or 0)
+    return len(benchmark_job_measurement_routes(job))
+
+
 def benchmark_job_public_modes(job: dict[str, Any]) -> list[dict[str, str]]:
     """Keep calibration route disclosure compact while showing an MTPLX depth search."""
     modes: list[dict[str, str]] = []
     for mode in job.get("modes") or []:
         label = BenchmarkManager._mode_label(str(mode))
-        if mode == "mtp" and job.get("backend") == "mtplx":
+        if (
+            mode == "mtp" and job.get("backend") == "lmstudio"
+            and isinstance(job.get("calibrationTuningPlan"), dict)
+        ):
+            label = f"MTP tuned ≤{BENCHMARK_MTP_TUNER_MAX_CANDIDATES}"
+        elif mode == "mtp" and job.get("backend") == "mtplx":
             depths = mtplx_mtp_depth_candidates(
                 job["model"]["backends"]["mtplx"],
             )
             if len(depths) > 1:
                 label = f"MTP D1–D{max(depths)}"
+        elif (
+            mode == "dflash2" and job.get("backend") == "omlx"
+            and isinstance(job.get("calibrationTuningPlan"), dict)
+        ):
+            label = f"DFlash tuned ≤{BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES}"
         modes.append({"id": str(mode), "label": label})
     return modes
 
@@ -11659,6 +11677,20 @@ def validated_dflash2_tuning_request(
     return job
 
 
+def prepare_calibration_tuning_plan(job: dict[str, Any]) -> None:
+    """Attach a bounded engine-owned search plan to a cross-engine job in place."""
+    backend = str(job.get("backend") or "")
+    modes = {str(mode) for mode in job.get("modes") or []}
+    plan_job = copy.deepcopy(job)
+    # Cross-engine calibration starts each engine from its audited defaults;
+    # controls belonging to the currently visible engine must not bias another.
+    plan_job["options"] = {}
+    if backend == "lmstudio" and "mtp" in modes:
+        job["calibrationTuningPlan"] = lmstudio_mtp_tuning_plan(plan_job)
+    elif backend == "omlx" and "dflash2" in modes:
+        job["calibrationTuningPlan"] = dflash2_tuning_plan(plan_job)
+
+
 def rotated_engine_shootout_jobs(
     jobs: list[dict[str, Any]], model: dict[str, Any], shootout_id: str,
 ) -> tuple[list[dict[str, Any]], str]:
@@ -11747,6 +11779,7 @@ def validated_engine_shootout_request(
             })
             continue
         job["shootoutId"] = shootout_id
+        prepare_calibration_tuning_plan(job)
         jobs.append(job)
     if len(jobs) < 2:
         detail = "; ".join(
@@ -11840,14 +11873,15 @@ def calibration_plan(
                 job = validated_benchmark_request(
                     candidate, models, allow_baseline_only=True,
                 )
+                prepare_calibration_tuning_plan(job)
             except ValueError as error:
                 allowed = False
                 reason = str(error)
         if job is not None:
             jobs.append(job)
         measured_modes = list(job.get("modes") or []) if job is not None else []
-        measurement_routes = (
-            benchmark_job_measurement_routes(job) if job is not None else []
+        measurement_route_count = (
+            benchmark_job_maximum_route_count(job) if job is not None else 0
         )
         engine_settings = (
             job.get("evidence", {}).get("engineSettings")
@@ -11857,7 +11891,25 @@ def calibration_plan(
             benchmark_mode_summary(model, backend, measured_modes or ["ar"])
             if job is not None else ""
         )
-        if job is not None and backend == "mtplx" and "mtp" in measured_modes:
+        if (
+            job is not None and backend == "lmstudio"
+            and isinstance(job.get("calibrationTuningPlan"), dict)
+        ):
+            mode_detail += (
+                f" LM Studio searches up to {BENCHMARK_MTP_TUNER_MAX_CANDIDATES} "
+                "bounded MTP depth, minimum, and cutoff combinations; only the fastest "
+                "AR-matching load is kept."
+            )
+        elif (
+            job is not None and backend == "omlx"
+            and isinstance(job.get("calibrationTuningPlan"), dict)
+        ):
+            mode_detail += (
+                f" oMLX searches up to {BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES} bounded "
+                "DFlash block, verifier, and draft-precision combinations; only the fastest "
+                "AR-matching load is kept."
+            )
+        elif job is not None and backend == "mtplx" and "mtp" in measured_modes:
             depths = mtplx_mtp_depth_candidates(
                 job["model"]["backends"]["mtplx"],
             )
@@ -11883,7 +11935,7 @@ def calibration_plan(
                 if job is not None else str(reason)
             ),
             "modes": benchmark_job_public_modes(job) if job is not None else [],
-            "measurementRouteCount": len(measurement_routes),
+            "measurementRouteCount": measurement_route_count,
             "modeDetail": mode_detail,
             "accelerationReason": (
                 benchmark_acceleration_reason(model, backend, measured_modes)
@@ -11913,10 +11965,10 @@ def calibration_plan(
         )
     ready = not blockers
     route_count = sum(
-        len(benchmark_job_measurement_routes(job)) for job in jobs
+        benchmark_job_maximum_route_count(job) for job in jobs
     ) if ready else 0
     measured_requests = sum(
-        len(benchmark_job_measurement_routes(job))
+        benchmark_job_maximum_route_count(job)
         * (2 + benchmark_measurement_count(job["suite"]))
         for job in jobs
     ) if ready else 0
@@ -11995,6 +12047,9 @@ def calibration_plan(
         "routeCount": route_count,
         "modelReloadCount": route_count,
         "measuredRequestCount": measured_requests,
+        "countsAreMaximum": any(
+            isinstance(job.get("calibrationTuningPlan"), dict) for job in jobs
+        ),
         "resourceCooldownMaxSecondsPerRoute": BENCHMARK_COOLDOWN_MAX_SECONDS,
         "evidence": {
             "trusted": trusted,
@@ -16211,9 +16266,7 @@ class BenchmarkManager:
                             "backend": item["backend"],
                             "label": BACKEND_LABELS[item["backend"]],
                             "modes": benchmark_job_public_modes(item),
-                            "measurementRouteCount": len(
-                                benchmark_job_measurement_routes(item)
-                            ),
+                            "measurementRouteCount": benchmark_job_maximum_route_count(item),
                         }
                         for item in shootout["jobs"]
                     ],
@@ -16482,17 +16535,30 @@ class BenchmarkManager:
         options["acceleration"] = {"ar": "off", "mtp": "mtp", "dflash2": "dflash"}[mode]
         if mode == "dflash2":
             capability = job["model"]["backends"]["omlx"]
-            requested_depth = None if job.get("shootoutId") else options.get("depth")
-            options["depth"] = safe_int(
-                requested_depth, int(capability.get("dflashBlockSize") or 8),
-                1, int(capability.get("dflashMaxBlockSize") or 8),
-            )
-            options.setdefault("dflashDraftQuant", "native")
-            options.setdefault("dflashVerify", "adaptive")
+            forced = job.get("_benchmarkDflashSettings")
+            if isinstance(forced, dict):
+                controls = dflash2_tuning_controls(forced, capability)
+                options.update({
+                    "depth": controls["blockSize"],
+                    "dflashDraftQuant": controls["draftQuant"],
+                    "dflashVerify": controls["verifyMode"],
+                })
+            else:
+                requested_depth = None if job.get("shootoutId") else options.get("depth")
+                options["depth"] = safe_int(
+                    requested_depth, int(capability.get("dflashBlockSize") or 8),
+                    1, int(capability.get("dflashMaxBlockSize") or 8),
+                )
+                options.setdefault("dflashDraftQuant", "native")
+                options.setdefault("dflashVerify", "adaptive")
         elif mode == "mtp":
             capability = job["model"]["backends"][job["backend"]]
             if job["backend"] == "lmstudio":
-                requested = {} if job.get("shootoutId") else options
+                forced = job.get("_benchmarkMtpSettings")
+                requested = (
+                    forced if isinstance(forced, dict)
+                    else {} if job.get("shootoutId") else options
+                )
                 options.update(lmstudio_mtp_controls(requested, capability))
             else:
                 forced_depth = job.get("_benchmarkMtpDepth")
@@ -17427,6 +17493,7 @@ class BenchmarkManager:
                     record.get("settings"),
                 ),
                 "mtpDepthSweep": copy.deepcopy(record.get("mtpDepthSweep")),
+                "tuningSweep": copy.deepcopy(record.get("tuningSweep")),
                 "score": round(float(measurement["score"]), 4) if measurement else None,
                 "metric": measurement["metric"] if measurement else None,
                 "display": measurement["display"] if measurement else "Not comparable",
@@ -17502,13 +17569,339 @@ class BenchmarkManager:
             "recommendation": public_decision["recommendation"],
         }
 
+    def _shootout_tuning_gate(
+        self, route_label: str, backend: str,
+        resource_reference: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Require a stable cross-engine start and carry one shared reference forward."""
+        gate = self._wait_for_resource_baseline(
+            route_label, backend, resource_reference,
+        )
+        status = str(gate.get("status") or "")
+        reference = resource_reference
+        if reference is None:
+            if status in {"reference-ready", "ready"}:
+                candidate = gate.get("reference")
+                if not isinstance(candidate, dict):
+                    raise RuntimeError(
+                        f"{route_label} did not publish its resource reference."
+                    )
+                reference = copy.deepcopy(candidate)
+            elif status != "unavailable":
+                raise RuntimeError(
+                    f"{route_label} did not reach a stable Mac-condition baseline "
+                    f"({status or 'unknown'}). Nothing was saved; retry when the Mac is idle."
+                )
+        elif status not in {"ready", "condition-improved", "reference-ready"}:
+            raise RuntimeError(
+                f"{route_label} started under non-comparable Mac conditions "
+                f"({status or 'unknown'}). Nothing was saved; retry when the Mac is idle."
+            )
+        return gate, reference
+
+    def _publish_shootout_tuning(
+        self, backend: str, kind: str, candidates: list[dict[str, Any]],
+        selected_key: str | None, maximum: int,
+    ) -> None:
+        public = []
+        for candidate in candidates:
+            item = {
+                key: copy.deepcopy(value)
+                for key, value in candidate.items() if key != "_result"
+            }
+            item["selected"] = bool(selected_key and item.get("key") == selected_key)
+            public.append(item)
+        with self.lock:
+            engine = self.state.get("engines", {}).get(backend)
+            if isinstance(engine, dict):
+                engine["tuning"] = {
+                    "kind": kind, "candidates": public,
+                    "selectedCandidateKey": selected_key,
+                    "maximumCandidates": maximum,
+                }
+
+    def _shootout_lmstudio_tuning(
+        self, job: dict[str, Any], models: list[dict[str, Any]],
+        completed: int, total: int,
+        resource_reference: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], int, dict[str, Any] | None]:
+        """Return one complete LM Studio record after its bounded MTP search."""
+        plan = job["calibrationTuningPlan"]
+        capability = job["model"]["backends"]["lmstudio"]
+        candidates: list[dict[str, Any]] = []
+        candidate_by_key: dict[str, dict[str, Any]] = {}
+        baseline_gate, resource_reference = self._shootout_tuning_gate(
+            "LM Studio · AR tuning baseline", "lmstudio", resource_reference,
+        )
+        baseline, completed = self._measure_mode(
+            job, models, "ar", completed, total, baseline_gate,
+            display_label="AR tuning baseline", state_key="ar",
+        )
+
+        def measure_candidate(
+            settings: dict[str, Any], stage: str,
+        ) -> dict[str, Any] | None:
+            nonlocal completed, resource_reference
+            normalized = lmstudio_mtp_controls(settings, capability)
+            key = lmstudio_mtp_tuning_candidate_key(normalized)
+            if key in candidate_by_key:
+                return candidate_by_key[key]
+            if len(candidates) >= BENCHMARK_MTP_TUNER_MAX_CANDIDATES:
+                return None
+            if self.cancel_event.is_set():
+                raise LaunchCancelled("Engine Shootout cancelled during LM Studio tuning.")
+            label = (
+                f"MTP · max {normalized['depth']} · min {normalized['mtpMinTokens']} · "
+                f"cutoff {normalized['mtpMinContinueProbability']:.2f}"
+            )
+            gate, resource_reference = self._shootout_tuning_gate(
+                f"LM Studio · {label}", "lmstudio", resource_reference,
+            )
+            candidate_job = copy.deepcopy(job)
+            candidate_job["_benchmarkMtpSettings"] = copy.deepcopy(normalized)
+            result, completed = self._measure_mode(
+                candidate_job, models, "mtp", completed, total, gate,
+                display_label=label, state_key=f"mtp-{key}",
+            )
+            summary = self._mtp_tuning_candidate_summary(
+                baseline, result, stage, str(gate.get("status") or ""),
+            )
+            if summary["key"] != key:
+                raise RuntimeError(
+                    "LM Studio loaded different MTP settings than Calibration requested."
+                )
+            candidates.append(summary)
+            candidate_by_key[key] = summary
+            leading = self._best_tuning_candidate(candidates)
+            self._publish_shootout_tuning(
+                "lmstudio", "lmstudio-mtp", candidates, leading["key"],
+                BENCHMARK_MTP_TUNER_MAX_CANDIDATES,
+            )
+            return summary
+
+        anchor = copy.deepcopy(plan["anchor"])
+        for depth in plan["depthCandidates"]:
+            settings = copy.deepcopy(anchor)
+            settings["depth"] = int(depth)
+            settings["mtpMinTokens"] = min(
+                int(settings["mtpMinTokens"]), int(depth),
+            )
+            measure_candidate(settings, "depth")
+        best = self._best_tuning_candidate(candidates)
+        cutoff_anchor = copy.deepcopy(best["settings"])
+        for cutoff in _ordered_unique([
+            cutoff_anchor["mtpMinContinueProbability"], *plan["cutoffCandidates"],
+        ]):
+            settings = copy.deepcopy(cutoff_anchor)
+            settings["mtpMinContinueProbability"] = cutoff
+            measure_candidate(settings, "cutoff")
+        best = self._best_tuning_candidate(candidates)
+        minimum_anchor = copy.deepcopy(best["settings"])
+        for minimum in _ordered_unique([
+            minimum_anchor["mtpMinTokens"], 0, 1, minimum_anchor["depth"],
+        ]):
+            settings = copy.deepcopy(minimum_anchor)
+            settings["mtpMinTokens"] = max(
+                0, min(int(settings["depth"]), int(minimum)),
+            )
+            measure_candidate(settings, "minimum")
+        if self.cancel_event.is_set():
+            raise LaunchCancelled("Engine Shootout cancelled before LM Studio tuning was committed.")
+        best = self._best_tuning_candidate(candidates)
+        best["selected"] = True
+        self._publish_shootout_tuning(
+            "lmstudio", "lmstudio-mtp", candidates, best["key"],
+            BENCHMARK_MTP_TUNER_MAX_CANDIDATES,
+        )
+        record = self._build_record(
+            job, {"ar": baseline, "mtp": best["_result"]},
+        )
+        public_candidates = [
+            {
+                key: copy.deepcopy(value)
+                for key, value in candidate.items() if key != "_result"
+            }
+            for candidate in candidates
+        ]
+        record["kind"] = "lmstudio-mtp-tuning"
+        record["tuningSweep"] = {
+            "version": BENCHMARK_MTP_TUNER_VERSION,
+            "strategy": "bounded-coordinate-search",
+            "complete": True, "resourceComparable": True,
+            "baselineResourceStatus": str(baseline_gate.get("status") or ""),
+            "candidateCount": len(public_candidates),
+            "maximumCandidates": BENCHMARK_MTP_TUNER_MAX_CANDIDATES,
+            "selectedCandidateKey": best["key"],
+            "selectedSettings": copy.deepcopy(best["settings"]),
+            "candidates": public_candidates,
+        }
+        settings = best["settings"]
+        record["recommendation"] = (
+            (
+                f"Use LM Studio MTP D{settings['depth']} with min "
+                f"{settings['mtpMinTokens']} and cutoff "
+                f"{settings['mtpMinContinueProbability']:.2f}: it was the fastest "
+                f"correctness-clearing load across {len(candidates)} bounded candidates."
+            )
+            if record["winner"] == "mtp" else
+            f"Keep AR: none of {len(candidates)} bounded LM Studio MTP candidates "
+            "cleared exact parity and the speed noise floor."
+        )
+        if not _local_benchmark_record_verified(capability, record, job["evidence"]):
+            raise RuntimeError("The completed LM Studio Calibration sweep failed its evidence contract.")
+        return record, completed, resource_reference
+
+    def _shootout_dflash_tuning(
+        self, job: dict[str, Any], models: list[dict[str, Any]],
+        completed: int, total: int,
+        resource_reference: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], int, dict[str, Any] | None]:
+        """Return one complete oMLX record after its bounded DFlash search."""
+        plan = job["calibrationTuningPlan"]
+        capability = job["model"]["backends"]["omlx"]
+        candidates: list[dict[str, Any]] = []
+        candidate_by_key: dict[str, dict[str, Any]] = {}
+        baseline_gate, resource_reference = self._shootout_tuning_gate(
+            "oMLX · AR tuning baseline", "omlx", resource_reference,
+        )
+        baseline, completed = self._measure_mode(
+            job, models, "ar", completed, total, baseline_gate,
+            display_label="AR tuning baseline", state_key="ar",
+        )
+        final_results: dict[str, dict[str, Any]] = {"ar": baseline}
+        if "mtp" in plan["baselineModes"]:
+            mtp_gate, resource_reference = self._shootout_tuning_gate(
+                "oMLX · native MTP comparison", "omlx", resource_reference,
+            )
+            mtp_result, completed = self._measure_mode(
+                job, models, "mtp", completed, total, mtp_gate,
+                display_label="Native MTP comparison", state_key="mtp",
+            )
+            final_results["mtp"] = mtp_result
+
+        def measure_candidate(
+            settings: dict[str, Any], stage: str,
+        ) -> dict[str, Any] | None:
+            nonlocal completed, resource_reference
+            normalized = dflash2_tuning_controls(settings, capability)
+            key = dflash2_tuning_candidate_key(normalized)
+            if key in candidate_by_key:
+                return candidate_by_key[key]
+            if len(candidates) >= BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES:
+                return None
+            if self.cancel_event.is_set():
+                raise LaunchCancelled("Engine Shootout cancelled during DFlash tuning.")
+            label = (
+                f"DFlash · block {normalized['blockSize']} · "
+                f"{normalized['verifyMode']} · {normalized['draftQuant']}"
+            )
+            gate, resource_reference = self._shootout_tuning_gate(
+                f"oMLX · {label}", "omlx", resource_reference,
+            )
+            candidate_job = copy.deepcopy(job)
+            candidate_job["_benchmarkDflashSettings"] = copy.deepcopy(normalized)
+            result, completed = self._measure_mode(
+                candidate_job, models, "dflash2", completed, total, gate,
+                display_label=label, state_key=f"dflash2-{key}",
+            )
+            summary = self._dflash_tuning_candidate_summary(
+                baseline, result, stage, str(gate.get("status") or ""),
+            )
+            if summary["key"] != key:
+                raise RuntimeError(
+                    "oMLX loaded different DFlash settings than Calibration requested."
+                )
+            candidates.append(summary)
+            candidate_by_key[key] = summary
+            leading = self._best_tuning_candidate(candidates)
+            self._publish_shootout_tuning(
+                "omlx", "omlx-dflash2", candidates, leading["key"],
+                BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES,
+            )
+            return summary
+
+        anchor = copy.deepcopy(plan["anchor"])
+        for block_size in plan["blockCandidates"]:
+            settings = copy.deepcopy(anchor)
+            settings["blockSize"] = int(block_size)
+            measure_candidate(settings, "block")
+        best = self._best_tuning_candidate(candidates)
+        verifier_anchor = copy.deepcopy(best["settings"])
+        for verify_mode in _ordered_unique([
+            verifier_anchor["verifyMode"], *plan["verifyCandidates"],
+        ]):
+            settings = copy.deepcopy(verifier_anchor)
+            settings["verifyMode"] = str(verify_mode)
+            measure_candidate(settings, "verifier")
+        best = self._best_tuning_candidate(candidates)
+        quant_anchor = copy.deepcopy(best["settings"])
+        for draft_quant in _ordered_unique([
+            quant_anchor["draftQuant"], *plan["quantCandidates"],
+        ]):
+            settings = copy.deepcopy(quant_anchor)
+            settings["draftQuant"] = str(draft_quant)
+            measure_candidate(settings, "quantization")
+        if self.cancel_event.is_set():
+            raise LaunchCancelled("Engine Shootout cancelled before DFlash tuning was committed.")
+        best = self._best_tuning_candidate(candidates)
+        best["selected"] = True
+        self._publish_shootout_tuning(
+            "omlx", "omlx-dflash2", candidates, best["key"],
+            BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES,
+        )
+        final_results["dflash2"] = best["_result"]
+        record = self._build_record(job, final_results)
+        public_candidates = [
+            {
+                key: copy.deepcopy(value)
+                for key, value in candidate.items() if key != "_result"
+            }
+            for candidate in candidates
+        ]
+        record["kind"] = "omlx-dflash2-tuning"
+        record["tuningSweep"] = {
+            "version": BENCHMARK_DFLASH_TUNER_VERSION,
+            "strategy": "bounded-coordinate-search",
+            "searchedAxes": ["blockSize", "verifyMode", "draftQuant"],
+            "baselineModes": list(plan["baselineModes"]),
+            "complete": True, "resourceComparable": True,
+            "baselineResourceStatus": str(baseline_gate.get("status") or ""),
+            "candidateCount": len(public_candidates),
+            "maximumCandidates": BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES,
+            "selectedCandidateKey": best["key"],
+            "selectedSettings": copy.deepcopy(best["settings"]),
+            "candidates": public_candidates,
+        }
+        settings = best["settings"]
+        if record["winner"] == "dflash2":
+            record["recommendation"] = (
+                f"Use DFlash block {settings['blockSize']} with "
+                f"{settings['verifyMode']} verification and {settings['draftQuant']} "
+                f"draft precision: it was the fastest correctness-clearing load across "
+                f"{len(candidates)} bounded candidates."
+            )
+        elif record["winner"] == "mtp":
+            record["recommendation"] = (
+                f"Use native MTP: it beat AR and the best of {len(candidates)} "
+                "correctness-gated DFlash candidates."
+            )
+        else:
+            record["recommendation"] = (
+                f"Keep AR: none of {len(candidates)} bounded DFlash candidates"
+                + (" or native MTP" if "mtp" in plan["baselineModes"] else "")
+                + " cleared exact parity and the speed noise floor."
+            )
+        if not _local_benchmark_record_verified(capability, record, job["evidence"]):
+            raise RuntimeError("The completed DFlash Calibration sweep failed its evidence contract.")
+        return record, completed, resource_reference
+
     def _shootout_worker(
         self, shootout: dict[str, Any], models: list[dict[str, Any]],
     ) -> None:
         jobs = shootout["jobs"]
         total = sum(
             (2 + benchmark_measurement_count(job["suite"]))
-            * len(benchmark_job_measurement_routes(job))
+            * benchmark_job_maximum_route_count(job)
             for job in jobs
         )
         completed = 0
@@ -17518,6 +17911,33 @@ class BenchmarkManager:
             for job in jobs:
                 if self.cancel_event.is_set():
                     raise LaunchCancelled("Engine Shootout cancelled.")
+                tuning_plan = job.get("calibrationTuningPlan")
+                if isinstance(tuning_plan, dict):
+                    if job["backend"] == "lmstudio":
+                        record, completed, resource_reference = self._shootout_lmstudio_tuning(
+                            job, models, completed, total, resource_reference,
+                        )
+                    elif job["backend"] == "omlx":
+                        record, completed, resource_reference = self._shootout_dflash_tuning(
+                            job, models, completed, total, resource_reference,
+                        )
+                    else:
+                        raise RuntimeError("Calibration created an unsupported adaptive engine plan.")
+                    records.append(record)
+                    with self.lock:
+                        engine = self.state.get("engines", {}).get(job["backend"])
+                        if isinstance(engine, dict):
+                            engine["phase"] = "measured"
+                            engine["record"] = {
+                                "winner": record["winner"],
+                                "winnerLabel": self._mode_label(str(record["winner"])),
+                                "recommendation": record["recommendation"],
+                            }
+                    self._event(
+                        f"{BACKEND_LABELS[job['backend']]} tuning complete; its best route "
+                        "is staged until every engine finishes."
+                    )
+                    continue
                 results: dict[str, dict[str, Any]] = {}
                 mtplx_depth_candidates: list[dict[str, Any]] = []
                 for route in benchmark_job_measurement_routes(job):

@@ -6750,9 +6750,10 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(plan["ready"])
         self.assertEqual(plan["action"], "measure")
         self.assertEqual(plan["eligibleEngineCount"], 3)
-        self.assertEqual(plan["routeCount"], 8)
-        self.assertEqual(plan["modelReloadCount"], 8)
-        self.assertEqual(plan["measuredRequestCount"], 48)
+        self.assertEqual(plan["routeCount"], 17)
+        self.assertEqual(plan["modelReloadCount"], 17)
+        self.assertEqual(plan["measuredRequestCount"], 102)
+        self.assertTrue(plan["countsAreMaximum"])
         self.assertEqual(plan["request"]["reasoning"], "auto")
         self.assertEqual(plan["request"]["options"]["fan"], "smart")
         self.assertEqual(plan["calibrationCooling"], "smart")
@@ -6766,6 +6767,11 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("model-controlled reasoning", lmstudio["reason"])
         self.assertNotIn("no reasoning", lmstudio["reason"].lower())
         self.assertEqual(lmstudio["settingsLabel"], "Full GPU · 1 request lane")
+        self.assertEqual(lmstudio["measurementRouteCount"], 11)
+        self.assertEqual(
+            [item["label"] for item in lmstudio["modes"]], ["AR", "MTP tuned ≤10"],
+        )
+        self.assertIn("up to 10 bounded MTP", lmstudio["modeDetail"])
         mtplx = next(item for item in plan["engines"] if item["backend"] == "mtplx")
         self.assertEqual(mtplx["settingsLabel"], "Sustained profile · automatic cooling")
         self.assertEqual(mtplx["measurementRouteCount"], 4)
@@ -6869,6 +6875,68 @@ class LauncherTests(unittest.TestCase):
         mtplx_job = next(job for job in loud["jobs"] if job["backend"] == "mtplx")
         self.assertEqual(mtplx_job["options"]["fan"], "max")
         self.assertEqual(mtplx_job["evidence"]["engineSettings"]["fan"], "max")
+
+    def test_cross_engine_calibration_uses_bounded_tuners_and_exact_candidate_settings(self) -> None:
+        model = copy.deepcopy(self.models[0])
+        for backend, capability in model["backends"].items():
+            capability["benchmarkModelFingerprint"] = "adaptive-calibration-model"
+            capability["runtimeVersion"] = f"{backend} adaptive calibration runtime"
+
+        lm_job = launcher.validated_benchmark_request(
+            {
+                **self.payload("lmstudio", "chat", model),
+                "suite": "quick", "reasoning": "auto",
+            },
+            [model],
+        )
+        lm_job["shootoutId"] = "adaptive-calibration"
+        launcher.prepare_calibration_tuning_plan(lm_job)
+        self.assertEqual(
+            lm_job["calibrationTuningPlan"]["maximumModelLoads"], 11,
+        )
+        exact_mtp = {
+            "depth": 2, "mtpMinTokens": 1,
+            "mtpMinContinueProbability": 0.25,
+        }
+        lm_candidate = copy.deepcopy(lm_job)
+        lm_candidate["_benchmarkMtpSettings"] = exact_mtp
+        manager = launcher.BenchmarkManager(mock.Mock())
+        lm_payload = manager._mode_payload(lm_candidate, "mtp")
+        self.assertEqual(
+            {key: lm_payload["options"][key] for key in exact_mtp}, exact_mtp,
+        )
+
+        dflash = model["backends"]["omlx"]
+        dflash.update({
+            "dflash": True, "dflashVersion": "2",
+            "dflashReason": "Verified DFlash pair",
+            "dflashDraftPath": "/test/Qwen3.8-27B-DFlash2",
+            "dflashPairFingerprint": "adaptive-calibration-pair",
+            "dflashRuntimeVersion": dflash["runtimeVersion"],
+            "dflashBlockSize": 8, "dflashMaxBlockSize": 8,
+            "dflashReadiness": {"runtimeRecommended": True},
+        })
+        omlx_job = launcher.validated_benchmark_request(
+            {
+                **self.payload("omlx", "chat", model),
+                "suite": "quick", "reasoning": "auto",
+            },
+            [model],
+        )
+        omlx_job["shootoutId"] = "adaptive-calibration"
+        launcher.prepare_calibration_tuning_plan(omlx_job)
+        self.assertLessEqual(
+            omlx_job["calibrationTuningPlan"]["maximumModelLoads"], 12,
+        )
+        exact_dflash = {
+            "blockSize": 6, "verifyMode": "dflash", "draftQuant": "q4",
+        }
+        omlx_candidate = copy.deepcopy(omlx_job)
+        omlx_candidate["_benchmarkDflashSettings"] = exact_dflash
+        omlx_payload = manager._mode_payload(omlx_candidate, "dflash2")
+        self.assertEqual(omlx_payload["options"]["depth"], 6)
+        self.assertEqual(omlx_payload["options"]["dflashVerify"], "dflash")
+        self.assertEqual(omlx_payload["options"]["dflashDraftQuant"], "q4")
 
     def test_calibration_plan_uses_existing_trusted_evidence_or_blocks_incompatible_kv(self) -> None:
         model = json.loads(json.dumps(self.models[0]))
@@ -8343,6 +8411,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("calibration-engine-settings", styles)
         self.assertIn("calibration-result-settings", styles)
         self.assertIn("engine.mtpDepthSweep", script)
+        self.assertIn("engine.tuningSweep", script)
         self.assertIn("engine.routeSettingsLabel", script)
         self.assertIn('Routes: ${routePreview}.', script)
         self.assertIn("Use saved result", script)

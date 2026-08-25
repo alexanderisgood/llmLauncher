@@ -1157,6 +1157,8 @@ def command_version(path: str | None) -> str:
             [path, "--version"], text=True, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, timeout=4, check=False,
         )
+        if result.returncode != 0:
+            return "Installed (version unavailable)"
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         diagnostics = re.compile(r"^(?:warning|warn|npm warn|note|info)\b", re.IGNORECASE)
         candidates = [line for line in lines if not diagnostics.match(line)] or lines
@@ -1598,16 +1600,29 @@ def managed_runtime_verification(binary: str | None) -> dict[str, Any]:
     manifest_hash = str(manifest.get("artifactSha256") or "").lower()
     direct_hash = _runtime_update_direct_hash(target, str(release["version"]))
     expected = str(release["sha256"])
-    verified = secrets.compare_digest(manifest_hash, expected) or secrets.compare_digest(direct_hash, expected)
+    provenance_matched = (
+        secrets.compare_digest(manifest_hash, expected)
+        or secrets.compare_digest(direct_hash, expected)
+    )
+    final_path_works = _exact_omlx_version(
+        command_version(str(resolved)), str(release["version"]),
+    )
+    verified = provenance_matched and final_path_works
     return {
         "verified": verified,
-        "state": "verified" if verified else "unverified-provenance",
+        "state": (
+            "verified" if verified else
+            "final-path-failed" if provenance_matched else
+            "unverified-provenance"
+        ),
         "channel": release["channel"], "version": release["version"],
         "artifactSha256": expected if verified else None,
         "manifest": bool(manifest),
         "detail": (
             "Official release-wheel checksum provenance verified."
             if verified else
+            "Official checksum provenance exists, but the final installed command failed its exact version check."
+            if provenance_matched else
             "The executable works, but its source checksum cannot be matched to the audited official wheel."
         ),
     }
@@ -1740,7 +1755,7 @@ def build_runtime_update_plan(channel: Any) -> dict[str, Any]:
         "steps": (
             ["Revalidate installed checksum provenance", "Run dependency and version smoke tests", "Write an owner-only verification manifest"]
             if action == "verify" else
-            ["Resume the exact official wheel download", "Verify its published SHA-256 and dependency metadata", "Create a new isolated environment", "Stage binary wheels and four full-commit source builds", "Hash the complete private wheelhouse", "Install that wheelhouse offline", "Run dependency, version, and native-kernel smoke tests", "Atomically promote the verified copy without selecting it"]
+            ["Resume the exact official wheel download", "Verify its published SHA-256 and dependency metadata", "Create a new isolated environment", "Stage binary wheels and four full-commit source builds", "Hash the complete private wheelhouse", "Install that wheelhouse offline", "Run preliminary dependency, version, and native-kernel smoke tests", "Rebase generated launchers and atomically promote the isolated copy", "Repeat every smoke test from the final path before recording trust"]
         ),
         "rollback": {
             "automaticSelection": False,
@@ -19610,6 +19625,85 @@ class RuntimeUpdateManager:
         except OSError:
             pass
 
+    @staticmethod
+    def _rebase_staged_environment(staging: Path, target: Path) -> list[str]:
+        """Rewrite generated venv launchers so they survive the atomic directory move."""
+        try:
+            root = MANAGED_RUNTIMES_DIR.expanduser().resolve(strict=False)
+            staging_parent = staging.parent.resolve(strict=False)
+            target_parent = target.parent.resolve(strict=False)
+        except OSError as error:
+            raise RuntimeError("The isolated runtime paths could not be revalidated before promotion.") from error
+        if (
+            staging_parent != root or target_parent != root
+            or not staging.name.startswith(".omlx-") or ".installing-" not in staging.name
+            or not target.name.startswith("omlx-")
+        ):
+            raise RuntimeError("The isolated runtime paths changed before promotion.")
+        bin_dir = staging / "bin"
+        if bin_dir.is_symlink() or not bin_dir.is_dir():
+            raise RuntimeError("The isolated runtime command directory changed before promotion.")
+        source = str(staging).encode("utf-8")
+        destination = str(target).encode("utf-8")
+        rewritten: list[str] = []
+        try:
+            entries = list(bin_dir.iterdir())
+        except OSError as error:
+            raise RuntimeError("The isolated runtime commands could not be inspected before promotion.") from error
+        for path in entries:
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                if path.stat().st_size > 2 * 1024 * 1024:
+                    continue
+                contents = path.read_bytes()
+            except OSError as error:
+                raise RuntimeError("An isolated runtime command could not be inspected before promotion.") from error
+            if source not in contents:
+                continue
+            if b"\0" in contents:
+                raise RuntimeError("A generated runtime command contains an unsafe embedded staging path.")
+            try:
+                path.write_bytes(contents.replace(source, destination))
+            except OSError as error:
+                raise RuntimeError("A generated runtime command could not be prepared for its final path.") from error
+            rewritten.append(path.name)
+        required = {"omlx", "pip"}
+        if not required.issubset(rewritten):
+            raise RuntimeError("The isolated environment did not expose every relocatable runtime command.")
+        for path in entries:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
+                continue
+            if source in path.read_bytes():
+                raise RuntimeError("A generated runtime command still points at the private staging directory.")
+        return sorted(rewritten)
+
+    @staticmethod
+    def _safe_cleanup_failed_promotion(target: Path, version: str) -> None:
+        """Remove only the exact unselected target created by this failed worker."""
+        try:
+            root = MANAGED_RUNTIMES_DIR.expanduser().resolve(strict=False)
+            parent = target.parent.resolve(strict=False)
+            selected = BINARIES.get("omlx")
+            selected_target = (
+                Path(selected).expanduser().resolve(strict=False).parent.parent
+                if selected else None
+            )
+        except OSError:
+            return
+        if (
+            parent != root or target.name != f"omlx-{version}"
+            or selected_target == target.resolve(strict=False)
+        ):
+            return
+        try:
+            if target.is_symlink():
+                target.unlink()
+            elif target.exists():
+                shutil.rmtree(target)
+        except OSError:
+            pass
+
     def _download(self, plan: dict[str, Any], log_path: Path) -> Path:
         release = plan["release"]
         downloads = RUNTIME_UPDATE_DIR / "downloads"
@@ -19761,7 +19855,7 @@ class RuntimeUpdateManager:
             "dependencyArtifacts": copy.deepcopy(dependency_artifacts),
             "dependencies": dependencies,
             "smoke": copy.deepcopy(smoke),
-            "selectionChanged": False,
+            "selectionChanged": False, "finalPathVerified": True,
         }
 
     def _worker(self, plan: dict[str, Any]) -> None:
@@ -19774,6 +19868,7 @@ class RuntimeUpdateManager:
         selected_before = BINARIES.get("omlx")
         source_audit: dict[str, Any] = {}
         dependency_artifacts: list[dict[str, Any]] = []
+        promoted_target = False
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
             root = MANAGED_RUNTIMES_DIR.expanduser()
@@ -19846,24 +19941,34 @@ class RuntimeUpdateManager:
                 with self.lock:
                     self.state["phase"] = "smoke-testing"
                     self.state["progress"] = 0.84
-                self._event("Install finished in staging. Running version, dependency, command, and native-kernel checks…")
-                smoke = self._smoke_runtime(staging, release)
-                dependencies = self._dependency_inventory(staging)
-                atomic_json(staging / RUNTIME_UPDATE_MANIFEST, self._manifest(
-                    plan, smoke, dependencies,
-                    source_audit=source_audit, dependency_artifacts=dependency_artifacts,
-                ))
+                self._event("Install finished in staging. Running preliminary version, dependency, command, and native-kernel checks…")
+                self._smoke_runtime(staging, release)
                 if wheelhouse.is_symlink() or wheelhouse.parent != staging:
                     raise RuntimeError("The private wheelhouse changed before final cleanup.")
                 shutil.rmtree(wheelhouse)
                 if target.exists() or target.is_symlink():
                     raise RuntimeError("The final destination appeared during smoke testing; it was not overwritten.")
+                rebased_commands = self._rebase_staged_environment(staging, target)
                 with self.lock:
                     self.state["phase"] = "promoting"
-                    self.state["progress"] = 0.96
-                self._event("Every smoke test passed. Atomically promoting the isolated copy without selecting it…")
+                    self.state["progress"] = 0.94
+                self._event("Preliminary checks passed. Atomically promoting the rebased copy for final-path verification…")
                 os.replace(staging, target)
                 staging = None
+                promoted_target = True
+                with self.lock:
+                    self.state["phase"] = "smoke-testing"
+                    self.state["progress"] = 0.97
+                self._event("Running every smoke test again from the final installed path before recording trust…")
+                smoke = self._smoke_runtime(target, release)
+                dependencies = self._dependency_inventory(target)
+                manifest = self._manifest(
+                    plan, smoke, dependencies,
+                    source_audit=source_audit, dependency_artifacts=dependency_artifacts,
+                )
+                manifest["rebasedCommands"] = rebased_commands
+                atomic_json(target / RUNTIME_UPDATE_MANIFEST, manifest)
+                promoted_target = False
                 action_label = "installed"
 
             _RUNTIME_KERNEL_CACHE.clear()
@@ -19910,6 +20015,8 @@ class RuntimeUpdateManager:
         finally:
             if staging is not None:
                 self._safe_cleanup_staging(staging)
+            if promoted_target:
+                self._safe_cleanup_failed_promotion(target, str(release["version"]))
             with self.lock:
                 process = self.process
             if process is not None and process.poll() is None:

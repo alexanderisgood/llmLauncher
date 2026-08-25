@@ -1531,9 +1531,23 @@ class LauncherTests(unittest.TestCase):
             )
 
     def test_command_version_ignores_cli_warning_preambles(self) -> None:
-        completed = mock.Mock(stdout="WARNING: experimental local provider\ncodex-cli 0.149.0-alpha.4.1\n")
+        completed = mock.Mock(
+            returncode=0,
+            stdout="WARNING: experimental local provider\ncodex-cli 0.149.0-alpha.4.1\n",
+        )
         with mock.patch.object(launcher.subprocess, "run", return_value=completed):
             self.assertEqual(launcher.command_version("/tmp/codex"), "codex-cli 0.149.0-alpha.4.1")
+
+    def test_command_version_rejects_version_text_from_a_failed_launcher(self) -> None:
+        completed = mock.Mock(
+            returncode=127,
+            stdout="/tmp/omlx-0.6.3rc3/bin/omlx: missing interpreter\n",
+        )
+        with mock.patch.object(launcher.subprocess, "run", return_value=completed):
+            self.assertEqual(
+                launcher.command_version("/tmp/omlx-0.6.3rc3/bin/omlx"),
+                "Installed (version unavailable)",
+            )
 
     def test_model_library_reports_every_engine_surface_and_mode_without_mutation(self) -> None:
         models = copy.deepcopy(self.models)
@@ -5900,6 +5914,42 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn("GH_TOKEN", environment)
         self.assertNotIn("GITHUB_TOKEN", environment)
 
+    def test_runtime_update_rebases_generated_launchers_before_promotion(self) -> None:
+        managed_root = Path(self.temp.name) / "runtimes"
+        staging = managed_root / ".omlx-0.6.3rc3.installing-fixture"
+        target = managed_root / "omlx-0.6.3rc3"
+        bin_dir = staging / "bin"
+        bin_dir.mkdir(parents=True)
+        python = bin_dir / "python"
+        python.write_text(
+            "#!/bin/sh\nif [ \"$2\" = \"--version\" ]; then echo 0.6.3rc3; fi\n",
+            encoding="utf-8",
+        )
+        python.chmod(0o700)
+        for name in ("omlx", "pip"):
+            command = bin_dir / name
+            command.write_text(
+                f'#!/bin/sh\nexec "{staging}/bin/python" "$0" "$@"\n',
+                encoding="utf-8",
+            )
+            command.chmod(0o700)
+        manager = launcher.RuntimeUpdateManager(
+            launcher.RunManager(), launcher.BenchmarkManager(launcher.RunManager()),
+        )
+        with mock.patch.object(launcher, "MANAGED_RUNTIMES_DIR", managed_root):
+            rewritten = manager._rebase_staged_environment(staging, target)
+        self.assertEqual(rewritten, ["omlx", "pip"])
+        os.replace(staging, target)
+        completed = subprocess.run(
+            [str(target / "bin" / "omlx"), "--version"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=4, check=False,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout.strip(), "0.6.3rc3")
+        self.assertNotIn(str(staging), (target / "bin" / "omlx").read_text(encoding="utf-8"))
+        self.assertIn(str(target), (target / "bin" / "omlx").read_text(encoding="utf-8"))
+
     def test_runtime_update_adopts_only_matching_official_wheel_provenance(self) -> None:
         managed_root = Path(self.temp.name) / "runtimes"
         target = managed_root / "omlx-0.6.3rc3"
@@ -5932,10 +5982,19 @@ class LauncherTests(unittest.TestCase):
                 "archive_info": {"hashes": {"sha256": "0" * 64}},
             }), encoding="utf-8")
             rejected = launcher.managed_runtime_verification(str(binary))
+        direct.write_text(json.dumps({
+            "archive_info": {"hashes": {"sha256": expected}},
+        }), encoding="utf-8")
+        with mock.patch.object(launcher, "MANAGED_RUNTIMES_DIR", managed_root), mock.patch.object(
+            launcher, "command_version", return_value="Installed (version unavailable)",
+        ):
+            final_path_failed = launcher.managed_runtime_verification(str(binary))
         self.assertTrue(verification["verified"])
         self.assertEqual(plan["action"], "verify")
         self.assertTrue(plan["canStart"])
         self.assertFalse(rejected["verified"])
+        self.assertFalse(final_path_failed["verified"])
+        self.assertEqual(final_path_failed["state"], "final-path-failed")
 
     def test_runtime_verification_writes_manifest_without_switching_selection(self) -> None:
         managed_root = Path(self.temp.name) / "runtimes"
@@ -5980,6 +6039,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(manifest["sourceAudit"]["mode"], "adopted-official-provenance")
         self.assertEqual(manifest["dependencyArtifacts"], [])
         self.assertFalse(manifest["selectionChanged"])
+        self.assertTrue(manifest["finalPathVerified"])
 
     def test_runtime_promotion_plan_binds_two_exact_copies_without_side_effects(self) -> None:
         model = copy.deepcopy(self.models[0])

@@ -315,6 +315,71 @@ class LauncherTests(unittest.TestCase):
             self.port_patch.stop()
         self.temp.cleanup()
 
+    def write_mference_bundle(
+        self, family: str = "qwen36", source_revision: str = "a" * 40,
+    ) -> Path:
+        signature = launcher.MFERENCE_STREAMING_ARCH_SIGNATURES[family]
+        bundle = Path(self.temp.name) / f"{family}.gturbo"
+        experts = bundle / "packed_experts"
+        experts.mkdir(parents=True)
+        payloads = {
+            "model_weights.bin": b"weights",
+            "packed_experts/layout.json": b"{}",
+        }
+        for layer in range(signature["firstExpertLayer"], signature["numLayers"]):
+            payloads[f"packed_experts/layer_{layer:02d}.bin"] = bytes([layer % 251 + 1])
+        files = {}
+        for relative, data in payloads.items():
+            target = bundle / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            files[relative] = {
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        manifest = {
+            "magic": "GTURBO",
+            "versionMajor": 1,
+            "versionMinor": 0,
+            "flags": {"streamingPresent": True},
+            "modelID": f"example/{family}-model",
+            "sourceSnapshotHash": "sha256:" + "b" * 64,
+            "arch": {
+                "family": family,
+                "hiddenSize": signature["hiddenSize"],
+                "vocabSize": signature["vocabSize"],
+                "numLayers": signature["numLayers"],
+                "numExperts": signature["numExperts"],
+                "topKExperts": signature["topKExperts"],
+                "fullAttentionLayerMask": [0] * signature["numLayers"],
+            },
+            "quant": {"routedExpert": {"weightBits": 4}},
+            "files": files,
+            "expertsPerLayer": signature["numExperts"],
+            "numLayers": signature["numLayers"],
+            "expertStride": os.sysconf("SC_PAGE_SIZE"),
+        }
+        manifest_data = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        (bundle / "manifest.json").write_bytes(manifest_data)
+        manifest_hash = hashlib.sha256(manifest_data).hexdigest()
+        receipt_files = {**files, "manifest.json": {
+            "size": len(manifest_data), "sha256": manifest_hash,
+        }}
+        receipt = {
+            "schemaVersion": 1,
+            "manifestSha256": manifest_hash,
+            "modelDirectoryPath": str(bundle.resolve()),
+            "sourceRepoID": f"example/{family}-model",
+            "sourceRevision": source_revision,
+            "verificationTimestamp": "2026-08-26T00:00:00Z",
+            "toolVersion": "MferenceRepack verify-install",
+            "files": receipt_files,
+        }
+        (bundle / "verified-install.json").write_text(
+            json.dumps(receipt, sort_keys=True), encoding="utf-8",
+        )
+        return bundle
+
     def test_controller_source_freshness_blocks_new_work_but_not_stop(self) -> None:
         source = Path(self.temp.name) / "launcher-copy.py"
         source.write_text("old", encoding="utf-8")
@@ -359,6 +424,95 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("not yet", swift_reason)
         self.assertIn("not passed", mference_reason)
 
+    def test_swiftlm_accepts_upstream_qwen3_next_family_without_flash_next(self) -> None:
+        model_path = Path(self.temp.name) / "Qwen3-Next-80B-A3B-4bit"
+        model_path.mkdir()
+        config = {
+            "model_type": "qwen3_next_moe",
+            "num_experts": 512,
+            "num_experts_per_tok": 8,
+        }
+        profile = launcher.ssd_streaming_model_profile(
+            model_path, config, 120 << 30, 64 << 30,
+        )
+
+        ready, reason = launcher.swiftlm_model_supported(model_path, config, profile)
+
+        self.assertTrue(ready)
+        self.assertFalse(profile["qwen38FlashNext"])
+        self.assertIn("native SSD", reason)
+
+    def test_mference_bundle_requires_bound_receipt_and_pinned_payload_layout(self) -> None:
+        bundle = self.write_mference_bundle()
+
+        ready, reason, total = launcher.mference_bundle_validation(bundle)
+
+        self.assertTrue(ready)
+        self.assertGreater(total, 0)
+        self.assertIn("qwen36", reason)
+        profile = launcher.ssd_streaming_model_profile(bundle, {}, total, 1)
+        supported, support_reason = launcher.mference_model_supported(bundle, profile)
+        self.assertTrue(supported)
+        self.assertEqual(support_reason, reason)
+
+        receipt_path = bundle / "verified-install.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["manifestSha256"] = "0" * 64
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        ready, reason, _ = launcher.mference_bundle_validation(bundle)
+        self.assertFalse(ready)
+        self.assertIn("does not match manifest", reason)
+
+    def test_mference_bundle_rejects_fabricated_metadata_and_changed_payload(self) -> None:
+        fake = Path(self.temp.name) / "fake.gturbo"
+        (fake / "packed_experts").mkdir(parents=True)
+        for name in ("manifest.json", "verified-install.json"):
+            (fake / name).write_text('{"present":true}', encoding="utf-8")
+        (fake / "model_weights.bin").write_bytes(b"x")
+        (fake / "packed_experts" / "layout.json").write_bytes(b"x")
+        (fake / "packed_experts" / "layer_00.bin").write_bytes(b"x")
+        self.assertFalse(launcher.mference_bundle_validation(fake)[0])
+
+        bundle = self.write_mference_bundle("gemma4")
+        (bundle / "packed_experts" / "layer_00.bin").write_bytes(b"changed")
+        ready, reason, _ = launcher.mference_bundle_validation(bundle)
+        self.assertFalse(ready)
+        self.assertIn("size does not match", reason)
+
+    def test_mference_builder_uses_its_fixed_context_and_served_model_id(self) -> None:
+        bundle = self.write_mference_bundle()
+        config = {
+            **launcher.read_json(bundle / "tokenizer" / "config.json"),
+            **launcher.read_json(bundle / "manifest.json"),
+        }
+        fingerprint = launcher.model_artifact_fingerprint(bundle, config)
+        capability = {
+            "runnable": True,
+            "ssdStreaming": True,
+            "modelPath": str(bundle),
+            "artifactFingerprint": fingerprint,
+            "promptCacheMode": "on",
+            "queueLimit": 4,
+        }
+        model = {
+            "id": "mference-test", "name": "Mference test", "path": str(bundle),
+            "backends": {"mference": capability},
+        }
+        plan = launcher.LaunchPlan(
+            "mference-build", "mference", "chat", model, self.temp.name,
+            128_000, 4_096, "auto", 18_123, "custom", {},
+            runtime_binary="/usr/bin/true",
+        )
+
+        launcher.build_mference(plan, capability)
+
+        served = plan.model["servedId"]
+        self.assertEqual(plan.engine_argv[plan.engine_argv.index("--model-id") + 1], served)
+        self.assertEqual(plan.engine_argv[plan.engine_argv.index("--max-context") + 1], "128000")
+        plan.context = 131_072
+        with self.assertRaisesRegex(ValueError, "fixed context windows"):
+            launcher.build_mference(plan, capability)
+
     def test_swiftlm_profile_preserves_native_expert_routing(self) -> None:
         capability = {"nativeExpertTopK": 8, "prefillSize": 512}
 
@@ -390,9 +544,10 @@ class LauncherTests(unittest.TestCase):
         mlx_path.mkdir()
         bundle_path = Path(self.temp.name) / "oversized-moe.gturbo"
         bundle_path.mkdir()
-        (bundle_path / "manifest.json").write_text(json.dumps({
-            "source_model_id": "example/oversized-moe",
-            "source_revision": revision,
+        (bundle_path / "manifest.json").write_text("{}", encoding="utf-8")
+        (bundle_path / "verified-install.json").write_text(json.dumps({
+            "sourceRepoID": "example/oversized-moe",
+            "sourceRevision": revision,
         }), encoding="utf-8")
 
         mlx_contract = launcher._ssd_source_contract(mlx_path, source_config)
@@ -408,6 +563,8 @@ class LauncherTests(unittest.TestCase):
                 Path(self.temp.name) / "same-looking-name", {"_name_or_path": "example/oversized-moe"},
             )["verifiedForCrossFormatComparison"]
         )
+        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        self.assertIn('return backend ? backendName(backend) : "Unknown engine";', script)
         self.assertNotIn("/api/benchmark/stop", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
         self.assertNotIn("/api/stop", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
 
@@ -5706,6 +5863,7 @@ for line in sys.stdin:
             "benchmarkModelFingerprint": "mference-artifact-fingerprint",
             "runtimeVersion": "Mference test runtime",
             "promptCacheMode": "on", "queueLimit": 4,
+            "contextWindows": list(launcher.MFERENCE_CONTEXT_WINDOWS),
             "preferredAcceleration": "off", "fallbackAcceleration": "off",
         }
         payload = self.payload("swiftlm", "pi", model)
@@ -5717,6 +5875,15 @@ for line in sys.stdin:
             launcher.BINARIES,
             {"swiftlm": "/usr/bin/true", "mference": "/usr/bin/true"},
         ):
+            calibration = launcher.calibration_plan(payload, [model])
+            self.assertEqual(calibration["request"]["context"], 128_000)
+            self.assertEqual(calibration["contextAdjustment"]["requested"], 131_072)
+            self.assertEqual(calibration["contextAdjustment"]["measured"], 128_000)
+            shootout = launcher.validated_engine_shootout_request(payload, [model])
+            self.assertEqual({job["context"] for job in shootout["jobs"]}, {128_000})
+            self.assertEqual(shootout["contextAdjustment"]["measured"], 128_000)
+
+            payload["context"] = 128_000
             swift_job = launcher.validated_benchmark_request(
                 payload, [model], allow_baseline_only=True,
             )

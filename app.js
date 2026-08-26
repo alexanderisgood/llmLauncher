@@ -922,6 +922,10 @@ function limitError() {
   const output = Number($("outputInput").value);
   if (!Number.isInteger(context) || context < 1024) return "Context must be at least 1,024 tokens.";
   if (model?.nativeContext && context > model.nativeContext) return `This model advertises at most ${formatNumber(model.nativeContext)} context tokens. The launcher will not silently lower your value.`;
+  const runtimeWindows = model?.backends?.[state.backend]?.contextWindows;
+  if (Array.isArray(runtimeWindows) && !runtimeWindows.includes(context)) {
+    return `${backendName(state.backend)} supports these exact context windows: ${runtimeWindows.map(formatNumber).join(", ")}.`;
+  }
   if (!Number.isInteger(output) || output < 256) return "Maximum response must be at least 256 tokens.";
   if (output >= context) return "Maximum response must be smaller than context.";
   if (context - output < 1024) return "Leave at least 1,024 context tokens for instructions and history.";
@@ -1627,6 +1631,15 @@ function modelChanged() {
     : "The runtime reads native routing from the checkpoint; no approximation is applied.";
   if (model.nativeContext) $("contextInput").max = model.nativeContext;
   else $("contextInput").removeAttribute("max");
+  const runtimeWindows = Array.isArray(cap.contextWindows) ? cap.contextWindows.map(Number).filter(Number.isInteger) : [];
+  if (runtimeWindows.length) {
+    const currentContext = Number($("contextInput").value);
+    if (!runtimeWindows.includes(currentContext)) {
+      const compatible = runtimeWindows.filter(value => value <= currentContext).at(-1) || runtimeWindows[0];
+      $("contextInput").value = String(compatible);
+    }
+    $("contextInput").title = `${backendName(state.backend)} context choices: ${runtimeWindows.map(formatNumber).join(", ")}`;
+  } else $("contextInput").removeAttribute("title");
   const acceleration = $("accelerationSelect");
   [...acceleration.options].forEach(option => { option.disabled = false; });
   const mtp = acceleration.querySelector('option[value="mtp"]');
@@ -6924,8 +6937,12 @@ function performanceReceiptView(receipt) {
   const eligible = Array.isArray(receipt?.eligibleBackends)
     ? receipt.eligibleBackends.filter(uiEngineVisible) : [];
   const reasoningNormalized = receipt?.reasoningContract?.normalized === true;
+  const contextNormalized = Number.isInteger(receipt?.contextAdjustment?.measured);
   const reasoningLabel = reasoningNormalized
     ? `${receipt.reasoningContract.label || "Model default"} reasoning`
+    : "";
+  const contextLabel = contextNormalized
+    ? `${formatNumber(receipt.contextAdjustment.measured)} common SSD context`
     : "";
   const age = performanceReceiptAge(receipt);
   const firstOutput = finiteMetric(receipt?.firstTokenSeconds);
@@ -6937,14 +6954,14 @@ function performanceReceiptView(receipt) {
   const measuredTitle = [receipt?.backendLabel, receipt?.modeLabel].filter(Boolean).join(" · ");
   const fullSummary = [receipt?.summary, measured].filter(Boolean).join(" ");
   if (["trusted-engine", "trusted-route"].includes(receipt?.state)) {
-    if (receipt.fresh && reasoningNormalized) return {
+    if (receipt.fresh && (reasoningNormalized || contextNormalized)) return {
       state:"trusted", icon:"◆",
       title:focused
         ? (receipt.state === "trusted-engine" ? `Best measured · ${receipt.backendLabel || "engine"}` : `Best setting · ${receipt.modeLabel || "verified route"}`)
         : `Measured · ${measuredTitle || "verified route"}`,
       detail:focused
-        ? [receipt.state === "trusted-engine" ? receipt.modeLabel : receipt.backendLabel, receipt.workloadDisplay, reasoningLabel, age].filter(Boolean).join(" · ")
-        : [measured, reasoningLabel, "review before applying"].filter(Boolean).join(" · "),
+        ? [receipt.state === "trusted-engine" ? receipt.modeLabel : receipt.backendLabel, receipt.workloadDisplay, reasoningLabel, contextLabel, age].filter(Boolean).join(" · ")
+        : [measured, reasoningLabel, contextLabel, "review before applying"].filter(Boolean).join(" · "),
       action:"Review", actionId:"review-normalized", titleText:fullSummary,
     };
     if (receipt.fresh) return {
@@ -7590,9 +7607,10 @@ function renderCalibrationPlan() {
   const normalizedReasoning = reasoningContract.normalized === true;
   const kv = request.options?.kv && request.options.kv !== "off" ? String(request.options.kv).toUpperCase() : "Full precision";
   calibrationStateBadge("calibrationContractState", "Locked", "ready");
-  $("calibrationContract").textContent = normalizedReasoning
+  const contextAdjustment = plan.contextAdjustment?.reason ? ` ${plan.contextAdjustment.reason}` : "";
+  $("calibrationContract").textContent = (normalizedReasoning
     ? `${plan.model.name} · ${plan.clientLabel} · ${formatNumber(request.context)} context · ${formatNumber(request.output)} max response. ${reasoningContract.detail} Your launch setting changes only if you apply the result.`
-    : `${plan.model.name} · ${plan.clientLabel} · ${formatNumber(request.context)} context · ${formatNumber(request.output)} max response. The model, quantisation, reasoning, sampling, prompt contract, and KV precision stay fixed.`;
+    : `${plan.model.name} · ${plan.clientLabel} · ${formatNumber(request.context)} context · ${formatNumber(request.output)} max response. The model, quantisation, reasoning, sampling, prompt contract, and KV precision stay fixed.`) + contextAdjustment;
   $("calibrationPlanFacts").innerHTML = [
     ["Workload", plan.suite.label], ["Goal", plan.preferenceLabel],
     ...(plan.ssdStreaming ? [["Route type", "SSD-streamed MoE"]] : []),
@@ -7916,8 +7934,10 @@ async function applyCalibrationResult(saveProfile = false) {
   const reasoningContract = plan.reasoningContract || {};
   const previousReasoning = $("reasoningSelect").value;
   const previousCooling = $("fanSelect").value;
+  const previousContext = $("contextInput").value;
   let reasoningChanged = false;
   let coolingChanged = false;
+  let contextChanged = false;
   let routeApplied = false;
   const name = $("calibrationProfileName").value.trim();
   if (saveProfile && !name) {
@@ -7928,6 +7948,12 @@ async function applyCalibrationResult(saveProfile = false) {
   renderCalibration();
   $("calibrationStatus").textContent = "Rechecking and applying the measured engine decision to the visible controls…";
   try {
+    const measuredContext = Number(plan.request?.context);
+    if (Number.isInteger(measuredContext) && measuredContext > 0 && String(measuredContext) !== previousContext) {
+      $("contextInput").value = String(measuredContext);
+      contextChanged = true;
+      refreshLaunchability();
+    }
     if (reasoningContract.normalized === true) {
       const measured = String(reasoningContract.measured || "auto");
       const option = [...$("reasoningSelect").options].find(item => item.value === measured);
@@ -7953,11 +7979,12 @@ async function applyCalibrationResult(saveProfile = false) {
         }),
       });
       useProfileInventory(data);
-      showNotice(`Applied ${state.optimalLabel || "the calibrated route"}${reasoningChanged ? " at model-default reasoning" : ""} and saved “${name}” as an auto-measured Quick Launch profile.`);
+      showNotice(`Applied ${state.optimalLabel || "the calibrated route"}${reasoningChanged ? " at model-default reasoning" : ""}${contextChanged ? ` at ${formatNumber(measuredContext)} context` : ""} and saved “${name}” as an auto-measured Quick Launch profile.`);
     } else {
-      showNotice(reasoningChanged
-        ? `Applied ${state.optimalLabel || "the calibrated route"}. Reasoning changed from ${previousReasoning} to model default so the measured three-engine result remains like-for-like; cooling is ${plan.calibrationCoolingLabel || "Automatic"}.`
-        : `Applied ${state.optimalLabel || "the calibrated route"} with ${plan.calibrationCoolingLabel || "Automatic"} cooling. Model, limits, reasoning, sampling, and KV precision were preserved.`);
+      const contextNote = contextChanged ? ` Context is now ${formatNumber(measuredContext)}, the common fixed SSD window shown in Calibration.` : "";
+      showNotice((reasoningChanged
+        ? `Applied ${state.optimalLabel || "the calibrated route"}. Reasoning changed from ${previousReasoning} to model default so the measured engine result remains like-for-like; cooling is ${plan.calibrationCoolingLabel || "Automatic"}.`
+        : `Applied ${state.optimalLabel || "the calibrated route"} with ${plan.calibrationCoolingLabel || "Automatic"} cooling. Model, response limit, reasoning, sampling, and KV precision were preserved.`) + contextNote);
     }
     if ($("calibrationDialog").open) $("calibrationDialog").close();
   } catch (error) {
@@ -7967,6 +7994,10 @@ async function applyCalibrationResult(saveProfile = false) {
     }
     if (coolingChanged && !routeApplied) {
       $("fanSelect").value = previousCooling;
+      refreshLaunchability();
+    }
+    if (contextChanged && !routeApplied) {
+      $("contextInput").value = previousContext;
       refreshLaunchability();
     }
     $("calibrationStatus").textContent = error.message;
@@ -9062,7 +9093,7 @@ function profileRunBlocked() {
 }
 
 function profileBackendLabel(backend) {
-  return ({omlx:"oMLX", lmstudio:"LM Studio", mtplx:"MTPLX", freetoken:"FreeToken"})[backend] || backend || "Unknown engine";
+  return backend ? backendName(backend) : "Unknown engine";
 }
 
 function requestUsesExperimentalFreeToken(request = {}) {

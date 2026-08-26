@@ -57,9 +57,9 @@ Nothing is uploaded by the launcher. Model downloads happen only after a separat
 
 ## Oversized MoEs on SSD
 
-The SSD lane is deliberately separate from the three normal runtime cards. SwiftLM streams experts from an MLX checkpoint; Mference runs a verified model-specific `.gturbo` repack. The launcher preserves the model's native expert top-k, disables speculative decoding on this I/O-bound path, and exposes only controls that each runtime can enforce.
+The SSD lane is deliberately separate from the three normal runtime cards. SwiftLM streams experts from a supported MLX checkpoint, including its released Qwen3-Next family; Mference runs a model-specific `.gturbo` repack only after its bounded manifest and install receipt agree with Mference's pinned architecture and complete payload layout. The launcher preserves the model's native expert top-k, disables speculative decoding on this I/O-bound path, and exposes only controls that each runtime can enforce.
 
-When both routes are installed, Calibration can compare them only after their artifacts prove the same immutable source revision. It measures first-turn and warm-prefix generation TPS, time to first output, memory pressure, and thermal state in fresh processes. It observes the natural macOS file cache instead of claiming a privileged cold-cache purge.
+When both routes are installed, Calibration can compare them only after their artifacts prove the same immutable source revision. Mference exposes fixed context windows up to 128,000 tokens, so an SSD comparison visibly locks and applies the largest common supported window rather than silently measuring a different contract. It measures first-turn and warm-prefix generation TPS, time to first output, memory pressure, and thermal state in fresh processes. It observes the natural macOS file cache instead of claiming a privileged cold-cache purge.
 
 [Qwen3.8-Flash-Next](https://github.com/QwenLM/Qwen3.8-Flash-Next) is detected as an SSD-streaming candidate, but currently remains blocked because neither upstream runtime lists that new architecture as supported. Detection is not treated as proof that the weights can be executed.
 

@@ -296,9 +296,33 @@ SSD_STREAMING_CONTRACT_VERSION = 1
 SSD_STREAMING_MIN_WEIGHT_RATIO = 0.85
 SSD_STREAMING_PREFILL_SIZES = (128, 256, 512, 1_024, 2_048)
 SSD_STREAMING_BACKENDS = ("swiftlm", "mference")
+MFERENCE_CONTEXT_WINDOWS = (4_096, 8_192, 16_384, 32_768, 65_536, 128_000)
 SSD_STREAMING_RUNTIME_URLS = {
     "swiftlm": "https://github.com/SharpAI/SwiftLM",
     "mference": "https://github.com/NeelM0906/Mference",
+}
+MFERENCE_KNOWN_FLAGS = frozenset({"streamingPresent", "turboQuantKV", "aneSharedExpert"})
+MFERENCE_STREAMING_ARCH_SIGNATURES: dict[str, dict[str, int]] = {
+    "gemma4": {
+        "hiddenSize": 2_816, "vocabSize": 262_144, "numLayers": 30,
+        "numExperts": 128, "topKExperts": 8, "firstExpertLayer": 0,
+    },
+    "qwen36": {
+        "hiddenSize": 2_048, "vocabSize": 248_320, "numLayers": 40,
+        "numExperts": 256, "topKExperts": 8, "firstExpertLayer": 0,
+    },
+    "deepseekV4Flash": {
+        "hiddenSize": 4_096, "vocabSize": 129_280, "numLayers": 43,
+        "numExperts": 256, "topKExperts": 6, "firstExpertLayer": 0,
+    },
+    "inklingSmall": {
+        "hiddenSize": 4_096, "vocabSize": 201_024, "numLayers": 42,
+        "numExperts": 256, "topKExperts": 6, "firstExpertLayer": 2,
+    },
+    "maple": {
+        "hiddenSize": 2_048, "vocabSize": 151_936, "numLayers": 24,
+        "numExperts": 256, "topKExperts": 8, "firstExpertLayer": 0,
+    },
 }
 BENCHMARK_TELEMETRY_INTERVAL_SECONDS = 1.0
 BENCHMARK_MEMORY_MEANINGFUL_BYTES = 512 * 1024**2
@@ -2286,29 +2310,168 @@ def candidate_dirs(root: Path, max_depth: int = 4) -> list[Path]:
     return found
 
 
+def _bounded_regular_json(path: Path) -> tuple[dict[str, Any], bytes, str | None]:
+    """Read one bounded metadata object without trusting links or special files."""
+    try:
+        details = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(details.st_mode):
+            return {}, b"", f"{path.name} must be a regular file"
+        if not 0 < details.st_size <= MAX_JSON:
+            return {}, b"", f"{path.name} exceeds the supported metadata size"
+        data = path.read_bytes()
+        value = json.loads(data)
+    except (OSError, ValueError, UnicodeError):
+        return {}, b"", f"{path.name} is not valid JSON"
+    if not isinstance(value, dict):
+        return {}, b"", f"{path.name} must contain a JSON object"
+    return value, data, None
+
+
+def mference_bundle_validation(path: Path) -> tuple[bool, str, int]:
+    """Mirror Mference's cheap receipt checks without hashing multi-GB payloads."""
+    if not path.name.endswith(".gturbo"):
+        return False, "Mference requires a .gturbo bundle.", 0
+    try:
+        root = path.resolve(strict=True)
+    except OSError:
+        return False, "The Mference bundle is missing or unreadable.", 0
+    if not root.is_dir():
+        return False, "The Mference bundle is not a directory.", 0
+
+    manifest, manifest_data, manifest_error = _bounded_regular_json(root / "manifest.json")
+    receipt, receipt_data, receipt_error = _bounded_regular_json(root / "verified-install.json")
+    if manifest_error or receipt_error:
+        return False, manifest_error or receipt_error or "Invalid Mference metadata.", 0
+    if manifest.get("magic") != "GTURBO" or manifest.get("versionMajor") != 1:
+        return False, "The Mference manifest has an unsupported format.", 0
+    flags = manifest.get("flags")
+    if not isinstance(flags, dict) or any(key not in MFERENCE_KNOWN_FLAGS for key in flags):
+        return False, "The Mference manifest contains unsupported runtime flags.", 0
+    if flags.get("streamingPresent") is not True or flags.get("turboQuantKV") is True:
+        return False, "The Mference bundle does not declare a supported SSD-streaming layout.", 0
+
+    arch = manifest.get("arch")
+    if not isinstance(arch, dict):
+        return False, "The Mference manifest is missing its architecture contract.", 0
+    family = arch.get("family") or "gemma4"
+    signature = MFERENCE_STREAMING_ARCH_SIGNATURES.get(family) if isinstance(family, str) else None
+    if not signature:
+        return False, "This .gturbo architecture is not pinned by the installed Mference contract.", 0
+    for key in ("hiddenSize", "vocabSize", "numLayers", "numExperts", "topKExperts"):
+        value = arch.get(key)
+        if isinstance(value, bool) or value != signature[key]:
+            return False, f"The .gturbo {family} architecture does not match Mference's pinned {key}.", 0
+    if manifest.get("numLayers") != signature["numLayers"]:
+        return False, "The Mference manifest layer count conflicts with its architecture.", 0
+    if manifest.get("expertsPerLayer") != signature["numExperts"]:
+        return False, "The Mference manifest expert count conflicts with its architecture.", 0
+    expert_stride = manifest.get("expertStride")
+    page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    if (
+        isinstance(expert_stride, bool) or not isinstance(expert_stride, int)
+        or expert_stride <= 0 or expert_stride % page_size
+    ):
+        return False, "The Mference expert stride is not page aligned.", 0
+    mask = arch.get("fullAttentionLayerMask")
+    if not isinstance(mask, list) or len(mask) != signature["numLayers"]:
+        return False, "The Mference attention layout does not match its layer count.", 0
+    if not isinstance(manifest.get("quant"), dict) or not manifest["quant"]:
+        return False, "The Mference production manifest is missing quantization metadata.", 0
+
+    files = manifest.get("files")
+    receipt_files = receipt.get("files")
+    if not isinstance(files, dict) or not 3 <= len(files) <= 4_096:
+        return False, "The Mference manifest has an invalid payload file set.", 0
+    if not isinstance(receipt_files, dict):
+        return False, "The Mference receipt has an invalid payload file set.", 0
+    manifest_hash = hashlib.sha256(manifest_data).hexdigest()
+    if receipt.get("schemaVersion") != 1:
+        return False, "The Mference receipt schema is unsupported.", 0
+    if not isinstance(receipt.get("modelDirectoryPath"), str) or receipt["modelDirectoryPath"] != str(root):
+        return False, "The Mference receipt belongs to a different bundle location.", 0
+    if not isinstance(receipt.get("manifestSha256"), str) or not secrets.compare_digest(
+        receipt["manifestSha256"].casefold(), manifest_hash,
+    ):
+        return False, "The Mference receipt does not match manifest.json.", 0
+    expected_receipt_files = set(files) | {"manifest.json"}
+    if set(receipt_files) != expected_receipt_files:
+        return False, "The Mference receipt file set does not match its manifest.", 0
+    manifest_receipt = receipt_files.get("manifest.json")
+    if not isinstance(manifest_receipt, dict) or manifest_receipt.get("size") != len(manifest_data):
+        return False, "The Mference receipt has the wrong manifest size.", 0
+    if not isinstance(manifest_receipt.get("sha256"), str) or not secrets.compare_digest(
+        manifest_receipt["sha256"].casefold(), manifest_hash,
+    ):
+        return False, "The Mference receipt has the wrong manifest hash.", 0
+
+    layer_indices: set[int] = set()
+    payload_total = 0
+    for relative, entry in files.items():
+        if (
+            not isinstance(relative, str) or not relative or len(relative) > 512
+            or relative.startswith(("/", "\\")) or "\\" in relative or "\0" in relative
+        ):
+            return False, "The Mference manifest contains an unsafe payload path.", 0
+        parts = relative.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            return False, "The Mference manifest contains an unsafe payload path.", 0
+        if relative in {"manifest.json", "verified-install.json"}:
+            return False, "The Mference manifest incorrectly includes its own metadata.", 0
+        if not isinstance(entry, dict) or not isinstance(receipt_files.get(relative), dict):
+            return False, f"The Mference metadata for {relative} is invalid.", 0
+        declared_size = entry.get("size")
+        declared_hash = entry.get("sha256")
+        receipt_entry = receipt_files[relative]
+        if (
+            isinstance(declared_size, bool) or not isinstance(declared_size, int) or declared_size < 0
+            or not isinstance(declared_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", declared_hash)
+            or receipt_entry.get("size") != declared_size
+            or not isinstance(receipt_entry.get("sha256"), str)
+            or not secrets.compare_digest(receipt_entry["sha256"].casefold(), declared_hash.casefold())
+        ):
+            return False, f"The Mference receipt does not match {relative}.", 0
+        candidate = root.joinpath(*parts)
+        try:
+            cursor = root
+            for part in parts:
+                cursor /= part
+                if cursor.is_symlink():
+                    return False, f"The Mference payload {relative} may not use symbolic links.", 0
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(root)
+            details = candidate.lstat()
+        except (OSError, ValueError):
+            return False, f"The Mference payload {relative} is missing or unsafe.", 0
+        if not stat.S_ISREG(details.st_mode) or details.st_size != declared_size:
+            return False, f"The Mference payload size does not match {relative}.", 0
+        payload_total += details.st_size
+        match = re.fullmatch(r"packed_experts/layer_(\d+)\.bin", relative)
+        if match:
+            layer_indices.add(int(match.group(1)))
+
+    for required in ("model_weights.bin", "packed_experts/layout.json"):
+        entry = files.get(required)
+        if not isinstance(entry, dict) or not isinstance(entry.get("size"), int) or entry["size"] <= 0:
+            return False, f"The Mference manifest is missing a usable {required}.", 0
+    first_layer = signature["firstExpertLayer"]
+    expected_layers = set(range(first_layer, signature["numLayers"]))
+    if layer_indices != expected_layers:
+        return False, "The Mference bundle is missing one or more pinned expert-layer payloads.", 0
+    for index in expected_layers:
+        entry = files.get(f"packed_experts/layer_{index:02d}.bin") or files.get(
+            f"packed_experts/layer_{index}.bin"
+        )
+        if not isinstance(entry, dict) or not isinstance(entry.get("size"), int) or entry["size"] <= 0:
+            return False, "The Mference bundle contains an empty expert-layer payload.", 0
+
+    total = payload_total + len(manifest_data) + len(receipt_data)
+    return True, f"Verified Mference {family} receipt and SSD-streaming payload layout.", total
+
+
 def weight_completeness(path: Path, config: dict[str, Any]) -> tuple[bool, str, int]:
     if path.name.endswith(".gturbo"):
-        manifest = read_json(path / "manifest.json")
-        receipt = read_json(path / "verified-install.json")
-        common = path / "model_weights.bin"
-        layout = path / "packed_experts" / "layout.json"
-        try:
-            expert_files = sorted((path / "packed_experts").glob("layer_*.bin"))
-            required = [path / "manifest.json", path / "verified-install.json", common, layout]
-            complete = bool(
-                manifest and receipt and expert_files
-                and all(item.is_file() and item.stat().st_size > 0 for item in required)
-                and all(item.stat().st_size > 0 for item in expert_files)
-            )
-            total = sum(item.stat().st_size for item in required if item.is_file())
-            total += sum(item.stat().st_size for item in expert_files)
-        except OSError:
-            return False, "Incomplete Mference bundle", 0
-        return (
-            (True, "Ready", total)
-            if complete else
-            (False, "Incomplete Mference bundle", total)
-        )
+        ready, reason, total = mference_bundle_validation(path)
+        return ready, "Ready" if ready else reason, total
     try:
         files = [p for p in path.iterdir() if p.is_file()]
     except OSError:
@@ -2374,6 +2537,7 @@ def _ssd_source_contract(path: Path, config: dict[str, Any]) -> dict[str, Any]:
         if (
             key.endswith(("source_model", "source_model_id", "source_repo", "source_repository", "_name_or_path"))
             or ("source" in key and key.endswith(("model", "model_id", "repo", "repository")))
+            or key.endswith("sourcerepoid")
         )
         and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.@-]+", value)
     ]
@@ -2481,7 +2645,8 @@ def swiftlm_model_supported(path: Path, config: dict[str, Any], profile: dict[st
     if profile.get("qwen38FlashNext"):
         return False, "Qwen3.8 Flash-Next is not yet listed in SwiftLM's accepted model families."
     supported = any(marker in identity for marker in (
-        "qwen3.5", "qwen3_5", "qwen3.6", "qwen3_6", "gemma-4", "gemma4",
+        "qwen3.5", "qwen3_5", "qwen3.6", "qwen3_6", "qwen3-next", "qwen3_next", "qwen3next",
+        "gemma-4", "gemma4",
         "deepseek_v3", "deepseek-v3", "deepseek_v4", "deepseek-v4",
     ))
     return (
@@ -2495,7 +2660,8 @@ def mference_model_supported(path: Path, profile: dict[str, Any]) -> tuple[bool,
     if profile.get("qwen38FlashNext"):
         return False, "Qwen3.8 Flash-Next has not passed Mference's pinned-family acceptance gate."
     if path.name.endswith(".gturbo"):
-        return True, "Verified Mference .gturbo bundle with SSD-streamed experts."
+        ready, reason, _ = mference_bundle_validation(path)
+        return ready, reason
     return False, "Mference requires its verified pinned .gturbo repack of this model."
 
 
@@ -6301,6 +6467,8 @@ def scan_models() -> list[dict[str, Any]]:
                     "modelPath": str(real),
                     "promptCacheMode": "on",
                     "queueLimit": 4,
+                    "contextWindows": list(MFERENCE_CONTEXT_WINDOWS),
+                    "contextMaximum": max(MFERENCE_CONTEXT_WINDOWS),
                     "exactExpertRouting": True,
             },
         }
@@ -7236,6 +7404,48 @@ def validated_limits(model: dict[str, Any], payload: dict[str, Any]) -> tuple[in
     return context, output
 
 
+def mference_compatible_context(requested: int) -> int | None:
+    """Return Mference's largest fixed context window not exceeding the request."""
+    compatible = [value for value in MFERENCE_CONTEXT_WINDOWS if value <= requested]
+    return max(compatible) if compatible else None
+
+
+def normalized_ssd_comparison_request(
+    payload: dict[str, Any], model: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Use the largest visible context that both SSD runtimes can reproduce."""
+    request = copy.deepcopy(payload)
+    profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
+    if profile.get("recommended") is not True:
+        return request, None
+    context, _output = validated_limits(model, request)
+    compatible = mference_compatible_context(context)
+    if compatible is None:
+        raise ValueError("SSD calibration needs at least 4,096 context tokens for Mference.")
+    if compatible == context:
+        return request, None
+    request["context"] = compatible
+    validated_limits(model, request)
+    return request, {
+        "requested": context,
+        "measured": compatible,
+        "reason": (
+            f"Mference exposes fixed context windows, so this SSD comparison uses {compatible:,} "
+            f"tokens instead of {context:,}. Applying the result makes that visible change."
+        ),
+    }
+
+
+def validate_runtime_context(backend: str, context: int) -> None:
+    if backend != "mference":
+        return
+    if context not in MFERENCE_CONTEXT_WINDOWS:
+        choices = ", ".join(f"{value:,}" for value in MFERENCE_CONTEXT_WINDOWS)
+        raise ValueError(
+            f"Mference supports fixed context windows: {choices}. Choose one of those exact values."
+        )
+
+
 def validated_chat_settings(
     model: dict[str, Any], payload: dict[str, Any], client: str,
 ) -> dict[str, Any]:
@@ -8164,6 +8374,7 @@ def optimal_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> di
         raise ValueError(str(capability.get("reason") or "This model cannot run in the selected runtime."))
     options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
     context, output = validated_limits(model, payload)
+    validate_runtime_context(backend, context)
     chat = validated_chat_settings(model, payload, client)
     validate_chat_capability(capability, chat, client)
     reasoning = str(payload.get("reasoning", "auto"))
@@ -10332,6 +10543,9 @@ def benchmark_history_request(
     reasoning_contract = benchmark_reasoning_contract(payload, model)
     comparison_payload = copy.deepcopy(payload)
     comparison_payload["reasoning"] = reasoning_contract["measured"]
+    comparison_payload, context_adjustment = normalized_ssd_comparison_request(
+        comparison_payload, model,
+    )
     current = optimal_request(comparison_payload, models)
     backend = str(payload.get("backend") or current["backend"])
     client = str(payload.get("client") or "")
@@ -10705,6 +10919,7 @@ def benchmark_history_request(
     )
     receipt["suite"] = suite_name
     receipt["suiteLabel"] = suite["label"]
+    receipt["contextAdjustment"] = copy.deepcopy(context_adjustment)
     receipt["eligibleBackends"] = [
         {"backend": item, "label": BACKEND_LABELS[item]} for item in eligible
     ]
@@ -10723,6 +10938,7 @@ def benchmark_history_request(
             "client": client, "suite": suite_name, "suiteLabel": suite["label"],
             "context": context, "output": output, "reasoning": reasoning, "kv": kv,
             "reasoningContract": copy.deepcopy(reasoning_contract),
+            "contextAdjustment": copy.deepcopy(context_adjustment),
             "eligibleBackends": [
                 {"backend": item, "label": BACKEND_LABELS[item]} for item in eligible
             ],
@@ -11396,6 +11612,7 @@ def normalized_request(
     if not capability["runnable"]:
         raise ValueError(capability["reason"])
     context, output = validated_limits(model, payload)
+    validate_runtime_context(backend, context)
     chat = validated_chat_settings(model, payload, client)
     validate_chat_capability(capability, chat, client)
     reasoning = str(payload.get("reasoning", "medium"))
@@ -11837,6 +12054,7 @@ def build_mference(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     model_path = _verified_ssd_model_path(plan, cap)
     if not model_path.name.endswith(".gturbo"):
         raise ValueError("Mference requires a verified .gturbo model bundle.")
+    validate_runtime_context("mference", plan.context)
     options = validated_profile_options("mference", plan.model, cap, plan.options)
     plan.options.update(options)
     served = f"llm-launcher-{slug(plan.model['name'], 34)}-{plan.run_id[:8]}"
@@ -11846,6 +12064,7 @@ def build_mference(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     argv = [
         binary,
         "--model", str(model_path),
+        "--model-id", served,
         "--port", str(plan.port),
         "--max-context", str(plan.context),
         "--queue-limit", str(options["queueLimit"]),
@@ -12445,6 +12664,7 @@ def validated_benchmark_request(
     if not suite:
         raise ValueError("Choose a Quick, Standard, Thorough, or Agentic Route Lab suite.")
     context, output = validated_limits(model, payload)
+    validate_runtime_context(backend, context)
     largest_request = int(
         suite.get("requiredContext")
         or (max(suite["promptTokens"]) + int(suite["maxTokens"]) + 512)
@@ -12780,6 +13000,9 @@ def validated_engine_shootout_request(
     reasoning_contract = benchmark_reasoning_contract(payload, model)
     comparison_payload = copy.deepcopy(payload)
     comparison_payload["reasoning"] = reasoning_contract["measured"]
+    comparison_payload, context_adjustment = normalized_ssd_comparison_request(
+        comparison_payload, model,
+    )
     if "calibrationCooling" in payload:
         calibration_cooling = validated_calibration_cooling(payload)
         comparison_options = comparison_payload.get("options")
@@ -12877,6 +13100,7 @@ def validated_engine_shootout_request(
         "excludedEngines": excluded,
         "ssdStreaming": ssd_lane,
         "ssdContract": copy.deepcopy(ssd_profile.get("calibration")) if ssd_lane else None,
+        "contextAdjustment": context_adjustment,
     }
 
 
@@ -12897,7 +13121,17 @@ def calibration_plan(
         copy.deepcopy(payload.get("options"))
         if isinstance(payload.get("options"), dict) else {}
     )
-    visible_request = validated_launch_profile_request(payload, models)
+    selected = next(
+        (item for item in models if item.get("id") == str(payload.get("modelId") or "")),
+        None,
+    )
+    calibration_payload = copy.deepcopy(payload)
+    context_adjustment: dict[str, Any] | None = None
+    if selected is not None:
+        calibration_payload, context_adjustment = normalized_ssd_comparison_request(
+            calibration_payload, selected,
+        )
+    visible_request = validated_launch_profile_request(calibration_payload, models)
     suite_name = str(payload.get("suite") or ("standard" if visible_request["client"] == "chat" else "agentic"))
     suite = BENCHMARK_SUITES.get(suite_name)
     if not suite:
@@ -13136,6 +13370,7 @@ def calibration_plan(
         "preferenceLabel": ENGINE_PREFERENCE_LABELS[preference],
         "ssdStreaming": ssd_lane,
         "ssdContract": copy.deepcopy(ssd_profile.get("calibration")) if ssd_lane else None,
+        "contextAdjustment": context_adjustment,
         "calibrationCooling": calibration_cooling,
         "calibrationCoolingLabel": {
             "default": "System controlled",

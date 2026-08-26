@@ -396,6 +396,12 @@
             <button id="agentConsoleJumpLatest" type="button" class="agent-console-jump-latest" hidden>↓ Latest output</button>
           </div>
           <form id="agentConsoleForm" class="agent-console-composer">
+            <section id="agentConsoleInteraction" class="agent-console-interaction" aria-live="polite" hidden>
+              <div class="agent-console-interaction-copy"><span>Pi needs input</span><strong id="agentConsoleInteractionTitle">Extension request</strong><p id="agentConsoleInteractionMessage"></p></div>
+              <div id="agentConsoleInteractionOptions" class="agent-console-interaction-options" hidden></div>
+              <label id="agentConsoleInteractionInputWrap" class="agent-console-interaction-input" for="agentConsoleInteractionInput" hidden><span>Your response</span><textarea id="agentConsoleInteractionInput" rows="2" maxlength="65280" autocomplete="off" spellcheck="false"></textarea></label>
+              <div class="agent-console-interaction-actions"><button id="agentConsoleInteractionCancel" type="button" class="secondary compact">Cancel request</button><button id="agentConsoleInteractionNo" type="button" class="secondary compact" hidden>No</button><button id="agentConsoleInteractionSubmit" type="button" class="primary" hidden><strong>Continue</strong></button></div>
+            </section>
             <label for="agentConsoleInput"><span id="agentConsoleInputLabel">Message agent</span><input id="agentConsoleInput" type="text" maxlength="65536" autocomplete="off" spellcheck="false" placeholder="Send a prompt…"></label>
             <div class="agent-console-keys" aria-label="Terminal keys"><button id="agentConsoleEscapeButton" type="button" class="secondary compact" title="Send the Escape key">Esc</button><button id="agentConsoleInterruptButton" type="button" class="secondary compact" title="Interrupt the current agent action">Ctrl-C</button><button id="agentConsoleEnterButton" type="submit" class="primary"><strong>Send</strong></button></div>
             <p id="agentConsoleStatus" role="status" aria-live="polite">Click the terminal for direct keyboard control. Terminal output is capped at 2 MB and never persisted.</p>

@@ -135,16 +135,57 @@
     resize(cols, rows) {
       const nextCols = clamp(cols, 40, 240);
       const nextRows = clamp(rows, 12, 100);
-      const resizeScreen = screen => {
-        const lines = screen.lines.slice(0, nextRows);
+      const previousRows = this.rows;
+      const pushScrollback = (cells, styles) => {
+        let cellCount = cells.length;
+        while (cellCount > 0 && /^\s*$/u.test(cells[cellCount - 1])) cellCount -= 1;
+        const keptCells = cells.slice(0, cellCount);
+        const keptStyles = (styles || []).slice(0, cellCount);
+        this.scrollback.push(keptCells.join(""));
+        this.scrollbackStyled.push({cells:keptCells, styles:keptStyles});
+        if (this.scrollback.length > this.scrollbackLimit) {
+          const excess = this.scrollback.length - this.scrollbackLimit;
+          this.scrollback.splice(0, excess);
+          this.scrollbackStyled.splice(0, excess);
+        }
+      };
+      const resizeScreen = (screen, preserveTranscript = false) => {
+        let lines = screen.lines.slice();
+        let styles = screen.styles.slice();
+        const fullScrollRegion = screen.scrollTop === 0 && screen.scrollBottom === previousRows - 1;
+        if (preserveTranscript && fullScrollRegion && nextRows < previousRows) {
+          const removedCount = Math.min(lines.length, previousRows - nextRows);
+          for (let index = 0; index < removedCount; index += 1) {
+            pushScrollback(lines.shift() || [], styles.shift() || []);
+          }
+          screen.y = Math.max(0, screen.y - removedCount);
+          screen.savedY = Math.max(0, screen.savedY - removedCount);
+        } else if (nextRows < lines.length) {
+          lines = lines.slice(0, nextRows);
+          styles = styles.slice(0, nextRows);
+        }
+        if (preserveTranscript && fullScrollRegion && nextRows > previousRows && this.scrollback.length) {
+          const restoreCount = Math.min(nextRows - previousRows, this.scrollback.length);
+          const restoredLines = this.scrollback.splice(this.scrollback.length - restoreCount, restoreCount);
+          const restoredStyles = this.scrollbackStyled.splice(
+            this.scrollbackStyled.length - restoreCount, restoreCount,
+          );
+          lines.unshift(...restoredStyles.map(record => [...record.cells]));
+          styles.unshift(...restoredStyles.map(record => [...record.styles]));
+          screen.y += restoreCount;
+          screen.savedY += restoreCount;
+          // Keep the plain and styled scrollback stores in lock-step. The styled
+          // records are authoritative here; restoredLines is removed only to
+          // preserve that invariant.
+          void restoredLines;
+        }
         while (lines.length < nextRows) lines.push(blankLine(nextCols));
+        while (styles.length < nextRows) styles.push(blankStyleLine(nextCols));
         for (let index = 0; index < lines.length; index += 1) {
           lines[index] = lines[index].slice(0, nextCols);
           while (lines[index].length < nextCols) lines[index].push(" ");
         }
         screen.lines = lines;
-        const styles = screen.styles.slice(0, nextRows);
-        while (styles.length < nextRows) styles.push(blankStyleLine(nextCols));
         for (let index = 0; index < styles.length; index += 1) {
           styles[index] = styles[index].slice(0, nextCols);
           while (styles[index].length < nextCols) styles[index].push("");
@@ -160,8 +201,8 @@
       };
       this.cols = nextCols;
       this.rows = nextRows;
-      resizeScreen(this.main);
-      resizeScreen(this.alternate);
+      resizeScreen(this.main, true);
+      resizeScreen(this.alternate, false);
     }
 
     _scrollUp(count = 1) {

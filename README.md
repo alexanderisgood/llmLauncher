@@ -19,7 +19,7 @@ Its primary in-memory engines are **oMLX**, **LM Studio**, and **MTPLX**. Oversi
 - Exposes a separate **Huge models on SSD** lane for supported MoEs, with source-bound SwiftLM/Mference calibration rather than comparing unrelated repacks by filename.
 - Keeps cooling user-owned: optimisation and Calibration use automatic cooling by default and never select maximum fans without an explicit choice.
 - Supports streaming thinking, message queues, history, branching, TPS, warm-route reuse, and resumable local Chat.
-- Gives Pi a stable in-launcher transcript with restored session messages, separate thinking/response/tool lanes, queued follow-ups, and abort/clear-queue controls; external Terminal remains available for Pi's full TUI.
+- Gives Pi a stable in-launcher transcript with restored session messages, separate thinking/response/tool lanes, queued follow-ups, abort/clear-queue controls, and answerable extension prompts; resize and state-recovery guards keep live output visible. External Terminal remains available for Pi's full TUI.
 - Includes a polished light **Frost** appearance plus Focused progressive disclosure for a calmer Mac-style interface; the Hub Console remains a black terminal workspace in every appearance.
 - Keeps generated routes on authenticated loopback addresses and stops only launcher-owned processes.
 - Provides profiles, Session Sets, model acquisition, runtime inspection, route checks, and capacity controls.

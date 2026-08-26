@@ -6288,6 +6288,82 @@ async function copyAgentConsoleVisible() {
   }
 }
 
+function currentAgentConsoleInteraction(meta = currentAgentConsoleView()?.meta || {}) {
+  const interactions = Array.isArray(meta?.interactions) ? meta.interactions : [];
+  return interactions.find(item => item && typeof item === "object" && item.id) || null;
+}
+
+function renderAgentConsoleInteraction(meta, canInput) {
+  const panel = $("agentConsoleInteraction");
+  const interactions = Array.isArray(meta?.interactions) ? meta.interactions : [];
+  const interaction = currentAgentConsoleInteraction(meta);
+  if (!interaction || meta.protocol !== "pi-rpc") {
+    panel.hidden = true;
+    panel.dataset.requestId = "";
+    return;
+  }
+  const method = String(interaction.method || "");
+  const changed = panel.dataset.requestId !== interaction.id;
+  panel.hidden = false;
+  panel.dataset.requestId = interaction.id;
+  panel.dataset.method = method;
+  if (changed) {
+    $("agentConsoleInteractionTitle").textContent = interaction.title || "Pi needs input";
+    const detail = method === "confirm" ? String(interaction.message || "") : "";
+    $("agentConsoleInteractionMessage").textContent = [
+      detail,
+      interactions.length > 1 ? `${interactions.length - 1} more request${interactions.length === 2 ? "" : "s"} waiting.` : "",
+    ].filter(Boolean).join(" ");
+    const options = Array.isArray(interaction.options) ? interaction.options : [];
+    $("agentConsoleInteractionOptions").innerHTML = options.map((option, index) =>
+      `<button type="button" class="secondary compact" data-agent-console-option="${esc(option)}" title="${esc(option)}">${esc(option || `Option ${index + 1}`)}</button>`
+    ).join("");
+    $("agentConsoleInteractionInput").value = method === "editor" ? String(interaction.prefill || "") : "";
+    $("agentConsoleInteractionInput").placeholder = method === "input"
+      ? String(interaction.placeholder || "Enter a response…") : "Enter a response…";
+  }
+  const optionsVisible = method === "select";
+  const inputVisible = method === "input" || method === "editor";
+  const confirmVisible = method === "confirm";
+  $("agentConsoleInteractionOptions").hidden = !optionsVisible;
+  $("agentConsoleInteractionInputWrap").hidden = !inputVisible;
+  $("agentConsoleInteractionNo").hidden = !confirmVisible;
+  $("agentConsoleInteractionSubmit").hidden = optionsVisible;
+  $("agentConsoleInteractionSubmit").querySelector("strong").textContent = confirmVisible ? "Yes" : "Continue";
+  for (const button of panel.querySelectorAll("button")) button.disabled = !canInput || state.agentConsoleBusy;
+  $("agentConsoleInteractionInput").disabled = !canInput || state.agentConsoleBusy;
+}
+
+async function respondAgentConsoleInteraction(response) {
+  const view = currentAgentConsoleView();
+  const interaction = currentAgentConsoleInteraction(view?.meta);
+  if (!view || !interaction || state.agentConsoleBusy) return;
+  state.agentConsoleBusy = true;
+  renderAgentConsole();
+  try {
+    const data = await api("/api/agent-console/input", {
+      method:"POST",
+      body:JSON.stringify({
+        ownerRunId:state.agentConsoleOwnerRunId,
+        surfaceId:state.agentConsoleSurfaceId,
+        command:"extension_response",
+        requestId:interaction.id,
+        ...response,
+      }),
+    });
+    if (state.agentConsoleViews[state.agentConsoleSurfaceId] === view) {
+      reconcileAgentConsoleViewMeta(view, data.console);
+      state.agentConsoleMeta = view.meta;
+    }
+    scheduleAgentConsoleRead(0);
+  } catch (error) {
+    showNotice(error.message, true);
+  } finally {
+    state.agentConsoleBusy = false;
+    renderAgentConsole();
+  }
+}
+
 function renderAgentConsole() {
   const view = currentAgentConsoleView();
   const attachment = currentAgentConsoleAttachment() || view?.meta || state.agentConsoleMeta || {};
@@ -6299,6 +6375,7 @@ function renderAgentConsole() {
   }
   const meta = view?.meta || attachment;
   const structuredPi = meta.protocol === "pi-rpc";
+  const piInteraction = structuredPi ? currentAgentConsoleInteraction(meta) : null;
   const runtimeAdvisory = meta.runtimeAdvisory || state.runStatus?.run?.runtimeAdvisory || null;
   const surface = meta.surface || clientName(meta.client) || "Agent";
   const stateLabel = String(meta.state || meta.status || "starting");
@@ -6358,6 +6435,7 @@ function renderAgentConsole() {
   updateAgentConsoleStatusSummaryLabel();
 
   const canInput = Boolean(meta.canInput ?? stateLabel === "running");
+  renderAgentConsoleInteraction(meta, canInput);
   $("agentConsoleInput").disabled = !canInput || state.agentConsoleBusy;
   $("agentConsoleEnterButton").disabled = !canInput || state.agentConsoleBusy;
   $("agentConsoleEscapeButton").disabled = !canInput || state.agentConsoleBusy;
@@ -6382,13 +6460,15 @@ function renderAgentConsole() {
     : "Interactive agent terminal. Type to send keys; use the text field below for accessible input.");
   const dropped = Number(meta.droppedBytes || 0);
   const interactionDetail = structuredPi
-    ? pendingMessages
+    ? piInteraction
+      ? `Pi is waiting for your answer to “${piInteraction.title || "an extension request"}”.`
+      : pendingMessages
       ? `${pendingMessages} follow-up message${pendingMessages === 1 ? " is" : "s are"} queued.`
       : activelyResponding ? "Pi is responding; Send adds a follow-up without interrupting it."
         : "Pi is ready; session history and new output stay visible in this transcript."
     : "";
   $("agentConsoleStatus").textContent = `${view?.recovering ? "Restoring the latest console screen… " : ""}${interactionDetail || meta.detail || `Hub Console is ${stateLabel}.`}${runtimeAdvisory?.detail ? ` ${runtimeAdvisory.detail}` : ""}${dropped ? ` Earlier output was discarded after the 2 MB memory cap (${formatBytes(dropped)} dropped).` : ""}`;
-  $("agentConsoleStatus").className = stateLabel === "failed" ? "error" : runtimeAdvisory ? "warning" : "";
+  $("agentConsoleStatus").className = stateLabel === "failed" ? "error" : runtimeAdvisory || piInteraction ? "warning" : "";
   renderAgentConsoleTabs();
 }
 
@@ -11277,6 +11357,30 @@ $("agentConsoleSearchNext").addEventListener("click", () => moveAgentConsoleSear
 $("agentConsoleSearchClose").addEventListener("click", () => setAgentConsoleSearch(false));
 $("agentConsoleJumpLatest").addEventListener("click", scrollAgentConsoleToLatest);
 $("agentTerminalViewport").addEventListener("scroll", updateAgentConsoleScrollUi, {passive:true});
+$("agentConsoleInteractionOptions").addEventListener("click", event => {
+  const button = event.target.closest("[data-agent-console-option]");
+  if (button && !button.disabled) void respondAgentConsoleInteraction({value:button.dataset.agentConsoleOption || ""});
+});
+$("agentConsoleInteractionCancel").addEventListener("click", () => {
+  void respondAgentConsoleInteraction({cancelled:true});
+});
+$("agentConsoleInteractionNo").addEventListener("click", () => {
+  void respondAgentConsoleInteraction({confirmed:false});
+});
+$("agentConsoleInteractionSubmit").addEventListener("click", () => {
+  const method = $("agentConsoleInteraction").dataset.method;
+  void respondAgentConsoleInteraction(method === "confirm"
+    ? {confirmed:true} : {value:$("agentConsoleInteractionInput").value});
+});
+$("agentConsoleInteractionInput").addEventListener("keydown", event => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    void respondAgentConsoleInteraction({cancelled:true});
+  } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    void respondAgentConsoleInteraction({value:event.currentTarget.value});
+  }
+});
 $("agentConsoleForm").addEventListener("submit", event => {
   event.preventDefault();
   const value = $("agentConsoleInput").value;

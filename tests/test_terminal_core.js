@@ -25,6 +25,21 @@ assert.equal(terminal.rows, 14);
 terminal.write("\x1b[3;1Hwide: 界");
 assert.match(terminal.toString(), /wide: 界/);
 
+const resizeTranscript = new TerminalBuffer(40, 14, 20);
+resizeTranscript.write(Array.from({length:14}, (_, index) => `resize-${index}`).join("\r\n"));
+const beforeRowShrink = resizeTranscript.toString();
+resizeTranscript.resize(40, 12);
+assert.equal(
+  resizeTranscript.toString(), beforeRowShrink,
+  "shrinking the console must move old top rows into scrollback instead of dropping recent output",
+);
+assert.match(resizeTranscript.toString(), /resize-13$/);
+resizeTranscript.resize(40, 14);
+assert.equal(
+  resizeTranscript.toString(), beforeRowShrink,
+  "growing the console must restore scrollback rows without duplicating or losing the transcript",
+);
+
 const wrapping = new TerminalBuffer(40, 12, 4);
 wrapping.write("x".repeat(40));
 assert.equal(wrapping.cursor().y, 0, "a full final column must wait before wrapping");

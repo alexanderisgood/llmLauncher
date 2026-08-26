@@ -388,6 +388,8 @@ AGENT_CONSOLE_MAX_READ = 128 * 1024
 AGENT_CONSOLE_MAX_INPUT = 64 * 1024
 PI_RPC_MAX_QUEUED_MESSAGES = 32
 PI_RPC_MAX_QUEUED_BYTES = 512 * 1024
+PI_RPC_STATE_PROBE_SECONDS = 2.0
+PI_RPC_MAX_INTERACTIONS = 8
 AGENT_CONSOLE_COLS = (40, 240)
 AGENT_CONSOLE_ROWS = (12, 100)
 SESSION_IDLE_TIMEOUT_CHOICES = {0, 5, 15, 30, 60, 120}
@@ -11235,9 +11237,13 @@ class AgentConsole:
     rpc_pending_messages: int = 0
     rpc_external_pending_messages: int = 0
     rpc_follow_up_queue: list[str] = field(default_factory=list, repr=False)
+    rpc_interactions: list[dict[str, Any]] = field(default_factory=list, repr=False)
     rpc_section: str = ""
     rpc_history_loaded: bool = False
     rpc_last_queue_count: int = -1
+    rpc_prompt_id: str = ""
+    rpc_prompt_acknowledged: bool = False
+    rpc_last_state_probe_at: float = 0.0
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def append(self, value: bytes) -> None:
@@ -11282,6 +11288,7 @@ class AgentConsole:
                 "protocol": self.protocol,
                 "streaming": self.rpc_streaming,
                 "pendingMessages": self.rpc_pending_messages,
+                "interactions": copy.deepcopy(self.rpc_interactions),
             }
 
     def public(self) -> dict[str, Any]:
@@ -11315,6 +11322,7 @@ class AgentConsole:
                 "protocol": self.protocol,
                 "streaming": self.rpc_streaming,
                 "pendingMessages": self.rpc_pending_messages,
+                "interactions": copy.deepcopy(self.rpc_interactions),
                 "persistent": False,
                 "canInput": self.state == "running" and self.process.poll() is None,
                 "canStop": self.state in {"starting", "running", "stopping"} and self.process.poll() is None,
@@ -11338,6 +11346,41 @@ def safe_agent_transcript_text(value: Any, limit: int = 64 * 1024) -> str:
         else:
             cleaned.append("�")
     return "".join(cleaned)
+
+
+def safe_agent_ui_text(value: Any, limit: int) -> str:
+    """Bound agent-owned dialog copy without passing terminal controls to the UI."""
+    return safe_agent_transcript_text(value, limit).replace("\r\n", "\n").strip()
+
+
+def pi_rpc_interaction(event: Any) -> dict[str, Any] | None:
+    """Return the small, explicit subset of Pi RPC extension UI that Hub can answer."""
+    if not isinstance(event, dict):
+        return None
+    method = str(event.get("method") or "")
+    if method not in {"select", "confirm", "input", "editor"}:
+        return None
+    request_id = str(event.get("id") or "")
+    if not request_id or len(request_id) > 160 or any(ord(char) < 32 for char in request_id):
+        return None
+    interaction: dict[str, Any] = {
+        "id": request_id,
+        "method": method,
+        "title": safe_agent_ui_text(event.get("title") or "Pi needs input", 500),
+    }
+    if method == "select":
+        interaction["options"] = [
+            safe_agent_ui_text(item, 500)
+            for item in (event.get("options") if isinstance(event.get("options"), list) else [])[:100]
+        ]
+        interaction["options"] = [item for item in interaction["options"] if item]
+    elif method == "confirm":
+        interaction["message"] = safe_agent_ui_text(event.get("message"), 4_000)
+    elif method == "input":
+        interaction["placeholder"] = safe_agent_ui_text(event.get("placeholder"), 500)
+    elif method == "editor":
+        interaction["prefill"] = safe_agent_ui_text(event.get("prefill"), 32_000)
+    return interaction
 
 
 def pi_rpc_message_text(message: Any, *, include_thinking: bool = True) -> list[tuple[str, str]]:
@@ -11424,14 +11467,25 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
 
     if event_type == "response":
         command = str(event.get("command") or "")
+        response_id = str(event.get("id") or "")
         if event.get("success") is False:
             section("error", "PI ERROR", "38;5;203")
             output.extend(safe_agent_transcript_text(
                 event.get("error") or f"{command} failed",
             ).encode("utf-8"))
-            if command == "prompt":
+            if command == "prompt" and (
+                not response_id or not console.rpc_prompt_id
+                or response_id == console.rpc_prompt_id
+            ):
                 console.rpc_prompt_inflight = False
                 console.rpc_streaming = False
+                console.rpc_prompt_id = ""
+                console.rpc_prompt_acknowledged = False
+        elif command == "prompt" and (
+            not response_id or not console.rpc_prompt_id
+            or response_id == console.rpc_prompt_id
+        ):
+            console.rpc_prompt_acknowledged = True
         elif command == "get_messages" and not console.rpc_history_loaded:
             data = event.get("data") if isinstance(event.get("data"), dict) else {}
             output.extend(pi_rpc_render_history(data.get("messages")))
@@ -11445,7 +11499,19 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
                 external_pending = 0
             console.rpc_external_pending_messages = external_pending
             console.rpc_pending_messages = len(console.rpc_follow_up_queue) + external_pending
-            console.rpc_streaming = data.get("isStreaming") is True or console.rpc_prompt_inflight
+            measured_streaming = data.get("isStreaming") is True
+            if measured_streaming:
+                console.rpc_streaming = True
+                console.rpc_prompt_inflight = True
+            elif not console.rpc_prompt_inflight or console.rpc_prompt_acknowledged:
+                # The state reply is authoritative once Pi accepted the prompt.
+                # This repairs a missed agent_settled event without racing prompt
+                # preflight, which is not acknowledged until it succeeds.
+                console.rpc_streaming = False
+                console.rpc_prompt_inflight = False
+                console.rpc_prompt_id = ""
+                console.rpc_prompt_acknowledged = False
+                console.rpc_interactions.clear()
         return bytes(output)
 
     if event_type == "agent_start":
@@ -11461,6 +11527,9 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
     if event_type == "agent_settled":
         console.rpc_streaming = False
         console.rpc_prompt_inflight = False
+        console.rpc_prompt_id = ""
+        console.rpc_prompt_acknowledged = False
+        console.rpc_interactions.clear()
         return b""
     if event_type == "queue_update":
         steering = event.get("steering") if isinstance(event.get("steering"), list) else []
@@ -11539,9 +11608,22 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
         output.extend(safe_agent_transcript_text(event.get("errorMessage"), 2_000).encode("utf-8"))
         return bytes(output)
     if event_type == "extension_ui_request":
-        section("action", "PI NEEDS INPUT", "38;5;214")
+        interaction = pi_rpc_interaction(event)
+        section(
+            "action" if interaction is not None else "notice",
+            "PI NEEDS INPUT" if interaction is not None else "PI NOTICE",
+            "38;5;214",
+        )
         title = event.get("title") or event.get("message") or event.get("method") or "Extension request"
         output.extend(safe_agent_transcript_text(title, 2_000).encode("utf-8"))
+        if interaction is not None:
+            console.rpc_interactions = [
+                item for item in console.rpc_interactions
+                if item.get("id") != interaction["id"]
+            ]
+            console.rpc_interactions.append(interaction)
+            if len(console.rpc_interactions) > PI_RPC_MAX_INTERACTIONS:
+                del console.rpc_interactions[:-PI_RPC_MAX_INTERACTIONS]
     return bytes(output)
 
 
@@ -16710,6 +16792,60 @@ class RunManager:
             })
         return console
 
+    def _consume_pi_rpc_line(self, console: AgentConsole, line: bytes) -> None:
+        """Render one Pi JSONL event and advance launcher-owned follow-ups."""
+        line = line.rstrip(b"\r")
+        if not line:
+            return
+        try:
+            event = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            console.append(
+                pi_rpc_heading("PI NOTICE", "38;5;214")
+                + safe_agent_transcript_text(
+                    line.decode("utf-8", errors="replace"), 4_000,
+                ).encode("utf-8")
+            )
+            return
+        with console.lock:
+            rendered = pi_rpc_event_output(console, event)
+        console.append(rendered)
+        if event.get("type") != "agent_settled":
+            return
+        with console.lock:
+            next_message = (
+                console.rpc_follow_up_queue.pop(0)
+                if console.rpc_follow_up_queue else None
+            )
+            console.rpc_pending_messages = (
+                len(console.rpc_follow_up_queue)
+                + console.rpc_external_pending_messages
+            )
+            if next_message is not None:
+                prompt_id = f"launcher-prompt-{secrets.token_hex(8)}"
+                console.rpc_prompt_inflight = True
+                console.rpc_streaming = True
+                console.rpc_prompt_id = prompt_id
+                console.rpc_prompt_acknowledged = False
+        if next_message is None:
+            return
+        console.append(pi_rpc_heading("STARTING QUEUED MESSAGE", "38;5;214"))
+        try:
+            self._write_pi_rpc_command(console, {
+                "id": prompt_id, "type": "prompt", "message": next_message,
+            })
+        except ValueError as error:
+            with console.lock:
+                if console.rpc_prompt_id == prompt_id:
+                    console.rpc_prompt_inflight = False
+                    console.rpc_streaming = False
+                    console.rpc_prompt_id = ""
+                    console.rpc_prompt_acknowledged = False
+            console.append(
+                pi_rpc_heading("PI ERROR", "38;5;203")
+                + safe_agent_transcript_text(error, 2_000).encode("utf-8")
+            )
+
     def _read_agent_console(self, console: AgentConsole) -> None:
         try:
             while True:
@@ -16732,58 +16868,27 @@ class RunManager:
                     while b"\n" in console.rpc_line_buffer:
                         line, _, remainder = console.rpc_line_buffer.partition(b"\n")
                         console.rpc_line_buffer = bytearray(remainder)
-                        lines.append(line.rstrip(b"\r"))
+                        lines.append(line)
                 for line in lines:
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        console.append(
-                            pi_rpc_heading("PI NOTICE", "38;5;214")
-                            + safe_agent_transcript_text(
-                                line.decode("utf-8", errors="replace"), 4_000,
-                            ).encode("utf-8")
-                        )
-                        continue
-                    with console.lock:
-                        rendered = pi_rpc_event_output(console, event)
-                    console.append(rendered)
-                    if event.get("type") == "agent_settled":
-                        with console.lock:
-                            next_message = (
-                                console.rpc_follow_up_queue.pop(0)
-                                if console.rpc_follow_up_queue else None
-                            )
-                            console.rpc_pending_messages = (
-                                len(console.rpc_follow_up_queue)
-                                + console.rpc_external_pending_messages
-                            )
-                            if next_message is not None:
-                                console.rpc_prompt_inflight = True
-                                console.rpc_streaming = True
-                        if next_message is not None:
-                            console.append(pi_rpc_heading("STARTING QUEUED MESSAGE", "38;5;214"))
-                            try:
-                                self._write_pi_rpc_command(console, {
-                                    "id": f"launcher-prompt-{secrets.token_hex(8)}",
-                                    "type": "prompt", "message": next_message,
-                                })
-                            except ValueError as error:
-                                with console.lock:
-                                    console.rpc_prompt_inflight = False
-                                    console.rpc_streaming = False
-                                console.append(
-                                    pi_rpc_heading("PI ERROR", "38;5;203")
-                                    + safe_agent_transcript_text(error, 2_000).encode("utf-8")
-                                )
+                    self._consume_pi_rpc_line(console, line)
         finally:
+            if console.protocol == "pi-rpc":
+                with console.lock:
+                    final_line = bytes(console.rpc_line_buffer)
+                    console.rpc_line_buffer.clear()
+                if final_line:
+                    self._consume_pi_rpc_line(console, final_line)
             try:
                 exit_code = console.process.wait(timeout=1)
             except (OSError, subprocess.TimeoutExpired):
                 exit_code = console.process.poll()
             self._close_agent_console_fd(console)
             with console.lock:
+                console.rpc_streaming = False
+                console.rpc_prompt_inflight = False
+                console.rpc_prompt_id = ""
+                console.rpc_prompt_acknowledged = False
+                console.rpc_interactions.clear()
                 console.exit_code = int(exit_code) if exit_code is not None else None
                 console.ended_at = datetime.now(timezone.utc).isoformat()
                 if console.state == "stopping":
@@ -16819,7 +16924,26 @@ class RunManager:
             return console
 
     def read_agent_console(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._agent_console_for_payload(payload).output_slice(payload.get("offset"))
+        console = self._agent_console_for_payload(payload)
+        if console.protocol == "pi-rpc":
+            now = time.monotonic()
+            with console.lock:
+                should_probe = (
+                    console.state == "running" and console.process.poll() is None
+                    and console.master_fd >= 0
+                    and now - console.rpc_last_state_probe_at >= PI_RPC_STATE_PROBE_SECONDS
+                )
+                if should_probe:
+                    console.rpc_last_state_probe_at = now
+            if should_probe:
+                try:
+                    self._write_pi_rpc_command(console, {
+                        "id": f"launcher-state-{secrets.token_hex(6)}",
+                        "type": "get_state",
+                    })
+                except ValueError:
+                    pass
+        return console.output_slice(payload.get("offset"))
 
     def write_agent_console(self, payload: dict[str, Any]) -> dict[str, Any]:
         console = self._agent_console_for_payload(payload)
@@ -16831,14 +16955,13 @@ class RunManager:
         encoded = value.encode("utf-8")
         if not encoded or len(encoded) > AGENT_CONSOLE_MAX_INPUT:
             raise ValueError("Hub Console input must be between 1 byte and 64 KB.")
-        with console.lock:
-            if console.state != "running" or console.process.poll() is not None or console.master_fd < 0:
-                raise ValueError("That agent is no longer accepting input.")
-            fd = console.master_fd
-        written = 0
         try:
-            while written < len(encoded):
-                written += os.write(fd, encoded[written:])
+            with console.lock:
+                if console.state != "running" or console.process.poll() is not None or console.master_fd < 0:
+                    raise ValueError("That agent is no longer accepting input.")
+                written = 0
+                while written < len(encoded):
+                    written += os.write(console.master_fd, encoded[written:])
         except OSError as error:
             raise ValueError(f"Could not send input to the agent: {error}") from error
         return console.public()
@@ -16850,17 +16973,16 @@ class RunManager:
         ).encode("utf-8")
         if len(encoded) > AGENT_CONSOLE_MAX_INPUT:
             raise ValueError("Pi Hub input must be at most 64 KB.")
-        with console.lock:
-            if (
-                console.state != "running" or console.process.poll() is not None
-                or console.master_fd < 0
-            ):
-                raise ValueError("That agent is no longer accepting input.")
-            fd = console.master_fd
-        written = 0
         try:
-            while written < len(encoded):
-                written += os.write(fd, encoded[written:])
+            with console.lock:
+                if (
+                    console.state != "running" or console.process.poll() is not None
+                    or console.master_fd < 0
+                ):
+                    raise ValueError("That agent is no longer accepting input.")
+                written = 0
+                while written < len(encoded):
+                    written += os.write(console.master_fd, encoded[written:])
         except OSError as error:
             raise ValueError(f"Could not send input to Pi: {error}") from error
 
@@ -16885,6 +17007,7 @@ class RunManager:
                 raise ValueError("Enter a message for Pi.")
             if len(message.encode("utf-8")) > AGENT_CONSOLE_MAX_INPUT - 256:
                 raise ValueError("Pi Hub messages must be smaller than 64 KB.")
+            prompt_id = f"launcher-prompt-{secrets.token_hex(8)}"
             with console.lock:
                 is_busy = console.rpc_streaming or console.rpc_prompt_inflight
                 if is_busy:
@@ -16904,6 +17027,8 @@ class RunManager:
                 else:
                     console.rpc_prompt_inflight = True
                     console.rpc_streaming = True
+                    console.rpc_prompt_id = prompt_id
+                    console.rpc_prompt_acknowledged = False
                     pending = 0
             if is_busy:
                 console.append(
@@ -16912,10 +17037,50 @@ class RunManager:
                 )
                 return console.public()
             rpc_command = {
-                "id": f"launcher-prompt-{secrets.token_hex(8)}",
+                "id": prompt_id,
                 "type": "prompt",
                 "message": message,
             }
+        elif command == "extension_response":
+            request_id = str(payload.get("requestId") or "")
+            with console.lock:
+                interaction = next((
+                    copy.deepcopy(item) for item in console.rpc_interactions
+                    if item.get("id") == request_id
+                ), None)
+            if interaction is None:
+                raise ValueError("That Pi request is no longer waiting for an answer.")
+            method = interaction["method"]
+            rpc_command = {"type": "extension_ui_response", "id": request_id}
+            response_label = "Cancelled"
+            if payload.get("cancelled") is True:
+                rpc_command["cancelled"] = True
+            elif method == "confirm":
+                if not isinstance(payload.get("confirmed"), bool):
+                    raise ValueError("Choose Yes, No, or Cancel for Pi.")
+                rpc_command["confirmed"] = payload["confirmed"]
+                response_label = "Yes" if payload["confirmed"] else "No"
+            else:
+                value = payload.get("value")
+                if not isinstance(value, str):
+                    raise ValueError("Enter a response for Pi.")
+                if method == "select" and value not in interaction.get("options", []):
+                    raise ValueError("Choose one of Pi's listed options.")
+                if len(value.encode("utf-8")) > AGENT_CONSOLE_MAX_INPUT - 256:
+                    raise ValueError("Pi dialog responses must be smaller than 64 KB.")
+                rpc_command["value"] = value
+                response_label = value or "Empty response"
+            self._write_pi_rpc_command(console, rpc_command)
+            with console.lock:
+                console.rpc_interactions = [
+                    item for item in console.rpc_interactions
+                    if item.get("id") != request_id
+                ]
+            console.append(
+                pi_rpc_heading("PI INPUT SENT", "38;5;109")
+                + safe_agent_transcript_text(response_label, 2_000).encode("utf-8")
+            )
+            return console.public()
         elif command == "abort":
             rpc_command = {
                 "id": f"launcher-abort-{secrets.token_hex(6)}", "type": "abort",
@@ -16937,8 +17102,11 @@ class RunManager:
         except ValueError:
             if command == "prompt":
                 with console.lock:
-                    console.rpc_prompt_inflight = False
-                    console.rpc_streaming = False
+                    if console.rpc_prompt_id == rpc_command["id"]:
+                        console.rpc_prompt_inflight = False
+                        console.rpc_streaming = False
+                        console.rpc_prompt_id = ""
+                        console.rpc_prompt_acknowledged = False
             raise
         return console.public()
 

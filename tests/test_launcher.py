@@ -3093,6 +3093,7 @@ for line in sys.stdin:
         self.assertEqual(public["protocol"], "pi-rpc")
         self.assertTrue(public["supportsQueue"])
         self.assertFalse(public["supportsDirectKeys"])
+        self.assertEqual(public["interactions"], [])
 
         console.state = "running"
         process = mock.Mock()
@@ -3106,6 +3107,52 @@ for line in sys.stdin:
         cleared = manager._write_pi_rpc_console(console, {"command": "clear_queue"})
         self.assertEqual(cleared["pendingMessages"], 0)
         self.assertEqual(console.rpc_follow_up_queue, [])
+
+        interaction_output = launcher.pi_rpc_event_output(console, {
+            "type": "extension_ui_request", "id": "confirm-one",
+            "method": "confirm", "title": "Apply edits?", "message": "Continue locally?",
+        })
+        self.assertIn(b"PI NEEDS INPUT", interaction_output)
+        self.assertEqual(console.public()["interactions"], [{
+            "id": "confirm-one", "method": "confirm",
+            "title": "Apply edits?", "message": "Continue locally?",
+        }])
+        with mock.patch.object(manager, "_write_pi_rpc_command") as write_rpc:
+            answered = manager._write_pi_rpc_console(console, {
+                "command": "extension_response", "requestId": "confirm-one",
+                "confirmed": True,
+            })
+        write_rpc.assert_called_once_with(console, {
+            "type": "extension_ui_response", "id": "confirm-one", "confirmed": True,
+        })
+        self.assertEqual(answered["interactions"], [])
+
+        console.rpc_prompt_id = "prompt-one"
+        console.rpc_prompt_inflight = True
+        console.rpc_streaming = True
+        launcher.pi_rpc_event_output(console, {
+            "type": "response", "command": "prompt", "id": "prompt-one", "success": True,
+        })
+        self.assertTrue(console.rpc_prompt_acknowledged)
+        launcher.pi_rpc_event_output(console, {
+            "type": "response", "command": "get_state", "success": True,
+            "data": {"isStreaming": False, "pendingMessageCount": 0},
+        })
+        self.assertFalse(console.rpc_streaming)
+        self.assertFalse(console.rpc_prompt_inflight)
+        self.assertEqual(console.rpc_prompt_id, "")
+
+        console.master_fd = 1
+        console.rpc_last_state_probe_at = 0
+        with mock.patch.object(manager, "_write_pi_rpc_command") as probe_rpc:
+            manager.read_agent_console({
+                "ownerRunId": plan.run_id, "surfaceId": plan.run_id, "offset": 0,
+            })
+            manager.read_agent_console({
+                "ownerRunId": plan.run_id, "surfaceId": plan.run_id, "offset": 0,
+            })
+        self.assertEqual(probe_rpc.call_count, 1)
+        self.assertEqual(probe_rpc.call_args.args[1]["type"], "get_state")
 
     def test_pi_rpc_transcript_never_executes_model_supplied_terminal_controls(self) -> None:
         process = mock.Mock()
@@ -3128,6 +3175,39 @@ for line in sys.stdin:
         self.assertIn("and this", rendered.decode("utf-8"))
         self.assertNotIn(b"\x1b[2J", rendered)
         self.assertIn("␛[2J", rendered.decode("utf-8"))
+
+    def test_pi_rpc_reader_keeps_a_final_json_line_without_newline(self) -> None:
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        process = mock.Mock()
+        process.wait.return_value = 0
+        process.poll.return_value = 0
+        read_fd, write_fd = os.pipe()
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=read_fd, cols=100, rows=30, protocol="pi-rpc",
+        )
+        manager = launcher.RunManager()
+        manager.plan = plan
+        manager.state = {
+            "phase": "running", "message": "Running", "run": plan.public(), "events": [],
+        }
+        manager.agent_consoles[plan.run_id] = console
+        manager.attachments[plan.run_id] = launcher.SurfaceAttachment(
+            owner_run_id=plan.run_id, plan=plan, primary=True,
+        )
+        event = {
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": "final answer"},
+        }
+        os.write(write_fd, json.dumps(event).encode("utf-8"))
+        os.close(write_fd)
+        manager._read_agent_console(console)
+        transcript = bytes(console.output).decode("utf-8", errors="replace")
+        self.assertIn("RESPONSE", transcript)
+        self.assertIn("final answer", transcript)
+        self.assertEqual(console.state, "exited")
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Hub Console parser test")
     def test_hub_console_javascript_terminal_core(self) -> None:
@@ -8794,6 +8874,22 @@ for line in sys.stdin:
             self.assertIn(f'addEventListener("{event_name}", markChatScrollInteraction', script)
         self.assertIn(".chat-answer-label.streaming{color:var(--accent)}", styles)
         self.assertIn(".chat-reasoning.streaming{border-color:", styles)
+
+    def test_hub_console_preserves_output_and_can_answer_pi_requests(self) -> None:
+        index = (ROOT / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "styles.css").read_text(encoding="utf-8")
+        for element_id in (
+            "agentConsoleInteraction", "agentConsoleInteractionTitle",
+            "agentConsoleInteractionOptions", "agentConsoleInteractionInput",
+            "agentConsoleInteractionCancel", "agentConsoleInteractionSubmit",
+        ):
+            self.assertIn(f'id="{element_id}"', index)
+        self.assertIn("function renderAgentConsoleInteraction(meta, canInput)", script)
+        self.assertIn("async function respondAgentConsoleInteraction(response)", script)
+        self.assertIn('command:"extension_response"', script)
+        self.assertIn(".agent-console-interaction{grid-column:1/-1;display:grid", styles)
+        self.assertIn(".agent-terminal-shell{position:relative;min-width:0;min-height:220px;overflow:hidden;background:#000}", styles)
 
     def test_chat_queue_uses_progressive_disclosure_and_opens_for_review(self) -> None:
         script = (ROOT / "app.js").read_text(encoding="utf-8")

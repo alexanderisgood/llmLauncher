@@ -87,7 +87,7 @@ CHAT_CONTINUE_INSTRUCTION = (
 )
 DEFAULT_CONTEXT = 131_072
 DEFAULT_OUTPUT = 16_384
-VERSION = "1.66.0-alpha.4"
+VERSION = "1.67.0-alpha.1"
 ADAPTER_SCHEMA_VERSION = 1
 MODEL_LIBRARY_SCHEMA_VERSION = 1
 MODEL_ACQUISITION_SCHEMA_VERSION = 1
@@ -292,6 +292,14 @@ BENCHMARK_DFLASH_TUNER_VERSION = 1
 BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES = 10
 BENCHMARK_DFLASH_TUNER_VERIFY_MODES = ("adaptive", "dflash", "ddtree")
 BENCHMARK_DFLASH_TUNER_DRAFT_QUANTS = ("native", "q8", "q4", "q2")
+SSD_STREAMING_CONTRACT_VERSION = 1
+SSD_STREAMING_MIN_WEIGHT_RATIO = 0.85
+SSD_STREAMING_PREFILL_SIZES = (128, 256, 512, 1_024, 2_048)
+SSD_STREAMING_BACKENDS = ("swiftlm", "mference")
+SSD_STREAMING_RUNTIME_URLS = {
+    "swiftlm": "https://github.com/SharpAI/SwiftLM",
+    "mference": "https://github.com/NeelM0906/Mference",
+}
 BENCHMARK_TELEMETRY_INTERVAL_SECONDS = 1.0
 BENCHMARK_MEMORY_MEANINGFUL_BYTES = 512 * 1024**2
 BENCHMARK_COOLDOWN_MAX_SECONDS = 60.0
@@ -412,12 +420,16 @@ OPTIMIZER_KEYS = {
     ),
     "mtplx": ("acceleration", "depth", "profile", "fan"),
     "freetoken": ("maxBatchSize", "expertCacheSize", "prefixCacheEntries"),
+    "swiftlm": ("prefillSize", "nativeExpertTopK"),
+    "mference": ("promptCacheMode", "queueLimit"),
 }
 BENCHMARK_ENGINE_SETTING_KEYS = {
     "omlx": ("burst", "anePrefill"),
     "lmstudio": ("gpu", "parallel"),
     "mtplx": ("profile", "fan"),
     "freetoken": ("maxBatchSize", "expertCacheSize", "prefixCacheEntries"),
+    "swiftlm": ("prefillSize", "nativeExpertTopK", "ssdCacheState"),
+    "mference": ("promptCacheMode", "queueLimit", "ssdCacheState"),
 }
 
 
@@ -865,6 +877,18 @@ RUNTIME_CANDIDATE_SPECS: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("homebrew", "/opt/homebrew/bin/mtplx", "Homebrew CLI"),
         ("path", "mtplx", "Shell PATH"),
     ),
+    "swiftlm": (
+        ("user-cli", "~/.local/bin/SwiftLM", "User CLI"),
+        ("homebrew", "/opt/homebrew/bin/SwiftLM", "Homebrew CLI"),
+        ("source-build", "~/Documents/Code/SwiftLM/.build/release/SwiftLM", "Source release build"),
+        ("path", "SwiftLM", "Shell PATH"),
+    ),
+    "mference": (
+        ("user-cli", "~/.local/bin/MferenceServer", "User server"),
+        ("homebrew", "/opt/homebrew/bin/MferenceServer", "Homebrew server"),
+        ("source-build", "~/Documents/Code/Mference/.build/release/MferenceServer", "Source release build"),
+        ("path", "MferenceServer", "Shell PATH"),
+    ),
 }
 
 
@@ -1007,6 +1031,8 @@ BINARIES = {
     "omlx": _SELECTED_OMLX_BINARY,
     "lms": preferred_runtime_binary("lms"),
     "mtplx": preferred_runtime_binary("mtplx"),
+    "swiftlm": preferred_runtime_binary("swiftlm"),
+    "mference": preferred_runtime_binary("mference"),
     "freetoken_native": _SELECTED_FREETOKEN_NATIVE_BINARY,
     "freetoken": (
         _SELECTED_FREETOKEN_NATIVE_BINARY
@@ -1071,6 +1097,12 @@ ENGINE_ADAPTERS: dict[str, AdapterDescriptor] = {
     "freetoken": AdapterDescriptor(
         "freetoken", "FreeToken", "engine", "freetoken", "native-or-remote-openai-compatible",
     ),
+    "swiftlm": AdapterDescriptor(
+        "swiftlm", "SwiftLM", "engine", "swiftlm", "openai-compatible-ssd-expert-streaming",
+    ),
+    "mference": AdapterDescriptor(
+        "mference", "Mference", "engine", "mference", "openai-compatible-ssd-expert-streaming",
+    ),
 }
 
 CLIENT_ADAPTERS: dict[str, AdapterDescriptor] = {
@@ -1128,6 +1160,18 @@ CLIENT_SUPPORT: dict[str, dict[str, dict[str, Any]]] = {
         "opencode": {"supported": True, "reason": "FreeToken OpenAI Chat Completions through a private LAN bridge"},
         "codex": {"supported": True, "reason": "FreeToken native Responses API through a private LAN bridge"},
         "chat": {"supported": True, "reason": "Built-in streaming Chat over the configured FreeToken server"},
+    },
+    "swiftlm": {
+        "pi": {"supported": True, "reason": "OpenAI Chat Completions with function tools"},
+        "opencode": {"supported": True, "reason": "OpenAI Chat Completions with function tools"},
+        "codex": {"supported": False, "reason": "SwiftLM does not expose the Responses API required by Codex"},
+        "chat": {"supported": True, "reason": "Built-in streaming Chat Completions"},
+    },
+    "mference": {
+        "pi": {"supported": True, "reason": "OpenAI Chat Completions with function tools"},
+        "opencode": {"supported": True, "reason": "OpenAI Chat Completions with function tools"},
+        "codex": {"supported": False, "reason": "Mference does not expose the Responses API required by Codex"},
+        "chat": {"supported": True, "reason": "Built-in streaming Chat Completions"},
     },
 }
 
@@ -2061,10 +2105,57 @@ def runtime_inventory() -> dict[str, Any]:
             },
         },
     ]
+    for runtime_id, label, minimum, detail in (
+        (
+            "swiftlm", "SwiftLM", "macOS 14 · Apple Silicon",
+            "Streams routed experts from ordinary MLX MoE checkpoints with native expert routing preserved.",
+        ),
+        (
+            "mference", "Mference", "macOS 15 · Apple Silicon",
+            "Runs only pinned, verified .gturbo bundles with model-specific Metal kernels.",
+        ),
+    ):
+        candidates = runtime_candidate_details(runtime_id)
+        selected = next((item for item in candidates if item["selected"]), None)
+        installed_runtime = selected is not None
+        runtimes.append({
+            "id": runtime_id,
+            "label": label,
+            "level": "ready" if installed_runtime else "blocked",
+            "headline": (
+                f"{label} is ready for accepted SSD-streamed models."
+                if installed_runtime else
+                f"{label} is optional and not installed."
+            ),
+            "selected": selected,
+            "candidates": candidates,
+            "checks": [
+                {
+                    "label": "SSD-streaming server",
+                    "ready": installed_runtime,
+                    "detail": str(selected.get("version") if selected else "Not installed"),
+                },
+                {
+                    "label": "Exact model contract",
+                    "ready": installed_runtime,
+                    "detail": detail,
+                },
+                {"label": "Platform", "ready": True, "detail": minimum},
+            ],
+            "update": {
+                "mode": "manual-review", "automatic": False,
+                "headline": f"Install and update {label} from its upstream source.",
+                "detail": "The launcher never downloads runtimes or very large model weights while inspecting this optional lane.",
+                "primaryUrl": SSD_STREAMING_RUNTIME_URLS[runtime_id],
+                "primaryLabel": f"Open {label} source",
+                "docsUrl": SSD_STREAMING_RUNTIME_URLS[runtime_id],
+                "rollback": "Runtime selection changes only the executable used for new sessions; model files are not rewritten.",
+            },
+        })
     installed = sum(bool(runtime.get("selected")) for runtime in runtimes)
     advisories = sum(runtime["level"] != "ready" for runtime in runtimes)
     if installed == len(runtimes) and advisories:
-        summary_message = "All three runtimes are installed; one or more advanced checks still need review."
+        summary_message = "All runtimes are installed; one or more advanced checks still need review."
     elif installed == len(runtimes):
         summary_message = "All selected runtimes passed their local checks."
     else:
@@ -2139,6 +2230,8 @@ def model_roots() -> list[tuple[str, Path]]:
         ("Documents", Path.home() / "Documents" / "models"),
         ("Documents", Path.home() / "Documents" / "Models"),
         ("Hugging Face", Path.home() / ".cache" / "huggingface" / "hub"),
+        ("Mference", Path.home() / "Library" / "Application Support" / "Mference"),
+        ("Mference", Path.home() / ".mference" / "models"),
     ]
     omlx_settings = read_json(Path.home() / ".omlx" / "settings.json")
     configured = deep_get(omlx_settings, ("model", "model_dirs"))
@@ -2167,6 +2260,12 @@ def candidate_dirs(root: Path, max_depth: int = 4) -> list[Path]:
         except OSError:
             return
         names = {entry.name for entry in entries}
+        if (
+            path.name.endswith(".gturbo") and "manifest.json" in names
+            and "verified-install.json" in names
+        ):
+            found.append(path)
+            return
         has_config = "config.json" in names
         has_gguf = any(name.lower().endswith(".gguf") for name in names)
         if has_config or has_gguf:
@@ -2188,6 +2287,28 @@ def candidate_dirs(root: Path, max_depth: int = 4) -> list[Path]:
 
 
 def weight_completeness(path: Path, config: dict[str, Any]) -> tuple[bool, str, int]:
+    if path.name.endswith(".gturbo"):
+        manifest = read_json(path / "manifest.json")
+        receipt = read_json(path / "verified-install.json")
+        common = path / "model_weights.bin"
+        layout = path / "packed_experts" / "layout.json"
+        try:
+            expert_files = sorted((path / "packed_experts").glob("layer_*.bin"))
+            required = [path / "manifest.json", path / "verified-install.json", common, layout]
+            complete = bool(
+                manifest and receipt and expert_files
+                and all(item.is_file() and item.stat().st_size > 0 for item in required)
+                and all(item.stat().st_size > 0 for item in expert_files)
+            )
+            total = sum(item.stat().st_size for item in required if item.is_file())
+            total += sum(item.stat().st_size for item in expert_files)
+        except OSError:
+            return False, "Incomplete Mference bundle", 0
+        return (
+            (True, "Ready", total)
+            if complete else
+            (False, "Incomplete Mference bundle", total)
+        )
     try:
         files = [p for p in path.iterdir() if p.is_file()]
     except OSError:
@@ -2211,6 +2332,171 @@ def weight_completeness(path: Path, config: dict[str, Any]) -> tuple[bool, str, 
     if weights:
         return True, "Ready", sum(p.stat().st_size for p in weights)
     return False, "Incomplete (no model weights)", total
+
+
+def _positive_config_integer(config: dict[str, Any], *keys: str) -> int | None:
+    text = config.get("text_config") if isinstance(config.get("text_config"), dict) else config
+    for source in (text, config):
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+    return None
+
+
+def _ssd_source_contract(path: Path, config: dict[str, Any]) -> dict[str, Any]:
+    """Find a format-independent source receipt without guessing from a display name."""
+    documents = [config]
+    if path.name.endswith(".gturbo"):
+        documents.extend([
+            read_json(path / "manifest.json"),
+            read_json(path / "verified-install.json"),
+        ])
+    candidates: list[tuple[str, str]] = []
+
+    def visit(value: Any, prefix: str = "") -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_prefix = f"{prefix}.{key}" if prefix else str(key)
+                visit(child, child_prefix)
+        elif isinstance(value, list):
+            for index, child in enumerate(value[:2_048]):
+                visit(child, f"{prefix}[{index}]")
+        elif isinstance(value, str) and 0 < len(value) <= 1_024:
+            candidates.append((prefix.casefold(), value.strip()))
+
+    for document in documents:
+        visit(document)
+    source_ids = [
+        value for key, value in candidates
+        if (
+            key.endswith(("source_model", "source_model_id", "source_repo", "source_repository", "_name_or_path"))
+            or ("source" in key and key.endswith(("model", "model_id", "repo", "repository")))
+        )
+        and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.@-]+", value)
+    ]
+    revisions = [
+        value.casefold() for key, value in candidates
+        if "source" in key and any(marker in key for marker in ("revision", "commit"))
+        and re.fullmatch(r"[0-9a-fA-F]{40}", value)
+    ]
+    index_digests = [
+        value.casefold() for key, value in candidates
+        if "source" in key and "index" in key and any(marker in key for marker in ("sha", "digest", "hash"))
+        and re.fullmatch(r"[0-9a-fA-F]{64}", value)
+    ]
+    source_id = source_ids[0].casefold() if source_ids else None
+    proof_kind = "revision" if revisions else "source-index" if index_digests else None
+    proof = revisions[0] if revisions else index_digests[0] if index_digests else None
+    comparison_identity = None
+    if source_id and proof_kind and proof:
+        comparison_identity = hashlib.sha256(
+            f"ssd-source-v1\0{source_id}\0{proof_kind}\0{proof}".encode("utf-8")
+        ).hexdigest()
+    return {
+        "sourceModel": source_id,
+        "proofKind": proof_kind,
+        "proof": proof,
+        "comparisonIdentity": comparison_identity,
+        "verifiedForCrossFormatComparison": comparison_identity is not None,
+    }
+
+
+def ssd_streaming_model_profile(
+    path: Path, config: dict[str, Any], weight_bytes: int, installed_memory: int,
+) -> dict[str, Any]:
+    """Describe oversized-MoE eligibility without claiming unsupported runtime support."""
+    identity = " ".join(filter(None, (
+        path.name,
+        str(config.get("model_type") or ""),
+        str(deep_get(config, ("text_config", "model_type")) or ""),
+        " ".join(str(item) for item in (config.get("architectures") or []) if isinstance(item, str)),
+    ))).casefold()
+    expert_count = _positive_config_integer(
+        config, "num_experts", "num_local_experts", "n_routed_experts", "moe_num_experts",
+    )
+    native_top_k = _positive_config_integer(
+        config, "num_experts_per_tok", "num_experts_per_token", "num_selected_experts", "moe_top_k",
+    )
+    bundle = path.name.endswith(".gturbo")
+    moe = bool(expert_count and expert_count > 1) or bundle or any(
+        marker in identity for marker in ("moe", "a3b", "a4b", "a10b", "a12b", "flash-next")
+    )
+    qwen38_flash = bool(
+        ("qwen3.8" in identity or "qwen3_8" in identity)
+        and ("flash" in identity or "next" in identity)
+    )
+    ratio = (
+        float(weight_bytes) / float(installed_memory)
+        if weight_bytes > 0 and installed_memory > 0 else None
+    )
+    oversized = bool(ratio is not None and ratio >= SSD_STREAMING_MIN_WEIGHT_RATIO)
+    candidate = bool(moe and weight_bytes > 0)
+    recommended = bool(candidate and oversized)
+    if not moe:
+        reason = "SSD expert streaming is reserved for Mixture-of-Experts checkpoints."
+    elif not weight_bytes:
+        reason = "Finish the model download before SSD-streaming admission can be checked."
+    elif oversized:
+        reason = "The checkpoint is an MoE whose weights exceed the launcher's safe in-memory threshold."
+    else:
+        reason = "This MoE currently fits below the safe in-memory threshold; SSD streaming remains optional."
+    source_contract = _ssd_source_contract(path, config)
+    return {
+        "version": SSD_STREAMING_CONTRACT_VERSION,
+        "candidate": candidate,
+        "recommended": recommended,
+        "moe": moe,
+        "oversized": oversized,
+        "qwen38FlashNext": qwen38_flash,
+        "expertCount": expert_count,
+        "nativeExpertTopK": native_top_k,
+        "weightBytes": weight_bytes,
+        "installedMemoryBytes": installed_memory,
+        "weightToMemoryRatio": round(ratio, 4) if ratio is not None else None,
+        "format": "gturbo" if bundle else "mlx",
+        "reason": reason,
+        "sourceContract": source_contract,
+        "comparisonIdentity": source_contract["comparisonIdentity"],
+        "crossFormatComparisonReady": source_contract["verifiedForCrossFormatComparison"],
+        "calibration": {
+            "suite": "agentic",
+            "engines": list(SSD_STREAMING_BACKENDS),
+            "freshProcessPerEngine": True,
+            "coldAndWarmStages": True,
+            "nativeExpertRoutingRequired": True,
+            "metrics": ["generationTps", "ttft", "peakMemory", "thermalState", "prefixReuse"],
+        },
+    }
+
+
+def swiftlm_model_supported(path: Path, config: dict[str, Any], profile: dict[str, Any]) -> tuple[bool, str]:
+    identity = " ".join((
+        path.name,
+        str(config.get("model_type") or ""),
+        str(deep_get(config, ("text_config", "model_type")) or ""),
+    )).casefold()
+    if profile.get("qwen38FlashNext"):
+        return False, "Qwen3.8 Flash-Next is not yet listed in SwiftLM's accepted model families."
+    supported = any(marker in identity for marker in (
+        "qwen3.5", "qwen3_5", "qwen3.6", "qwen3_6", "gemma-4", "gemma4",
+        "deepseek_v3", "deepseek-v3", "deepseek_v4", "deepseek-v4",
+    ))
+    return (
+        (True, "SwiftLM supports this MLX MoE family with native SSD expert streaming.")
+        if supported else
+        (False, "SwiftLM has not listed this exact MoE architecture as supported.")
+    )
+
+
+def mference_model_supported(path: Path, profile: dict[str, Any]) -> tuple[bool, str]:
+    if profile.get("qwen38FlashNext"):
+        return False, "Qwen3.8 Flash-Next has not passed Mference's pinned-family acceptance gate."
+    if path.name.endswith(".gturbo"):
+        return True, "Verified Mference .gturbo bundle with SSD-streamed experts."
+    return False, "Mference requires its verified pinned .gturbo repack of this model."
 
 
 def safetensors_inventory(path: Path) -> tuple[bool, dict[str, dict[str, Any]], list[dict[str, Any]]]:
@@ -2601,12 +2887,28 @@ def model_artifact_fingerprint(path: Path, config: dict[str, Any]) -> str:
     try:
         real = path.resolve(strict=True)
         weights = []
-        for item in sorted(real.iterdir(), key=lambda value: value.name):
-            if not item.is_file() or item.suffix not in {".safetensors", ".gguf"}:
-                continue
+        candidates = [
+            item for item in real.iterdir()
+            if item.is_file() and item.suffix in {".safetensors", ".gguf"}
+        ]
+        if real.name.endswith(".gturbo"):
+            candidates.extend(
+                item for item in (
+                    real / "model_weights.bin",
+                    real / "manifest.json",
+                    real / "verified-install.json",
+                    real / "packed_experts" / "layout.json",
+                )
+                if item.is_file()
+            )
+            candidates.extend(
+                item for item in (real / "packed_experts").glob("layer_*.bin")
+                if item.is_file()
+            )
+        for item in sorted(set(candidates), key=lambda value: str(value.relative_to(real))):
             details = item.stat()
             weights.append({
-                "name": item.name,
+                "name": str(item.relative_to(real)),
                 "device": details.st_dev,
                 "inode": details.st_ino,
                 "size": details.st_size,
@@ -2619,6 +2921,8 @@ def model_artifact_fingerprint(path: Path, config: dict[str, Any]) -> str:
         "path": str(real),
         "config": config,
         "index": read_json(real / "model.safetensors.index.json"),
+        "mferenceManifest": read_json(real / "manifest.json") if real.name.endswith(".gturbo") else {},
+        "mferenceReceipt": read_json(real / "verified-install.json") if real.name.endswith(".gturbo") else {},
         "weights": weights,
     }
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -3515,6 +3819,7 @@ def benchmark_record_identity(record: dict[str, Any]) -> tuple[Any, ...]:
     """Identify one repeatable benchmark route without collapsing its history."""
     return (
         record.get("backend"), record.get("modelFingerprint"),
+        record.get("ssdComparisonIdentity"),
         record.get("runtimeVersion"), record.get("hardwareFingerprint"),
         record.get("client"), record.get("reasoning"), record.get("targetKV"),
         record.get("samplingFingerprint"), record.get("contextMin"), record.get("contextMax"),
@@ -3545,6 +3850,18 @@ def save_benchmark_records(new_records: list[dict[str, Any]]) -> None:
         raise ValueError("No benchmark evidence was supplied.")
     if any(not isinstance(record, dict) or not required.issubset(record) for record in new_records):
         raise ValueError("Benchmark evidence is incomplete and was not saved.")
+    for record in new_records:
+        backend = str(record.get("backend") or "")
+        identity = record.get("ssdComparisonIdentity")
+        if backend in SSD_STREAMING_BACKENDS:
+            if (
+                record.get("ssdStreaming") is not True
+                or not isinstance(identity, str)
+                or re.fullmatch(r"[0-9a-f]{64}", identity) is None
+            ):
+                raise ValueError("SSD benchmark evidence is missing its verified source identity.")
+        elif record.get("ssdStreaming") is True or identity not in {None, ""}:
+            raise ValueError("Non-SSD benchmark evidence contains an SSD source identity.")
     new_ids = {str(record.get("id") or "") for record in new_records}
     new_shootout_routes = {
         (str(record.get("shootoutId") or ""), str(record.get("backend") or ""))
@@ -3595,6 +3912,13 @@ def matching_benchmark_records(
         and record.get("runtimeVersion") == runtime_version
         and record.get("hardwareFingerprint") == machine
         and benchmark_runtime_integrity_issue(record) is None
+        and (
+            backend not in SSD_STREAMING_BACKENDS
+            or (
+                record.get("ssdStreaming") is True
+                and record.get("ssdComparisonIdentity") == capability.get("comparisonIdentity")
+            )
+        )
         and (
             "dflash2" not in (record.get("comparedModes") or [])
             or record.get("pairFingerprint") == capability.get("dflashPairFingerprint")
@@ -4043,6 +4367,20 @@ def _local_benchmark_record_verified(
     if not isinstance(benchmark, dict):
         return False
     backend = str(benchmark.get("backend") or "")
+    ssd_identity = benchmark.get("ssdComparisonIdentity")
+    if backend in SSD_STREAMING_BACKENDS:
+        capability_identity = capability.get("comparisonIdentity")
+        if (
+            capability.get("ssdStreaming") is not True
+            or benchmark.get("ssdStreaming") is not True
+            or not isinstance(ssd_identity, str)
+            or re.fullmatch(r"[0-9a-f]{64}", ssd_identity) is None
+            or not isinstance(capability_identity, str)
+            or not secrets.compare_digest(ssd_identity, capability_identity)
+        ):
+            return False
+    elif benchmark.get("ssdStreaming") is True or ssd_identity not in {None, ""}:
+        return False
     if (
         benchmark.get("scope") != "local"
         or benchmark.get("modelFingerprint") != capability.get("benchmarkModelFingerprint")
@@ -5549,6 +5887,8 @@ def scan_models() -> list[dict[str, Any]]:
     )
     lmstudio_mtp_runtime = lmstudio_mtp_load_supported(BINARIES.get("lms"))
     mtplx_version = command_version(BINARIES.get("mtplx"))
+    swiftlm_version = command_version(BINARIES.get("swiftlm"))
+    mference_version = command_version(BINARIES.get("mference"))
     freetoken_native_binary = BINARIES.get("freetoken_native")
     freetoken_native_version = command_version(freetoken_native_binary)
     dflash2_runtime = omlx_supports_dflash2(omlx_version)
@@ -5565,6 +5905,10 @@ def scan_models() -> list[dict[str, Any]]:
     for item in discovered.values():
         real = item["path"]
         config = read_json(real / "config.json")
+        if real.name.endswith(".gturbo"):
+            manifest = read_json(real / "manifest.json")
+            tokenizer_config = read_json(real / "tokenizer" / "config.json")
+            config = {**tokenizer_config, **manifest}
         if not is_dflash2_draft(real, config):
             continue
         ready, status, size = weight_completeness(real, config)
@@ -5583,6 +5927,16 @@ def scan_models() -> list[dict[str, Any]]:
         real = item["path"]
         key = str(real)
         config = read_json(real / "config.json")
+        if real.name.endswith(".gturbo"):
+            # Mference bundles keep their pinned model contract in the bundle
+            # manifest rather than a Hugging Face-style root config.  Use the
+            # same merged view for admission, fingerprinting, and launch-time
+            # revalidation so a scan cannot approve one artifact and later
+            # reject the unchanged bundle as stale.
+            config = {
+                **read_json(real / "tokenizer" / "config.json"),
+                **read_json(real / "manifest.json"),
+            }
         # Draft checkpoints are helpers, never standalone target models.
         if is_dflash2_draft(real, config):
             continue
@@ -5592,7 +5946,11 @@ def scan_models() -> list[dict[str, Any]]:
             tensor for tensor in real.glob("*.safetensors")
             if tensor.name != "mtp.safetensors" and tensor.stat().st_size > 0
         ]
-        fmt = "gguf" if ggufs and not model_tensors else "mlx"
+        fmt = (
+            "mference"
+            if real.name.endswith(".gturbo") else
+            "gguf" if ggufs and not model_tensors else "mlx"
+        )
         artifact = ggufs[0] if fmt == "gguf" else real
         context = deep_get(
             config,
@@ -5611,6 +5969,15 @@ def scan_models() -> list[dict[str, Any]]:
         architecture = str(architectures[0]) if isinstance(architectures, list) and architectures else model_type
         quant = deep_get(config, ("quantization", "bits"), ("quantization_config", "bits"))
         quantization = f"{quant}-bit" if isinstance(quant, (int, float)) else "From artifact"
+        ssd_profile = ssd_streaming_model_profile(
+            real, config, weight_bytes, installed_memory,
+        )
+        swiftlm_family_ready, swiftlm_family_reason = swiftlm_model_supported(
+            real, config, ssd_profile,
+        )
+        mference_family_ready, mference_family_reason = mference_model_supported(
+            real, ssd_profile,
+        )
         ane_profile = ane_quantization_profile(config)
         ane_memory = ane_memory_readiness(weight_bytes, installed_memory)
         ane_cpu_profile = ane_cpu_sharing_profile(real)
@@ -5887,6 +6254,55 @@ def scan_models() -> list[dict[str, Any]]:
                     "customSampling": False,
                     "samplingReason": "The native FreeToken milestone currently uses greedy decoding only.",
             },
+            "swiftlm": {
+                    "runnable": bool(
+                        ready and fmt == "mlx" and ssd_profile["moe"]
+                        and swiftlm_family_ready
+                    ),
+                    "reason": (
+                        swiftlm_family_reason
+                        if ready and fmt == "mlx" and ssd_profile["moe"] else
+                        "SwiftLM SSD streaming requires a complete MLX Mixture-of-Experts checkpoint."
+                    ),
+                    "mtp": False,
+                    "mtpReason": "MTP is deliberately disabled for SSD-streamed MoEs because verification multiplies expert I/O fan-out.",
+                    "dflash": False,
+                    "dflashVersion": None,
+                    "dflashReason": "DFlash is outside the exact SSD-streaming calibration contract.",
+                    "kv": False,
+                    "preferredAcceleration": "off",
+                    "depth": 1,
+                    "depthMax": 1,
+                    "agentReasoning": ["auto", "off"],
+                    "codexReasoning": ["auto"],
+                    "ssdStreaming": True,
+                    "ssdProfile": copy.deepcopy(ssd_profile),
+                    "modelPath": str(real),
+                    "nativeExpertTopK": int(ssd_profile.get("nativeExpertTopK") or 0),
+                    "prefillSize": 512,
+                    "exactExpertRouting": True,
+            },
+            "mference": {
+                    "runnable": bool(ready and fmt == "mference" and mference_family_ready),
+                    "reason": mference_family_reason,
+                    "mtp": False,
+                    "mtpReason": "Mference uses model-native expert execution; no speculative route is included in SSD calibration.",
+                    "dflash": False,
+                    "dflashVersion": None,
+                    "dflashReason": "DFlash is outside Mference's pinned model contract.",
+                    "kv": False,
+                    "preferredAcceleration": "off",
+                    "depth": 1,
+                    "depthMax": 1,
+                    "agentReasoning": ["auto"],
+                    "codexReasoning": ["auto"],
+                    "ssdStreaming": True,
+                    "ssdProfile": copy.deepcopy(ssd_profile),
+                    "modelPath": str(real),
+                    "promptCacheMode": "on",
+                    "queueLimit": 4,
+                    "exactExpertRouting": True,
+            },
         }
         model_fingerprint = model_artifact_fingerprint(real, config) if ready else ""
         freetoken_capability = backend["freetoken"]
@@ -6012,11 +6428,16 @@ def scan_models() -> list[dict[str, Any]]:
             "lmstudio": lmstudio_version,
             "mtplx": mtplx_version,
             "freetoken": freetoken_native_version,
+            "swiftlm": swiftlm_version,
+            "mference": mference_version,
         }
         for backend_name, capability in backend.items():
             runtime_version = runtime_versions[backend_name]
             capability["runtimeVersion"] = runtime_version
             capability["benchmarkModelFingerprint"] = model_fingerprint
+            if backend_name in SSD_STREAMING_BACKENDS:
+                capability["artifactFingerprint"] = model_fingerprint
+                capability["comparisonIdentity"] = ssd_profile.get("comparisonIdentity")
             capability["localBenchmark"] = None
             capability["localBenchmarks"] = []
             capability["fallbackAcceleration"] = capability.get("preferredAcceleration")
@@ -6073,8 +6494,46 @@ def scan_models() -> list[dict[str, Any]]:
             "defaultSampling": default_sampling,
             "lmKey": lm_key,
             "nativeFreetoken": freetoken_capability.get("native") is True,
+            "ssdStreaming": ssd_profile,
             "backends": backend,
         }
+    # A verified Mference repack and its ordinary MLX source are separate
+    # folders. Link only receipts that prove the same pinned source revision
+    # or source index; display-name similarity is never enough.
+    ssd_groups: dict[str, list[dict[str, Any]]] = {}
+    for record in records.values():
+        profile = record.get("ssdStreaming")
+        identity = str(profile.get("comparisonIdentity") or "") if isinstance(profile, dict) else ""
+        if identity:
+            ssd_groups.setdefault(identity, []).append(record)
+    for identity, group in ssd_groups.items():
+        route_sources: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+        for source_record in group:
+            for backend_name in SSD_STREAMING_BACKENDS:
+                capability = source_record.get("backends", {}).get(backend_name, {})
+                if capability.get("runnable") is True:
+                    route_sources.setdefault(backend_name, (source_record, capability))
+        if len(route_sources) < 2:
+            continue
+        for target_record in group:
+            for backend_name, (source_record, source_capability) in route_sources.items():
+                target_capability = target_record.get("backends", {}).get(backend_name, {})
+                if target_capability.get("runnable") is True:
+                    continue
+                paired = copy.deepcopy(source_capability)
+                paired.update({
+                    "pairedArtifact": True,
+                    "pairedArtifactName": str(source_record.get("name") or "SSD model bundle"),
+                    "pairedArtifactModelId": str(source_record.get("id") or ""),
+                    "comparisonIdentity": identity,
+                    "reason": (
+                        f"Uses the verified equivalent {source_record.get('name')} artifact for "
+                        f"{BACKEND_LABELS[backend_name]}."
+                    ),
+                })
+                target_record["backends"][backend_name] = paired
+            target_record["ssdStreaming"]["pairedCalibrationReady"] = True
+            target_record["ssdStreaming"]["pairedEngines"] = list(SSD_STREAMING_BACKENDS)
     freetoken = load_freetoken_connection()
     if freetoken:
         endpoint_label = urllib.parse.urlsplit(str(freetoken["endpoint"])).netloc
@@ -6529,7 +6988,7 @@ def fastest_safe_options(
     that names it as the preferred route.
     """
     if backend not in OPTIMIZER_KEYS:
-        raise ValueError("Choose oMLX, LM Studio, MTPLX, or FreeToken.")
+        raise ValueError("Choose a supported runtime.")
     options = dict(current_options or {})
     before = dict(options)
     rationale: list[str] = []
@@ -6665,7 +7124,7 @@ def fastest_safe_options(
             if measured_engine_settings else
             "Use the artifact's validated MTPLX profile and keep cooling on your visible choice."
         )
-    else:
+    elif backend == "freetoken":
         options.update({"acceleration": "off", "depth": 1, "kv": "off"})
         if capability.get("native") is True:
             options.update({
@@ -6685,6 +7144,38 @@ def fastest_safe_options(
             rationale.append(
                 "Keep execution policy on the connected FreeToken server; preserve the visible request contract without inventing a remote tuning result."
             )
+    elif backend == "swiftlm":
+        native_top_k = max(0, int(capability.get("nativeExpertTopK") or 0))
+        options.update({
+            "acceleration": "off", "depth": 1, "kv": "off",
+            "prefillSize": safe_int(
+                measured_engine_settings.get("prefillSize"),
+                int(capability.get("prefillSize") or 512),
+                min(SSD_STREAMING_PREFILL_SIZES), max(SSD_STREAMING_PREFILL_SIZES),
+            ),
+            "nativeExpertTopK": native_top_k,
+        })
+        evidence_tier = "local-benchmark" if local_verified else "exact-ssd-streaming-default"
+        evidence_label = "Locally measured SSD-streaming preset" if local_verified else "Exact SSD-streaming default"
+        rationale.extend([
+            "Stream routed experts from SSD while keeping the checkpoint's native expert count per token.",
+            "Keep speculative decoding off so draft verification cannot multiply SSD expert reads.",
+        ])
+    elif backend == "mference":
+        options.update({
+            "acceleration": "off", "depth": 1, "kv": "off",
+            "promptCacheMode": str(measured_engine_settings.get("promptCacheMode") or "on"),
+            "queueLimit": safe_int(
+                measured_engine_settings.get("queueLimit"),
+                int(capability.get("queueLimit") or 4), 1, 32,
+            ),
+        })
+        evidence_tier = "local-benchmark" if local_verified else "verified-gturbo-default"
+        evidence_label = "Locally measured SSD-streaming preset" if local_verified else "Verified .gturbo default"
+        rationale.extend([
+            "Use the verified .gturbo expert layout and one model-native routed-expert path.",
+            "Keep the prompt cache enabled for repeated agent prefixes without changing generated tokens.",
+        ])
 
     changed = [
         key for key in OPTIMIZER_KEYS[backend]
@@ -7645,7 +8136,7 @@ def optimal_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> di
     """Resolve an optimizer result without allocating a port or creating a run."""
     backend = str(payload.get("backend", ""))
     if backend not in ENGINE_ADAPTERS or backend not in OPTIMIZER_KEYS:
-        raise ValueError("Choose oMLX, LM Studio, MTPLX, or FreeToken.")
+        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, or Mference.")
     client = str(payload.get("client", ""))
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose Pi, OpenCode, Codex, or Chat.")
@@ -7739,6 +8230,8 @@ def optimizer_backend_eligibility(
         "lmstudio": {"off"},
         "mtplx": {"off", "q8", "q4"},
         "freetoken": {"off"},
+        "swiftlm": {"off"},
+        "mference": {"off"},
     }[backend]
     if kv not in allowed_kv or (kv != "off" and capability.get("kv") is not True):
         return False, "This engine cannot preserve the selected KV precision."
@@ -7853,6 +8346,8 @@ def cross_engine_benchmark_measurement(
     """
     quality_fingerprint = record.get("qualityFingerprint")
     quality_tokens = record.get("qualityCompletionTokens")
+    ssd_identity = record.get("ssdComparisonIdentity")
+    is_ssd_measurement = record.get("ssdStreaming") is True
     if (
         record.get("comparisonContractVersion") not in {2, 3, BENCHMARK_COMPARISON_CONTRACT_VERSION}
         or not isinstance(quality_fingerprint, str)
@@ -7861,6 +8356,15 @@ def cross_engine_benchmark_measurement(
         or not isinstance(quality_tokens, int)
         or quality_tokens <= 0
     ):
+        return None
+    if is_ssd_measurement:
+        if (
+            str(record.get("backend") or "") not in SSD_STREAMING_BACKENDS
+            or not isinstance(ssd_identity, str)
+            or re.fullmatch(r"[0-9a-f]{64}", ssd_identity) is None
+        ):
+            return None
+    elif ssd_identity not in {None, ""}:
         return None
     winner = str(record.get("winner") or "")
     modes = record.get("modes")
@@ -7917,7 +8421,8 @@ def cross_engine_benchmark_measurement(
         display = f"{score:.1f} output tok/s"
         higher_is_better = True
     contract = {
-        "modelFingerprint": record.get("modelFingerprint"),
+        "modelContractKind": "ssd-source" if is_ssd_measurement else "artifact",
+        "modelContract": ssd_identity if is_ssd_measurement else record.get("modelFingerprint"),
         "hardwareFingerprint": record.get("hardwareFingerprint"),
         "suite": record.get("suite"),
         "workloadKind": workload,
@@ -8480,6 +8985,12 @@ def benchmark_mode_summary(
     """Explain which verified routes an exact model artifact can actually compare."""
     capability = model.get("backends", {}).get(backend, {})
     tested = [str(mode) for mode in modes if str(mode) in {"ar", "mtp", "dflash2"}]
+    if backend in SSD_STREAMING_BACKENDS:
+        return (
+            "Runs exact native expert routing through SSD streaming. The fresh-process first turn, "
+            "shared-prefix turn, tool ingestion, and warm follow-up are measured separately; "
+            "the OS file cache is observed, not forcibly purged."
+        )
     labels = [BenchmarkManager._mode_label(mode) for mode in tested]
     accelerators = labels[1:] if tested[:1] == ["ar"] else [
         label for mode, label in zip(tested, labels) if mode != "ar"
@@ -8514,6 +9025,8 @@ def benchmark_acceleration_reason(
         return "This model has no verified MTPLX MTP weights"
     if backend == "omlx":
         return "This model has no verified oMLX accelerator"
+    if backend in SSD_STREAMING_BACKENDS:
+        return "Exact SSD streaming uses native expert routing; speculative decoding is excluded"
     return mtp_reason or "This model has no verified accelerator"
 
 
@@ -8536,6 +9049,15 @@ def benchmark_engine_settings_label(backend: str, settings: Any) -> str:
             "default": "system cooling", "smart": "automatic cooling", "max": "maximum fans",
         }.get(str(values.get("fan") or "smart"), "automatic cooling")
         return f"{profile} profile · {cooling}"
+    if backend == "swiftlm":
+        prefill = safe_int(values.get("prefillSize"), 512, 128, 2_048)
+        top_k = max(0, safe_int(values.get("nativeExpertTopK"), 0, 0, 4_096))
+        routing = f"native top-{top_k}" if top_k else "native expert routing"
+        return f"SSD expert streaming · {prefill:,} prefill · {routing}"
+    if backend == "mference":
+        cache = "prompt cache" if str(values.get("promptCacheMode") or "on") == "on" else "no prompt cache"
+        queue = safe_int(values.get("queueLimit"), 4, 1, 32)
+        return f"Verified .gturbo streaming · {cache} · queue {queue}"
     return ""
 
 
@@ -8639,7 +9161,9 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
 
     eligible: list[str] = []
     excluded: list[dict[str, str]] = []
-    for backend in ENGINE_ADAPTERS:
+    ssd_profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
+    candidate_backends = SSD_STREAMING_BACKENDS if ssd_profile.get("recommended") is True else tuple(ENGINE_ADAPTERS)
+    for backend in candidate_backends:
         allowed, reason = optimizer_backend_eligibility(
             model, backend, client, reasoning, kv, chat,
         )
@@ -8892,6 +9416,11 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         evidence_label = f"{ENGINE_PREFERENCE_LABELS[preference]} · leading group"
     if workload_comparison.get("warning"):
         winner_rationale.append(str(workload_comparison["warning"]))
+    next_action = (
+        "apply"
+        if winning_backend != current_backend or bool(result.get("changedKeys"))
+        else "keep-current"
+    )
     result.update({
         "engineChanged": winning_backend != current_backend,
         "originalBackend": current_backend,
@@ -8907,7 +9436,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         "leadingBackends": list(leading_backends),
         "currentInLeadingBand": current_in_leading_band,
         "engineNextAction": engine_selection_next_action(
-            "apply", preference, winning_backend, client, str(winner_rationale[0]),
+            next_action, preference, winning_backend, client, str(winner_rationale[0]),
         ),
         "settingsEvidenceTier": result.get("evidenceTier"),
         "settingsEvidenceLabel": result.get("evidenceLabel"),
@@ -8923,6 +9452,7 @@ PROFILE_OPTION_KEYS = {
     "dflashVerify", "dflashDraftQuant", "anePrefill", "gpu", "parallel",
     "mtpMinTokens", "mtpMinContinueProbability",
     "maxBatchSize", "expertCacheSize", "prefixCacheEntries",
+    "prefillSize", "nativeExpertTopK", "promptCacheMode", "queueLimit",
 }
 PROFILE_CHAT_KEYS = {
     "systemPrompt", "sampling", "temperature", "topP", "topK",
@@ -9196,7 +9726,49 @@ def validated_profile_options(
         return validated_freetoken_options(
             capability, raw, require_experimental_consent=False,
         )
-    raise ValueError("Choose oMLX, LM Studio, MTPLX, or FreeToken.")
+    if backend == "swiftlm":
+        native_top_k = max(0, int(capability.get("nativeExpertTopK") or 0))
+        requested_top_k = _profile_integer(
+            raw.get("nativeExpertTopK"), native_top_k, 0, 4_096,
+            "Native experts per token",
+        )
+        if requested_top_k != native_top_k:
+            raise ValueError(
+                "SwiftLM SSD calibration must keep the checkpoint's native expert routing."
+            )
+        prefill_size = _profile_integer(
+            raw.get("prefillSize"), int(capability.get("prefillSize") or 512),
+            min(SSD_STREAMING_PREFILL_SIZES), max(SSD_STREAMING_PREFILL_SIZES),
+            "SwiftLM prefill size",
+        )
+        if prefill_size not in SSD_STREAMING_PREFILL_SIZES:
+            allowed = ", ".join(str(value) for value in SSD_STREAMING_PREFILL_SIZES)
+            raise ValueError(f"SwiftLM prefill size must be one of: {allowed}.")
+        return {
+            "acceleration": "off", "depth": 1, "kv": "off",
+            "prefillSize": prefill_size,
+            "nativeExpertTopK": native_top_k,
+            "ssdCacheState": _profile_choice(
+                raw, "ssdCacheState", "natural-cold-to-warm",
+                {"natural-cold-to-warm"}, "SSD cache state",
+            ),
+        }
+    if backend == "mference":
+        return {
+            "acceleration": "off", "depth": 1, "kv": "off",
+            "promptCacheMode": _profile_choice(
+                raw, "promptCacheMode", "on", {"on", "off"}, "Mference prompt cache",
+            ),
+            "queueLimit": _profile_integer(
+                raw.get("queueLimit"), int(capability.get("queueLimit") or 4),
+                1, 32, "Mference queue limit",
+            ),
+            "ssdCacheState": _profile_choice(
+                raw, "ssdCacheState", "natural-cold-to-warm",
+                {"natural-cold-to-warm"}, "SSD cache state",
+            ),
+        }
+    raise ValueError("Choose a supported runtime.")
 
 
 def validated_launch_profile_request(
@@ -9777,7 +10349,10 @@ def benchmark_history_request(
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported benchmark history goal.")
     eligible: list[str] = []
-    for candidate in ENGINE_ADAPTERS:
+    ssd_profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
+    ssd_lane = ssd_profile.get("recommended") is True
+    candidate_backends = SSD_STREAMING_BACKENDS if ssd_lane else tuple(ENGINE_ADAPTERS)
+    for candidate in candidate_backends:
         allowed, _reason = benchmark_backend_eligibility(
             model, candidate, client, reasoning, kv, chat,
         )
@@ -9801,6 +10376,14 @@ def benchmark_history_request(
             and record.get("runtimeVersion") == capability.get("runtimeVersion")
             and record.get("hardwareFingerprint") == machine
             and benchmark_runtime_integrity_issue(record) is None
+            and (
+                not ssd_lane
+                or (
+                    record_backend in SSD_STREAMING_BACKENDS
+                    and record.get("ssdStreaming") is True
+                    and record.get("ssdComparisonIdentity") == capability.get("comparisonIdentity")
+                )
+            )
             and (
                 record.get("comparisonContractVersion") != BENCHMARK_COMPARISON_CONTRACT_VERSION
                 or record.get("engineSettings")
@@ -10768,7 +11351,7 @@ def normalized_request(
     client = str(payload.get("client", ""))
     mode = str(payload.get("mode", "custom"))
     if backend not in ENGINE_ADAPTERS:
-        raise ValueError("Choose oMLX, LM Studio, MTPLX, or FreeToken.")
+        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, or Mference.")
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose Pi, OpenCode, Codex, or Chat.")
     if client == "chat":
@@ -11194,6 +11777,90 @@ def build_mtplx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
             plan.warnings.append("The selected response ceiling is too small for the full reasoning budget; half is reserved for the answer/tool call.")
 
 
+def _verified_ssd_model_path(plan: LaunchPlan, cap: dict[str, Any]) -> Path:
+    """Rebind an SSD route to the exact scanned artifact before starting a server."""
+    try:
+        model_path = Path(str(plan.model.get("path") or "")).expanduser().resolve(strict=True)
+        scanned_path = Path(str(cap.get("modelPath") or "")).expanduser().resolve(strict=True)
+    except OSError as error:
+        raise ValueError("The SSD-streamed model moved after the model scan. Rescan models.") from error
+    if model_path != scanned_path or not model_path.is_dir():
+        raise ValueError("The SSD-streamed model changed after the model scan. Rescan models.")
+    if cap.get("runnable") is not True or cap.get("ssdStreaming") is not True:
+        raise ValueError(str(cap.get("reason") or "This model is not accepted by the selected SSD runtime."))
+    config = read_json(model_path / "config.json")
+    if model_path.name.endswith(".gturbo"):
+        config = {
+            **read_json(model_path / "tokenizer" / "config.json"),
+            **read_json(model_path / "manifest.json"),
+        }
+    artifact_fingerprint = model_artifact_fingerprint(model_path, config)
+    if (
+        not artifact_fingerprint
+        or not secrets.compare_digest(
+            artifact_fingerprint, str(cap.get("artifactFingerprint") or ""),
+        )
+    ):
+        raise ValueError("The SSD-streamed model files changed after the model scan. Rescan models.")
+    return model_path
+
+
+def build_swiftlm(plan: LaunchPlan, cap: dict[str, Any]) -> None:
+    model_path = _verified_ssd_model_path(plan, cap)
+    options = validated_profile_options("swiftlm", plan.model, cap, plan.options)
+    plan.options.update(options)
+    served = f"llm-launcher-{slug(plan.model['name'], 34)}-{plan.run_id[:8]}"
+    binary = plan.runtime_binary or BINARIES.get("swiftlm")
+    if not binary:
+        raise ValueError("SwiftLM is not installed.")
+    plan.engine_argv = [
+        binary,
+        "--model", str(model_path),
+        "--host", "127.0.0.1",
+        "--port", str(plan.port),
+        "--max-tokens", str(plan.output),
+        "--prefill-size", str(options["prefillSize"]),
+        "--stream-experts",
+    ]
+    native_top_k = int(options["nativeExpertTopK"])
+    plan.engine_env = (
+        {"SWIFTLM_TOP_K": str(native_top_k)} if native_top_k > 0 else {}
+    )
+    plan.model["servedId"] = served
+    plan.warnings.extend([
+        "SwiftLM will stream routed MoE experts from SSD. Cold turns include disk reads; warm turns can reuse the operating-system file cache.",
+        "The launcher keeps native expert routing and disables speculative decoding so the SSD comparison does not trade model fidelity for speed.",
+    ])
+
+
+def build_mference(plan: LaunchPlan, cap: dict[str, Any]) -> None:
+    model_path = _verified_ssd_model_path(plan, cap)
+    if not model_path.name.endswith(".gturbo"):
+        raise ValueError("Mference requires a verified .gturbo model bundle.")
+    options = validated_profile_options("mference", plan.model, cap, plan.options)
+    plan.options.update(options)
+    served = f"llm-launcher-{slug(plan.model['name'], 34)}-{plan.run_id[:8]}"
+    binary = plan.runtime_binary or BINARIES.get("mference")
+    if not binary:
+        raise ValueError("Mference is not installed.")
+    argv = [
+        binary,
+        "--model", str(model_path),
+        "--port", str(plan.port),
+        "--max-context", str(plan.context),
+        "--queue-limit", str(options["queueLimit"]),
+    ]
+    if options["promptCacheMode"] == "off":
+        argv.extend(["--prompt-cache-mode", "off"])
+    plan.model["servedId"] = served
+    plan.engine_argv = argv
+    plan.engine_env = {}
+    plan.warnings.extend([
+        "Mference will stream routed experts from this verified .gturbo bundle. Cold and warm SSD performance can differ materially.",
+        "The launcher keeps the bundle's pinned model-native routing and excludes speculative decoding from this calibration lane.",
+    ])
+
+
 def build_remote_freetoken(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     """Own only a private bridge; the configured FreeToken server owns model memory."""
     connection = load_freetoken_connection()
@@ -11363,6 +12030,8 @@ ENGINE_BUILDERS = {
     "lmstudio": build_lmstudio,
     "mtplx": build_mtplx,
     "freetoken": build_freetoken,
+    "swiftlm": build_swiftlm,
+    "mference": build_mference,
 }
 
 
@@ -11744,7 +12413,9 @@ def validated_benchmark_request(
     backend = str(payload.get("backend") or "")
     client = str(payload.get("client") or "")
     if backend not in ENGINE_ADAPTERS:
-        raise ValueError("Choose oMLX, LM Studio, MTPLX, or FreeToken before benchmarking.")
+        raise ValueError(
+            "Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, or Mference before benchmarking."
+        )
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose the work surface whose contract should own this benchmark.")
     engine_adapter = ENGINE_ADAPTERS[backend]
@@ -11807,6 +12478,12 @@ def validated_benchmark_request(
         model, context, output, client, reasoning, str(options.get("kv") or "off"), chat,
     )
     add_benchmark_engine_evidence(evidence, model, options, [backend])
+    ssd_lane = backend in SSD_STREAMING_BACKENDS
+    ssd_comparison_identity = str(capability.get("comparisonIdentity") or "") if ssd_lane else ""
+    if ssd_lane and re.fullmatch(r"[0-9a-f]{64}", ssd_comparison_identity) is None:
+        raise ValueError(
+            "SSD calibration requires a verified pinned source revision shared by both runtime artifacts."
+        )
     return {
         "id": str(uuid.uuid4()),
         "backend": backend,
@@ -11827,6 +12504,8 @@ def validated_benchmark_request(
         "modelFingerprint": str(capability.get("benchmarkModelFingerprint") or ""),
         "runtimeVersion": str(capability.get("runtimeVersion") or ""),
         "pairFingerprint": capability.get("dflashPairFingerprint"),
+        "ssdStreaming": ssd_lane,
+        "ssdComparisonIdentity": ssd_comparison_identity,
         "speedSampling": benchmark_speed_sampling(model, chat),
     }
 
@@ -11871,7 +12550,9 @@ def benchmark_job_public_modes(job: dict[str, Any]) -> list[dict[str, str]]:
     modes: list[dict[str, str]] = []
     for mode in job.get("modes") or []:
         label = BenchmarkManager._mode_label(str(mode))
-        if (
+        if mode == "ar" and job.get("backend") in SSD_STREAMING_BACKENDS:
+            label = "Exact SSD stream"
+        elif (
             mode == "mtp" and job.get("backend") == "lmstudio"
             and isinstance(job.get("calibrationTuningPlan"), dict)
         ):
@@ -12115,7 +12796,10 @@ def validated_engine_shootout_request(
     shootout_id = str(uuid.uuid4())
     jobs: list[dict[str, Any]] = []
     excluded: list[dict[str, str]] = []
-    for backend in ENGINE_ADAPTERS:
+    ssd_profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
+    ssd_lane = ssd_profile.get("recommended") is True
+    candidate_backends = SSD_STREAMING_BACKENDS if ssd_lane else tuple(ENGINE_ADAPTERS)
+    for backend in candidate_backends:
         allowed, reason = benchmark_backend_eligibility(
             model, backend, client, reasoning, kv, chat,
         )
@@ -12128,6 +12812,12 @@ def validated_engine_shootout_request(
         candidate["backend"] = backend
         candidate.pop("scope", None)
         try:
+            if ssd_lane:
+                candidate["options"] = validated_profile_options(
+                    backend, model, model.get("backends", {}).get(backend, {}),
+                    candidate.get("options"),
+                )
+                candidate["options"]["ssdCacheState"] = "natural-cold-to-warm"
             job = validated_benchmark_request(
                 candidate, models, allow_baseline_only=True,
             )
@@ -12149,7 +12839,16 @@ def validated_engine_shootout_request(
             + (f" {detail}" if detail else "")
         )
     fingerprints = {str(job.get("modelFingerprint") or "") for job in jobs}
-    if "" in fingerprints or len(fingerprints) != 1:
+    if ssd_lane:
+        comparison_identities = {
+            str(job["model"].get("backends", {}).get(job["backend"], {}).get("comparisonIdentity") or "")
+            for job in jobs
+        }
+        if "" in comparison_identities or len(comparison_identities) != 1:
+            raise ValueError(
+                "SSD calibration needs verified SwiftLM and Mference artifacts from the same pinned source revision."
+            )
+    elif "" in fingerprints or len(fingerprints) != 1:
         raise ValueError(
             "The compatible engines do not resolve to the same model artifact fingerprint, so a "
             "cross-engine speed comparison would not be trustworthy."
@@ -12176,6 +12875,8 @@ def validated_engine_shootout_request(
         "executionOrder": execution_order,
         "orderStrategy": order_strategy,
         "excludedEngines": excluded,
+        "ssdStreaming": ssd_lane,
+        "ssdContract": copy.deepcopy(ssd_profile.get("calibration")) if ssd_lane else None,
     }
 
 
@@ -12220,7 +12921,10 @@ def calibration_plan(
     kv = str(request.get("options", {}).get("kv") or "off")
     engines: list[dict[str, Any]] = []
     jobs: list[dict[str, Any]] = []
-    for backend in ENGINE_ADAPTERS:
+    ssd_profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
+    ssd_lane = ssd_profile.get("recommended") is True
+    candidate_backends = SSD_STREAMING_BACKENDS if ssd_lane else tuple(ENGINE_ADAPTERS)
+    for backend in candidate_backends:
         allowed, reason = benchmark_backend_eligibility(
             model, backend, request["client"], request["reasoning"], kv,
             request.get("chat") if isinstance(request.get("chat"), dict) else None,
@@ -12243,6 +12947,11 @@ def calibration_plan(
                 job = validated_benchmark_request(
                     candidate, models, allow_baseline_only=True,
                 )
+                if backend in SSD_STREAMING_BACKENDS:
+                    job["options"]["ssdCacheState"] = "natural-cold-to-warm"
+                    add_benchmark_engine_evidence(
+                        job["evidence"], model, job["options"], [backend],
+                    )
                 prepare_calibration_tuning_plan(job)
             except ValueError as error:
                 allowed = False
@@ -12301,6 +13010,8 @@ def calibration_plan(
                     f"offer a separate {reasoning_contract['requested']} selector."
                 )
                 if job is not None and reasoning_contract["normalized"] else
+                "Uses the verified equivalent source revision, native expert routing, and the same work contract."
+                if job is not None and ssd_lane else
                 "Preserves this exact model, work surface, reasoning, sampling, limits, and KV precision."
                 if job is not None else str(reason)
             ),
@@ -12327,9 +13038,19 @@ def calibration_plan(
     fingerprints = {str(job.get("modelFingerprint") or "") for job in jobs}
     if len(jobs) < 2:
         blockers.append(
+            "SSD calibration needs both SwiftLM and Mference, plus verified equivalent model artifacts."
+            if ssd_lane else
             "Calibration needs at least two installed engines that can preserve the complete measurement contract."
         )
-    if jobs and ("" in fingerprints or len(fingerprints) != 1):
+    comparison_identities = {
+        str(job["model"].get("backends", {}).get(job["backend"], {}).get("comparisonIdentity") or "")
+        for job in jobs
+    }
+    if ssd_lane and jobs and ("" in comparison_identities or len(comparison_identities) != 1):
+        blockers.append(
+            "The SSD artifacts do not prove one matching pinned source revision, so their speeds cannot be compared safely."
+        )
+    elif not ssd_lane and jobs and ("" in fingerprints or len(fingerprints) != 1):
         blockers.append(
             "Compatible engines do not expose one matching model-artifact fingerprint, so their speeds cannot be compared safely."
         )
@@ -12413,6 +13134,8 @@ def calibration_plan(
         },
         "preference": preference,
         "preferenceLabel": ENGINE_PREFERENCE_LABELS[preference],
+        "ssdStreaming": ssd_lane,
+        "ssdContract": copy.deepcopy(ssd_profile.get("calibration")) if ssd_lane else None,
         "calibrationCooling": calibration_cooling,
         "calibrationCoolingLabel": {
             "default": "System controlled",
@@ -12552,6 +13275,56 @@ def launch_memory_estimate(
             },
             "nativeFreeToken": True,
             "basis": "Native FreeToken schema v1 weight and per-token KV sizing at the full selected context, plus a conservative launcher runtime and macOS reserve.",
+        }
+    if backend in SSD_STREAMING_BACKENDS:
+        capability = model.get("backends", {}).get(backend, {})
+        ssd_profile = capability.get("ssdProfile") if isinstance(capability.get("ssdProfile"), dict) else {}
+        weight_bytes = max(0, int(ssd_profile.get("weightBytes") or model.get("size") or 0))
+        experts = max(1, int(ssd_profile.get("expertCount") or 1))
+        top_k = max(1, int(ssd_profile.get("nativeExpertTopK") or 1))
+        active_fraction = min(1.0, float(top_k) / float(experts))
+        # Shared tensors, active routed experts, bounded double buffering, and
+        # server workspace remain resident. The inactive expert store stays on
+        # SSD and is intentionally excluded from unified-memory admission.
+        resident_weights = min(
+            weight_bytes,
+            round(weight_bytes * min(0.35, 0.08 + active_fraction * 2.0))
+            + 1_073_741_824,
+        )
+        geometry = model.get("memoryGeometry") if isinstance(model.get("memoryGeometry"), dict) else {}
+        kv_bytes = 0
+        if geometry.get("ready") and context > 0:
+            kv_bytes = round(
+                2 * int(geometry["fullAttentionLayers"]) * context
+                * int(geometry["kvHeads"]) * int(geometry["headDimension"]) * 2.0
+            )
+        runtime_reserve = SESSION_RUNTIME_BASE_RESERVE_BYTES
+        working_set = resident_weights + kv_bytes + runtime_reserve
+        total = int(resource.get("totalMemoryBytes") or 0)
+        os_reserve = max(
+            SESSION_OS_RESERVE_MIN_BYTES,
+            round(total * SESSION_OS_RESERVE_FRACTION) if total > 0 else 0,
+        )
+        return {
+            "version": SESSION_MEMORY_ESTIMATE_VERSION,
+            "modelBytes": resident_weights,
+            "ssdWeightBytes": weight_bytes,
+            "ssdStreamedBytes": max(0, weight_bytes - resident_weights),
+            "companionBytes": 0, "companionLabels": [],
+            "kvCacheBytes": kv_bytes, "kvPrecision": "full", "kvScalarBytes": 2.0,
+            "contextTokens": context, "parallelLanes": 1,
+            "runtimeReserveBytes": runtime_reserve,
+            "estimatedWorkingSetBytes": working_set,
+            "osReserveBytes": os_reserve,
+            "requiredHeadroomBytes": working_set + os_reserve,
+            "geometryReady": geometry.get("ready") is True,
+            "geometry": copy.deepcopy(geometry),
+            "ssdStreaming": True,
+            "estimateIsConservative": True,
+            "basis": (
+                "Conservative SSD-streaming working set: shared tensors, native top-k routed experts, "
+                "double-buffered I/O, full-precision KV at the selected context, runtime workspace, and macOS reserve."
+            ),
         }
     geometry = model.get("memoryGeometry") if isinstance(model.get("memoryGeometry"), dict) else {}
     geometry_ready = bool(geometry.get("ready"))
@@ -15205,7 +15978,10 @@ class RunManager:
             # Reserve the agent-facing route before an expensive model load.
             # No client can reach it until its selected work surface opens
             # after the upstream API passes verification.
-            if plan.purpose == "session":
+            delayed_ssd_proxy = bool(
+                plan.purpose == "session" and plan.backend in SSD_STREAMING_BACKENDS
+            )
+            if plan.purpose == "session" and not delayed_ssd_proxy:
                 self._start_session_proxy(plan, log_path, cancel_event)
             elif plan.client == "codex":
                 self._start_codex_proxy(plan, log_path, cancel_event)
@@ -15223,6 +15999,11 @@ class RunManager:
             self._check_cancelled(cancel_event)
             self._wait_ready(plan, cancel_event)
             self._check_cancelled(cancel_event)
+            if delayed_ssd_proxy:
+                # These servers advertise a runtime-owned model ID. Discover
+                # it from their single-model API before freezing the relay.
+                self._start_session_proxy(plan, log_path, cancel_event)
+                self._check_cancelled(cancel_event)
             self._verify_lmstudio_reasoning(plan)
             self._verify_client_api(plan)
             self._check_cancelled(cancel_event)
@@ -15391,6 +16172,9 @@ class RunManager:
                 with urllib.request.urlopen(request, timeout=3) as response:
                     data = json.loads(response.read(2_000_000))
                 ids = [str(item.get("id")) for item in data.get("data", []) if isinstance(item, dict)]
+                if plan.backend in SSD_STREAMING_BACKENDS and len(ids) == 1 and ids[0]:
+                    plan.model["servedId"] = ids[0]
+                    return
                 if plan.model["servedId"] in ids:
                     if plan.backend == "freetoken" and plan.model.get("nativeFreetoken") is True:
                         health_request = urllib.request.Request(
@@ -16809,6 +17593,8 @@ class BenchmarkManager:
                     "workloadKind": shootout["workloadKind"],
                     "enginePreference": shootout["enginePreference"],
                     "enginePreferenceLabel": ENGINE_PREFERENCE_LABELS[shootout["enginePreference"]],
+                    "ssdStreaming": shootout.get("ssdStreaming") is True,
+                    "ssdContract": copy.deepcopy(shootout.get("ssdContract")),
                     "reasoningContract": copy.deepcopy(shootout["reasoningContract"]),
                     "executionOrder": list(shootout["executionOrder"]),
                     "orderStrategy": shootout["orderStrategy"],
@@ -17358,6 +18144,8 @@ class BenchmarkManager:
             "winner": winner, "winnerSpeedup": winner_speedup,
             "worstCaseSpeedup": worst_case, "endToEndSpeedup": winner_speedup,
             "settings": settings, "pairFingerprint": job.get("pairFingerprint"),
+            "ssdStreaming": job.get("ssdStreaming") is True,
+            "ssdComparisonIdentity": str(job.get("ssdComparisonIdentity") or ""),
             "shootoutId": job.get("shootoutId"),
             "shootoutExecutionOrder": copy.deepcopy(job.get("shootoutExecutionOrder")),
             "shootoutOrderIndex": job.get("shootoutOrderIndex"),

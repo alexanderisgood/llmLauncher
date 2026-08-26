@@ -226,6 +226,10 @@ const optimizerControls = {
   maxBatchSize: "freeTokenBatchSelect",
   expertCacheSize: "freeTokenExpertCacheInput",
   prefixCacheEntries: "freeTokenPrefixCacheSelect",
+  prefillSize: "swiftlmPrefillSelect",
+  nativeExpertTopK: "swiftlmTopK",
+  promptCacheMode: "mferencePromptCache",
+  queueLimit: "mferenceQueueLimit",
 };
 const optimizerKeys = {
   mtplx: ["acceleration", "depth", "profile", "fan"],
@@ -235,6 +239,8 @@ const optimizerKeys = {
     "mtpMinContinueProbability", "gpu", "parallel",
   ],
   freetoken: ["maxBatchSize", "expertCacheSize", "prefixCacheEntries"],
+  swiftlm: ["prefillSize", "nativeExpertTopK"],
+  mference: ["promptCacheMode", "queueLimit"],
 };
 const enginePreferenceLabels = {
   throughput:"Highest generation TPS",
@@ -334,7 +340,7 @@ function orderedRouteIds(collection, fallback) {
 }
 
 function visibleRouteCatalog() {
-  const backends = orderedRouteIds("engines", ["omlx", "lmstudio", "mtplx", "freetoken"])
+  const backends = orderedRouteIds("engines", ["omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference"])
     .filter(uiEngineVisible);
   const clients = orderedRouteIds("workSurfaces", ["pi", "opencode", "codex", "chat"]);
   const routes = [];
@@ -462,7 +468,7 @@ function runtimeKvValue(backend = state.backend) {
 }
 
 function setRuntimeKvValue(backend, value) {
-  if (backend === "lmstudio" || backend === "freetoken") return value === "off";
+  if (["lmstudio", "freetoken", "swiftlm", "mference"].includes(backend)) return value === "off";
   const control = backend === "omlx" ? $("omlxKv") : $("mtplxKv");
   const option = [...control.options].find(item => item.value === String(value));
   if (!option) return false;
@@ -479,6 +485,20 @@ function gatherOptions() {
       expertCacheSize:expertText === "" ? null : Number(expertText),
       prefixCacheEntries:Number($("freeTokenPrefixCacheSelect").value),
       experimentalQualificationConsent:freeTokenExperimentalConsentAccepted(),
+    };
+  }
+  if (state.backend === "swiftlm") {
+    return {
+      acceleration:"off", depth:1, kv:"off",
+      prefillSize:Number($("swiftlmPrefillSelect").value),
+      nativeExpertTopK:Number($("swiftlmTopK").value || 0),
+    };
+  }
+  if (state.backend === "mference") {
+    return {
+      acceleration:"off", depth:1, kv:"off",
+      promptCacheMode:$("mferencePromptCache").value,
+      queueLimit:Number($("mferenceQueueLimit").value),
     };
   }
   return {
@@ -1002,12 +1022,12 @@ function renderAneReadiness(cap = {}) {
 
 function backendName(backend) {
   return adapterDescriptor("engines", backend)?.label
-    || ({omlx:"oMLX", lmstudio:"LM Studio", mtplx:"MTPLX", freetoken:"FreeToken"})[backend]
+    || ({omlx:"oMLX", lmstudio:"LM Studio", mtplx:"MTPLX", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference"})[backend]
     || backend;
 }
 
 function backendMark(backend) {
-  return ({omlx:"O", lmstudio:"LM", mtplx:"M", freetoken:"FT", lms:"LM"})[backend] || "?";
+  return ({omlx:"O", lmstudio:"LM", mtplx:"M", freetoken:"FT", swiftlm:"S", mference:"MF", lms:"LM"})[backend] || "?";
 }
 
 function benchmarkCandidates(cap = {}, backend = state.backend) {
@@ -1015,6 +1035,9 @@ function benchmarkCandidates(cap = {}, backend = state.backend) {
     id:cap.native === true ? "native" : "remote",
     label:cap.native === true ? "Native greedy" : "Server managed",
     available:Boolean(cap.runnable),
+  }];
+  if (["swiftlm", "mference"].includes(backend)) return [{
+    id:"ar", label:"Exact SSD stream", available:Boolean(cap.runnable),
   }];
   const modes = [{id:"ar", label:"AR", available:Boolean(cap.runnable)}];
   if (cap.mtp) modes.push({id:"mtp", label:"MTP", available:true});
@@ -1029,14 +1052,17 @@ function engineShootoutRoutes(model = selectedModel()) {
   const binaryKeys = Object.fromEntries(
     visibleEngineAdapters().map(adapter => [adapter.id, adapter.binaryKey]),
   );
-  const kvChoices = {omlx:["off","q8","q6","q4"], lmstudio:["off"], mtplx:["off","q8","q4"], freetoken:["off"]};
-  return visibleEngineAdapters().map(adapter => adapter.id).map(backend => {
+  const kvChoices = {omlx:["off","q8","q6","q4"], lmstudio:["off"], mtplx:["off","q8","q4"], freetoken:["off"], swiftlm:["off"], mference:["off"]};
+  const ssdLane = model.ssdStreaming?.recommended === true;
+  const backends = visibleEngineAdapters().map(adapter => adapter.id)
+    .filter(backend => !ssdLane || ["swiftlm", "mference"].includes(backend));
+  return backends.map(backend => {
     const cap = model.backends?.[backend] || {};
     const support = resolvedClientSupport(backend, state.client, model);
     const routeReasoning = cap[state.client === "codex" ? "codexReasoning" : "agentReasoning"] || ["auto"];
     const benchmarkReasoning = cap.agentReasoning || ["auto"];
     let reason = "";
-    const binaryKey = binaryKeys[backend] || ({omlx:"omlx", lmstudio:"lms", mtplx:"mtplx", freetoken:"freetoken"})[backend];
+    const binaryKey = binaryKeys[backend] || ({omlx:"omlx", lmstudio:"lms", mtplx:"mtplx", freetoken:"freetoken", swiftlm:"swiftlm", mference:"mference"})[backend];
     if (!state.binaries?.[binaryKey]?.installed) reason = "Runtime not installed";
     else if (!model.ready || !cap.runnable) reason = cap.reason || "Model is not runnable";
     else if (!support?.supported) reason = support?.reason || "Work surface unsupported";
@@ -1497,8 +1523,20 @@ function updateBackend(preserveOptimization = false) {
   $("omlxControls").classList.toggle("hidden", state.backend !== "omlx");
   $("lmstudioControls").classList.toggle("hidden", state.backend !== "lmstudio");
   $("freetokenControls").classList.toggle("hidden", state.backend !== "freetoken");
-  $("sharedRuntimeControls").classList.toggle("hidden", state.backend === "freetoken");
-  $("advancedSummary").textContent = ({mtplx:"MTPLX controls", omlx:"oMLX controls", lmstudio:"LM Studio controls", freetoken:"FreeToken route controls"})[state.backend];
+  $("swiftlmControls").classList.toggle("hidden", state.backend !== "swiftlm");
+  $("mferenceControls").classList.toggle("hidden", state.backend !== "mference");
+  $("sharedRuntimeControls").classList.toggle("hidden", ["freetoken", "swiftlm", "mference"].includes(state.backend));
+  $("advancedSummary").textContent = ({
+    mtplx:"MTPLX controls", omlx:"oMLX controls", lmstudio:"LM Studio controls",
+    freetoken:"FreeToken route controls", swiftlm:"SwiftLM SSD controls",
+    mference:"Mference SSD controls",
+  })[state.backend];
+  if (["swiftlm", "mference"].includes(state.backend)) $("ssdRuntimeDisclosure").open = true;
+  const swiftReady = Boolean(state.binaries?.swiftlm?.installed);
+  const mferenceReady = Boolean(state.binaries?.mference?.installed);
+  $("ssdRuntimeStatus").textContent = swiftReady && mferenceReady
+    ? "Both SSD runtimes are installed. A large-MoE calibration becomes available when matching source receipts are present."
+    : `${swiftReady || mferenceReady ? "One" : "Neither"} SSD runtime installed · calibration needs both.`;
   renderFreeTokenConnection();
   renderModelOptions();
 }
@@ -1578,7 +1616,15 @@ function modelChanged() {
     && freeTokenRoute(model) === "native" && freeTokenQualification(model).experimental;
   const statusClass = experimentalFreeToken ? "warning" : model.ready ? "good" : "bad";
   const statusLabel = experimentalFreeToken ? "Experimental" : model.status;
-  card.innerHTML = `<div class="model-title"><strong>${esc(model.name)}</strong><span class="badge ${statusClass}">${esc(statusLabel)}</span></div><div class="model-meta"><span>${esc(model.format.toUpperCase())}</span><span>${esc(model.quantization)}</span><span>${esc(model.sizeLabel)}</span><span>${formatNumber(model.nativeContext || 0)} context</span><span>${esc(model.origins.join(" + "))}</span><span>${esc(cap.reason)}</span></div>`;
+  const ssdChip = model.ssdStreaming?.recommended === true
+    ? `<span>SSD streaming recommended</span>`
+    : model.ssdStreaming?.candidate === true ? `<span>SSD streaming optional</span>` : "";
+  card.innerHTML = `<div class="model-title"><strong>${esc(model.name)}</strong><span class="badge ${statusClass}">${esc(statusLabel)}</span></div><div class="model-meta"><span>${esc(model.format.toUpperCase())}</span><span>${esc(model.quantization)}</span><span>${esc(model.sizeLabel)}</span><span>${formatNumber(model.nativeContext || 0)} context</span>${ssdChip}<span>${esc(model.origins.join(" + "))}</span><span>${esc(cap.reason)}</span></div>`;
+  const nativeTopK = Number(cap.nativeExpertTopK || 0);
+  $("swiftlmTopK").value = String(Number.isInteger(nativeTopK) && nativeTopK > 0 ? nativeTopK : 0);
+  $("swiftlmTopKHelp").textContent = nativeTopK > 0
+    ? `Locked to this checkpoint's native top-${nativeTopK} routing.`
+    : "The runtime reads native routing from the checkpoint; no approximation is applied.";
   if (model.nativeContext) $("contextInput").max = model.nativeContext;
   else $("contextInput").removeAttribute("max");
   const acceleration = $("accelerationSelect");
@@ -7299,7 +7345,10 @@ function renderBenchmarkStatus(status = {}) {
   const cooldown = status.result?.resourceCooldown || status.job?.resourceCooldown;
   const mtpTuning = status.result?.kind === "lmstudio-mtp-tuning" || status.job?.kind === "lmstudio-mtp-tuning";
   const dflashTuning = status.result?.kind === "omlx-dflash2-tuning" || status.job?.kind === "omlx-dflash2-tuning";
-  $("benchmarkFairness").textContent = mtpTuning
+  const ssdStreaming = status.job?.ssdStreaming === true;
+  $("benchmarkFairness").textContent = ssdStreaming
+    ? `SSD-streaming run order: ${order.map(backendName).join(" → ")}. Every runtime gets a fresh process and the same native-routing agent workload; first-turn and warm stages are kept separate without forcing a privileged macOS cache purge.`
+    : mtpTuning
     ? `One AR reference and up to ${Number(status.job?.tuningPlan?.maximumMtpCandidates || status.result?.tuningSweep?.maximumCandidates || 10)} MTP candidates. Every candidate receives a fresh load, exact greedy parity, and the same bounded Mac-condition gate.`
     : dflashTuning
       ? `${(status.job?.tuningPlan?.baselineModes || status.result?.tuningSweep?.baselineModes || ["ar"]).map(benchmarkWinnerLabel).join(" + ")} reference routes and up to ${Number(status.job?.tuningPlan?.maximumDflashCandidates || status.result?.tuningSweep?.maximumCandidates || 10)} DFlash candidates. Every candidate receives a fresh load, exact greedy parity, and the same bounded Mac-condition gate.`
@@ -7546,6 +7595,7 @@ function renderCalibrationPlan() {
     : `${plan.model.name} · ${plan.clientLabel} · ${formatNumber(request.context)} context · ${formatNumber(request.output)} max response. The model, quantisation, reasoning, sampling, prompt contract, and KV precision stay fixed.`;
   $("calibrationPlanFacts").innerHTML = [
     ["Workload", plan.suite.label], ["Goal", plan.preferenceLabel],
+    ...(plan.ssdStreaming ? [["Route type", "SSD-streamed MoE"]] : []),
     ["Reasoning", normalizedReasoning ? `Model default (from ${reasoningContract.requested})` : request.reasoning], ["KV precision", kv],
     [plan.countsAreMaximum ? "Max model reloads" : "Model reloads", String(plan.modelReloadCount)],
     [plan.countsAreMaximum ? "Max measured requests" : "Measured requests", String(plan.measuredRequestCount)],
@@ -7595,7 +7645,9 @@ function renderCalibrationPlan() {
   const evidenceDetail = resultReady
     ? [shownEvidence.detail, shownEvidence.outputWarning].filter(Boolean).join(" ")
     : plan.ready
-      ? `${plan.eligibleEngineCount} engines will be tested one at a time using generated prompts.${routePreview ? ` Routes: ${routePreview}.` : ""}`
+      ? plan.ssdStreaming
+        ? `${plan.eligibleEngineCount} SSD runtimes will be tested one at a time using generated prompts. First-turn and warm-prefix TPS, time to first output, memory pressure, and thermal state are recorded. The OS file cache is observed rather than forcibly purged.${routePreview ? ` Routes: ${routePreview}.` : ""}`
+        : `${plan.eligibleEngineCount} engines will be tested one at a time using generated prompts.${routePreview ? ` Routes: ${routePreview}.` : ""}`
       : blockers;
   $("calibrationEvidence").className = `calibration-evidence${resultReady ? " trusted" : plan.ready ? "" : " blocked"}`;
   $("calibrationEvidence").innerHTML = `<i aria-hidden="true">${resultReady ? "◆" : plan.ready ? "◇" : "×"}</i><span><strong>${esc(resultReady ? shownEvidence.label : plan.ready ? "Ready to test the engines" : "This setup cannot be tested yet")}</strong><small>${esc(evidenceDetail)}</small></span>`;
@@ -7609,7 +7661,7 @@ function renderCalibrationPlan() {
   $("calibrationResults").classList.toggle("hidden", measuredEngines.length === 0);
   $("calibrationResults").innerHTML = measuredEngines.length ? `<strong>Measured engine results</strong><div>${measuredEngines.map((engine, index) => {
     const selected = measuredDecisionReady && engine.backend === (measuredDecision.backend || shownEvidence.backend);
-    const mode = engine.mode === "dflash2" ? "DFlash 2" : engine.mode === "mtp" ? "MTP" : "AR";
+    const mode = engine.mode === "dflash2" ? "DFlash 2" : engine.mode === "mtp" ? "MTP" : plan.ssdStreaming ? "SSD stream" : "AR";
     const testedModes = Array.isArray(engine.testedModes) && engine.testedModes.length
       ? engine.testedModes : [engine.mode || "ar"];
     const depthCandidates = Array.isArray(engine.mtpDepthSweep?.depthCandidates)
@@ -7624,11 +7676,13 @@ function renderCalibrationPlan() {
             ? `DFlash tuned (${tuningCount} candidates)`
         : benchmarkWinnerLabel(item)
     ));
-    const testedLabel = testedModes.length > 1
+    const testedLabel = plan.ssdStreaming
+      ? "Tested exact native SSD streaming"
+      : testedModes.length > 1
       ? `Tested ${testedRoutes.join(" + ")}`
       : `Tested AR only · ${engine.accelerationReason || "no verified accelerator in this artifact"}`;
     const exactRoute = engine.routeSettingsLabel || mode;
-    const modeLabel = testedModes.length > 1 ? `Winner: ${exactRoute}` : "AR only";
+    const modeLabel = plan.ssdStreaming ? exactRoute : testedModes.length > 1 ? `Winner: ${exactRoute}` : "AR only";
     const decodeTps = finiteMetric(engine.decodeTokensPerSecond);
     const badge = CalibrationDecision.resultBadge(measuredDecision, engine, index);
     return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${engine.settingsLabel ? `<small class="calibration-result-settings">Setup · ${esc(engine.settingsLabel)}</small>` : ""}${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${esc(badge)}</em></article>`;
@@ -9910,7 +9964,7 @@ function applyBootstrapData(boot, setProject = false) {
   const binaries = Object.entries(state.binaries).filter(([name]) => (
     uiFeatureEnabled("freetoken") || !String(name).startsWith("freetoken")
   ));
-  const binaryLabels = {lms:"LM Studio", hf:"Model downloader", freetoken:"FreeToken"};
+  const binaryLabels = {lms:"LM Studio", hf:"Model downloader", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference"};
   $("toolCount").textContent = `${binaries.filter(([,value]) => value.installed).length}/${binaries.length} ready`;
   $("binaryList").innerHTML = binaries.map(([name, value]) => `<div class="binary ${value.installed ? "" : "missing"}"><div><strong>${esc(binaryLabels[name] || name)}</strong><span title="${esc(value.path || "")}">${esc(value.version)}</span></div><em>${value.installed ? "Ready" : "Missing"}</em><i aria-hidden="true"></i></div>`).join("");
   if (setProject && !$("projectPath").value) {

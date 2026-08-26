@@ -83,6 +83,17 @@
                 <button type="button" class="choice" data-backend="lmstudio" aria-pressed="false"><span class="choice-icon lms" aria-hidden="true">LM</span><span><strong>LM Studio</strong><small>Desktop runtime</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                 <button type="button" class="choice" data-backend="freetoken" data-ui-feature="freetoken" aria-pressed="false" hidden disabled><span class="choice-icon freetoken" aria-hidden="true">FT</span><span><strong>FreeToken</strong><small>Native or remote MoE</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
               </div>
+              <details id="ssdRuntimeDisclosure" class="ssd-runtime-disclosure">
+                <summary><span><strong>Huge models on SSD</strong><small>Optional MoE streaming</small></span><i aria-hidden="true">⌄</i></summary>
+                <div class="ssd-runtime-body">
+                  <p>For models whose expert weights do not fit safely in memory. Normal models keep using the runtimes above.</p>
+                  <div class="ssd-runtime-choices" role="group" aria-label="SSD-streaming runtime">
+                    <button type="button" class="choice" data-backend="swiftlm" aria-pressed="false"><span class="choice-icon swiftlm" aria-hidden="true">S</span><span><strong>SwiftLM</strong><small>Streams MLX experts</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                    <button type="button" class="choice" data-backend="mference" aria-pressed="false"><span class="choice-icon mference" aria-hidden="true">MF</span><span><strong>Mference</strong><small>Verified .gturbo models</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                  </div>
+                  <small id="ssdRuntimeStatus">Install either runtime to use supported oversized MoEs. Calibration needs both and a verified matching source revision.</small>
+                </div>
+              </details>
             </section>
 
             <section class="config-section" aria-labelledby="agentTitle">
@@ -224,6 +235,20 @@
                   <p id="freeTokenNativeControlStatus" class="freetoken-native-status" role="status">Safe single-chat defaults selected.</p>
                 </div>
                 <button id="openFreeTokenControls" type="button" class="secondary">Remote server settings</button>
+              </div>
+              <div id="swiftlmControls" class="backend-controls hidden">
+                <div class="ssd-control-intro"><span aria-hidden="true">SSD</span><div><strong>Exact expert streaming</strong><small>Inactive experts remain on SSD. Native expert routing stays fixed; speculative decoding stays off.</small></div></div>
+                <div class="fields-row two">
+                  <label class="field optimizable" data-opt-key="prefillSize"><span>Prefill chunk</span><select id="swiftlmPrefillSelect"><option value="128">128</option><option value="256">256</option><option value="512" selected>512 · recommended</option><option value="1024">1,024</option><option value="2048">2,048</option></select><small>Controls prompt memory and prefill pacing, not generated tokens.</small></label>
+                  <label class="field optimizable"><span>Experts per token</span><input id="swiftlmTopK" type="number" min="0" max="4096" value="0" readonly><small id="swiftlmTopKHelp">Read from the selected checkpoint and locked for exact calibration.</small></label>
+                </div>
+              </div>
+              <div id="mferenceControls" class="backend-controls hidden">
+                <div class="ssd-control-intro"><span aria-hidden="true">SSD</span><div><strong>Pinned .gturbo execution</strong><small>Mference loads only a verified model-specific repack and streams the routed experts it needs.</small></div></div>
+                <div class="fields-row two">
+                  <label class="field optimizable" data-opt-key="promptCacheMode"><span>Prompt cache</span><select id="mferencePromptCache"><option value="on" selected>On · reuse agent prefixes</option><option value="off">Off</option></select><small>Warm-prefix reuse is measured separately from the first turn.</small></label>
+                  <label class="field optimizable" data-opt-key="queueLimit"><span>Waiting requests</span><select id="mferenceQueueLimit"><option value="1">1</option><option value="2">2</option><option value="4" selected>4 · recommended</option><option value="8">8</option><option value="16">16</option><option value="32">32</option></select><small>Generation remains single-lane; this only bounds waiting work.</small></label>
+                </div>
               </div>
             </div>
           </details>
@@ -537,7 +562,7 @@
     <div class="model-library-safety"><i aria-hidden="true">✓</i><p><strong>Opening and refreshing this library are read-only.</strong><span>It scans known model folders and installed commands. It does not load a model, start an engine, use the network, download weights, or remove files.</span></p></div>
     <div class="model-library-filters" role="search" aria-label="Filter detected models">
       <label class="model-library-search"><span aria-hidden="true">⌕</span><span class="sr-only">Search models</span><input id="modelLibrarySearch" type="search" maxlength="160" autocomplete="off" placeholder="Search name, format, architecture, folder…"></label>
-      <label><span>Engine</span><select id="modelLibraryEngineFilter"><option value="all">All engines</option><option value="omlx">oMLX</option><option value="lmstudio">LM Studio</option><option value="mtplx">MTPLX</option><option value="freetoken" data-ui-feature="freetoken" hidden disabled>FreeToken</option></select></label>
+      <label><span>Engine</span><select id="modelLibraryEngineFilter"><option value="all">All engines</option><option value="omlx">oMLX</option><option value="lmstudio">LM Studio</option><option value="mtplx">MTPLX</option><option value="swiftlm">SwiftLM · SSD</option><option value="mference">Mference · SSD</option><option value="freetoken" data-ui-feature="freetoken" hidden disabled>FreeToken</option></select></label>
       <label><span>Work surface</span><select id="modelLibrarySurfaceFilter"><option value="all">All surfaces</option><option value="pi">Pi</option><option value="opencode">OpenCode</option><option value="codex">Codex</option><option value="chat">Chat</option></select></label>
       <label><span>Doctor state</span><select id="modelLibraryStateFilter"><option value="all">All states</option><option value="ready">Ready</option><option value="attention">Review</option><option value="blocked">Blocked</option></select></label>
     </div>

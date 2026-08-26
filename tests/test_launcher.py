@@ -328,6 +328,86 @@ class LauncherTests(unittest.TestCase):
             self.assertFalse(launcher.controller_source_is_current())
         self.assertIn("/api/benchmark/start", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
         self.assertIn("/api/launch", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
+
+    def test_qwen38_flash_ssd_streaming_is_detected_but_fails_closed(self) -> None:
+        model_path = Path(self.temp.name) / "Qwen3.8-Flash-Next-4bit"
+        model_path.mkdir()
+        config = {
+            "model_type": "qwen3_8_flash_next_moe",
+            "architectures": ["Qwen3_8FlashNextForConditionalGeneration"],
+            "num_experts": 256,
+            "num_experts_per_tok": 8,
+        }
+
+        profile = launcher.ssd_streaming_model_profile(
+            model_path, config, 120 << 30, 64 << 30,
+        )
+
+        self.assertTrue(profile["moe"])
+        self.assertTrue(profile["oversized"])
+        self.assertTrue(profile["recommended"])
+        self.assertTrue(profile["qwen38FlashNext"])
+        self.assertEqual(profile["nativeExpertTopK"], 8)
+        swift_ready, swift_reason = launcher.swiftlm_model_supported(
+            model_path, config, profile,
+        )
+        mference_ready, mference_reason = launcher.mference_model_supported(
+            model_path, profile,
+        )
+        self.assertFalse(swift_ready)
+        self.assertFalse(mference_ready)
+        self.assertIn("not yet", swift_reason)
+        self.assertIn("not passed", mference_reason)
+
+    def test_swiftlm_profile_preserves_native_expert_routing(self) -> None:
+        capability = {"nativeExpertTopK": 8, "prefillSize": 512}
+
+        options = launcher.validated_profile_options(
+            "swiftlm", {}, capability,
+            {"nativeExpertTopK": 8, "prefillSize": 1_024},
+        )
+
+        self.assertEqual(options["nativeExpertTopK"], 8)
+        self.assertEqual(options["prefillSize"], 1_024)
+        with self.assertRaisesRegex(ValueError, "native expert routing"):
+            launcher.validated_profile_options(
+                "swiftlm", {}, capability,
+                {"nativeExpertTopK": 4, "prefillSize": 1_024},
+            )
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            launcher.validated_profile_options(
+                "swiftlm", {}, capability,
+                {"nativeExpertTopK": 8, "prefillSize": 768},
+            )
+
+    def test_ssd_cross_format_pairing_requires_exact_source_receipt(self) -> None:
+        revision = "a" * 40
+        source_config = {
+            "_name_or_path": "example/oversized-moe",
+            "source_revision": revision,
+        }
+        mlx_path = Path(self.temp.name) / "oversized-moe-mlx"
+        mlx_path.mkdir()
+        bundle_path = Path(self.temp.name) / "oversized-moe.gturbo"
+        bundle_path.mkdir()
+        (bundle_path / "manifest.json").write_text(json.dumps({
+            "source_model_id": "example/oversized-moe",
+            "source_revision": revision,
+        }), encoding="utf-8")
+
+        mlx_contract = launcher._ssd_source_contract(mlx_path, source_config)
+        bundle_contract = launcher._ssd_source_contract(bundle_path, {})
+
+        self.assertTrue(mlx_contract["verifiedForCrossFormatComparison"])
+        self.assertEqual(
+            mlx_contract["comparisonIdentity"],
+            bundle_contract["comparisonIdentity"],
+        )
+        self.assertFalse(
+            launcher._ssd_source_contract(
+                Path(self.temp.name) / "same-looking-name", {"_name_or_path": "example/oversized-moe"},
+            )["verifiedForCrossFormatComparison"]
+        )
         self.assertNotIn("/api/benchmark/stop", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
         self.assertNotIn("/api/stop", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
 
@@ -1567,7 +1647,10 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(report["counts"]["accelerators"], 3)
         self.assertEqual(report["doctor"]["state"], "attention")
         engines = {item["id"]: item for item in report["engines"]}
-        self.assertEqual(set(engines), {"omlx", "lmstudio", "mtplx", "freetoken"})
+        self.assertEqual(
+            set(engines),
+            {"omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference"},
+        )
         for engine in (engines[item] for item in {"omlx", "lmstudio", "mtplx"}):
             self.assertEqual(
                 [mode["label"] for mode in engine["modes"]], ["AR", "MTP"],
@@ -5593,6 +5676,153 @@ for line in sys.stdin:
         self.assertEqual(
             incomplete["engineNextAction"]["missingEngines"], incomplete["missingEngines"],
         )
+
+    def test_ssd_shootout_reuses_cross_format_result_and_never_requests_normal_engines(self) -> None:
+        model = json.loads(json.dumps(self.models[0]))
+        identity = "d" * 64
+        model["ssdStreaming"] = {
+            "version": launcher.SSD_STREAMING_CONTRACT_VERSION,
+            "recommended": True,
+            "oversized": True,
+            "comparisonIdentity": identity,
+            "pairedCalibrationReady": True,
+            "pairedEngines": list(launcher.SSD_STREAMING_BACKENDS),
+        }
+        model["backends"]["swiftlm"] = {
+            "runnable": True, "reason": "Verified SwiftLM SSD route",
+            "mtp": False, "dflash": False, "kv": False,
+            "agentReasoning": ["auto", "off"], "codexReasoning": ["auto"],
+            "ssdStreaming": True, "comparisonIdentity": identity,
+            "benchmarkModelFingerprint": "swift-artifact-fingerprint",
+            "runtimeVersion": "SwiftLM test runtime",
+            "nativeExpertTopK": 8, "prefillSize": 512,
+            "preferredAcceleration": "off", "fallbackAcceleration": "off",
+        }
+        model["backends"]["mference"] = {
+            "runnable": True, "reason": "Verified Mference SSD route",
+            "mtp": False, "dflash": False, "kv": False,
+            "agentReasoning": ["auto"], "codexReasoning": ["auto"],
+            "ssdStreaming": True, "comparisonIdentity": identity,
+            "benchmarkModelFingerprint": "mference-artifact-fingerprint",
+            "runtimeVersion": "Mference test runtime",
+            "promptCacheMode": "on", "queueLimit": 4,
+            "preferredAcceleration": "off", "fallbackAcceleration": "off",
+        }
+        payload = self.payload("swiftlm", "pi", model)
+        payload.update({"reasoning": "auto", "suite": "quick", "enginePreference": "fastest"})
+        payload["options"]["kv"] = "off"
+        machine = "ssd-shootout-mac"
+
+        with mock.patch.dict(
+            launcher.BINARIES,
+            {"swiftlm": "/usr/bin/true", "mference": "/usr/bin/true"},
+        ):
+            swift_job = launcher.validated_benchmark_request(
+                payload, [model], allow_baseline_only=True,
+            )
+            self.assertTrue(swift_job["ssdStreaming"])
+            self.assertEqual(swift_job["ssdComparisonIdentity"], identity)
+            self.assertEqual(
+                swift_job["evidence"]["engineSettings"]["ssdCacheState"],
+                "natural-cold-to-warm",
+            )
+
+            evidence = launcher.optimizer_evidence(
+                model, payload["context"], payload["output"], "pi", "auto", "off", {},
+            )
+            launcher.add_benchmark_engine_evidence(
+                evidence, model, payload["options"], list(launcher.SSD_STREAMING_BACKENDS),
+            )
+
+            def record(backend: str, seconds: float, generation_tps: float) -> dict:
+                capability = model["backends"][backend]
+                samples = [
+                    {
+                        "targetPromptTokens": target, "repetition": 1,
+                        "promptTokens": target, "completionTokens": 128,
+                        "ttftSeconds": seconds / 4, "totalSeconds": seconds,
+                        "decodeTokensPerSecond": generation_tps,
+                        "endToEndTokensPerSecond": 128 / seconds,
+                    }
+                    for target in (512, 2_048)
+                ]
+                value = {
+                    "id": f"ssd-record-{backend}",
+                    "createdAt": "2026-08-26T12:00:00Z",
+                    "scope": "local", "backend": backend,
+                    "modelId": model["id"], "modelName": model["name"],
+                    "modelFingerprint": capability["benchmarkModelFingerprint"],
+                    "runtimeVersion": capability["runtimeVersion"],
+                    "hardwareFingerprint": machine,
+                    "suite": "quick", "workloadKind": "throughput",
+                    "scenarioContract": [], "client": "pi", "reasoning": "auto",
+                    "targetKV": "off", "samplingFingerprint": evidence["samplingFingerprint"],
+                    "contextMin": payload["context"], "contextMax": payload["context"],
+                    "outputMin": payload["output"], "outputMax": payload["output"],
+                    "promptTokensMin": 512, "promptTokensMax": 2_048,
+                    "comparedModes": ["ar"],
+                    "modes": {"ar": {
+                        "samples": samples,
+                        "medianDecodeTokensPerSecond": generation_tps,
+                    }},
+                    "comparisonContractVersion": launcher.BENCHMARK_COMPARISON_CONTRACT_VERSION,
+                    "engineSettings": evidence["engineSettingsByBackend"][backend],
+                    "modeSettings": {"ar": {}}, "settings": {},
+                    "qualityFingerprint": "e" * 64, "qualityCompletionTokens": 64,
+                    "baselinePassed": True, "qualityPassed": True,
+                    "allQualityPassed": True, "winner": "ar",
+                    "winnerSpeedup": 1.0, "worstCaseSpeedup": 1.0,
+                    "endToEndSpeedup": 1.0,
+                    "ssdStreaming": True, "ssdComparisonIdentity": identity,
+                    "shootoutId": "ssd-complete-shootout",
+                    "shootoutExecutionOrder": ["swiftlm", "mference"],
+                }
+                capability["localBenchmark"] = value
+                capability["localBenchmarks"] = [value]
+                return value
+
+            swift_record = record("swiftlm", 2.0, 64.0)
+            mference_record = record("mference", 1.0, 128.0)
+            swift_measurement = launcher.cross_engine_benchmark_measurement(swift_record)
+            mference_measurement = launcher.cross_engine_benchmark_measurement(mference_record)
+            self.assertIsNotNone(swift_measurement)
+            self.assertIsNotNone(mference_measurement)
+            self.assertEqual(swift_measurement["signature"], mference_measurement["signature"])
+
+            with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+                result = launcher.best_engine_request(payload, [model])
+            self.assertEqual(result["backend"], "mference")
+            self.assertEqual(result["engineEvidenceTier"], "cross-engine-local-benchmark")
+            self.assertEqual(result["engineNextAction"]["id"], "apply")
+            self.assertEqual(
+                [item["backend"] for item in result["engineDecision"]["eligibleBackends"]],
+                ["swiftlm", "mference"],
+            )
+            self.assertEqual(
+                {item["backend"] for item in result["comparedEngines"]},
+                {"swiftlm", "mference"},
+            )
+
+            applied = json.loads(json.dumps(payload))
+            applied["backend"] = "mference"
+            applied["options"] = json.loads(json.dumps(result["options"]))
+            with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+                reused = launcher.best_engine_request(applied, [model])
+            self.assertEqual(reused["backend"], "mference")
+            self.assertEqual(reused["engineNextAction"]["id"], "keep-current", reused)
+            self.assertFalse(reused["engineNextAction"]["requiresCalibration"])
+
+            mismatched = json.loads(json.dumps(mference_record))
+            mismatched["ssdComparisonIdentity"] = "f" * 64
+            mismatch_measurement = launcher.cross_engine_benchmark_measurement(mismatched)
+            self.assertIsNotNone(mismatch_measurement)
+            self.assertNotEqual(
+                swift_measurement["signature"], mismatch_measurement["signature"],
+            )
+            with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+                self.assertFalse(launcher._local_benchmark_record_verified(
+                    model["backends"]["mference"], mismatched, evidence,
+                ))
 
     def test_engine_shootout_includes_ar_only_engines_and_saves_one_quality_checked_matrix(self) -> None:
         model = json.loads(json.dumps(self.models[0]))

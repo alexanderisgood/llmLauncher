@@ -5428,6 +5428,35 @@ for line in sys.stdin:
         self.assertEqual(reused_result["engineEvidenceTier"], "cross-engine-noise-floor")
         self.assertEqual(reused_result["engineNextAction"]["id"], "keep-current")
 
+        tied_history_records = []
+        for backend in ("omlx", "lmstudio", "mtplx"):
+            historical = json.loads(json.dumps(tied_leaders["backends"][backend]["localBenchmark"]))
+            historical.update({
+                "id": f"tied-history-{backend}",
+                "shootoutId": "tied-history",
+                "createdAt": "2026-08-22T12:00:00Z",
+                "shootoutExecutionOrder": ["omlx", "lmstudio", "mtplx"],
+            })
+            tied_history_records.append(historical)
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+            third_place_history = launcher.benchmark_history_request(
+                dict(third_place_payload, suite="quick"), [tied_leaders],
+                tied_history_records, now=datetime(2026, 8, 23, tzinfo=timezone.utc),
+            )
+            leading_route_history = launcher.benchmark_history_request(
+                dict(applied_payload, suite="quick"), [tied_leaders],
+                tied_history_records, now=datetime(2026, 8, 23, tzinfo=timezone.utc),
+            )
+        self.assertEqual(third_place_history["receipt"]["state"], "tie")
+        self.assertEqual(
+            [item["backend"] for item in third_place_history["receipt"]["leadingBackends"]],
+            ["omlx", "lmstudio"],
+        )
+        self.assertEqual(third_place_history["receipt"]["recommendedBackend"], "omlx")
+        self.assertEqual(third_place_history["receipt"]["currentBackend"], "mtplx")
+        self.assertFalse(third_place_history["receipt"]["currentInLeadingBand"])
+        self.assertTrue(leading_route_history["receipt"]["currentInLeadingBand"])
+
         history_records = []
         for run_index, created_at in enumerate(("2026-08-01T12:00:00Z", "2026-08-22T12:00:00Z"), 1):
             for backend in ("omlx", "lmstudio", "mtplx"):
@@ -7218,6 +7247,29 @@ for line in sys.stdin:
         self.assertTrue(tied_plan["evidence"]["engineChanged"])
         self.assertEqual(tied_plan["evidence"]["leadingBackends"], ["omlx", "lmstudio"])
 
+        # Changing to the measured winner must not discard the fixed controls
+        # of the other engines. Otherwise reopening Calibration treats the
+        # just-saved matrix as a different contract and asks to test again.
+        winner_request = self.payload("omlx", "pi", model)
+        winner_request.update({
+            "suite": "agentic", "enginePreference": "throughput",
+            "calibrationCooling": "default",
+        })
+        winner_request["options"].update({
+            "profile": "turbo", "fan": "default",
+            "gpu": "max", "parallel": 1,
+        })
+        with mock.patch.object(
+            launcher, "best_engine_request", return_value=tied_leader,
+        ) as best_engine:
+            reopened_plan = launcher.calibration_plan(winner_request, [model])
+        comparison_options = best_engine.call_args.args[0]["options"]
+        self.assertEqual(reopened_plan["action"], "apply-existing")
+        self.assertEqual(comparison_options["profile"], "turbo")
+        self.assertEqual(comparison_options["fan"], "default")
+        self.assertEqual(comparison_options["gpu"], "max")
+        self.assertEqual(comparison_options["parallel"], 1)
+
         incompatible = self.payload("omlx", "pi", model)
         incompatible["options"]["kv"] = "q6"
         incompatible.update({"suite": "standard", "enginePreference": "memory"})
@@ -8454,10 +8506,15 @@ for line in sys.stdin:
         ):
             self.assertIn(f'id="{element_id}"', index)
         self.assertIn("function performanceReceiptRequestKey", script)
+        self.assertIn('options:request.options || {}, sampling', script)
         self.assertIn("function renderPerformanceReceipt", script)
         self.assertIn("function renderEngineEvidenceChoices", script)
         self.assertIn('request.reasoningPolicy = "all-engines-model-default"', script)
         self.assertIn('actionId:"review-normalized"', script)
+        self.assertIn('title:focused ? `Apply leading engine · ${recommendedName}`', script)
+        self.assertIn('action:"Apply", actionId:"apply-engine"', script)
+        self.assertIn('&& promoteCompletedCalibrationResult()', script)
+        self.assertIn('$("calibrationCoolingSelect").value = visibleCooling', script)
         self.assertIn('receipt?.state === "trusted-engine" && receipt?.fresh', script)
         self.assertIn('button.classList.toggle("measured-best", best)', script)
         self.assertIn('title:focused ? "Compare compatible engines" : "No exact engine result"', script)

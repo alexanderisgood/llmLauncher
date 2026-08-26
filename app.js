@@ -2044,6 +2044,7 @@ async function applyOptimal(scope = "current", enginePreference = "throughput", 
       decision:calibrationFallback.decision,
     });
   }
+  if (applied && generation === state.optimizationGeneration) schedulePerformanceReceipt(true);
   return applied;
 }
 
@@ -6857,7 +6858,7 @@ function performanceReceiptRequestKey(request) {
     modelId:request.modelId, backend:request.backend, client:request.client,
     context:request.context, output:request.output, reasoning:request.reasoning,
     reasoningPolicy:request.reasoningPolicy || "exact",
-    kv:request.options?.kv || "off", sampling,
+    options:request.options || {}, sampling,
     suite:request.suite, enginePreference:request.enginePreference,
   });
 }
@@ -6918,11 +6919,33 @@ function performanceReceiptView(receipt) {
       action:"Rerun", actionId:"rerun-lab", titleText:fullSummary,
     };
   }
-  if (receipt?.state === "tie") return {
-    state:"tie", icon:"≈", title:focused ? "No clear engine winner" : "Measured tie · no safe engine switch",
-    detail:focused ? `${eligible.length} engines finished within the 3% noise floor` : `${suite} · ${age}`,
-    action:"Review", actionId:"review-lab", titleText:fullSummary,
-  };
+  if (receipt?.state === "tie") {
+    const leaders = Array.isArray(receipt.leadingBackends)
+      ? receipt.leadingBackends.filter(item => uiEngineVisible(item?.backend || item)) : [];
+    const leaderNames = leaders.map(item => item?.label || backendName(item?.backend || item));
+    const currentOutside = receipt.currentInLeadingBand === false;
+    const currentName = receipt.currentBackendLabel || backendName(receipt.currentBackend || state.backend);
+    const recommendedName = receipt.recommendedLabel || backendName(receipt.recommendedBackend);
+    const leadingText = leaderNames.length
+      ? `${leaderNames.join(leaderNames.length === 2 ? " and " : ", ")} are within 3%`
+      : "The leading engines are within 3%";
+    if (!receipt.fresh) return {
+      state:"stale", icon:"◇", title:focused ? "Saved tie needs rechecking" : "Saved leading group · recheck",
+      detail:focused ? `${leadingText} · ${age}` : `${suite} · ${age}`,
+      action:"Rerun", actionId:"rerun-lab", titleText:fullSummary,
+    };
+    if (currentOutside && receipt.recommendedBackend) return {
+      state:"tie", icon:"◆",
+      title:focused ? `Apply leading engine · ${recommendedName}` : `Measured leader · ${recommendedName}`,
+      detail:focused ? `${leadingText} · ${currentName} is outside` : `${currentName} is outside the measured leading group`,
+      action:"Apply", actionId:"apply-engine", titleText:fullSummary,
+    };
+    return {
+      state:"tie", icon:"≈", title:focused ? "Leading engines tied" : "Measured leading group · current kept",
+      detail:focused ? `${leadingText} · current route is competitive` : `${suite} · ${age}`,
+      action:"Review", actionId:"review-lab", titleText:fullSummary,
+    };
+  }
   if (receipt?.state === "incomplete") return {
     state:"incomplete", icon:"!", title:focused ? "Finish the engine comparison" : "Measurement incomplete",
     detail:focused
@@ -6953,7 +6976,9 @@ function performanceReceiptView(receipt) {
 
 function renderEngineEvidenceChoices(receipt) {
   const winner = receipt?.state === "trusted-engine" && receipt?.fresh
-    ? String(receipt.backend || "") : "";
+    ? String(receipt.backend || "")
+    : receipt?.state === "tie" && receipt?.fresh && receipt?.currentInLeadingBand === false
+      ? String(receipt.recommendedBackend || "") : "";
   document.querySelectorAll("[data-backend]").forEach(button => {
     const best = Boolean(winner && button.dataset.backend === winner);
     button.classList.toggle("measured-best", best);
@@ -7482,7 +7507,12 @@ function calibrationAlternativeMarkup(plan, engine, controlsLocked) {
 }
 
 function renderCalibrationPlan() {
-  const plan = state.calibrationPlan;
+  let plan = state.calibrationPlan;
+  if (
+    plan && plan.action !== "apply-existing"
+    && completedCalibrationDecision()
+    && promoteCompletedCalibrationResult()
+  ) plan = state.calibrationPlan;
   const active = calibrationBenchmarkActive();
   const controlsLocked = state.calibrationLoading || active || state.calibrationApplying;
   $("calibrationSuiteSelect").disabled = controlsLocked;
@@ -7763,7 +7793,15 @@ async function openCalibrationAssistant(options = {}) {
   closeOptimizerMenu();
   $("calibrationSuiteSelect").value = recommendedSuite;
   $("calibrationPreferenceSelect").value = preference;
-  if (!$("calibrationDialog").open) $("calibrationDialog").showModal();
+  if (!$("calibrationDialog").open) {
+    const visibleCooling = $("fanSelect").value;
+    const matchingCooling = [...$("calibrationCoolingSelect").options]
+      .find(item => item.value === visibleCooling && !item.disabled);
+    if (matchingCooling && !calibrationBenchmarkActive()) {
+      $("calibrationCoolingSelect").value = visibleCooling;
+    }
+    $("calibrationDialog").showModal();
+  }
   await pollBenchmarkStatus();
   await loadCalibrationPlan(!calibrationBenchmarkActive());
 }
@@ -11816,12 +11854,15 @@ Object.values(optimizerControls).forEach(id => {
       refreshLaunchability();
     }
     markOptimizerCustom();
+    schedulePerformanceReceipt();
   });
   control.addEventListener("change", () => {
     if (id === "accelerationSelect" || id === "depthInput") updateAccelerationState();
     if (id.startsWith("freeToken")) updateFreeTokenNativeControls();
     markOptimizerCustom();
     refreshLaunchability();
+    scheduleBenchmarkHistory();
+    schedulePerformanceReceipt();
   });
 });
 

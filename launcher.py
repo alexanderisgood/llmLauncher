@@ -9901,12 +9901,19 @@ def benchmark_history_request(
                 "profileDisplay": (profile.get("displays") or {}).get(item["backend"]) if profile else None,
             })
         created_at = max((str(record.get("createdAt") or "") for record in comparable_records.values()), default="")
+        leading_backends = [
+            str(item) for item in (profile or {}).get("leadingBackends") or []
+        ]
+        recommended_backend = str((profile or {}).get("winner", {}).get("backend") or "")
         evaluated.append({
             "id": shootout_id, "createdAt": created_at,
             "status": status, "summary": summary,
             "trustedWinner": status == "trusted",
             "winnerBackend": profile["winner"]["backend"] if status == "trusted" and profile else None,
             "winnerLabel": BACKEND_LABELS[profile["winner"]["backend"]] if status == "trusted" and profile else None,
+            "leadingBackends": leading_backends,
+            "recommendedBackend": recommended_backend or None,
+            "recommendedLabel": BACKEND_LABELS.get(recommended_backend) if recommended_backend else None,
             "metric": profile.get("metric") if profile else None,
             "engines": engine_rows,
             "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
@@ -10057,10 +10064,23 @@ def benchmark_history_request(
             "summary": latest_shootout.get("summary"),
         }
     elif latest_shootout and latest_shootout.get("status") == "tie":
+        leading_backends = [
+            str(item) for item in latest_shootout.get("leadingBackends") or []
+        ]
+        recommended_backend = str(latest_shootout.get("recommendedBackend") or "")
         receipt = {
             "state": "tie", "scope": "engine",
             "createdAt": latest_shootout.get("createdAt"),
             "summary": latest_shootout.get("summary"),
+            "currentBackend": backend,
+            "currentBackendLabel": BACKEND_LABELS.get(backend, backend),
+            "currentInLeadingBand": backend in set(leading_backends),
+            "leadingBackends": [
+                {"backend": item, "label": BACKEND_LABELS.get(item, item)}
+                for item in leading_backends
+            ],
+            "recommendedBackend": recommended_backend or None,
+            "recommendedLabel": BACKEND_LABELS.get(recommended_backend, recommended_backend),
         }
     elif current_route_runs:
         route = current_route_runs[0]
@@ -12172,6 +12192,10 @@ def calibration_plan(
 ) -> dict[str, Any]:
     """Describe an exact-contract calibration without starting or allocating anything."""
     calibration_cooling = validated_calibration_cooling(payload)
+    raw_options = (
+        copy.deepcopy(payload.get("options"))
+        if isinstance(payload.get("options"), dict) else {}
+    )
     visible_request = validated_launch_profile_request(payload, models)
     suite_name = str(payload.get("suite") or ("standard" if visible_request["client"] == "chat" else "agentic"))
     suite = BENCHMARK_SUITES.get(suite_name)
@@ -12206,8 +12230,16 @@ def calibration_plan(
             candidate = copy.deepcopy(request)
             candidate["backend"] = backend
             candidate["suite"] = suite_name
-            candidate.setdefault("options", {})["fan"] = calibration_cooling
             try:
+                candidate_option_source = copy.deepcopy(raw_options)
+                candidate_option_source.update({
+                    "acceleration": "auto", "kv": kv,
+                    "fan": calibration_cooling,
+                })
+                candidate["options"] = validated_profile_options(
+                    backend, model, model.get("backends", {}).get(backend, {}),
+                    candidate_option_source,
+                )
                 job = validated_benchmark_request(
                     candidate, models, allow_baseline_only=True,
                 )
@@ -12328,7 +12360,13 @@ def calibration_plan(
     )
 
     measured_request = copy.deepcopy(request)
-    measured_request.setdefault("options", {})["fan"] = calibration_cooling
+    comparison_options = copy.deepcopy(measured_request.get("options") or {})
+    for job in jobs:
+        settings = job.get("evidence", {}).get("engineSettings")
+        if isinstance(settings, dict):
+            comparison_options.update(copy.deepcopy(settings))
+    comparison_options["fan"] = calibration_cooling
+    measured_request["options"] = comparison_options
     measured_request["enginePreference"] = preference
     decision = best_engine_request(measured_request, models)
     evidence_tier = str(decision.get("engineEvidenceTier") or decision.get("evidenceTier") or "")

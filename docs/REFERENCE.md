@@ -1,6 +1,6 @@
 # LLM Launcher reference
 
-A capability-aware hub for running models through local **oMLX**, **LM Studio**, or **MTPLX**, then opening each compatible route in **Pi**, **OpenCode**, **Codex**, or a built-in streaming **Chat**. The implemented native/connected **FreeToken** integration is temporarily hidden behind one off-by-default UI feature flag while that route matures; its backend, saved data, and tests remain intact.
+A capability-aware hub for running models through local **oMLX**, **LM Studio**, or **MTPLX**, plus optional **SwiftLM** and **Mference** SSD-streaming routes for verified oversized MoEs, then opening each compatible route in **Pi**, **OpenCode**, **Codex**, or a built-in streaming **Chat**. The implemented native/connected **FreeToken** integration is temporarily hidden behind one off-by-default UI feature flag while that route matures; its backend, saved data, and tests remain intact.
 
 ## Start
 
@@ -10,7 +10,7 @@ The browser remembers the last usable engine, model, and work surface shown in t
 
 1. Optionally open **Models** to search every detected artifact and see its compatibility doctor: installed engines, decode modes, work surfaces, and matching saved evidence. Selecting a model/engine here changes only the visible launcher choice.
 2. To add a model, choose **Find / download a model** inside Model Library. Search or inspect one public Hugging Face repository, review the pinned commit, license, exact MLX/GGUF file set, destination, disk and memory checks, then explicitly approve the resumable download. Search and inspection create nothing.
-3. Choose oMLX, LM Studio, or MTPLX. FreeToken is deliberately absent from the current interface; enabling its single UI flag restores the already-implemented native and connected routes.
+3. Choose oMLX, LM Studio, or MTPLX. A supported MoE whose weights do not fit safely in memory can instead use **Huge models on SSD** with SwiftLM or Mference. FreeToken is deliberately absent from the current interface; enabling its single UI flag restores the already-implemented native and connected routes.
 4. Optionally open **Tools → Runtimes** to inspect the exact oMLX, LM Studio, and MTPLX executables used by new local sessions. Opening it is local and read-only; switching to another already-installed copy is explicit.
 5. In the default **Focused** view, a quiet collapsed **Saved routes** strip can reveal at most one ready launch profile, one Session Set, and one resumable Chat. It never replaces or disables the normal configuration form or Launch dock. Profile launches still revalidate current models, runtimes, measurements, memory, and exceptional approvals; a Session Set still opens its side-effect-free review plan. Open **Tools → Launch profiles** to save or manage the full visible launch setup.
 6. Once a normal model session has the agents and Chats you want, optionally open **Tools → Session sets** and save them together as one **Session Set**. Reopening first shows a side-effect-free plan, then its action button loads one model or reuses the exact resident route and opens only the missing surfaces. A separate checkbox appears only for a current memory-risk acknowledgement or experimental route.
@@ -72,6 +72,18 @@ Generated runtime files, logs, and the bounded `chat-history.json` store live un
 Engines and work surfaces now have one canonical registered descriptor, one compatibility policy, and one dedicated builder. Unknown adapters fail explicitly instead of falling through to another runtime, and the launcher checks at startup that every descriptor has a builder and a complete compatibility row. The interface receives the same read-only catalog through bootstrap for labels, executable mappings, protocol, built-in status, and installation state.
 
 This is an internal extension seam, not arbitrary plugin loading. Adding an engine or work surface still requires reviewed code and tests, which keeps generated commands, temporary overlays, credentials, and the no-global-config-write guarantee auditable. See [`ARCHITECTURE.md`](../ARCHITECTURE.md) for the flow, builder contract, and contributor checklist.
+
+## Oversized MoEs on SSD
+
+**Huge models on SSD** is an optional, collapsed runtime lane rather than a fourth ordinary in-memory choice. [SwiftLM](https://github.com/SharpAI/SwiftLM) consumes supported MLX MoEs and streams routed experts from SSD. [Mference](https://github.com/NeelM0906/Mference) is model-specific and accepts only its verified pinned `.gturbo` repacks. Both can serve Pi, OpenCode, and built-in Chat through Chat Completions; neither currently supplies the Responses endpoint required by Codex.
+
+The scanner first proves that the artifact is a complete MoE, records its full weight size relative to installed memory, and reads the checkpoint's native expert top-k. The SSD lane is recommended when the weights reach 85% of installed unified memory, remains optional for a smaller supported MoE, and stays unavailable for an unknown architecture. The launch builders preserve native expert routing and do not enable speculative decoding: on an SSD-bound path, multiplying verification-time expert reads can reduce rather than improve throughput.
+
+SwiftLM exposes only a bounded prompt-prefill chunk choice plus the read-only native top-k. Mference exposes its prompt-cache policy and queue limit. Runtime installation and model-specific conversion remain upstream operations; the launcher discovers installed binaries and verified artifacts but does not silently download, repack, or execute an unsupported model.
+
+When both runtimes have artifacts derived from the same immutable repository and revision, Calibration can compare them as one source-bound pair. A matching filename is not enough: MLX metadata or a launcher-verified `.gturbo` receipt must produce the same cryptographic comparison identity. Each route starts in a fresh process and runs separate first-turn and warm-prefix stages using generated agentic prompts. The result records generation TPS, TTFT, memory pressure, thermal state, prefix reuse, natural cold-to-warm cache state, and exact runtime/artifact identities. macOS file cache is observed rather than forcibly purged.
+
+[Qwen3.8-Flash-Next](https://github.com/QwenLM/Qwen3.8-Flash-Next) is a new 125B MoE with a changed QSA/GDN architecture. The launcher recognises it as an SSD-streaming candidate but currently marks both routes incompatible: SwiftLM does not list the family in its accepted architectures, and Mference has no pinned `.gturbo` implementation for it. This is a deliberate fail-closed boundary, not a claim that the model can never be ported.
 
 ## FreeToken: native port or connected engine
 
@@ -310,6 +322,7 @@ The scanner checks:
 - `~/.lmstudio/models`
 - `~/.omlx/models` and configured oMLX model directories
 - `~/.mtplx/models`
+- `~/Library/Application Support/Mference` and `~/.mference/models`
 - `~/.cache/huggingface/hub`
 - `~/Documents/models` and `~/Documents/Models`
 

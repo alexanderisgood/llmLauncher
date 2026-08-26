@@ -6,7 +6,7 @@
 
 LLM Launcher is a macOS hub for selecting a local model, choosing the best compatible inference engine, and opening that route in **Pi**, **OpenCode**, **Codex**, or a built-in streaming **Chat**.
 
-It currently supports **oMLX**, **LM Studio**, and **MTPLX**. Instead of treating every OpenAI-compatible server as identical, it keeps model format, reasoning support, context, sampling, accelerator settings, agent protocol, and locally measured performance in one visible contract.
+Its primary in-memory engines are **oMLX**, **LM Studio**, and **MTPLX**. Oversized Mixture-of-Experts models can also use optional **SwiftLM** or **Mference** SSD-streaming routes when the exact runtime, model family, and source identity pass the launcher's compatibility checks. Instead of treating every OpenAI-compatible server as identical, it keeps model format, reasoning support, context, sampling, accelerator settings, agent protocol, and locally measured performance in one visible contract.
 
 > **Alpha software:** this is an early public release for macOS and Apple Silicon enthusiasts. It is not signed or notarized yet, runtime interfaces may change, and you should review a route before trusting it with important work.
 
@@ -16,6 +16,7 @@ It currently supports **oMLX**, **LM Studio**, and **MTPLX**. Instead of treatin
 - Launches one model into Pi, OpenCode, Codex, or local Chat without rewriting those tools' permanent configuration.
 - Preserves context, output, reasoning, sampling, and KV-cache choices across the complete route.
 - Measures like-for-like engine and accelerator performance before claiming a fastest option.
+- Exposes a separate **Huge models on SSD** lane for supported MoEs, with source-bound SwiftLM/Mference calibration rather than comparing unrelated repacks by filename.
 - Keeps cooling user-owned: optimisation and Calibration use automatic cooling by default and never select maximum fans without an explicit choice.
 - Supports streaming thinking, message queues, history, branching, TPS, warm-route reuse, and resumable local Chat.
 - Gives Pi a stable in-launcher transcript with restored session messages, separate thinking/response/tool lanes, queued follow-ups, and abort/clear-queue controls; external Terminal remains available for Pi's full TUI.
@@ -29,7 +30,8 @@ The experimental FreeToken integration remains implemented and tested but is hid
 
 - macOS; the primary target is Apple Silicon.
 - Python 3.10 or newer.
-- At least one supported engine installed: [oMLX](https://github.com/jundot/omlx), [LM Studio](https://lmstudio.ai/), or [MTPLX](https://github.com/youssofal/MTPLX).
+- At least one primary engine installed: [oMLX](https://github.com/jundot/omlx), [LM Studio](https://lmstudio.ai/), or [MTPLX](https://github.com/youssofal/MTPLX).
+- Optional: [SwiftLM](https://github.com/SharpAI/SwiftLM) or [Mference](https://github.com/NeelM0906/Mference) for a compatible oversized-MoE SSD-streaming route. Mference requires its verified model-specific `.gturbo` repack.
 - Pi, OpenCode, or Codex only if you want to launch that agent. Built-in Chat needs no separate agent.
 - Local model weights compatible with the selected engine. Models and commercial runtimes are not bundled.
 
@@ -46,18 +48,27 @@ The launcher selects an available Python 3.10+ interpreter, starts an owner-only
 On first use:
 
 1. Choose **Models** to inspect detected artifacts and engine compatibility.
-2. Select oMLX, LM Studio, or MTPLX.
+2. Select oMLX, LM Studio, or MTPLX. For a supported MoE whose weights do not fit safely in memory, open **Huge models on SSD** and select SwiftLM or Mference.
 3. Select Pi, OpenCode, Codex, or Chat.
 4. Review context, maximum response, reasoning, and engine controls.
 5. Choose **Launch** or **Start chat**.
 
 Nothing is uploaded by the launcher. Model downloads happen only after a separate pinned-revision review and explicit approval.
 
+## Oversized MoEs on SSD
+
+The SSD lane is deliberately separate from the three normal runtime cards. SwiftLM streams experts from an MLX checkpoint; Mference runs a verified model-specific `.gturbo` repack. The launcher preserves the model's native expert top-k, disables speculative decoding on this I/O-bound path, and exposes only controls that each runtime can enforce.
+
+When both routes are installed, Calibration can compare them only after their artifacts prove the same immutable source revision. It measures first-turn and warm-prefix generation TPS, time to first output, memory pressure, and thermal state in fresh processes. It observes the natural macOS file cache instead of claiming a privileged cold-cache purge.
+
+[Qwen3.8-Flash-Next](https://github.com/QwenLM/Qwen3.8-Flash-Next) is detected as an SSD-streaming candidate, but currently remains blocked because neither upstream runtime lists that new architecture as supported. Detection is not treated as proof that the weights can be executed.
+
 ## Known alpha limitations
 
 - There is no packaged `.app`, code signing, notarization, or automatic launcher updater yet.
 - The interface and saved-data formats may evolve before a stable release.
 - Runtime support is deliberately strict; a nominally OpenAI-compatible route can remain unavailable if its model, reasoning, tools, or Responses contract cannot be preserved.
+- SSD streaming is model-family specific. A large MoE remains unavailable until its exact SwiftLM or Mference architecture path is verified; Qwen3.8-Flash-Next is currently detected but intentionally not launchable through either route.
 - FreeToken is temporarily hidden from the interface. Existing implementation and saved records are retained.
 - Hardware recommendations are evidence-bound to the measured Mac, model fingerprint, runtime, and workload; they are not universal benchmark claims.
 

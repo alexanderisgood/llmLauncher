@@ -15,6 +15,7 @@
       <a href="#mental-model">How it fits together</a>
       <a href="#unified">Use the unified launcher</a>
       <a href="#model-library">Model Library</a>
+      <a href="#ssd-streaming">Huge models on SSD</a>
       <a href="#acquisition">Model Acquisition</a>
       <a href="#runtime-manager">Runtime Manager</a>
       <a href="#sessions">Sessions &amp; capacity</a>
@@ -39,16 +40,16 @@
 
     <article class="manual-content">
       <header class="manual-hero">
-        <p class="eyebrow">LOCAL LLM FIELD MANUAL · 25 AUGUST 2026</p>
+        <p class="eyebrow">LOCAL LLM FIELD MANUAL · 26 AUGUST 2026</p>
         <h1>Launch any local model<br><span>without crossing the wires.</span></h1>
-        <p>This guide explains the easy route through LLM Launcher, direct commands for its established Mac-local engines, and the implemented FreeToken routes that are temporarily hidden from the everyday interface.</p>
+        <p>This guide explains the easy route through LLM Launcher, its established in-memory engines, optional SSD-streaming routes for oversized MoEs, and the implemented FreeToken routes that are temporarily hidden from the everyday interface.</p>
       </header>
 
       <section id="mental-model">
         <span class="chapter">01</span><h2>How it fits together</h2>
         <p>There are always two layers. The <strong>model engine</strong> loads the weights and exposes an OpenAI-compatible address. A <strong>work surface</strong>—Pi, OpenCode, Codex, or the launcher's built-in Chat—sends prompts through the launcher's private route.</p>
         <div class="flow">
-          <div><b>Model</b><span>Local artifact</span></div><i>→</i><div><b>Engine</b><span>oMLX · LM Studio · MTPLX</span></div><i>→</i><div><b>Private route</b><span>Authenticated 127.0.0.1 bridge</span></div><i>→</i><div><b>Work surface</b><span>Pi · OpenCode · Codex · Chat</span></div>
+          <div><b>Model</b><span>Local artifact</span></div><i>→</i><div><b>Engine</b><span>Primary or SSD-streamed</span></div><i>→</i><div><b>Private route</b><span>Authenticated 127.0.0.1 bridge</span></div><i>→</i><div><b>Work surface</b><span>Pi · OpenCode · Codex · Chat</span></div>
         </div>
         <div class="callout"><b>The common mistake</b><p>Changing coding agent does not load a model. Starting a runtime does not open a coding agent. You need both halves, and they must agree on the model ID, context window, response limit, and API protocol.</p></div>
       </section>
@@ -59,7 +60,7 @@
           <li><b>Double-click <code>Start LLM Launcher.command</code>.</b><span>The starter selects an installed Python 3.10 or newer instead of Apple’s older system Python, then opens a page served only on this Mac. Opening it twice verifies and reopens the existing local controller rather than starting a competing copy.</span></li>
           <li><b>Choose an appearance and information level if you want.</b><span>The top-bar appearance menu offers the polished light Frost interface, neutral Graphite, true-light Daylight, warm Ember, and the original blue/violet Midnight palette. Frost uses one compact control-height and spacing system across its toolbar, header, launch dock, Chat, and dialog action rows, with aligned adjacent buttons and a unified edge-to-edge app layout. The menu also offers Focused and Detailed. Focused is the default launch-first view: when a usable saved route exists, a quiet collapsed Saved routes strip can reveal one ready profile, one Session Set, and one resumable Chat without replacing or disabling the normal form or Launch dock. Those actions still use ordinary profile revalidation, Chat route review, or the Session Set review plan. Focused gives Launch configuration the full workspace width, places the three current engines on one desktop row with an automatic two-column narrow fallback, and replaces the mostly empty inspector with one compact live phase/status strip plus Stop and Log controls in the heading. It also uses plain-language performance copy, marks a fresh exact cross-engine winner directly on its runtime card, hides inactive Chat sampling overrides until Custom is selected, and reduces Hub Console route/telemetry to one expandable status strip. Show details or Detailed restores the full inspector, evidence, inventory, helper copy, Route Check, Preview, inactive-control context, and the Console's full route/latency report. Daylight applies to Saved routes, the complete workspace, inventory, progress cards, calibration, benchmark, runtime, setup, ANE, history, and log dialogs—not only the top-level controls. The actual Hub Console terminal viewport deliberately stays pure black with a stable high-contrast ANSI palette in every appearance; only its surrounding controls follow the theme. The browser remembers only the palette and information-level names; neither can change a model, runtime, profile, benchmark, or launch setting.</span></li>
           <li><b>Optionally add a public model.</b><span>Open Models, then Find / download a model. Search and inspection change nothing; a pinned download needs a separate review of the model page, license, exact files, destination, and capacity checks.</span></li>
-          <li><b>Choose engine, model, and a work surface.</b><span>Pick oMLX, LM Studio, or MTPLX, then Pi, OpenCode, Codex, or built-in Chat. The browser restores the last exact visible route only while its runtime, artifact, and surface remain available; otherwise startup chooses an installed compatible route, falling back to built-in Chat when no agent is available. It stores only those three IDs, starts nothing, and never restores or changes limits, reasoning, sampling, KV precision, accelerators, prompts, or folders. A remembered FreeToken route is ignored while that UI feature is off. For an agent, choose the in-launcher Hub Console or the external macOS Terminal fallback. Unavailable combinations are disabled with a reason.</span></li>
+          <li><b>Choose engine, model, and a work surface.</b><span>Pick oMLX, LM Studio, or MTPLX for a normal in-memory route. For a supported MoE whose weights do not fit safely in memory, open Huge models on SSD and choose SwiftLM or Mference. Then choose a compatible Pi, OpenCode, Codex, or built-in Chat surface; the SSD engines currently do not expose the Responses API Codex needs. The browser restores the last exact visible route only while its runtime, artifact, and surface remain available; otherwise startup chooses an installed compatible route, falling back to built-in Chat when no agent is available. It stores only those three IDs, starts nothing, and never restores or changes limits, reasoning, sampling, KV precision, accelerators, prompts, or folders. A remembered FreeToken route is ignored while that UI feature is off. For an agent, choose the in-launcher Hub Console or the external macOS Terminal fallback. Unavailable combinations are disabled with a reason.</span></li>
           <li><b>Set context, response limit, reasoning, and optional Chat sampling.</b><span>The engine and work surface receive the same limits. Custom Chat controls include temperature, top P, top K, presence penalty, frequency penalty, and seed when the route supports them.</span></li>
           <li><b>Optionally open Sessions.</b><span>Review the launcher-owned route and a conservative full-context capacity estimate for the next model load. Tight or unknown headroom needs one explicit, exact-contract acknowledgement.</span></li>
           <li><b>Optionally open Tools → Calibration.</b><span>The read-only plan identifies compatible engines and the cost of a local comparison. It can reuse a completed matching result or start the displayed plan directly from Test engines.</span></li>
@@ -79,18 +80,30 @@
 
       <section id="model-library">
         <span class="chapter">02A</span><h2>Model Library: understand an artifact before launching it</h2>
-        <p>Open Models in the top bar for one searchable view of every detected local target checkpoint across oMLX, LM Studio, and MTPLX. FreeToken-only remote models and compatibility rows remain in backend data but are omitted from visible cards, filters, actions, and counts while its UI flag is off. The report comes from the same scanner and compatibility policy that gate Launch, so it does not maintain a looser second list.</p>
+        <p>Open Models in the top bar for one searchable view of every detected local target checkpoint across oMLX, LM Studio, MTPLX, SwiftLM, and Mference. FreeToken-only remote models and compatibility rows remain in backend data but are omitted from visible cards, filters, actions, and counts while its UI flag is off. The report comes from the same scanner and compatibility policy that gate Launch, so it does not maintain a looser second list.</p>
         <ol class="steps compact">
           <li><b>Search or filter the catalog.</b><span>Filter by engine, ready work surface, or doctor state. An engine filter deliberately keeps incompatible checkpoints visible, scopes each badge, route count, diagnosis, and detail card to that engine, and hides the unrelated engine cards. Search also covers architecture, format, quantisation, origin, path, decode modes, and compatibility explanations.</span></li>
           <li><b>Separate compatibility from installation.</b><span>An artifact can be structurally compatible with an engine while its runtime is missing. A route is marked ready only when the artifact, installed engine, work-surface command, protocol matrix, and enforceable reasoning controls all agree.</span></li>
           <li><b>Read the doctor, not just a green badge.</b><span>The checks cover complete weights, loadable installed engines, usable engine/surface pairs, accelerators, and matching saved benchmark runs. AR-only is a valid advisory; an unmeasured accelerator is available but not claimed faster.</span></li>
-          <li><b>Select without starting.</b><span>Use with oMLX, LM Studio, or MTPLX puts that route into the normal launcher. It preserves the current Pi/OpenCode/Codex/Chat choice so any incompatibility remains visible, and it starts no process.</span></li>
+          <li><b>Select without starting.</b><span>Use with an available primary or SSD-streaming engine puts that route into the normal launcher. It preserves the current Pi/OpenCode/Codex/Chat choice so any incompatibility remains visible, and it starts no process.</span></li>
         </ol>
         <div class="safe-grid"><div class="safe"><b>Opening or refreshing may do</b><span>Read known local model metadata, installed command status, and launcher-owned benchmark evidence.</span></div><div class="unsafe"><b>It never does</b><span>Load an engine, download or delete weights, contact the internet, alter a checkpoint, launch an agent/chat, or reopen a hidden engine.</span></div></div>
       </section>
 
+      <section id="ssd-streaming">
+        <span class="chapter">02B</span><h2>Huge models on SSD: stream verified MoE experts</h2>
+        <p>This optional lane is for Mixture-of-Experts checkpoints whose full weights do not fit safely in unified memory. Normal models remain on oMLX, LM Studio, or MTPLX. SwiftLM reads supported MLX checkpoints directly; Mference uses a model-specific, verified <code>.gturbo</code> repack.</p>
+        <ol class="steps compact">
+          <li><b>Read compatibility literally.</b><span>The scanner verifies a complete MoE, exact architecture family, full weight size, installed runtime, work-surface protocol, and native expert top-k. A large folder or similar model name cannot bypass those gates.</span></li>
+          <li><b>Keep native expert routing.</b><span>The launcher preserves the checkpoint's expert top-k and does not turn on speculative decoding. SSD streaming is I/O-bound, so extra verification-time expert reads can make a nominal accelerator slower.</span></li>
+          <li><b>Compare only a proven pair.</b><span>Calibration requires SwiftLM's MLX artifact and Mference's <code>.gturbo</code> bundle to prove the same immutable source repository and revision. Each gets a fresh process and separate first-turn and warm-prefix stages; TPS, first-output time, memory pressure, thermal state, and prefix reuse are recorded.</span></li>
+          <li><b>Treat the file cache honestly.</b><span>The launcher observes the natural cold-to-warm macOS cache state. It does not claim to perform a privileged system cache purge, and the saved evidence remains bound to the exact artifacts, runtime versions, Mac, and workload.</span></li>
+        </ol>
+        <div class="warning"><b>Qwen3.8-Flash-Next is detected, not yet runnable here.</b><p>Its new QSA/GDN architecture makes it an obvious SSD-streaming candidate, but neither SwiftLM nor Mference currently lists an implementation for that exact family. The launcher keeps both routes blocked until upstream support can be verified.</p></div>
+      </section>
+
       <section id="acquisition">
-        <span class="chapter">02B</span><h2>Model Acquisition: add one pinned model safely</h2>
+        <span class="chapter">02C</span><h2>Model Acquisition: add one pinned model safely</h2>
         <p>Choose Find / download a model at the bottom of Model Library. Opening the center checks only local downloader status. Public Hub search and repository inspection happen only when you press their buttons; they run anonymously with implicit Hugging Face account tokens disabled.</p>
         <ol class="steps compact">
           <li><b>Search or enter a repository.</b><span>Search sends only the visible search phrase. Direct inspection sends one public <code>owner/model</code> ID and optional branch, tag, or commit. Gated/private repositories are not accessed with saved credentials.</span></li>
@@ -107,7 +120,7 @@
       </section>
 
       <section id="runtime-manager">
-        <span class="chapter">02C</span><h2>Runtime Manager: know exactly what will launch</h2>
+        <span class="chapter">02D</span><h2>Runtime Manager: know exactly what will launch</h2>
         <p>Open <strong>Tools → Runtimes</strong> to inspect the executable behind each engine. The check stays local: it reads known paths, app versions, local LM Studio runtime-pack folders, and command versions without starting an app or contacting an update server. Focused presentation shows the three compact engine summaries first; open an engine's <strong>Details</strong> only when you need paths and evidence, or open <strong>Advanced runtime tools</strong> for isolated oMLX installation and A/B measurement. Detailed presentation expands both layers automatically.</p>
         <ol class="steps compact">
           <li><b>Review the selected copy.</b><span>Each card shows the exact executable path and version used by new sessions. Duplicate installs are separate so an older shell command cannot masquerade as the app-managed engine.</span></li>
@@ -490,6 +503,9 @@ MTPLX_BIN="$HOME/Library/Application Support/MTPLX/runtime-venv/bin/mtplx"
           <li><a href="https://github.com/youssofal/MTPLX/blob/main/INSTALL.md">MTPLX installation guide</a><span>App-managed and command-line installation paths</span></li>
           <li><a href="https://github.com/youssofal/MTPLX/releases/tag/v2.9.1">MTPLX 2.9.1 release</a><span>Long-agent stability, truthful Turbo profile, cache reuse, and local flight telemetry</span></li>
           <li><a href="https://github.com/youssofal/MTPLX/releases/tag/v2.9.2">MTPLX 2.9.2 release</a><span>Passthrough agent transcripts, context-fenced greedy-decode gains, and model-forge correctness</span></li>
+          <li><a href="https://github.com/SharpAI/SwiftLM">SwiftLM</a><span>Apple-Silicon OpenAI-compatible serving and SSD expert streaming for supported MLX MoEs</span></li>
+          <li><a href="https://github.com/NeelM0906/Mference">Mference</a><span>Model-specific Swift/Metal MoE inference with pinned <code>.gturbo</code> SSD-streamed experts</span></li>
+          <li><a href="https://github.com/QwenLM/Qwen3.8-Flash-Next">Qwen3.8-Flash-Next</a><span>Official architecture and model description for the newly detected, currently unsupported SSD candidate</span></li>
           <li><a href="https://github.com/FlashML-org/FreeToken">FreeToken</a><span>Apache-2.0 source, supported models, architecture, and current server implementation</span></li>
           <li><a href="https://github.com/FlashML-org/FreeToken/blob/main/docs/install.md">FreeToken installation requirements</a><span>Current Linux x86_64, NVIDIA driver, and CUDA 13 platform boundary</span></li>
           <li><a href="https://github.com/FlashML-org/FreeToken/blob/main/docs/quickstart.md">FreeToken quick start</a><span>Server launch and OpenAI-compatible request examples</span></li>

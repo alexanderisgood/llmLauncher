@@ -7425,7 +7425,7 @@ function completedCalibrationDecision(status = state.benchmarkStatus || {}) {
   const result = status.result || {};
   if (result.matrixWorkloadComparable === false) return null;
   const decision = result.profiles?.[$("calibrationPreferenceSelect").value] || result.decision || {};
-  if (!["cross-engine-local-benchmark", "cross-engine-noise-floor"].includes(decision.evidenceTier)) return null;
+  if (!["cross-engine-local-benchmark", "cross-engine-leading-band", "cross-engine-noise-floor"].includes(decision.evidenceTier)) return null;
   return {result, decision};
 }
 
@@ -7443,11 +7443,12 @@ function promoteCompletedCalibrationResult(status = state.benchmarkStatus || {})
       trusted:Boolean(decision.trustedWinner),
       decisionReady:true,
       tier:decision.evidenceTier,
-      label:decision.trustedWinner
-        ? `${backendLabel} is fastest`
-        : `No clear winner — keep ${backendLabel}`,
+      label:CalibrationDecision.summary({...decision, backendLabel}),
       backend,
       backendLabel,
+      engineChanged:Boolean(decision.engineChanged),
+      leadingBackends:decision.leadingBackends || [],
+      currentInLeadingBand:decision.currentInLeadingBand === true,
       detail:decision.rationale?.[0] || decision.recommendation || result.recommendation || "The measured result is ready.",
       exactOutputMatch:decision.exactOutputMatch === true || result.exactOutputMatch === true,
       outputWarning:decision.outputWarning || result.outputWarning || "",
@@ -7538,15 +7539,17 @@ function renderCalibrationPlan() {
     : null;
   const completedDecisionReady = Boolean(
     completedResult?.matrixWorkloadComparable !== false
-    && ["cross-engine-local-benchmark","cross-engine-noise-floor"].includes(completedDecision?.evidenceTier),
+    && ["cross-engine-local-benchmark","cross-engine-leading-band","cross-engine-noise-floor"].includes(completedDecision?.evidenceTier),
   );
   const resultPending = Boolean(completedDecisionReady && !evidenceReady);
   const shownEvidence = resultPending ? {
     trusted:Boolean(completedDecision.trustedWinner),
-    label:completedDecision.trustedWinner
-      ? `${completedDecision.label} is fastest`
-      : `No clear winner — keep ${completedDecision.label}`,
+    label:CalibrationDecision.summary(completedDecision),
+    backend:completedDecision.backend,
     backendLabel:completedDecision.label,
+    engineChanged:Boolean(completedDecision.engineChanged),
+    leadingBackends:completedDecision.leadingBackends || [],
+    currentInLeadingBand:completedDecision.currentInLeadingBand === true,
     detail:completedDecision.rationale?.[0] || completedDecision.recommendation || completedResult.recommendation || "The completed result is being saved.",
     outputWarning:completedDecision.outputWarning || completedResult.outputWarning || "",
     comparedEngines:completedDecision.comparedEngines || completedResult.engines || [],
@@ -7570,7 +7573,7 @@ function renderCalibrationPlan() {
   const measuredEngines = Array.isArray(measuredDecision?.comparedEngines)
     ? measuredDecision.comparedEngines : [];
   const measuredDecisionReady = Boolean(completedDecision
-    ? ["cross-engine-local-benchmark", "cross-engine-noise-floor"]
+    ? ["cross-engine-local-benchmark", "cross-engine-leading-band", "cross-engine-noise-floor"]
       .includes(completedDecision.evidenceTier)
     : evidenceReady);
   $("calibrationResults").classList.toggle("hidden", measuredEngines.length === 0);
@@ -7597,7 +7600,8 @@ function renderCalibrationPlan() {
     const exactRoute = engine.routeSettingsLabel || mode;
     const modeLabel = testedModes.length > 1 ? `Winner: ${exactRoute}` : "AR only";
     const decodeTps = finiteMetric(engine.decodeTokensPerSecond);
-    return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${engine.settingsLabel ? `<small class="calibration-result-settings">Setup · ${esc(engine.settingsLabel)}</small>` : ""}${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${selected ? "Best result" : `#${index + 1}`}</em></article>`;
+    const badge = CalibrationDecision.resultBadge(measuredDecision, engine, index);
+    return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${engine.settingsLabel ? `<small class="calibration-result-settings">Setup · ${esc(engine.settingsLabel)}</small>` : ""}${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${esc(badge)}</em></article>`;
   }).join("")}</div>` : "";
   if (state.calibrationProfileContractId !== plan.contractId) {
     state.calibrationProfileContractId = plan.contractId;
@@ -7623,9 +7627,10 @@ function renderCalibrationPlan() {
   $("calibrationApplyButton").disabled = !canApply;
   $("calibrationApplyButton").className = evidenceReady ? "primary" : "secondary";
   $("calibrationStartButton").className = evidenceReady ? "secondary" : "primary";
-  $("calibrationApplyButton").textContent = evidence.trusted
-    ? `Use ${evidence.backendLabel}${normalizedReasoning ? " + model default" : ""}`
-    : `Keep ${evidence.backendLabel || "current engine"}${normalizedReasoning ? " + model default" : ""}`;
+  $("calibrationApplyButton").textContent = CalibrationDecision.applyLabel(evidence);
+  $("calibrationApplyButton").title = normalizedReasoning
+    ? "Apply the measured engine and its model-default reasoning contract."
+    : "Apply the measured engine and settings to the launcher.";
   $("calibrationProfilePanel").classList.toggle("hidden", !evidenceReady || active);
   $("calibrationSaveButton").disabled = !canApply || !$("calibrationProfileName").value.trim();
 }

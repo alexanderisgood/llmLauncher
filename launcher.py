@@ -8217,6 +8217,7 @@ def rank_cross_engine_profile(
     missing: list[str] = []
     metric = ""
     displays: dict[str, str] = {}
+    leading_backends: list[str] = []
     if preference == "throughput":
         missing = [
             str(item["backend"]) for item in group
@@ -8235,6 +8236,12 @@ def rank_cross_engine_profile(
             float(runner_up["decodeTokensPerSecond"]), 0.000_001,
         )
         trusted = lead >= BENCHMARK_MINIMUM_SPEEDUP
+        leading_backends = [
+            str(item["backend"]) for item in ranked
+            if float(winner["decodeTokensPerSecond"]) / max(
+                float(item["decodeTokensPerSecond"]), 0.000_001,
+            ) < BENCHMARK_MINIMUM_SPEEDUP
+        ]
         metric = "median-decode-tokens-per-second"
         displays = {
             item["backend"]: f"{float(item['decodeTokensPerSecond']):.1f} tok/s generation"
@@ -8253,6 +8260,10 @@ def rank_cross_engine_profile(
         winner, runner_up = ranked[0], ranked[1]
         lead = _speed_lead(winner, runner_up)
         trusted = lead >= BENCHMARK_MINIMUM_SPEEDUP
+        leading_backends = [
+            str(item["backend"]) for item in ranked
+            if _speed_lead(winner, item) < BENCHMARK_MINIMUM_SPEEDUP
+        ]
         metric = str(winner["metric"])
         displays = {item["backend"]: str(item["display"]) for item in ranked}
         winner_reason = (
@@ -8275,6 +8286,12 @@ def rank_cross_engine_profile(
         winner, runner_up = ranked[0], ranked[1]
         lead = float(runner_up["firstTokenSeconds"]) / max(float(winner["firstTokenSeconds"]), 0.000_001)
         trusted = lead >= BENCHMARK_MINIMUM_SPEEDUP
+        leading_backends = [
+            str(item["backend"]) for item in ranked
+            if float(item["firstTokenSeconds"]) / max(
+                float(winner["firstTokenSeconds"]), 0.000_001,
+            ) < BENCHMARK_MINIMUM_SPEEDUP
+        ]
         metric = "median-first-token-seconds"
         displays = {
             item["backend"]: f"{float(item['firstTokenSeconds']):.2f}s median first token"
@@ -8306,6 +8323,11 @@ def rank_cross_engine_profile(
         winner, runner_up = ranked[0], ranked[1]
         saved = int(runner_up["peakPressureDeltaBytes"]) - int(winner["peakPressureDeltaBytes"])
         trusted = saved >= BENCHMARK_MEMORY_MEANINGFUL_BYTES
+        leading_backends = [
+            str(item["backend"]) for item in ranked
+            if int(item["peakPressureDeltaBytes"]) - int(winner["peakPressureDeltaBytes"])
+            < BENCHMARK_MEMORY_MEANINGFUL_BYTES
+        ]
         metric = "peak-system-memory-pressure-delta-bytes"
         displays = {
             item["backend"]: (
@@ -8360,6 +8382,11 @@ def rank_cross_engine_profile(
         lead = _speed_lead(winner, runner_up)
         thermal_advantage = runner_thermal > winner_thermal
         trusted = thermal_advantage or lead >= BENCHMARK_MINIMUM_SPEEDUP
+        leading_backends = [
+            str(item["backend"]) for item in ranked
+            if int(item["thermalWorstValue"]) == winner_thermal
+            and _speed_lead(winner, item) < BENCHMARK_MINIMUM_SPEEDUP
+        ]
         metric = "worst-system-thermal-state-then-total-performance"
         displays = {
             item["backend"]: f"{THERMAL_STATE_LABELS[int(item['thermalWorstValue'])]} worst state · {item['display']}"
@@ -8386,6 +8413,7 @@ def rank_cross_engine_profile(
         "ranked": ranked, "winner": winner, "runnerUp": runner_up,
         "trusted": trusted, "metric": metric, "displays": displays,
         "winnerReason": winner_reason, "tieReason": tie_reason,
+        "leadingBackends": leading_backends,
     }
 
 
@@ -8730,9 +8758,12 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
     engine_meta["workloadComparison"] = copy.deepcopy(workload_comparison)
     profile = rank_cross_engine_profile(chosen_group, preference)
     ranked = profile.get("ranked") if profile.get("available") else _speed_ranked_entries(chosen_group)
+    leading_backends = [str(item) for item in profile.get("leadingBackends") or []]
+    leading_backend_set = set(leading_backends)
     compared = [
         {
             "backend": item["backend"], "label": BACKEND_LABELS[item["backend"]],
+            "leading": str(item["backend"]) in leading_backend_set,
             "mode": str(item["record"].get("winner") or "ar"),
             "testedModes": copy.deepcopy(item["record"].get("comparedModes") or ["ar"]),
             "modeDetail": benchmark_mode_summary(
@@ -8804,11 +8835,17 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         current["rationale"] = current["engineRationale"] + list(current.get("rationale") or [])
         return current
     winner = profile["winner"]
-    if not profile.get("trusted"):
+    profile_trusted = bool(profile.get("trusted"))
+    current_in_leading_band = current_backend in leading_backend_set
+    engine_meta.update({
+        "leadingBackends": list(leading_backends),
+        "currentInLeadingBand": current_in_leading_band,
+    })
+    if not profile_trusted and current_in_leading_band:
         tie_reason = str(profile.get("tieReason") or "The measured difference did not clear the switch threshold.")
         rationale = [
             tie_reason,
-            "The current engine was kept to avoid switching on measurement noise.",
+            "The current engine is inside the measured leading group, so it was kept to avoid switching on measurement noise.",
         ]
         if workload_comparison.get("warning"):
             rationale.append(str(workload_comparison["warning"]))
@@ -8820,6 +8857,9 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             "engineRationale": rationale,
             "engineDecision": engine_meta,
             "enginePreference": preference,
+            "enginePreferenceMetric": profile["metric"],
+            "leadingBackends": list(leading_backends),
+            "currentInLeadingBand": True,
             "engineNextAction": engine_selection_next_action(
                 "keep-current", preference, current_backend, client, tie_reason,
             ),
@@ -8831,17 +8871,32 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
     result = _optimizer_with_forced_record(
         payload, models, model, winning_backend, winner["record"], evidence,
     )
-    winner_rationale = [
-        str(profile["winnerReason"]),
-        "The comparison preserved this model, Mac, workload, context, response limit, reasoning, sampling, and KV precision.",
-    ]
+    if profile_trusted:
+        winner_rationale = [
+            str(profile["winnerReason"]),
+            "The comparison preserved this model, Mac, workload, context, response limit, reasoning, sampling, and KV precision.",
+        ]
+        evidence_tier = "cross-engine-local-benchmark"
+        evidence_label = f"{ENGINE_PREFERENCE_LABELS[preference]} · locally measured"
+    else:
+        tie_reason = str(profile.get("tieReason") or "The leading engines finished inside the switch threshold.")
+        winner_rationale = [
+            tie_reason,
+            (
+                f"{BACKEND_LABELS[current_backend]} was outside the measured leading group, so "
+                f"{BACKEND_LABELS[winning_backend]} was selected from the tied leaders instead of preserving a slower route."
+            ),
+            "The comparison preserved this model, Mac, workload, context, response limit, reasoning, sampling, and KV precision.",
+        ]
+        evidence_tier = "cross-engine-leading-band"
+        evidence_label = f"{ENGINE_PREFERENCE_LABELS[preference]} · leading group"
     if workload_comparison.get("warning"):
         winner_rationale.append(str(workload_comparison["warning"]))
     result.update({
         "engineChanged": winning_backend != current_backend,
         "originalBackend": current_backend,
-        "engineEvidenceTier": "cross-engine-local-benchmark",
-        "engineEvidenceLabel": f"{ENGINE_PREFERENCE_LABELS[preference]} · locally measured",
+        "engineEvidenceTier": evidence_tier,
+        "engineEvidenceLabel": evidence_label,
         "comparedEngines": compared, "missingEngines": [],
         "engineRationale": winner_rationale,
         "engineOutputWarning": str(workload_comparison.get("warning") or ""),
@@ -8849,13 +8904,15 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         "engineDecision": engine_meta,
         "enginePreference": preference,
         "enginePreferenceMetric": profile["metric"],
+        "leadingBackends": list(leading_backends),
+        "currentInLeadingBand": current_in_leading_band,
         "engineNextAction": engine_selection_next_action(
-            "apply", preference, winning_backend, client, str(profile["winnerReason"]),
+            "apply", preference, winning_backend, client, str(winner_rationale[0]),
         ),
         "settingsEvidenceTier": result.get("evidenceTier"),
         "settingsEvidenceLabel": result.get("evidenceLabel"),
-        "evidenceTier": "cross-engine-local-benchmark",
-        "evidenceLabel": f"{ENGINE_PREFERENCE_LABELS[preference]} · locally measured",
+        "evidenceTier": evidence_tier,
+        "evidenceLabel": evidence_label,
     })
     result["rationale"] = result["engineRationale"] + list(result.get("rationale") or [])
     return result
@@ -12277,7 +12334,8 @@ def calibration_plan(
     evidence_tier = str(decision.get("engineEvidenceTier") or decision.get("evidenceTier") or "")
     trusted = evidence_tier == "cross-engine-local-benchmark"
     decision_ready = evidence_tier in {
-        "cross-engine-local-benchmark", "cross-engine-noise-floor",
+        "cross-engine-local-benchmark", "cross-engine-leading-band",
+        "cross-engine-noise-floor",
     }
     resolved_backend = str(decision.get("backend") or request["backend"])
     rationale = list(decision.get("engineRationale") or decision.get("rationale") or [])
@@ -12339,6 +12397,9 @@ def calibration_plan(
             "label": str(decision.get("engineEvidenceLabel") or decision.get("evidenceLabel") or "Current engine kept"),
             "backend": resolved_backend,
             "backendLabel": BACKEND_LABELS[resolved_backend],
+            "engineChanged": bool(decision.get("engineChanged")),
+            "leadingBackends": copy.deepcopy(decision.get("leadingBackends") or []),
+            "currentInLeadingBand": decision.get("currentInLeadingBand") is True,
             "detail": str(rationale[0]) if rationale else "No matching cross-engine winner is available yet.",
             "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
             "outputWarning": str(
@@ -17997,6 +18058,8 @@ class BenchmarkManager:
                 "comparedEngines": copy.deepcopy(decision.get("comparedEngines") or []),
                 "missingEngines": copy.deepcopy(decision.get("missingEngines") or []),
                 "rationale": copy.deepcopy(decision.get("engineRationale") or []),
+                "leadingBackends": copy.deepcopy(decision.get("leadingBackends") or []),
+                "currentInLeadingBand": decision.get("currentInLeadingBand") is True,
                 "trustedWinner": trusted, "recommendation": recommendation,
                 "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
                 "outputWarning": str(workload_comparison.get("warning") or ""),

@@ -5388,6 +5388,46 @@ for line in sys.stdin:
         self.assertEqual(thermal["backend"], "mtplx")
         self.assertEqual(memory["enginePreferenceMetric"], "peak-system-memory-pressure-delta-bytes")
 
+        # A tie between the two leaders must never preserve a materially slower
+        # third-place current engine. These are the rounded values from the UI
+        # regression that exposed the old fallback: 69.0, 68.9, and 60.5 tok/s.
+        tied_leaders = json.loads(json.dumps(model))
+        screenshot_tps = {"omlx": 69.0, "lmstudio": 68.9, "mtplx": 60.5}
+        for backend, tps in screenshot_tps.items():
+            capability = tied_leaders["backends"][backend]
+            records = [capability["localBenchmark"], *capability["localBenchmarks"]]
+            for benchmark in records:
+                mode = benchmark["winner"]
+                benchmark["modes"][mode]["medianDecodeTokensPerSecond"] = tps
+                for sample in benchmark["modes"][mode]["samples"]:
+                    sample["decodeTokensPerSecond"] = tps
+        third_place_payload = json.loads(json.dumps(payload))
+        third_place_payload.update({"backend": "mtplx", "enginePreference": "throughput"})
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+            tied_leader_result = launcher.best_engine_request(third_place_payload, [tied_leaders])
+        self.assertEqual(tied_leader_result["backend"], "omlx")
+        self.assertTrue(tied_leader_result["engineChanged"])
+        self.assertEqual(tied_leader_result["engineEvidenceTier"], "cross-engine-leading-band")
+        self.assertEqual(tied_leader_result["leadingBackends"], ["omlx", "lmstudio"])
+        self.assertEqual(tied_leader_result["engineNextAction"]["id"], "apply")
+        self.assertIn("outside the measured leading group", " ".join(tied_leader_result["engineRationale"]))
+        self.assertEqual(
+            [item["backend"] for item in tied_leader_result["comparedEngines"] if item["leading"]],
+            ["omlx", "lmstudio"],
+        )
+
+        # Once the recommended route is applied, the same exact contract must
+        # reuse the saved matrix rather than requesting another calibration.
+        applied_payload = json.loads(json.dumps(third_place_payload))
+        applied_payload["backend"] = "omlx"
+        applied_payload["options"] = json.loads(json.dumps(tied_leader_result["options"]))
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+            reused_result = launcher.best_engine_request(applied_payload, [tied_leaders])
+        self.assertEqual(reused_result["backend"], "omlx")
+        self.assertFalse(reused_result["engineChanged"])
+        self.assertEqual(reused_result["engineEvidenceTier"], "cross-engine-noise-floor")
+        self.assertEqual(reused_result["engineNextAction"]["id"], "keep-current")
+
         history_records = []
         for run_index, created_at in enumerate(("2026-08-01T12:00:00Z", "2026-08-22T12:00:00Z"), 1):
             for backend in ("omlx", "lmstudio", "mtplx"):
@@ -5496,9 +5536,20 @@ for line in sys.stdin:
             sample["ttftSeconds"] = 1.29 / 4
         with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
             tied = launcher.best_engine_request(payload, [near_tie])
-        self.assertEqual(tied["engineEvidenceTier"], "cross-engine-noise-floor")
-        self.assertEqual(tied["backend"], "omlx")
-        self.assertEqual(tied["engineNextAction"]["id"], "keep-current")
+        self.assertEqual(tied["engineEvidenceTier"], "cross-engine-leading-band")
+        self.assertEqual(tied["backend"], "mtplx")
+        self.assertTrue(tied["engineChanged"])
+        self.assertEqual(tied["engineNextAction"]["id"], "apply")
+
+        current_leader_payload = json.loads(json.dumps(payload))
+        current_leader_payload["backend"] = "lmstudio"
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+            current_leader = launcher.best_engine_request(current_leader_payload, [near_tie])
+        self.assertEqual(current_leader["engineEvidenceTier"], "cross-engine-noise-floor")
+        self.assertEqual(current_leader["backend"], "lmstudio")
+        self.assertFalse(current_leader["engineChanged"])
+        self.assertTrue(current_leader["currentInLeadingBand"])
+        self.assertEqual(current_leader["engineNextAction"]["id"], "keep-current")
 
         model["backends"]["lmstudio"]["localBenchmark"] = None
         model["backends"]["lmstudio"]["localBenchmarks"] = []
@@ -7149,6 +7200,24 @@ for line in sys.stdin:
         self.assertTrue(plan["evidence"]["trusted"])
         self.assertEqual(plan["evidence"]["backend"], "omlx")
 
+        tied_leader = {
+            "backend": "omlx", "engineChanged": True,
+            "engineEvidenceTier": "cross-engine-leading-band",
+            "engineEvidenceLabel": "Highest generation TPS · leading group",
+            "engineRationale": [
+                "oMLX and LM Studio were inside the 3% threshold; MTPLX was outside it.",
+            ],
+            "leadingBackends": ["omlx", "lmstudio"],
+            "currentInLeadingBand": False,
+        }
+        with mock.patch.object(launcher, "best_engine_request", return_value=tied_leader):
+            tied_plan = launcher.calibration_plan(request, [model])
+        self.assertEqual(tied_plan["action"], "apply-existing")
+        self.assertFalse(tied_plan["evidence"]["trusted"])
+        self.assertTrue(tied_plan["evidence"]["decisionReady"])
+        self.assertTrue(tied_plan["evidence"]["engineChanged"])
+        self.assertEqual(tied_plan["evidence"]["leadingBackends"], ["omlx", "lmstudio"])
+
         incompatible = self.payload("omlx", "pi", model)
         incompatible["options"]["kv"] = "q6"
         incompatible.update({"suite": "standard", "enginePreference": "memory"})
@@ -8466,6 +8535,7 @@ for line in sys.stdin:
         self.assertIn('<script src="safe_markdown.js" defer></script>', index)
         self.assertIn('<script src="terminal_core.js" defer></script>', index)
         self.assertIn('<script src="agent_console_tabs.js" defer></script>', index)
+        self.assertIn('<script src="calibration_decision.js" defer></script>', index)
         for element_id in (
             "themeMenuButton", "themeToolbarLabel", "themeMenu",
             "interfaceDetailButton", "hubToolsMenuButton", "hubToolsMenu",

@@ -241,6 +241,7 @@ const optimizerKeys = {
   freetoken: ["maxBatchSize", "expertCacheSize", "prefixCacheEntries"],
   swiftlm: ["prefillSize", "nativeExpertTopK"],
   mference: ["promptCacheMode", "queueLimit"],
+  whallm: [],
 };
 const enginePreferenceLabels = {
   throughput:"Highest generation TPS",
@@ -340,7 +341,7 @@ function orderedRouteIds(collection, fallback) {
 }
 
 function visibleRouteCatalog() {
-  const backends = orderedRouteIds("engines", ["omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference"])
+  const backends = orderedRouteIds("engines", ["omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm"])
     .filter(uiEngineVisible);
   const clients = orderedRouteIds("workSurfaces", ["pi", "opencode", "codex", "chat"]);
   const routes = [];
@@ -468,7 +469,7 @@ function runtimeKvValue(backend = state.backend) {
 }
 
 function setRuntimeKvValue(backend, value) {
-  if (["lmstudio", "freetoken", "swiftlm", "mference"].includes(backend)) return value === "off";
+  if (["lmstudio", "freetoken", "swiftlm", "mference", "whallm"].includes(backend)) return value === "off";
   const control = backend === "omlx" ? $("omlxKv") : $("mtplxKv");
   const option = [...control.options].find(item => item.value === String(value));
   if (!option) return false;
@@ -500,6 +501,9 @@ function gatherOptions() {
       promptCacheMode:$("mferencePromptCache").value,
       queueLimit:Number($("mferenceQueueLimit").value),
     };
+  }
+  if (state.backend === "whallm") {
+    return {acceleration:"off", depth:1, kv:"off"};
   }
   return {
     acceleration: $("accelerationSelect").value,
@@ -1026,12 +1030,12 @@ function renderAneReadiness(cap = {}) {
 
 function backendName(backend) {
   return adapterDescriptor("engines", backend)?.label
-    || ({omlx:"oMLX", lmstudio:"LM Studio", mtplx:"MTPLX", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference"})[backend]
+    || ({omlx:"oMLX", lmstudio:"LM Studio", mtplx:"MTPLX", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm"})[backend]
     || backend;
 }
 
 function backendMark(backend) {
-  return ({omlx:"O", lmstudio:"LM", mtplx:"M", freetoken:"FT", swiftlm:"S", mference:"MF", lms:"LM"})[backend] || "?";
+  return ({omlx:"O", lmstudio:"LM", mtplx:"M", freetoken:"FT", swiftlm:"S", mference:"MF", whallm:"W", lms:"LM"})[backend] || "?";
 }
 
 function benchmarkCandidates(cap = {}, backend = state.backend) {
@@ -1040,7 +1044,7 @@ function benchmarkCandidates(cap = {}, backend = state.backend) {
     label:cap.native === true ? "Native greedy" : "Server managed",
     available:Boolean(cap.runnable),
   }];
-  if (["swiftlm", "mference"].includes(backend)) return [{
+  if (["swiftlm", "mference", "whallm"].includes(backend)) return [{
     id:"ar", label:"Exact SSD stream", available:Boolean(cap.runnable),
   }];
   const modes = [{id:"ar", label:"AR", available:Boolean(cap.runnable)}];
@@ -1056,17 +1060,18 @@ function engineShootoutRoutes(model = selectedModel()) {
   const binaryKeys = Object.fromEntries(
     visibleEngineAdapters().map(adapter => [adapter.id, adapter.binaryKey]),
   );
-  const kvChoices = {omlx:["off","q8","q6","q4"], lmstudio:["off"], mtplx:["off","q8","q4"], freetoken:["off"], swiftlm:["off"], mference:["off"]};
+  const kvChoices = {omlx:["off","q8","q6","q4"], lmstudio:["off"], mtplx:["off","q8","q4"], freetoken:["off"], swiftlm:["off"], mference:["off"], whallm:["off"]};
   const ssdLane = model.ssdStreaming?.recommended === true;
+  const ssdBackends = model.ssdStreaming?.calibration?.engines || ["swiftlm", "mference"];
   const backends = visibleEngineAdapters().map(adapter => adapter.id)
-    .filter(backend => !ssdLane || ["swiftlm", "mference"].includes(backend));
+    .filter(backend => !ssdLane || ssdBackends.includes(backend));
   return backends.map(backend => {
     const cap = model.backends?.[backend] || {};
     const support = resolvedClientSupport(backend, state.client, model);
     const routeReasoning = cap[state.client === "codex" ? "codexReasoning" : "agentReasoning"] || ["auto"];
     const benchmarkReasoning = cap.agentReasoning || ["auto"];
     let reason = "";
-    const binaryKey = binaryKeys[backend] || ({omlx:"omlx", lmstudio:"lms", mtplx:"mtplx", freetoken:"freetoken", swiftlm:"swiftlm", mference:"mference"})[backend];
+    const binaryKey = binaryKeys[backend] || ({omlx:"omlx", lmstudio:"lms", mtplx:"mtplx", freetoken:"freetoken", swiftlm:"swiftlm", mference:"mference", whallm:"whallm"})[backend];
     if (!state.binaries?.[binaryKey]?.installed) reason = "Runtime not installed";
     else if (!model.ready || !cap.runnable) reason = cap.reason || "Model is not runnable";
     else if (!support?.supported) reason = support?.reason || "Work surface unsupported";
@@ -1149,8 +1154,9 @@ function renderBenchmarkSetup() {
   }).join("");
   const remoteEngine = state.backend === "freetoken" && freeTokenRoute(model) === "remote";
   const nativeFreeToken = state.backend === "freetoken" && freeTokenRoute(model) === "native";
-  const freeTokenExcluded = remoteEngine || nativeFreeToken;
-  const comparable = Boolean(model && cap.runnable && candidates.length > 1 && !freeTokenExcluded);
+  const sharedWhallm = state.backend === "whallm" && model?.sharedServer === true;
+  const comparisonExcluded = remoteEngine || nativeFreeToken || sharedWhallm;
+  const comparable = Boolean(model && cap.runnable && candidates.length > 1 && !comparisonExcluded);
   const suiteRequirement = ({quick:2688, standard:8960, thorough:33792, agentic:16384})[suite] || 2688;
   const visibleContext = Number($("contextInput").value);
   const contextEnough = Number.isFinite(visibleContext) && visibleContext >= suiteRequirement;
@@ -1200,6 +1206,8 @@ function renderBenchmarkSetup() {
     ? "FreeToken is a connected server route. Use live TPS for this path; Mac-only engine evidence never mixes in network and remote-host performance."
     : nativeFreeToken
     ? "Native FreeToken reports live local TPS, but this greedy-only milestone cannot yet preserve Benchmark Lab's cross-engine sampling contract."
+    : sharedWhallm
+    ? "Whallm owns a separate full-expert checkpoint. Use its live local TPS and route telemetry; it is never treated as equivalent to a pruned REAP or repacked artifact."
     : acquisitionActive
     ? "Model Acquisition owns the pinned download and verification until it finishes or is stopped."
     : setupActive
@@ -1529,18 +1537,25 @@ function updateBackend(preserveOptimization = false) {
   $("freetokenControls").classList.toggle("hidden", state.backend !== "freetoken");
   $("swiftlmControls").classList.toggle("hidden", state.backend !== "swiftlm");
   $("mferenceControls").classList.toggle("hidden", state.backend !== "mference");
-  $("sharedRuntimeControls").classList.toggle("hidden", ["freetoken", "swiftlm", "mference"].includes(state.backend));
+  $("whallmControls").classList.toggle("hidden", state.backend !== "whallm");
+  $("sharedRuntimeControls").classList.toggle("hidden", ["freetoken", "swiftlm", "mference", "whallm"].includes(state.backend));
   $("advancedSummary").textContent = ({
     mtplx:"MTPLX controls", omlx:"oMLX controls", lmstudio:"LM Studio controls",
     freetoken:"FreeToken route controls", swiftlm:"SwiftLM SSD controls",
-    mference:"Mference SSD controls",
+    mference:"Mference SSD controls", whallm:"Whallm SSD route",
   })[state.backend];
-  if (["swiftlm", "mference"].includes(state.backend)) $("ssdRuntimeDisclosure").open = true;
+  if (["swiftlm", "mference", "whallm"].includes(state.backend)) $("ssdRuntimeDisclosure").open = true;
   const swiftReady = Boolean(state.binaries?.swiftlm?.installed);
   const mferenceReady = Boolean(state.binaries?.mference?.installed);
-  $("ssdRuntimeStatus").textContent = swiftReady && mferenceReady
-    ? "Both SSD runtimes are installed. A large-MoE calibration becomes available when matching source receipts are present."
-    : `${swiftReady || mferenceReady ? "One" : "Neither"} SSD runtime installed · calibration needs both.`;
+  const whallmReady = Boolean(state.binaries?.whallm?.installed);
+  const whallmModelReady = state.models.some(model => model.sharedServer === true && model.backends?.whallm?.runnable);
+  $("ssdRuntimeStatus").textContent = whallmModelReady
+    ? "Whallm's full-expert Qwen route is live. It stays separate from pruned or repacked checkpoint comparisons."
+    : whallmReady
+      ? "Whallm is installed; start its pinned Qwen server, then rescan. SwiftLM/Mference compare only matching artifacts."
+      : swiftReady && mferenceReady
+        ? "SwiftLM and Mference are installed; calibration needs artifacts proving one matching source revision."
+        : `${swiftReady || mferenceReady ? "One paired-artifact runtime" : "No paired-artifact runtime"} installed · Whallm is a separate full-Qwen option.`;
   renderFreeTokenConnection();
   renderModelOptions();
 }
@@ -8469,6 +8484,8 @@ function renderSessionDashboard() {
     const projectName = String(run.project || "").split("/").filter(Boolean).pop() || "Local route";
     const routeLocation = run.routeKind === "connected"
       ? "connected server through private localhost bridge"
+      : run.routeKind === "shared"
+        ? "shared local engine through private localhost bridge"
       : run.routeKind === "native"
         ? "native on this Mac"
         : "localhost";
@@ -8485,7 +8502,9 @@ function renderSessionDashboard() {
   const decisionClass = sessionDecisionClass(visibleDecision);
   $("sessionAdmissionTitle").textContent = warmReady
     ? "Reuse the loaded route"
-    : admission.estimate?.remoteEngine ? "Connected server route" : "Full-context capacity estimate";
+    : admission.estimate?.remoteEngine ? "Connected server route"
+    : admission.estimate?.sharedEngine ? "Shared local engine route"
+    : "Full-context capacity estimate";
   $("sessionAdmissionState").textContent = warmReady ? "Warm route available" : admission.label || "Unavailable";
   $("sessionAdmissionState").className = decisionClass;
   $("sessionAdmissionDetail").textContent = warmReady
@@ -8510,6 +8529,17 @@ function renderSessionDashboard() {
       ["Context", formatNumber(estimate.contextTokens)],
       ["Agent endpoint", "Private loopback"],
       ["Remote stop", "Never"],
+    ].map(([label,value]) => `<span><small>${esc(label)}</small><b title="${esc(value)}">${esc(value)}</b></span>`).join("");
+    $("sessionEstimateBar").innerHTML = "";
+    $("sessionEstimateBasis").textContent = estimate.basis;
+  } else if (estimate?.sharedEngine) {
+    $("sessionEstimateFacts").innerHTML = [
+      ["Model owner", "Whallm"],
+      ["Launcher adds", formatBytes(estimate.estimatedWorkingSetBytes)],
+      ["Published checkpoint", "Full 512 experts"],
+      ["Observed M5 Pro peak", formatBytes(estimate.observedEnginePeakBytes)],
+      ["Context", formatNumber(estimate.contextTokens)],
+      ["Launcher stop", "Bridge only"],
     ].map(([label,value]) => `<span><small>${esc(label)}</small><b title="${esc(value)}">${esc(value)}</b></span>`).join("");
     $("sessionEstimateBar").innerHTML = "";
     $("sessionEstimateBasis").textContent = estimate.basis;
@@ -10075,7 +10105,7 @@ function applyBootstrapData(boot, setProject = false) {
   const binaries = Object.entries(state.binaries).filter(([name]) => (
     uiFeatureEnabled("freetoken") || !String(name).startsWith("freetoken")
   ));
-  const binaryLabels = {lms:"LM Studio", hf:"Model downloader", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference"};
+  const binaryLabels = {lms:"LM Studio", hf:"Model downloader", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm"};
   $("toolCount").textContent = `${binaries.filter(([,value]) => value.installed).length}/${binaries.length} ready`;
   $("binaryList").innerHTML = binaries.map(([name, value]) => `<div class="binary ${value.installed ? "" : "missing"}"><div><strong>${esc(binaryLabels[name] || name)}</strong><span title="${esc(value.path || "")}">${esc(value.version)}</span></div><em>${value.installed ? "Ready" : "Missing"}</em><i aria-hidden="true"></i></div>`).join("");
   if (setProject && !$("projectPath").value) {

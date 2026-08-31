@@ -424,6 +424,61 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("not yet", swift_reason)
         self.assertIn("not passed", mference_reason)
 
+    def test_whallm_live_qwen_route_is_shared_single_engine_and_never_cross_compared(self) -> None:
+        live = {
+            "connected": True,
+            "endpoint": launcher.WHALLM_ENDPOINT,
+            "model": launcher.WHALLM_MODEL_ID,
+            "server": "Whallm test",
+        }
+        with mock.patch.object(launcher, "model_roots", return_value=[]), mock.patch.object(
+            launcher, "probe_whallm_endpoint", return_value=live,
+        ), mock.patch.object(
+            launcher, "load_freetoken_connection", return_value={},
+        ), mock.patch.object(
+            launcher, "physical_memory_bytes", return_value=48 * 1024**3,
+        ), mock.patch.dict(
+            launcher.BINARIES, {"whallm": "/usr/bin/true"},
+        ):
+            models = launcher.scan_models()
+        whallm_models = [model for model in models if model.get("sharedServer") is True]
+        self.assertEqual(len(whallm_models), 1)
+        model = whallm_models[0]
+        self.assertEqual(model["remoteModelId"], launcher.WHALLM_MODEL_ID)
+        self.assertEqual(model["ssdStreaming"]["expertCount"], 512)
+        self.assertEqual(model["ssdStreaming"]["calibration"]["engines"], ["whallm"])
+        self.assertTrue(model["backends"]["whallm"]["runnable"])
+        self.assertFalse(model["backends"]["omlx"]["runnable"])
+
+        payload = {
+            "backend": "whallm", "client": "pi", "modelId": model["id"],
+            "project": str(ROOT), "context": 16_384, "output": 2_048,
+            "reasoning": "low", "mode": "custom",
+            "options": {"acceleration": "off", "depth": 1, "kv": "off"},
+        }
+        with mock.patch.dict(
+            launcher.BINARIES, {"whallm": "/usr/bin/true", "pi": "/usr/bin/true"},
+        ), mock.patch.object(launcher, "probe_whallm_endpoint", return_value=live):
+            plan = launcher.normalized_request(payload, [model])
+            decision = launcher.best_engine_request(
+                {**payload, "enginePreference": "throughput"}, [model],
+            )
+        self.assertEqual(plan.public()["routeKind"], "shared")
+        self.assertEqual(plan.engine_argv[:2], [sys.executable, str(launcher.FREETOKEN_BRIDGE)])
+        bridge = json.loads(Path(plan.engine_argv[2]).read_text(encoding="utf-8"))
+        self.assertEqual(bridge["endpoint"], launcher.WHALLM_ENDPOINT)
+        self.assertEqual(bridge["servedModel"], launcher.WHALLM_MODEL_ID)
+        self.assertEqual(bridge["upstreamLabel"], "Whallm")
+        self.assertEqual(decision["engineEvidenceTier"], "single-compatible-engine")
+        self.assertEqual(decision["engineNextAction"]["id"], "keep-current")
+
+        estimate = launcher.launch_memory_estimate(
+            payload, model, {"totalMemoryBytes": 48 * 1024**3},
+        )
+        self.assertTrue(estimate["sharedEngine"])
+        self.assertEqual(estimate["observedEnginePeakBytes"], launcher.WHALLM_MEASURED_PEAK_BYTES)
+        self.assertLess(estimate["estimatedWorkingSetBytes"], 1024**3)
+
     def test_swiftlm_accepts_upstream_qwen3_next_family_without_flash_next(self) -> None:
         model_path = Path(self.temp.name) / "Qwen3-Next-80B-A3B-4bit"
         model_path.mkdir()
@@ -1786,6 +1841,26 @@ class LauncherTests(unittest.TestCase):
                 "Installed (version unavailable)",
             )
 
+    def test_whallm_app_discovers_packaged_dsv4_executable_and_bundle_version(self) -> None:
+        app = Path(self.temp.name) / "Whallm.app"
+        binary = app / "Contents" / "MacOS" / "dsv4-app"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        binary.chmod(0o700)
+        with (app / "Contents" / "Info.plist").open("wb") as handle:
+            launcher.plistlib.dump({"CFBundleShortVersionString": "1.1.2"}, handle)
+
+        with mock.patch.dict(
+            launcher.RUNTIME_CANDIDATE_SPECS,
+            {"whallm": (("system-app", str(binary), "Whallm app"),)},
+            clear=False,
+        ):
+            candidates = launcher.runtime_candidates("whallm")
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["path"], str(binary))
+        self.assertEqual(launcher.command_version(str(binary)), "Whallm 1.1.2")
+
     def test_model_library_reports_every_engine_surface_and_mode_without_mutation(self) -> None:
         models = copy.deepcopy(self.models)
         before = copy.deepcopy(models)
@@ -1806,7 +1881,7 @@ class LauncherTests(unittest.TestCase):
         engines = {item["id"]: item for item in report["engines"]}
         self.assertEqual(
             set(engines),
-            {"omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference"},
+            {"omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm"},
         )
         for engine in (engines[item] for item in {"omlx", "lmstudio", "mtplx"}):
             self.assertEqual(

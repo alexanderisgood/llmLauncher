@@ -6,7 +6,7 @@
 
 LLM Launcher is a macOS hub for selecting a local model, choosing the best compatible inference engine, and opening that route in **Pi**, **OpenCode**, **Codex**, or a built-in streaming **Chat**.
 
-Its primary in-memory engines are **oMLX**, **LM Studio**, and **MTPLX**. Oversized Mixture-of-Experts models can also use optional **SwiftLM** or **Mference** SSD-streaming routes when the exact runtime, model family, and source identity pass the launcher's compatibility checks. Instead of treating every OpenAI-compatible server as identical, it keeps model format, reasoning support, context, sampling, accelerator settings, agent protocol, and locally measured performance in one visible contract.
+Its primary in-memory engines are **oMLX**, **LM Studio**, and **MTPLX**. Oversized Mixture-of-Experts models can also use optional **SwiftLM** or **Mference** source-bound SSD routes, or the separate **Whallm** full-expert Qwen3.8 Flash-Next server. Instead of treating every OpenAI-compatible server as identical, it keeps model format, reasoning support, context, sampling, accelerator settings, agent protocol, and locally measured performance in one visible contract.
 
 > **Alpha software:** this is an early public release for macOS and Apple Silicon enthusiasts. It is not signed or notarized yet, runtime interfaces may change, and you should review a route before trusting it with important work.
 
@@ -17,7 +17,7 @@ Its primary in-memory engines are **oMLX**, **LM Studio**, and **MTPLX**. Oversi
 - Preserves context, output, reasoning, sampling, and KV-cache choices across the complete route.
 - Measures like-for-like engine and accelerator performance before claiming a fastest option.
 - Defaults every automatic engine decision to correctness-verified **generation TPS**, including older profiles and API requests that do not carry a goal; total workload, first response, memory, and thermal rankings remain explicit alternatives.
-- Exposes a separate **Huge models on SSD** lane for supported MoEs, with source-bound SwiftLM/Mference calibration rather than comparing unrelated repacks by filename.
+- Exposes a separate **Huge models on SSD** lane for supported MoEs, with source-bound SwiftLM/Mference calibration and an isolated Whallm full-expert route rather than comparing unrelated or pruned checkpoints by filename.
 - Keeps cooling user-owned: optimisation and Calibration use automatic cooling by default and never select maximum fans without an explicit choice.
 - Supports streaming thinking, message queues, history, branching, TPS, warm-route reuse, and resumable local Chat.
 - Gives Pi a stable in-launcher transcript with restored session messages, separate thinking/response/tool lanes, queued follow-ups, abort/clear-queue controls, and answerable extension prompts; authoritative final-message repair and response-limit continuation cues prevent a long reasoning turn from silently disappearing. Codex Responses routes likewise turn a falsely completed exact-ceiling result into the protocol's continuable incomplete state in both Hub Console and external Terminal. External Terminal remains available for Pi's full TUI.
@@ -25,7 +25,7 @@ Its primary in-memory engines are **oMLX**, **LM Studio**, and **MTPLX**. Oversi
 - Keeps generated routes on authenticated loopback addresses and stops only launcher-owned processes.
 - Provides profiles, Session Sets, model acquisition, runtime inspection, route checks, and capacity controls.
 
-Runtime Manager uses a reviewable release snapshot rather than an unchecked “latest” query. The snapshot audited on 31 August 2026 covers [oMLX 0.6.4](https://github.com/jundot/omlx/releases/tag/v0.6.4), [LM Studio 0.4.23 Build 1](https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23), [MTPLX 2.10.1](https://github.com/youssofal/MTPLX/releases/tag/v2.10.1), and optional [SwiftLM b709](https://github.com/SharpAI/SwiftLM/releases/tag/b709). A newer release is only a candidate: it does not replace a selected runtime or inherit old speed evidence.
+Runtime Manager uses a reviewable release snapshot rather than an unchecked “latest” query. The snapshot audited on 31 August 2026 covers [oMLX 0.6.4](https://github.com/jundot/omlx/releases/tag/v0.6.4), [LM Studio 0.4.23 Build 1](https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23), [MTPLX 2.10.1](https://github.com/youssofal/MTPLX/releases/tag/v2.10.1), optional [SwiftLM b709](https://github.com/SharpAI/SwiftLM/releases/tag/b709), and experimental [Whallm 1.1.2](https://github.com/yanun0323/Whallm/releases/tag/v1.1.2). A newer release is only a candidate: it does not replace a selected runtime or inherit old speed evidence.
 
 The experimental FreeToken integration remains implemented and tested but is hidden behind an off-by-default UI feature flag while the native route matures.
 
@@ -34,7 +34,8 @@ The experimental FreeToken integration remains implemented and tested but is hid
 - macOS; the primary target is Apple Silicon.
 - Python 3.10 or newer.
 - At least one primary engine installed: [oMLX](https://github.com/jundot/omlx), [LM Studio](https://lmstudio.ai/), or [MTPLX](https://github.com/youssofal/MTPLX).
-- Optional: [SwiftLM](https://github.com/SharpAI/SwiftLM) or [Mference](https://github.com/NeelM0906/Mference) for a compatible oversized-MoE SSD-streaming route. Mference requires its verified model-specific `.gturbo` repack.
+- Optional: [SwiftLM](https://github.com/SharpAI/SwiftLM) or [Mference](https://github.com/NeelM0906/Mference) for compatible oversized-MoE artifacts. Mference requires its verified model-specific `.gturbo` repack.
+- Optional and experimental: [Whallm](https://github.com/yanun0323/Whallm) for its own pinned full-512-expert Qwen3.8 Flash-Next download. Whallm publishes a 64 GB unified-memory floor even though its M5 Pro measurements stay below 19 GiB through 16K input.
 - Pi, OpenCode, or Codex only if you want to launch that agent. Built-in Chat needs no separate agent.
 - Local model weights compatible with the selected engine. Models and commercial runtimes are not bundled.
 
@@ -51,7 +52,7 @@ The launcher selects an available Python 3.10+ interpreter, starts an owner-only
 On first use:
 
 1. Choose **Models** to inspect detected artifacts and engine compatibility.
-2. Select oMLX, LM Studio, or MTPLX. For a supported MoE whose weights do not fit safely in memory, open **Huge models on SSD** and select SwiftLM or Mference.
+2. Select oMLX, LM Studio, or MTPLX. For a supported MoE whose weights do not fit safely in memory, open **Huge models on SSD** and select SwiftLM, Mference, or a live Whallm Qwen route.
 3. Select Pi, OpenCode, Codex, or Chat.
 4. Review context, maximum response, reasoning, and engine controls.
 5. Choose **Launch** or **Start chat**.
@@ -64,14 +65,16 @@ The SSD lane is deliberately separate from the three normal runtime cards. Swift
 
 When both routes are installed, Calibration can compare them only after their artifacts prove the same immutable source revision. Mference exposes fixed context windows up to 128,000 tokens, so an SSD comparison visibly locks and applies the largest common supported window rather than silently measuring a different contract. It measures first-turn and warm-prefix generation TPS, time to first output, memory pressure, and thermal state in fresh processes. It observes the natural macOS file cache instead of claiming a privileged cold-cache purge.
 
-[Qwen3.8-Flash-Next](https://github.com/QwenLM/Qwen3.8-Flash-Next) is detected as an SSD-streaming candidate, but currently remains blocked because neither upstream runtime lists that new architecture as supported. Detection is not treated as proof that the weights can be executed.
+[Qwen3.8-Flash-Next](https://github.com/QwenLM/Qwen3.8-Flash-Next) now has two materially different public 48 GB-class routes. [Whallm](https://github.com/yanun0323/Whallm/blob/master/docs/QWEN.md) installs its own roughly 125 GB MXFP4 checkpoint, preserves all 512 experts, and streams them from SSD; its published [M5 Pro benchmark](https://github.com/yanun0323/Whallm/blob/master/BENCHMARK.md) reports roughly 7.8–9.3 generation tok/s and 15–19 GiB peak memory, while the project still lists 64 GB unified memory as its support floor. The launcher therefore exposes 48 GB as experimental only after Whallm is already serving the exact pinned model ID.
+
+The alternative [REAP-288 oMLX checkpoint](https://huggingface.co/sh0wie/Qwen3.8-Flash-Next-REAP-288-MLX-4bit) reports about 39 GB resident memory with its n-gram table streamed by oMLX 0.6.4, but it retains 288 of 512 experts and reports a small HumanEval loss. It is a different model artifact and is never calibrated as equivalent to Whallm's full-expert checkpoint. The tweet-demonstrated full-expert pMLX path is not integrated because no public, reproducible release is available.
 
 ## Known alpha limitations
 
 - There is no packaged `.app`, code signing, notarization, or automatic launcher updater yet.
 - The interface and saved-data formats may evolve before a stable release.
 - Runtime support is deliberately strict; a nominally OpenAI-compatible route can remain unavailable if its model, reasoning, tools, or Responses contract cannot be preserved.
-- SSD streaming is model-family specific. A large MoE remains unavailable until its exact SwiftLM or Mference architecture path is verified; Qwen3.8-Flash-Next is currently detected but intentionally not launchable through either route.
+- SSD streaming is model-family specific. A large MoE remains unavailable until its exact runtime/artifact contract is verified. Whallm cannot consume an existing MLX folder, while SwiftLM and Mference still do not accept Qwen3.8 Flash-Next.
 - FreeToken is temporarily hidden from the interface. Existing implementation and saved records are retained.
 - Hardware recommendations are evidence-bound to the measured Mac, model fingerprint, runtime, and workload; they are not universal benchmark claims.
 

@@ -287,6 +287,36 @@ RUNTIME_RELEASE_CATALOG: dict[str, dict[str, Any]] = {
             "Calibrate only accepted source-bound SSD model families; b709 still does not advertise Qwen3.8 Flash-Next.",
         ],
     },
+    "whallm": {
+        "version": "1.1.2", "displayVersion": "1.1.2",
+        "channel": "stable", "releasedAt": "2026-08-28T18:42:00Z",
+        "releaseUrl": "https://github.com/yanun0323/Whallm/releases/tag/v1.1.2",
+        "summary": (
+            "Experimental Apple-Silicon app with a pinned Qwen3.8 Flash-Next MXFP4 "
+            "download, full 512-expert SSD streaming, Chat Completions, and Responses APIs."
+        ),
+        "highlights": [
+            {"value": "15–19 GiB", "label": "measured M5 Pro peak"},
+            {"value": "512", "label": "experts preserved"},
+            {"value": "8 tok/s", "label": "measured decode range"},
+        ],
+        "advisories": [
+            {
+                "affectedVersion": "1.1.2",
+                "headline": "48 GB remains outside the published support floor",
+                "detail": (
+                    "Whallm measures Qwen below 19 GiB on an M5 Pro and caps automatic Qwen "
+                    "memory at 48 GiB, but its public requirements still say 64 GiB or more. "
+                    "The launcher therefore labels this Mac route experimental rather than guaranteed."
+                ),
+            },
+        ],
+        "workflow": [
+            "Install the signed arm64 app from the official release.",
+            "Download the app's pinned Qwen model, then start its loopback server.",
+            "Rescan the launcher; it accepts only the exact advertised Qwen model ID and never stops Whallm's shared server.",
+        ],
+    },
 }
 LAUNCH_PROFILE_STORE_VERSION = 1
 LAUNCH_PROFILE_MAX = 32
@@ -320,11 +350,13 @@ BENCHMARK_DFLASH_TUNER_DRAFT_QUANTS = ("native", "q8", "q4", "q2")
 SSD_STREAMING_CONTRACT_VERSION = 1
 SSD_STREAMING_MIN_WEIGHT_RATIO = 0.85
 SSD_STREAMING_PREFILL_SIZES = (128, 256, 512, 1_024, 2_048)
-SSD_STREAMING_BACKENDS = ("swiftlm", "mference")
+SSD_STREAMING_BACKENDS = ("swiftlm", "mference", "whallm")
+SSD_ARTIFACT_BACKENDS = ("swiftlm", "mference")
 MFERENCE_CONTEXT_WINDOWS = (4_096, 8_192, 16_384, 32_768, 65_536, 128_000)
 SSD_STREAMING_RUNTIME_URLS = {
     "swiftlm": "https://github.com/SharpAI/SwiftLM",
     "mference": "https://github.com/NeelM0906/Mference",
+    "whallm": "https://github.com/yanun0323/Whallm",
 }
 MFERENCE_KNOWN_FLAGS = frozenset({"streamingPresent", "turboQuantKV", "aneSharedExpert"})
 MFERENCE_STREAMING_ARCH_SIGNATURES: dict[str, dict[str, int]] = {
@@ -434,6 +466,13 @@ FREETOKEN_CONNECTION_SCHEMA_VERSION = 1
 FREETOKEN_CONNECTION_MAX_MODELS = 64
 FREETOKEN_CONNECTION_MAX_RESPONSE = 4 * 1024 * 1024
 FREETOKEN_BRIDGE = APP_DIR / "freetoken_bridge.py"
+WHALLM_ENDPOINT = "http://127.0.0.1:11434"
+WHALLM_MODEL_ID = "qwen3.8-flash-next-fp8"
+WHALLM_CONTEXT_WINDOWS = (4_096, 8_192, 16_384)
+WHALLM_MODEL_BYTES = 125_291_490_955
+WHALLM_MEASURED_PEAK_BYTES = round(18.92 * 1024**3)
+WHALLM_RELEASE_URL = "https://github.com/yanun0323/Whallm/releases/tag/v1.1.2"
+WHALLM_DOCS_URL = "https://github.com/yanun0323/Whallm"
 FREETOKEN_NATIVE_SCHEMA_NAME = "freetoken.native-macos-capabilities"
 FREETOKEN_NATIVE_SCHEMA_VERSION = 1
 FREETOKEN_NATIVE_API_VERSION = "1.0"
@@ -474,6 +513,7 @@ OPTIMIZER_KEYS = {
     "freetoken": ("maxBatchSize", "expertCacheSize", "prefixCacheEntries"),
     "swiftlm": ("prefillSize", "nativeExpertTopK"),
     "mference": ("promptCacheMode", "queueLimit"),
+    "whallm": (),
 }
 BENCHMARK_ENGINE_SETTING_KEYS = {
     "omlx": ("burst", "anePrefill"),
@@ -482,6 +522,7 @@ BENCHMARK_ENGINE_SETTING_KEYS = {
     "freetoken": ("maxBatchSize", "expertCacheSize", "prefixCacheEntries"),
     "swiftlm": ("prefillSize", "nativeExpertTopK", "ssdCacheState"),
     "mference": ("promptCacheMode", "queueLimit", "ssdCacheState"),
+    "whallm": ("ssdCacheState",),
 }
 
 
@@ -606,6 +647,38 @@ def probe_freetoken_endpoint(
     if not models:
         raise ValueError("The endpoint responded, but it did not advertise a model through /v1/models.")
     return {"models": models, "server": server, "addresses": addresses}
+
+
+def probe_whallm_endpoint(timeout: float = 1.5) -> dict[str, Any]:
+    """Accept only Whallm's fixed loopback server and pinned Qwen model ID."""
+    if not globals().get("BINARIES", {}).get("whallm"):
+        return {}
+    opener = urllib.request.build_opener(_NoFreetokenRedirects())
+    health = urllib.request.Request(
+        f"{WHALLM_ENDPOINT}/healthz",
+        headers={"Accept": "application/json", "User-Agent": f"LLM-Launcher/{VERSION}"},
+    )
+    try:
+        with opener.open(health, timeout=timeout) as response:
+            if response.status != HTTPStatus.OK:
+                return {}
+            health_body = response.read(64 * 1024 + 1)
+        if len(health_body) > 64 * 1024:
+            return {}
+        health_value = json.loads(health_body)
+        if not isinstance(health_value, dict):
+            return {}
+        probe = probe_freetoken_endpoint(WHALLM_ENDPOINT, "", timeout=timeout)
+    except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError):
+        return {}
+    if WHALLM_MODEL_ID not in probe.get("models", []):
+        return {}
+    return {
+        "connected": True,
+        "endpoint": WHALLM_ENDPOINT,
+        "model": WHALLM_MODEL_ID,
+        "server": str(probe.get("server") or "Whallm")[:120],
+    }
 
 
 def load_freetoken_connection() -> dict[str, Any]:
@@ -941,6 +1014,10 @@ RUNTIME_CANDIDATE_SPECS: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("source-build", "~/Documents/Code/Mference/.build/release/MferenceServer", "Source release build"),
         ("path", "MferenceServer", "Shell PATH"),
     ),
+    "whallm": (
+        ("system-app", "/Applications/Whallm.app/Contents/MacOS/dsv4-app", "Whallm app"),
+        ("user-app", "~/Applications/Whallm.app/Contents/MacOS/dsv4-app", "User Whallm app"),
+    ),
 }
 
 
@@ -1085,6 +1162,7 @@ BINARIES = {
     "mtplx": preferred_runtime_binary("mtplx"),
     "swiftlm": preferred_runtime_binary("swiftlm"),
     "mference": preferred_runtime_binary("mference"),
+    "whallm": preferred_runtime_binary("whallm"),
     "freetoken_native": _SELECTED_FREETOKEN_NATIVE_BINARY,
     "freetoken": (
         _SELECTED_FREETOKEN_NATIVE_BINARY
@@ -1154,6 +1232,9 @@ ENGINE_ADAPTERS: dict[str, AdapterDescriptor] = {
     ),
     "mference": AdapterDescriptor(
         "mference", "Mference", "engine", "mference", "openai-compatible-ssd-expert-streaming",
+    ),
+    "whallm": AdapterDescriptor(
+        "whallm", "Whallm", "engine", "whallm", "shared-openai-compatible-ssd-expert-streaming",
     ),
 }
 
@@ -1225,6 +1306,12 @@ CLIENT_SUPPORT: dict[str, dict[str, dict[str, Any]]] = {
         "codex": {"supported": False, "reason": "Mference does not expose the Responses API required by Codex"},
         "chat": {"supported": True, "reason": "Built-in streaming Chat Completions"},
     },
+    "whallm": {
+        "pi": {"supported": True, "reason": "Whallm Chat Completions with function tools"},
+        "opencode": {"supported": True, "reason": "Whallm Chat Completions with function tools"},
+        "codex": {"supported": True, "reason": "Whallm native Responses API with Codex function tools"},
+        "chat": {"supported": True, "reason": "Built-in streaming Chat through Whallm"},
+    },
 }
 
 
@@ -1250,6 +1337,14 @@ def resolved_client_support(
 def command_version(path: str | None) -> str:
     if not path:
         return "Not installed"
+    candidate = Path(path).expanduser()
+    if (
+        candidate.name == "dsv4-app"
+        and candidate.parent.name == "MacOS"
+        and candidate.parent.parent.parent.name == "Whallm.app"
+    ):
+        version = plist_version(candidate.parent.parent / "Info.plist")
+        return f"Whallm {version}" if version else "Whallm installed"
     try:
         result = subprocess.run(
             [path, "--version"], text=True, stdout=subprocess.PIPE,
@@ -2178,6 +2273,10 @@ def runtime_inventory() -> dict[str, Any]:
             "mference", "Mference", "macOS 15 · Apple Silicon",
             "Runs only pinned, verified .gturbo bundles with model-specific Metal kernels.",
         ),
+        (
+            "whallm", "Whallm", "macOS 15 · Apple Silicon · 64 GB published floor",
+            "Owns one pinned Qwen3.8 Flash-Next install and streams all 512 routed experts from SSD; 48 GB is experimental.",
+        ),
     ):
         candidates = runtime_candidate_details(runtime_id)
         selected = next((item for item in candidates if item["selected"]), None)
@@ -2696,13 +2795,26 @@ def ssd_streaming_model_profile(
         "crossFormatComparisonReady": source_contract["verifiedForCrossFormatComparison"],
         "calibration": {
             "suite": "agentic",
-            "engines": list(SSD_STREAMING_BACKENDS),
+            # Whallm owns a separately downloaded pinned checkpoint. It cannot
+            # consume or be paired with these source-folder artifacts.
+            "engines": list(SSD_ARTIFACT_BACKENDS),
             "freshProcessPerEngine": True,
             "coldAndWarmStages": True,
             "nativeExpertRoutingRequired": True,
             "metrics": ["generationTps", "ttft", "peakMemory", "thermalState", "prefixReuse"],
         },
     }
+
+
+def ssd_profile_candidate_backends(profile: Any) -> tuple[str, ...]:
+    """Return only the runtimes that can consume this exact SSD artifact."""
+    calibration = profile.get("calibration") if isinstance(profile, dict) else None
+    declared = calibration.get("engines") if isinstance(calibration, dict) else None
+    result = tuple(
+        engine for engine in declared or ()
+        if isinstance(engine, str) and engine in SSD_STREAMING_BACKENDS
+    )
+    return result or SSD_ARTIFACT_BACKENDS
 
 
 def swiftlm_model_supported(path: Path, config: dict[str, Any], profile: dict[str, Any]) -> tuple[bool, str]:
@@ -6124,6 +6236,7 @@ def scan_models() -> list[dict[str, Any]]:
     mtplx_version = command_version(BINARIES.get("mtplx"))
     swiftlm_version = command_version(BINARIES.get("swiftlm"))
     mference_version = command_version(BINARIES.get("mference"))
+    whallm_version = command_version(BINARIES.get("whallm"))
     freetoken_native_binary = BINARIES.get("freetoken_native")
     freetoken_native_version = command_version(freetoken_native_binary)
     dflash2_runtime = omlx_supports_dflash2(omlx_version)
@@ -6540,6 +6653,30 @@ def scan_models() -> list[dict[str, Any]]:
                     "contextMaximum": max(MFERENCE_CONTEXT_WINDOWS),
                     "exactExpertRouting": True,
             },
+            "whallm": {
+                    "runnable": False,
+                    "reason": (
+                        "Whallm uses its own pinned 125 GB Qwen3.8 Flash-Next MXFP4 install; "
+                        "it cannot consume this scanned model folder. Start Whallm's server "
+                        "and rescan to use its advertised model."
+                        if ssd_profile.get("qwen38FlashNext") else
+                        "Whallm currently accepts only its pinned Qwen3.8 Flash-Next checkpoint."
+                    ),
+                    "mtp": False,
+                    "mtpReason": "Whallm's public Qwen route does not expose MTP.",
+                    "dflash": False,
+                    "dflashVersion": None,
+                    "dflashReason": "DFlash is not a Whallm serving mode.",
+                    "kv": False,
+                    "preferredAcceleration": "off",
+                    "depth": 1,
+                    "depthMax": 1,
+                    "agentReasoning": ["auto", "off", "low", "medium", "high", "xhigh", "max"],
+                    "codexReasoning": ["auto", "off", "low", "medium", "high", "xhigh", "max"],
+                    "ssdStreaming": True,
+                    "ssdProfile": copy.deepcopy(ssd_profile),
+                    "exactExpertRouting": True,
+            },
         }
         model_fingerprint = model_artifact_fingerprint(real, config) if ready else ""
         freetoken_capability = backend["freetoken"]
@@ -6667,6 +6804,7 @@ def scan_models() -> list[dict[str, Any]]:
             "freetoken": freetoken_native_version,
             "swiftlm": swiftlm_version,
             "mference": mference_version,
+            "whallm": whallm_version,
         }
         for backend_name, capability in backend.items():
             runtime_version = runtime_versions[backend_name]
@@ -6746,7 +6884,7 @@ def scan_models() -> list[dict[str, Any]]:
     for identity, group in ssd_groups.items():
         route_sources: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
         for source_record in group:
-            for backend_name in SSD_STREAMING_BACKENDS:
+            for backend_name in SSD_ARTIFACT_BACKENDS:
                 capability = source_record.get("backends", {}).get(backend_name, {})
                 if capability.get("runnable") is True:
                     route_sources.setdefault(backend_name, (source_record, capability))
@@ -6770,7 +6908,7 @@ def scan_models() -> list[dict[str, Any]]:
                 })
                 target_record["backends"][backend_name] = paired
             target_record["ssdStreaming"]["pairedCalibrationReady"] = True
-            target_record["ssdStreaming"]["pairedEngines"] = list(SSD_STREAMING_BACKENDS)
+            target_record["ssdStreaming"]["pairedEngines"] = list(SSD_ARTIFACT_BACKENDS)
     freetoken = load_freetoken_connection()
     if freetoken:
         endpoint_label = urllib.parse.urlsplit(str(freetoken["endpoint"])).netloc
@@ -6857,6 +6995,108 @@ def scan_models() -> list[dict[str, Any]]:
                 "remoteModelId": remote_model_id,
                 "backends": remote_backends,
             }
+    whallm = probe_whallm_endpoint()
+    if whallm:
+        source_revision = "bcd9f01ddc9cff2316eb84281bebcd5b058bddce"
+        comparison_identity = hashlib.sha256(
+            f"ssd-source-v1\0qwen/qwen3.8-flash-next-fp8\0revision\0{source_revision}".encode("utf-8")
+        ).hexdigest()
+        model_fingerprint = hashlib.sha256(json.dumps({
+            "engine": "whallm", "version": whallm_version,
+            "model": WHALLM_MODEL_ID, "revision": source_revision,
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        ssd_profile = {
+            "version": SSD_STREAMING_CONTRACT_VERSION,
+            "candidate": True, "recommended": True, "moe": True,
+            "oversized": True, "qwen38FlashNext": True,
+            "expertCount": 512, "nativeExpertTopK": 10,
+            "weightBytes": WHALLM_MODEL_BYTES,
+            "installedMemoryBytes": installed_memory,
+            "weightToMemoryRatio": round(WHALLM_MODEL_BYTES / installed_memory, 4) if installed_memory else None,
+            "format": "whallm-mxfp4", "reason": (
+                "Whallm advertises its pinned full 512-expert Qwen3.8 Flash-Next model on loopback. "
+                "This 48 GB Mac is experimental because Whallm publishes a 64 GB support floor."
+            ),
+            "sourceContract": {
+                "sourceModel": "qwen/qwen3.8-flash-next-fp8",
+                "proofKind": "revision", "proof": source_revision,
+                "comparisonIdentity": comparison_identity,
+                "verifiedForCrossFormatComparison": True,
+            },
+            "comparisonIdentity": comparison_identity,
+            "crossFormatComparisonReady": True,
+            "calibration": {
+                "suite": "agentic", "engines": ["whallm"],
+                "freshProcessPerEngine": False, "coldAndWarmStages": True,
+                "nativeExpertRoutingRequired": True,
+                "metrics": ["generationTps", "ttft", "peakMemory", "thermalState", "prefixReuse"],
+            },
+        }
+        remote_backends: dict[str, dict[str, Any]] = {}
+        for engine_id, descriptor in ENGINE_ADAPTERS.items():
+            if engine_id == "whallm":
+                remote_backends[engine_id] = {
+                    "runnable": True,
+                    "reason": (
+                        "Live Whallm 1.1.x loopback route · full 512 experts · experimental on 48 GB. "
+                        "Public M5 Pro measurements cover up to 16,384 input tokens."
+                    ),
+                    "mtp": False, "mtpReason": "Whallm Qwen does not expose MTP.",
+                    "dflash": False, "dflashVersion": None,
+                    "dflashReason": "DFlash is not a Whallm serving mode.",
+                    "kv": False, "preferredAcceleration": "off", "fallbackAcceleration": "off",
+                    "depth": 1, "depthMax": 1,
+                    "agentReasoning": ["auto", "off", "low", "medium", "high", "xhigh", "max"],
+                    "codexReasoning": ["auto", "off", "low", "medium", "high", "xhigh", "max"],
+                    "runtimeVersion": whallm_version,
+                    "benchmarkModelFingerprint": model_fingerprint,
+                    "localBenchmark": None, "localBenchmarks": [], "benchmarkHistoryCount": 0,
+                    "ssdStreaming": True, "ssdProfile": copy.deepcopy(ssd_profile),
+                    "comparisonIdentity": comparison_identity,
+                    "exactExpertRouting": True, "remote": False, "sharedServer": True,
+                    "contextWindows": list(WHALLM_CONTEXT_WINDOWS),
+                    "contextMaximum": max(WHALLM_CONTEXT_WINDOWS),
+                    "customSampling": False,
+                    "samplingReason": (
+                        "Whallm's public Qwen API does not expose every custom launcher sampling field; "
+                        "use the model's thinking or chat defaults."
+                    ),
+                }
+            else:
+                remote_backends[engine_id] = {
+                    "runnable": False,
+                    "reason": f"This model is owned by Whallm's pinned install, not a {descriptor.label} model folder.",
+                    "mtp": False, "mtpReason": "No equivalent local artifact was asserted.",
+                    "dflash": False, "dflashVersion": None,
+                    "dflashReason": "No equivalent local artifact was asserted.",
+                    "kv": False, "preferredAcceleration": "off", "fallbackAcceleration": "off",
+                    "depth": 1, "depthMax": 1,
+                    "agentReasoning": ["auto"], "codexReasoning": ["auto"],
+                    "runtimeVersion": "Not applicable",
+                    "benchmarkModelFingerprint": model_fingerprint,
+                    "localBenchmark": None, "localBenchmarks": [], "benchmarkHistoryCount": 0,
+                }
+        record_key = f"whallm:{WHALLM_MODEL_ID}:{source_revision}"
+        records[record_key] = {
+            "id": "whallm-" + model_fingerprint[:24],
+            "name": "Qwen3.8 Flash-Next · Whallm full experts",
+            "path": "Whallm shared loopback server",
+            "artifact": f"whallm:{source_revision[:24]}",
+            "origins": ["Whallm · 127.0.0.1:11434"],
+            "format": "Whallm MXFP4 + SSD", "architecture": "Qwen4Exp · 512 experts",
+            "modelType": "whallm-qwen38-flash-next",
+            "nativeContext": max(WHALLM_CONTEXT_WINDOWS),
+            "quantization": "MXFP4 experts · FP8 n-gram",
+            "size": WHALLM_MODEL_BYTES, "sizeLabel": display_size(WHALLM_MODEL_BYTES),
+            "memoryGeometry": {"ready": False, "sharedServer": True},
+            "mtpSidecarSize": 0, "ready": True, "status": "Connected",
+            "mtp": {"declared": False, "integrated": False, "sidecar": False},
+            "templateReasoningEfforts": ["low", "medium", "xhigh"],
+            "defaultSampling": {}, "lmKey": WHALLM_MODEL_ID,
+            "sharedServer": True, "remote": False,
+            "remoteModelId": WHALLM_MODEL_ID,
+            "ssdStreaming": ssd_profile, "backends": remote_backends,
+        }
     result = list(records.values())
     result.sort(key=lambda item: (not item["ready"], item["name"].lower()))
     return result
@@ -7413,6 +7653,14 @@ def fastest_safe_options(
             "Use the verified .gturbo expert layout and one model-native routed-expert path.",
             "Keep the prompt cache enabled for repeated agent prefixes without changing generated tokens.",
         ])
+    elif backend == "whallm":
+        options.update({"acceleration": "off", "depth": 1, "kv": "off"})
+        evidence_tier = "shared-pinned-ssd-route"
+        evidence_label = "Whallm full-expert route"
+        rationale.extend([
+            "Keep Whallm's pinned full 512-expert MXFP4 execution contract unchanged.",
+            "Use the running shared server directly; this launcher does not invent an accelerator or compare it with a pruned checkpoint.",
+        ])
 
     changed = [
         key for key in OPTIMIZER_KEYS[backend]
@@ -7487,6 +7735,8 @@ def normalized_ssd_comparison_request(
     profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
     if profile.get("recommended") is not True:
         return request, None
+    if "mference" not in ssd_profile_candidate_backends(profile):
+        return request, None
     context, _output = validated_limits(model, request)
     compatible = mference_compatible_context(context)
     if compatible is None:
@@ -7506,12 +7756,17 @@ def normalized_ssd_comparison_request(
 
 
 def validate_runtime_context(backend: str, context: int) -> None:
-    if backend != "mference":
+    choices_for_backend = (
+        MFERENCE_CONTEXT_WINDOWS if backend == "mference" else
+        WHALLM_CONTEXT_WINDOWS if backend == "whallm" else
+        None
+    )
+    if choices_for_backend is None:
         return
-    if context not in MFERENCE_CONTEXT_WINDOWS:
-        choices = ", ".join(f"{value:,}" for value in MFERENCE_CONTEXT_WINDOWS)
+    if context not in choices_for_backend:
+        choices = ", ".join(f"{value:,}" for value in choices_for_backend)
         raise ValueError(
-            f"Mference supports fixed context windows: {choices}. Choose one of those exact values."
+            f"{BACKEND_LABELS[backend]} supports fixed context windows: {choices}. Choose one of those exact values."
         )
 
 
@@ -8415,7 +8670,7 @@ def optimal_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> di
     """Resolve an optimizer result without allocating a port or creating a run."""
     backend = str(payload.get("backend", ""))
     if backend not in ENGINE_ADAPTERS or backend not in OPTIMIZER_KEYS:
-        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, or Mference.")
+        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, or Whallm.")
     client = str(payload.get("client", ""))
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose Pi, OpenCode, Codex, or Chat.")
@@ -8512,6 +8767,7 @@ def optimizer_backend_eligibility(
         "freetoken": {"off"},
         "swiftlm": {"off"},
         "mference": {"off"},
+        "whallm": {"off"},
     }[backend]
     if kv not in allowed_kv or (kv != "off" and capability.get("kv") is not True):
         return False, "This engine cannot preserve the selected KV precision."
@@ -9338,6 +9594,8 @@ def benchmark_engine_settings_label(backend: str, settings: Any) -> str:
         cache = "prompt cache" if str(values.get("promptCacheMode") or "on") == "on" else "no prompt cache"
         queue = safe_int(values.get("queueLimit"), 4, 1, 32)
         return f"Verified .gturbo streaming · {cache} · queue {queue}"
+    if backend == "whallm":
+        return "Full 512-expert SSD stream · Whallm-owned MXFP4"
     return ""
 
 
@@ -9442,7 +9700,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
     eligible: list[str] = []
     excluded: list[dict[str, str]] = []
     ssd_profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
-    candidate_backends = SSD_STREAMING_BACKENDS if ssd_profile.get("recommended") is True else tuple(ENGINE_ADAPTERS)
+    candidate_backends = ssd_profile_candidate_backends(ssd_profile) if ssd_profile.get("recommended") is True else tuple(ENGINE_ADAPTERS)
     for backend in candidate_backends:
         allowed, reason = optimizer_backend_eligibility(
             model, backend, client, reasoning, kv, chat,
@@ -9478,6 +9736,25 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         ],
         "excludedBackends": excluded,
     }
+    if eligible == [current_backend]:
+        reason = (
+            f"{BACKEND_LABELS[current_backend]} is the only installed route that can run this exact "
+            "model and work contract; there is no honest cross-engine calibration to perform."
+        )
+        current.update({
+            "engineChanged": False,
+            "engineEvidenceTier": "single-compatible-engine",
+            "engineEvidenceLabel": "Only compatible engine",
+            "comparedEngines": [],
+            "missingEngines": [],
+            "engineRationale": [reason],
+            "engineDecision": engine_meta,
+            "engineNextAction": engine_selection_next_action(
+                "keep-current", preference, current_backend, client, reason,
+            ),
+        })
+        current["rationale"] = current["engineRationale"] + list(current.get("rationale") or [])
+        return current
     if not complete:
         largest = max(groups.values(), key=len, default={})
         measured = sorted(largest)
@@ -10043,6 +10320,14 @@ def validated_profile_options(
                 raw.get("queueLimit"), int(capability.get("queueLimit") or 4),
                 1, 32, "Mference queue limit",
             ),
+            "ssdCacheState": _profile_choice(
+                raw, "ssdCacheState", "natural-cold-to-warm",
+                {"natural-cold-to-warm"}, "SSD cache state",
+            ),
+        }
+    if backend == "whallm":
+        return {
+            "acceleration": "off", "depth": 1, "kv": "off",
             "ssdCacheState": _profile_choice(
                 raw, "ssdCacheState", "natural-cold-to-warm",
                 {"natural-cold-to-warm"}, "SSD cache state",
@@ -10634,7 +10919,7 @@ def benchmark_history_request(
     eligible: list[str] = []
     ssd_profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
     ssd_lane = ssd_profile.get("recommended") is True
-    candidate_backends = SSD_STREAMING_BACKENDS if ssd_lane else tuple(ENGINE_ADAPTERS)
+    candidate_backends = ssd_profile_candidate_backends(ssd_profile) if ssd_lane else tuple(ENGINE_ADAPTERS)
     for candidate in candidate_backends:
         allowed, _reason = benchmark_backend_eligibility(
             model, candidate, client, reasoning, kv, chat,
@@ -11185,6 +11470,8 @@ class LaunchPlan:
         route_kind = (
             "connected"
             if self.backend == "freetoken" and self.model.get("remote") is True else
+            "shared"
+            if self.backend == "whallm" and self.model.get("sharedServer") is True else
             "native"
             if self.backend == "freetoken" and self.model.get("nativeFreetoken") is True else
             "local"
@@ -11247,6 +11534,8 @@ class SurfaceAttachment:
             "routeKind": (
                 "connected"
                 if self.plan.backend == "freetoken" and self.plan.model.get("remote") is True else
+                "shared"
+                if self.plan.backend == "whallm" and self.plan.model.get("sharedServer") is True else
                 "native"
                 if self.plan.backend == "freetoken" and self.plan.model.get("nativeFreetoken") is True else
                 "local"
@@ -11816,7 +12105,7 @@ def normalized_request(
     client = str(payload.get("client", ""))
     mode = str(payload.get("mode", "custom"))
     if backend not in ENGINE_ADAPTERS:
-        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, or Mference.")
+        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, or Whallm.")
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose Pi, OpenCode, Codex, or Chat.")
     if client == "chat":
@@ -12329,6 +12618,47 @@ def build_mference(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     ])
 
 
+def build_whallm(plan: LaunchPlan, cap: dict[str, Any]) -> None:
+    """Own a private route to Whallm without pretending to own its model process."""
+    if (
+        plan.model.get("sharedServer") is not True
+        or plan.model.get("remoteModelId") != WHALLM_MODEL_ID
+        or cap.get("runnable") is not True
+        or cap.get("sharedServer") is not True
+    ):
+        raise ValueError("This is not the live pinned Whallm Qwen3.8 Flash-Next route. Rescan models.")
+    if plan.context not in WHALLM_CONTEXT_WINDOWS:
+        choices = ", ".join(f"{value:,}" for value in WHALLM_CONTEXT_WINDOWS)
+        raise ValueError(f"Whallm's measured Qwen route uses one of these contexts: {choices}.")
+    live = probe_whallm_endpoint()
+    if live.get("model") != WHALLM_MODEL_ID:
+        raise ValueError("Whallm stopped serving its pinned Qwen model. Start it and rescan models.")
+    if not FREETOKEN_BRIDGE.is_file():
+        raise ValueError("The launcher's private OpenAI bridge is missing.")
+    options = validated_profile_options("whallm", plan.model, cap, plan.options)
+    plan.options.update(options)
+    local_key = secrets.token_urlsafe(32)
+    bridge_config = plan.run_dir / "whallm-bridge.json"
+    atomic_json(bridge_config, {
+        "version": 1,
+        "listenPort": plan.port,
+        "clientKey": local_key,
+        "endpoint": WHALLM_ENDPOINT,
+        "upstreamKey": "",
+        "upstreamLabel": "Whallm",
+        "servedModel": WHALLM_MODEL_ID,
+    })
+    plan.model["servedId"] = WHALLM_MODEL_ID
+    plan.secrets["apiKey"] = local_key
+    plan.engine_argv = [sys.executable, str(FREETOKEN_BRIDGE), str(bridge_config)]
+    plan.engine_env = {}
+    plan.warnings.extend([
+        "Whallm owns the full 512-expert model and its SSD cache. Stop closes only this launcher's private route; use Whallm to unload the model.",
+        "Whallm publishes a 64 GB support floor. Its M5 Pro measurements stayed below 19 GiB through 16K input, so this 48 GB Mac is exposed as an experimental—not guaranteed—route.",
+        "The Whallm checkpoint is a separate MXFP4 install and is never compared as equivalent to a pruned REAP checkpoint.",
+    ])
+
+
 def build_remote_freetoken(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     """Own only a private bridge; the configured FreeToken server owns model memory."""
     connection = load_freetoken_connection()
@@ -12500,6 +12830,7 @@ ENGINE_BUILDERS = {
     "freetoken": build_freetoken,
     "swiftlm": build_swiftlm,
     "mference": build_mference,
+    "whallm": build_whallm,
 }
 
 
@@ -12882,7 +13213,7 @@ def validated_benchmark_request(
     client = str(payload.get("client") or "")
     if backend not in ENGINE_ADAPTERS:
         raise ValueError(
-            "Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, or Mference before benchmarking."
+            "Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, or Whallm before benchmarking."
         )
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose the work surface whose contract should own this benchmark.")
@@ -13270,7 +13601,7 @@ def validated_engine_shootout_request(
     excluded: list[dict[str, str]] = []
     ssd_profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
     ssd_lane = ssd_profile.get("recommended") is True
-    candidate_backends = SSD_STREAMING_BACKENDS if ssd_lane else tuple(ENGINE_ADAPTERS)
+    candidate_backends = ssd_profile_candidate_backends(ssd_profile) if ssd_lane else tuple(ENGINE_ADAPTERS)
     for backend in candidate_backends:
         allowed, reason = benchmark_backend_eligibility(
             model, backend, client, reasoning, kv, chat,
@@ -13305,9 +13636,15 @@ def validated_engine_shootout_request(
         detail = "; ".join(
             f"{item['label']}: {item['reason']}" for item in excluded
         )
+        single_route_detail = (
+            " Whallm owns a separate pinned full-expert checkpoint, so it cannot be compared "
+            "as the same artifact as a SwiftLM, Mference, or pruned REAP model."
+            if model.get("sharedServer") is True else ""
+        )
         raise ValueError(
             "Engine Shootout needs at least two installed engines that can preserve the selected "
             "model, client, reasoning, sampling, context, response limit, and KV precision."
+            + single_route_detail
             + (f" {detail}" if detail else "")
         )
     fingerprints = {str(job.get("modelFingerprint") or "") for job in jobs}
@@ -13406,7 +13743,7 @@ def calibration_plan(
     jobs: list[dict[str, Any]] = []
     ssd_profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
     ssd_lane = ssd_profile.get("recommended") is True
-    candidate_backends = SSD_STREAMING_BACKENDS if ssd_lane else tuple(ENGINE_ADAPTERS)
+    candidate_backends = ssd_profile_candidate_backends(ssd_profile) if ssd_lane else tuple(ENGINE_ADAPTERS)
     for backend in candidate_backends:
         allowed, reason = benchmark_backend_eligibility(
             model, backend, request["client"], request["reasoning"], kv,
@@ -13521,6 +13858,8 @@ def calibration_plan(
     fingerprints = {str(job.get("modelFingerprint") or "") for job in jobs}
     if len(jobs) < 2:
         blockers.append(
+            "Whallm's full-expert checkpoint has no equivalent second engine to compare; use its measured route directly."
+            if model.get("sharedServer") is True else
             "SSD calibration needs both SwiftLM and Mference, plus verified equivalent model artifacts."
             if ssd_lane else
             "Calibration needs at least two installed engines that can preserve the complete measurement contract."
@@ -13694,6 +14033,32 @@ def launch_memory_estimate(
     backend = str(request.get("backend") or "")
     context = int(request.get("context") or 0)
     kv = str(options.get("kv") or "off")
+    if backend == "whallm" and model.get("sharedServer") is True:
+        bridge_reserve = 512 * 1024**2
+        return {
+            "version": SESSION_MEMORY_ESTIMATE_VERSION,
+            "modelBytes": 0,
+            "companionBytes": 0,
+            "companionLabels": [],
+            "kvCacheBytes": 0,
+            "kvPrecision": "Whallm-managed",
+            "kvScalarBytes": None,
+            "contextTokens": context,
+            "parallelLanes": 1,
+            "runtimeReserveBytes": bridge_reserve,
+            "estimatedWorkingSetBytes": bridge_reserve,
+            "osReserveBytes": 0,
+            "requiredHeadroomBytes": bridge_reserve,
+            "geometryReady": True,
+            "geometry": {"ready": True, "sharedServer": True},
+            "sharedEngine": True,
+            "observedEnginePeakBytes": WHALLM_MEASURED_PEAK_BYTES,
+            "basis": (
+                "Whallm is already serving this model before it becomes selectable. The launcher adds only a bounded "
+                "private bridge; Whallm owns model, KV, and SSD-cache memory. Upstream's M5 Pro measurements peaked "
+                "at 18.92 GiB through the published 16K-input case, but its official support floor remains 64 GB."
+            ),
+        }
     if backend == "freetoken" and model.get("remote") is True:
         return {
             "version": SESSION_MEMORY_ESTIMATE_VERSION,
@@ -13910,6 +14275,12 @@ def session_memory_admission(
         launchable = True
         label = "Connected route is ready"
         detail = "FreeToken already owns the model on its configured server; this launch starts only a private loopback bridge and the selected work surface."
+    elif request.get("backend") == "whallm" and model.get("sharedServer") is True:
+        decision = "ready"
+        requires_acknowledgement = False
+        launchable = True
+        label = "Whallm route is already loaded"
+        detail = "Whallm already owns the model and SSD cache; this launch adds only a private loopback bridge and the selected work surface. The 48 GB host remains an experimental upstream configuration."
     elif resource.get("memoryAvailable") is not True:
         decision = "unknown"
         requires_acknowledgement = True
@@ -13945,7 +14316,7 @@ def session_memory_admission(
             label = "Projected memory pressure"
             detail = "The conservative full-context estimate is larger than current unified-memory headroom and may compress or swap heavily."
     headroom_value = resource.get("headroomBytes")
-    projected = None if estimate.get("remoteEngine") else (
+    projected = None if estimate.get("remoteEngine") or estimate.get("sharedEngine") else (
         int(headroom_value) - int(estimate["estimatedWorkingSetBytes"])
         if isinstance(headroom_value, int) and not isinstance(headroom_value, bool) else None
     )
@@ -16450,6 +16821,8 @@ class RunManager:
             self.event(
                 "Opening a private bridge to the connected FreeToken server…"
                 if plan.backend == "freetoken" and plan.model.get("remote") is True else
+                "Opening a private bridge to the running Whallm model…"
+                if plan.backend == "whallm" and plan.model.get("sharedServer") is True else
                 "Starting native FreeToken on this Mac…"
                 if plan.backend == "freetoken" else
                 "Starting the model engine…"
@@ -16507,6 +16880,8 @@ class RunManager:
                 self.event(
                     "Connected model route is ready. Preparing the built-in chat…"
                     if plan.backend == "freetoken" and plan.model.get("remote") is True else
+                    "Whallm's shared model route is ready. Preparing the built-in chat…"
+                    if plan.backend == "whallm" else
                     "Native FreeToken is ready. Preparing the built-in chat…"
                     if plan.backend == "freetoken" else
                     "Model is ready. Preparing the built-in chat…"
@@ -16517,6 +16892,10 @@ class RunManager:
                     if plan.backend == "freetoken" and plan.agent_host == "console" else
                     "Connected model route is ready. Opening the coding agent in a background Terminal…"
                     if plan.backend == "freetoken" else
+                    "Whallm's shared model route is ready. Opening the coding agent in Hub Console…"
+                    if plan.backend == "whallm" and plan.agent_host == "console" else
+                    "Whallm's shared model route is ready. Opening the coding agent in a background Terminal…"
+                    if plan.backend == "whallm" else
                     "Model is ready. Opening the coding agent in Hub Console…"
                     if plan.agent_host == "console" else
                     "Model is ready. Opening the coding agent in a background Terminal…"
@@ -16532,6 +16911,8 @@ class RunManager:
                         primary.detail = (
                             "Built-in Chat is ready on the connected FreeToken model."
                             if plan.backend == "freetoken" and plan.model.get("remote") is True else
+                            "Built-in Chat is ready on Whallm's shared model."
+                            if plan.backend == "whallm" else
                             "Built-in Chat is ready on launcher-owned native FreeToken."
                             if plan.backend == "freetoken" else
                             "Built-in Chat is ready on the loaded model."

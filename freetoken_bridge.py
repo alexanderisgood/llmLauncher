@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Private loopback bridge to one user-configured FreeToken server."""
+"""Private loopback bridge to one launcher-approved OpenAI-compatible server."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ HOP_HEADERS = {
 
 
 def fail(message: str) -> None:
-    print(f"LLM Launcher FreeToken bridge: {message}", file=sys.stderr)
+    print(f"LLM Launcher private bridge: {message}", file=sys.stderr)
     raise SystemExit(2)
 
 
@@ -66,14 +66,21 @@ def load_config(path: Path) -> dict[str, Any]:
     upstream_key = value.get("upstreamKey", "")
     if not isinstance(upstream_key, str) or len(upstream_key) > 4_096 or "\0" in upstream_key:
         fail("invalid upstream key")
+    upstream_label = value.get("upstreamLabel", "FreeToken")
+    if (
+        not isinstance(upstream_label, str) or not upstream_label
+        or len(upstream_label) > 40 or not re.fullmatch(r"[A-Za-z0-9 ._-]+", upstream_label)
+    ):
+        fail("invalid upstream label")
     parsed = urllib.parse.urlsplit(value["endpoint"])
     if (
         parsed.scheme not in {"http", "https"} or not parsed.hostname
         or parsed.username is not None or parsed.password is not None
         or parsed.query or parsed.fragment or parsed.path not in {"", "/"}
     ):
-        fail("invalid FreeToken endpoint")
+        fail("invalid upstream endpoint")
     value["upstreamKey"] = upstream_key
+    value["upstreamLabel"] = upstream_label
     value["parsedEndpoint"] = parsed
     return value
 
@@ -113,7 +120,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            body = b'{"status":"ok","upstream":"freetoken"}'
+            body = json.dumps({
+                "status": "ok",
+                "upstream": self.server.config["upstreamLabel"],  # type: ignore[attr-defined]
+            }, separators=(",", ":")).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -152,7 +162,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeError) as error:
             raise ValueError("Request body must be valid JSON") from error
         if not isinstance(value, dict) or value.get("model") != self.server.config["servedModel"]:  # type: ignore[attr-defined]
-            raise ValueError("Request targets a different FreeToken model")
+            label = self.server.config.get("upstreamLabel", "FreeToken")  # type: ignore[attr-defined]
+            raise ValueError(f"Request targets a different {label} model")
 
     def _connection(self) -> http.client.HTTPConnection:
         parsed = self.server.config["parsedEndpoint"]  # type: ignore[attr-defined]
@@ -181,11 +192,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _send_models(self, response: http.client.HTTPResponse) -> None:
         body = response.read(MAX_MODELS_BODY + 1)
         if len(body) > MAX_MODELS_BODY:
-            raise ValueError("FreeToken model catalog is too large")
+            raise ValueError("Upstream model catalog is too large")
         try:
             value = json.loads(body)
         except (ValueError, UnicodeError) as error:
-            raise ValueError("FreeToken returned an invalid model catalog") from error
+            raise ValueError("Upstream returned an invalid model catalog") from error
         data = value.get("data") if isinstance(value, dict) else None
         served = self.server.config["servedModel"]  # type: ignore[attr-defined]
         matches = [
@@ -193,7 +204,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if isinstance(item, dict) and str(item.get("id") or "") == served
         ]
         if not matches:
-            raise ValueError("The configured FreeToken model is no longer served")
+            raise ValueError("The configured upstream model is no longer served")
         filtered = json.dumps({"object": "list", "data": matches}, separators=(",", ":")).encode("utf-8")
         self._response_started = True
         self.send_response(response.status)
@@ -222,7 +233,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def forward(self) -> None:
         if not self.allowed_path():
-            self.send_json_error(HTTPStatus.NOT_FOUND, "Unsupported FreeToken API path")
+            self.send_json_error(HTTPStatus.NOT_FOUND, "Unsupported private API path")
             return
         if not self.authorised():
             self.send_json_error(HTTPStatus.UNAUTHORIZED, "Invalid launcher route key")

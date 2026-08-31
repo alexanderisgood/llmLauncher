@@ -11244,6 +11244,8 @@ class AgentConsole:
     rpc_prompt_id: str = ""
     rpc_prompt_acknowledged: bool = False
     rpc_last_state_probe_at: float = 0.0
+    rpc_message_blocks: dict[str, str] = field(default_factory=dict, repr=False)
+    rpc_last_assistant: dict[str, Any] = field(default_factory=dict, repr=False)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def append(self, value: bytes) -> None:
@@ -11517,6 +11519,7 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
     if event_type == "agent_start":
         console.rpc_prompt_inflight = True
         console.rpc_streaming = True
+        console.rpc_last_assistant.clear()
         return b""
     if event_type == "agent_end":
         console.rpc_section = ""
@@ -11530,7 +11533,20 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
         console.rpc_prompt_id = ""
         console.rpc_prompt_acknowledged = False
         console.rpc_interactions.clear()
-        return b""
+        last = console.rpc_last_assistant
+        if (
+            last.get("thinkingCharacters", 0) > 0
+            and last.get("textCharacters", 0) == 0
+            and last.get("toolCalls", 0) == 0
+            and last.get("stopReason") != "length"
+        ):
+            section("incomplete", "NO FINAL ANSWER", "38;5;214")
+            output.extend(
+                b"Pi received model reasoning but no final response. Send continue to resume the task."
+            )
+        console.rpc_last_assistant = {}
+        console.rpc_message_blocks.clear()
+        return bytes(output)
     if event_type == "queue_update":
         steering = event.get("steering") if isinstance(event.get("steering"), list) else []
         follow_up = event.get("followUp") if isinstance(event.get("followUp"), list) else []
@@ -11551,6 +11567,9 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
             section("user", "YOU", "38;5;75")
             for _kind, text in pi_rpc_message_text(message, include_thinking=False):
                 output.extend(text.encode("utf-8"))
+        elif isinstance(message, dict) and message.get("role") == "assistant":
+            console.rpc_message_blocks.clear()
+            console.rpc_last_assistant.clear()
         return bytes(output)
     if event_type == "message_update":
         update = event.get("assistantMessageEvent")
@@ -11561,11 +11580,28 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
             section("thinking", "THINKING", "38;5;141")
             if update_type == "thinking_delta":
                 text = safe_agent_transcript_text(update.get("delta"))
+                try:
+                    content_index = max(0, min(4_096, int(update.get("contentIndex") or 0)))
+                except (TypeError, ValueError):
+                    content_index = 0
+                key = f"thinking:{content_index}"
+                console.rpc_message_blocks[key] = (
+                    console.rpc_message_blocks.get(key, "") + text
+                )[:AGENT_CONSOLE_MAX_BUFFER]
                 output.extend(f"\x1b[2;38;5;183m{text}\x1b[0m".encode("utf-8"))
         elif update_type.startswith("text_"):
             section("response", "RESPONSE", "38;5;84")
             if update_type == "text_delta":
-                output.extend(safe_agent_transcript_text(update.get("delta")).encode("utf-8"))
+                text = safe_agent_transcript_text(update.get("delta"))
+                try:
+                    content_index = max(0, min(4_096, int(update.get("contentIndex") or 0)))
+                except (TypeError, ValueError):
+                    content_index = 0
+                key = f"text:{content_index}"
+                console.rpc_message_blocks[key] = (
+                    console.rpc_message_blocks.get(key, "") + text
+                )[:AGENT_CONSOLE_MAX_BUFFER]
+                output.extend(text.encode("utf-8"))
         elif update_type == "toolcall_end":
             tool = update.get("toolCall") if isinstance(update.get("toolCall"), dict) else {}
             section(
@@ -11577,6 +11613,70 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
             except (TypeError, ValueError):
                 arguments = str(tool.get("arguments") or "")
             output.extend(safe_agent_transcript_text(arguments, 16_384).encode("utf-8"))
+        return bytes(output)
+    if event_type == "message_end":
+        message = event.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            return b""
+        raw_content = message.get("content")
+        if isinstance(raw_content, str):
+            content = [{"type": "text", "text": raw_content}]
+        elif isinstance(raw_content, list):
+            content = raw_content
+        else:
+            content = []
+        thinking_characters = 0
+        text_characters = 0
+        tool_calls = 0
+        for index, block in enumerate(content):
+            if not isinstance(block, dict):
+                continue
+            kind = str(block.get("type") or "")
+            if kind == "thinking":
+                final = safe_agent_transcript_text(block.get("thinking"))
+                thinking_characters += len(final)
+                label, colour = "RECOVERED THINKING", "38;5;141"
+            elif kind == "text":
+                final = safe_agent_transcript_text(block.get("text"))
+                text_characters += len(final)
+                label, colour = "RECOVERED RESPONSE", "38;5;84"
+            elif kind == "toolCall":
+                tool_calls += 1
+                continue
+            else:
+                continue
+            if not final:
+                continue
+            seen = console.rpc_message_blocks.get(f"{kind}:{index}", "")
+            if final == seen:
+                continue
+            if seen and final.startswith(seen):
+                section(kind, "THINKING" if kind == "thinking" else "RESPONSE", colour)
+                suffix = final[len(seen):]
+                output.extend(
+                    f"\x1b[2;38;5;183m{suffix}\x1b[0m".encode("utf-8")
+                    if kind == "thinking" else suffix.encode("utf-8")
+                )
+            else:
+                section(f"recovered-{kind}", label, colour)
+                output.extend(
+                    f"\x1b[2;38;5;183m{final}\x1b[0m".encode("utf-8")
+                    if kind == "thinking" else final.encode("utf-8")
+                )
+        stop_reason = safe_agent_ui_text(message.get("stopReason"), 80)
+        console.rpc_last_assistant = {
+            "thinkingCharacters": thinking_characters,
+            "textCharacters": text_characters,
+            "toolCalls": tool_calls,
+            "stopReason": stop_reason,
+        }
+        console.rpc_message_blocks.clear()
+        if stop_reason == "length":
+            section("limit", "RESPONSE LIMIT REACHED", "38;5;214")
+            output.extend(
+                b"The model used the complete response allowance. Send continue to resume this task, "
+                b"or raise Max response before the next hard task."
+            )
         return bytes(output)
     if event_type == "tool_execution_start":
         section(

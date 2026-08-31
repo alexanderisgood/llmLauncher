@@ -37,6 +37,7 @@ MAX_CONTROL_BODY = 64 * 1024
 MAX_RECENT = 32
 MAX_QUEUE = 64
 MAX_METRICS_BUFFER = 1024 * 1024
+MAX_LIMIT_GUARD_BUFFER = 256 * 1024
 CLIENTS = {"chat", "pi", "opencode", "codex"}
 CLIENT_LABELS = {"chat": "Chat", "pi": "Pi", "opencode": "OpenCode", "codex": "Codex"}
 HOP_HEADERS = {
@@ -675,6 +676,144 @@ class ResponseMetrics:
         return dict(self.runtime_stats)
 
 
+class ChatCompletionLimitGuard:
+    """Correct a falsely normal terminal SSE event at the exact output ceiling.
+
+    Some local servers have reported ``finish_reason=stop`` after emitting exactly
+    ``max_tokens``.  Agent clients then treat a reasoning-only, budget-exhausted
+    turn as complete.  The relay holds only the small terminal SSE tail until its
+    authoritative usage event arrives and relabels that boundary as ``length``.
+    Prompt, reasoning, and response text are never retained by this guard.
+    """
+
+    def __init__(self, output_limit: int) -> None:
+        self.output_limit = max(1, int(output_limit))
+        self.pending = bytearray()
+        self.terminal = bytearray()
+        self.terminal_started = False
+        self.disabled = False
+
+    @staticmethod
+    def _split_event(buffer: bytearray) -> bytes | None:
+        endings = []
+        for separator in (b"\n\n", b"\r\n\r\n"):
+            index = buffer.find(separator)
+            if index >= 0:
+                endings.append((index + len(separator), index))
+        if not endings:
+            return None
+        end, _index = min(endings, key=lambda item: item[1])
+        event = bytes(buffer[:end])
+        del buffer[:end]
+        return event
+
+    @staticmethod
+    def _event_value(event: bytes) -> dict[str, Any] | None:
+        payload_lines = []
+        for line in event.splitlines():
+            if line.startswith(b"data:"):
+                payload_lines.append(line[5:].lstrip())
+        payload = b"\n".join(payload_lines).strip()
+        if not payload or payload == b"[DONE]" or len(payload) > MAX_METRICS_BUFFER:
+            return None
+        try:
+            value = json.loads(payload)
+        except (ValueError, UnicodeError, TypeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    @classmethod
+    def _has_terminal_stop(cls, event: bytes) -> bool:
+        value = cls._event_value(event)
+        if value is None:
+            return False
+        for choice in value.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            reason = choice.get("finish_reason", choice.get("finishReason"))
+            if reason is not None:
+                return True
+        return False
+
+    @classmethod
+    def _completion_tokens(cls, tail: bytes) -> int | None:
+        buffer = bytearray(tail)
+        events: list[bytes] = []
+        while buffer:
+            event = cls._split_event(buffer)
+            if event is None:
+                events.append(bytes(buffer))
+                break
+            events.append(event)
+        completion: int | None = None
+        for event in events:
+            value = cls._event_value(event)
+            if value is None:
+                continue
+            usage = value.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            candidate = usage.get("completion_tokens", usage.get("output_tokens"))
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+                completion = candidate
+        return completion
+
+    @staticmethod
+    def _mark_length(tail: bytes) -> bytes:
+        return re.sub(
+            rb'("finish_reason"\s*:\s*)"stop"', rb'\1"length"', tail,
+        )
+
+    def feed(self, chunk: bytes) -> bytes:
+        if not chunk:
+            return b""
+        if self.disabled:
+            return chunk
+        if self.terminal_started:
+            if len(self.terminal) + len(chunk) > MAX_LIMIT_GUARD_BUFFER:
+                released = bytes(self.terminal) + chunk
+                self.terminal.clear()
+                self.disabled = True
+                return released
+            self.terminal.extend(chunk)
+            return b""
+
+        self.pending.extend(chunk)
+        released = bytearray()
+        while True:
+            event = self._split_event(self.pending)
+            if event is None:
+                break
+            if self._has_terminal_stop(event):
+                self.terminal_started = True
+                self.terminal.extend(event)
+                self.terminal.extend(self.pending)
+                self.pending.clear()
+                break
+            released.extend(event)
+        if not self.terminal_started and len(self.pending) > MAX_LIMIT_GUARD_BUFFER:
+            released.extend(self.pending)
+            self.pending.clear()
+            self.disabled = True
+        return bytes(released)
+
+    def finish(self) -> bytes:
+        if self.disabled:
+            return b""
+        if not self.terminal_started:
+            released = bytes(self.pending)
+            self.pending.clear()
+            return released
+        self.terminal.extend(self.pending)
+        self.pending.clear()
+        tail = bytes(self.terminal)
+        self.terminal.clear()
+        completion = self._completion_tokens(tail)
+        if completion is not None and completion >= self.output_limit:
+            return self._mark_length(tail)
+        return tail
+
+
 def transform_chat_request(body: bytes, config: dict[str, Any]) -> bytes:
     value = json.loads(body)
     if not isinstance(value, dict) or value.get("model") != config.get("servedModel"):
@@ -842,6 +981,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         base_path = self.path.split("?", 1)[0]
         bridge_request: BridgeRequest | None = None
+        request_output_limit: int | None = None
         upstream_path = self.path
         if (
             self.config["backend"] == "mtplx"
@@ -866,6 +1006,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 else:
                     body = transform_chat_request(body, self.config)
                     protocol = "chat-completions"
+                    request_output_limit = int(json.loads(body)["max_tokens"])
             except (ValueError, TypeError, json.JSONDecodeError) as error:
                 self.send_json_error(
                     HTTPStatus.BAD_REQUEST,
@@ -910,10 +1051,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
             connection.request(self.command, upstream_path, body=body or None, headers=headers)
             upstream = connection.getresponse()
             status_code = upstream.status
+            upstream_content_type = upstream.getheader("Content-Type") or ""
+            limit_guard = (
+                ChatCompletionLimitGuard(request_output_limit)
+                if (
+                    request_output_limit is not None
+                    and 200 <= upstream.status < 300
+                    and upstream_content_type.lower().startswith("text/event-stream")
+                )
+                else None
+            )
             if request_id:
                 metrics = ResponseMetrics(
                     "chat-completions" if bridge_request is not None else protocol,
-                    upstream.getheader("Content-Type") or "",
+                    upstream_content_type,
                     self.config["backend"],
                 )
             if bridge_request is not None and 200 <= upstream.status < 300:
@@ -966,7 +1117,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             response_started = True
             self.send_response(upstream.status, upstream.reason)
             for key, value in upstream.getheaders():
-                if key.lower() not in HOP_HEADERS:
+                if key.lower() not in HOP_HEADERS and not (
+                    limit_guard is not None and key.lower() == "content-length"
+                ):
                     self.send_header(key, value)
             self.send_header("Connection", "close")
             if request_id:
@@ -981,8 +1134,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     self.scheduler.add_bytes(request_id, len(chunk))
                     if metrics is not None and metrics.feed(chunk):
                         self.scheduler.first_output(request_id)
-                self.wfile.write(chunk)
-                self.wfile.flush()
+                relayed = limit_guard.feed(chunk) if limit_guard is not None else chunk
+                if relayed:
+                    self.wfile.write(relayed)
+                    self.wfile.flush()
+            if limit_guard is not None:
+                terminal = limit_guard.finish()
+                if terminal:
+                    self.wfile.write(terminal)
+                    self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             result = "client-disconnected"
         except (ConnectionAbortedError, OSError, http.client.HTTPException) as error:

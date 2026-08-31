@@ -2878,6 +2878,102 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn(private_text, json.dumps(public))
         self.assertFalse(scheduler.snapshot([])["privacy"]["estimatesTokens"])
 
+    def test_session_relay_corrects_false_stop_at_exact_output_limit(self) -> None:
+        guard = session_proxy.ChatCompletionLimitGuard(16_384)
+        content = b'data: {"choices":[{"delta":{"reasoning_content":"private"}}]}\n\n'
+        terminal = b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+        usage = b'data: {"choices":[],"usage":{"prompt_tokens":4629,"completion_tokens":16384}}\n\n'
+        done = b'data: [DONE]\n\n'
+        self.assertEqual(guard.feed(content[:17]), b"")
+        self.assertEqual(guard.feed(content[17:] + terminal[:11]), content)
+        self.assertEqual(guard.feed(terminal[11:] + usage + done), b"")
+        corrected = guard.finish()
+        self.assertIn(b'"finish_reason":"length"', corrected)
+        self.assertNotIn(b'"finish_reason":"stop"', corrected)
+        self.assertIn(b'"completion_tokens":16384', corrected)
+
+        below_limit = session_proxy.ChatCompletionLimitGuard(16_384)
+        self.assertEqual(below_limit.feed(terminal + usage.replace(b"16384", b"12000") + done), b"")
+        unchanged = below_limit.finish()
+        self.assertIn(b'"finish_reason":"stop"', unchanged)
+        self.assertNotIn(b'"finish_reason":"length"', unchanged)
+
+    def test_session_relay_delivers_corrected_output_limit_to_pi(self) -> None:
+        self.port_patch.stop()
+        self.port_patch_active = False
+        try:
+            upstream_port = REAL_FREE_PORT()
+            relay_port = REAL_FREE_PORT(
+                upstream_port + 1 if upstream_port < 65_535 else 18_079,
+                exclude={upstream_port},
+            )
+        except PermissionError:
+            self.skipTest("this sandbox does not permit loopback sockets")
+
+        recorded: list[dict[str, object]] = []
+
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                recorded.append(json.loads(self.rfile.read(length)))
+                frames = (
+                    b'data: {"choices":[{"index":0,"delta":{"reasoning_content":"bounded"}}]}\n\n'
+                    b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+                    b'data: {"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":8}}\n\n'
+                    b'data: [DONE]\n\n'
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(frames)))
+                self.end_headers()
+                self.wfile.write(frames)
+
+        pi = {"id": str(uuid.uuid4()), "client": "pi", "key": "pi-" + "g" * 32}
+        upstream = ThreadingHTTPServer(("127.0.0.1", upstream_port), Upstream)
+        relay = ThreadingHTTPServer(("127.0.0.1", relay_port), session_proxy.ProxyHandler)
+        relay.config = {
+            "upstreamPort": upstream_port, "upstreamKey": "upstream-" + "h" * 32,
+            "controlKey": "control-" + "i" * 32, "lanes": 1, "outputLimit": 8,
+            "reasoning": "xhigh", "backend": "omlx", "servedModel": "served-model",
+            "templateReasoningEfforts": [],
+        }
+        relay.registry = session_proxy.SurfaceRegistry([pi])
+        relay.scheduler = session_proxy.RequestScheduler(1)
+        upstream.daemon_threads = relay.daemon_threads = True
+        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        relay_thread = threading.Thread(target=relay.serve_forever, daemon=True)
+        upstream_thread.start()
+        relay_thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", relay_port, timeout=3)
+        try:
+            payload = json.dumps({
+                "model": "served-model", "stream": True, "max_tokens": 99,
+                "messages": [{"role": "user", "content": "hard task"}],
+            }).encode()
+            connection.request("POST", "/v1/chat/completions", body=payload, headers={
+                "Authorization": f"Bearer {pi['key']}",
+                "Content-Type": "application/json",
+            })
+            response = connection.getresponse()
+            delivered = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertIsNone(response.getheader("Content-Length"))
+            self.assertIn(b'"finish_reason":"length"', delivered)
+            self.assertNotIn(b'"finish_reason":"stop"', delivered)
+            self.assertEqual(recorded[0]["max_tokens"], 8)
+            self.assertEqual(recorded[0]["stream_options"], {"include_usage": True})
+        finally:
+            connection.close()
+            relay.shutdown()
+            upstream.shutdown()
+            relay.server_close()
+            upstream.server_close()
+            relay_thread.join(timeout=2)
+            upstream_thread.join(timeout=2)
+
     def test_session_relay_prefers_bounded_lmstudio_response_stats(self) -> None:
         metrics = session_proxy.ResponseMetrics(
             "chat-completions", "text/event-stream", "lmstudio",
@@ -3042,6 +3138,7 @@ for line in sys.stdin:
         print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"live thought"}}), flush=True)
         print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":1}}), flush=True)
         print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"live answer"}}), flush=True)
+        print(json.dumps({"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"live thought"},{"type":"text","text":"live answer recovered"}],"stopReason":"stop"}}), flush=True)
         print(json.dumps({"type":"agent_end","messages":[],"willRetry":False}), flush=True)
         print(json.dumps({"type":"agent_settled"}), flush=True)
         if prompt_count == 2:
@@ -3088,6 +3185,7 @@ for line in sys.stdin:
         self.assertIn("live thought", transcript)
         self.assertIn("RESPONSE", transcript)
         self.assertIn("live answer", transcript)
+        self.assertIn("recovered", transcript)
         self.assertNotIn('"streamingBehavior"', transcript, "RPC input echo must be disabled")
         public = console.public()
         self.assertEqual(public["protocol"], "pi-rpc")
@@ -3153,6 +3251,65 @@ for line in sys.stdin:
             })
         self.assertEqual(probe_rpc.call_count, 1)
         self.assertEqual(probe_rpc.call_args.args[1]["type"], "get_state")
+
+    def test_pi_rpc_reconciles_authoritative_message_end_and_explains_incomplete_turns(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start", "message": {"role": "assistant", "content": []},
+        })
+        partial = launcher.pi_rpc_event_output(console, {
+            "type": "message_update", "assistantMessageEvent": {
+                "type": "text_delta", "contentIndex": 1, "delta": "partial ",
+            },
+        })
+        recovered = launcher.pi_rpc_event_output(console, {
+            "type": "message_end", "message": {
+                "role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "private thought"},
+                    {"type": "text", "text": "partial final answer"},
+                ], "stopReason": "length",
+            },
+        })
+        self.assertIn(b"partial ", partial)
+        self.assertIn(b"RECOVERED THINKING", recovered)
+        self.assertIn(b"final answer", recovered)
+        self.assertNotIn(b"partial partial", partial + recovered)
+        self.assertIn(b"RESPONSE LIMIT REACHED", recovered)
+        self.assertIn(b"Send continue", recovered)
+
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start", "message": {"role": "assistant", "content": []},
+        })
+        reasoning_only = launcher.pi_rpc_event_output(console, {
+            "type": "message_end", "message": {
+                "role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "reasoning only"},
+                ], "stopReason": "stop",
+            },
+        })
+        settled = launcher.pi_rpc_event_output(console, {"type": "agent_settled"})
+        self.assertIn(b"RECOVERED THINKING", reasoning_only)
+        self.assertIn(b"NO FINAL ANSWER", settled)
+        self.assertIn(b"Send continue", settled)
+
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start", "message": {"role": "assistant", "content": []},
+        })
+        string_final = launcher.pi_rpc_event_output(console, {
+            "type": "message_end", "message": {
+                "role": "assistant", "content": "string-form final answer", "stopReason": "stop",
+            },
+        })
+        self.assertIn(b"RECOVERED RESPONSE", string_final)
+        self.assertIn(b"string-form final answer", string_final)
 
     def test_pi_rpc_transcript_never_executes_model_supplied_terminal_controls(self) -> None:
         process = mock.Mock()

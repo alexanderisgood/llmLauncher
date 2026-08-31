@@ -38,4 +38,13 @@ export default function launcherProvider(pi) {
       }
     }]
   });
+  pi.on("message_end", (event, ctx) => {
+    const message = event?.message;
+    if (message?.role !== "assistant" || message.stopReason !== "length") return;
+    if (!ctx?.hasUI || typeof ctx.ui?.notify !== "function") return;
+    ctx.ui.notify(
+      "The model used the complete response allowance before it finished. Send “continue” to resume this task, or raise Max response before launching the next hard task.",
+      "warning",
+    );
+  });
 }

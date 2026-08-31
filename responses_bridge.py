@@ -37,6 +37,7 @@ class BridgeRequest:
     by_wire_name: dict[str, ToolTarget]
     by_target: dict[tuple[str | None, str], str]
     model: str
+    output_limit: int
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -323,7 +324,10 @@ def translate_responses_request(body: bytes, config: dict[str, Any]) -> BridgeRe
     unsupported = sorted(key for key, setting in value.items() if key not in handled and setting is not None)
     if unsupported:
         raise ValueError(f"MTPLX Codex bridge cannot preserve Responses fields: {', '.join(unsupported)}")
-    return BridgeRequest(_json_bytes(translated), by_wire, by_target, model)
+    return BridgeRequest(
+        _json_bytes(translated), by_wire, by_target, model,
+        int(value["max_output_tokens"]),
+    )
 
 
 class ChatStreamBridge:
@@ -568,7 +572,11 @@ class ChatStreamBridge:
 
         self.finished = True
         response = {"id": self.response_id, "model": self.request.model, "usage": self._usage()}
-        if self.finish_reason in _LIMIT_REASONS:
+        stopped_at_ceiling = (
+            self.finish_reason == "stop"
+            and int(self.usage.get("output_tokens", 0)) >= self.request.output_limit
+        )
+        if self.finish_reason in _LIMIT_REASONS or stopped_at_ceiling:
             response.update({
                 "status": "incomplete",
                 "incomplete_details": {"reason": "max_output_tokens"},

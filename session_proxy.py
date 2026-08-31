@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from codex_proxy import transform_response_request
+from codex_proxy import ResponsesLimitGuard, transform_response_request
 from responses_bridge import BridgeRequest, ChatStreamBridge, translate_responses_request
 
 
@@ -998,6 +998,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             try:
                 if base_path == "/v1/responses":
                     body = transform_response_request(body, self.config)
+                    request_output_limit = int(json.loads(body)["max_output_tokens"])
                     protocol = "responses"
                     if self.config["backend"] == "mtplx":
                         bridge_request = translate_responses_request(body, self.config)
@@ -1052,15 +1053,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             upstream = connection.getresponse()
             status_code = upstream.status
             upstream_content_type = upstream.getheader("Content-Type") or ""
-            limit_guard = (
-                ChatCompletionLimitGuard(request_output_limit)
-                if (
-                    request_output_limit is not None
-                    and 200 <= upstream.status < 300
-                    and upstream_content_type.lower().startswith("text/event-stream")
-                )
-                else None
-            )
+            is_event_stream = upstream_content_type.lower().startswith("text/event-stream")
+            limit_guard: ChatCompletionLimitGuard | ResponsesLimitGuard | None = None
+            if request_output_limit is not None and 200 <= upstream.status < 300:
+                if protocol == "responses" and bridge_request is None:
+                    limit_guard = ResponsesLimitGuard(request_output_limit, is_event_stream)
+                elif protocol == "chat-completions" and is_event_stream:
+                    limit_guard = ChatCompletionLimitGuard(request_output_limit)
             if request_id:
                 metrics = ResponseMetrics(
                     "chat-completions" if bridge_request is not None else protocol,

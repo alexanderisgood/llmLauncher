@@ -2595,6 +2595,43 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "too small"):
             codex_proxy.transform_response_request(b'{"model":"test","max_output_tokens":1}', base)
 
+    def test_responses_limit_guard_corrects_streamed_and_json_completions(self) -> None:
+        content = (
+            b'event: response.output_text.delta\n'
+            b'data: {"type":"response.output_text.delta","delta":"private"}\n\n'
+        )
+        terminal = (
+            b'event: response.completed\n'
+            b'data: {"type":"response.completed","response":{"id":"resp-local",'
+            b'"status":"completed","usage":{"input_tokens":12,"output_tokens":16384}}}\n\n'
+        )
+        guard = codex_proxy.ResponsesLimitGuard(16_384, streaming=True)
+        self.assertEqual(guard.feed(content[:19]), b"")
+        self.assertEqual(guard.feed(content[19:] + terminal[:21]), content)
+        self.assertEqual(guard.feed(terminal[21:]), b"")
+        corrected = guard.finish()
+        self.assertIn(b"event: response.incomplete", corrected)
+        self.assertIn(b'"type":"response.incomplete"', corrected)
+        self.assertIn(b'"status":"incomplete"', corrected)
+        self.assertIn(b'"reason":"max_output_tokens"', corrected)
+        self.assertNotIn(b"response.completed", corrected)
+
+        below = codex_proxy.ResponsesLimitGuard(16_384, streaming=True)
+        self.assertEqual(below.feed(terminal.replace(b"16384", b"12000")), b"")
+        self.assertIn(b"response.completed", below.finish())
+
+        payload = json.dumps({
+            "id": "resp-json", "object": "response", "status": "completed",
+            "usage": {"input_tokens": 4, "output_tokens": 16_384},
+            "output": [],
+        }).encode()
+        non_stream = codex_proxy.ResponsesLimitGuard(16_384, streaming=False)
+        self.assertEqual(non_stream.feed(payload[:13]), b"")
+        self.assertEqual(non_stream.feed(payload[13:]), b"")
+        corrected_json = json.loads(non_stream.finish())
+        self.assertEqual(corrected_json["status"], "incomplete")
+        self.assertEqual(corrected_json["incomplete_details"], {"reason": "max_output_tokens"})
+
     def test_mtplx_responses_bridge_preserves_messages_namespaces_and_tool_outputs(self) -> None:
         config = {"servedModel": "served-model"}
         request = {
@@ -2700,6 +2737,20 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("response.incomplete", limited_text)
         self.assertIn('"reason":"max_output_tokens"', limited_text)
 
+        false_stop_request = responses_bridge.translate_responses_request(json.dumps({
+            "model": "served-model", "input": "Probe", "stream": True,
+            "max_output_tokens": 4,
+        }).encode(), {"servedModel": "served-model"})
+        false_stop = responses_bridge.ChatStreamBridge(false_stop_request)
+        false_stop_stream = (
+            b'data: {"choices":[{"index":0,"delta":{"reasoning_content":"bounded"},'
+            b'"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":4}}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        false_stop_text = (false_stop.feed(false_stop_stream) + false_stop.finish()).decode()
+        self.assertIn("response.incomplete", false_stop_text)
+        self.assertIn('"reason":"max_output_tokens"', false_stop_text)
+
     def test_codex_guard_streams_sse_without_buffering(self) -> None:
         self.port_patch.stop()
         self.port_patch_active = False
@@ -2765,6 +2816,79 @@ class LauncherTests(unittest.TestCase):
             denied.close()
         finally:
             release.set()
+            connection.close()
+            proxy.shutdown()
+            upstream.shutdown()
+            proxy.server_close()
+            upstream.server_close()
+            proxy_thread.join(timeout=2)
+            upstream_thread.join(timeout=2)
+
+    def test_codex_guard_delivers_incomplete_at_exact_responses_limit(self) -> None:
+        self.port_patch.stop()
+        self.port_patch_active = False
+        try:
+            upstream_port = REAL_FREE_PORT()
+            proxy_port = REAL_FREE_PORT(
+                upstream_port + 1 if upstream_port < 65_535 else 18_079,
+                exclude={upstream_port},
+            )
+        except PermissionError:
+            self.skipTest("this sandbox does not permit loopback sockets")
+        recorded: list[dict] = []
+
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                recorded.append(json.loads(self.rfile.read(length)))
+                frames = (
+                    b'event: response.output_text.delta\n'
+                    b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+                    b'event: response.completed\n'
+                    b'data: {"type":"response.completed","response":{"id":"resp-terminal",'
+                    b'"status":"completed","usage":{"input_tokens":20,"output_tokens":1024}}}\n\n'
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(frames)))
+                self.end_headers()
+                self.wfile.write(frames)
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", upstream_port), Upstream)
+        proxy = ThreadingHTTPServer(("127.0.0.1", proxy_port), codex_proxy.ProxyHandler)
+        proxy.config = {
+            "upstreamPort": upstream_port, "upstreamKey": "upstream-secret",
+            "clientKey": "client-secret", "outputLimit": 1_024,
+            "reasoning": "auto", "backend": "lmstudio",
+            "servedModel": "served-model", "templateReasoningEfforts": [],
+        }
+        upstream.daemon_threads = proxy.daemon_threads = True
+        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        upstream_thread.start()
+        proxy_thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=3)
+        try:
+            payload = json.dumps({
+                "model": "served-model", "stream": True, "max_output_tokens": 99_999,
+                "input": "hard task",
+            }).encode()
+            connection.request("POST", "/v1/responses", body=payload, headers={
+                "Authorization": "Bearer client-secret", "Content-Type": "application/json",
+            })
+            response = connection.getresponse()
+            delivered = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertIsNone(response.getheader("Content-Length"))
+            self.assertIn(b"response.output_text.delta", delivered)
+            self.assertIn(b"response.incomplete", delivered)
+            self.assertNotIn(b"response.completed", delivered)
+            self.assertIn(b'"reason":"max_output_tokens"', delivered)
+            self.assertEqual(recorded[0]["max_output_tokens"], 1_024)
+        finally:
             connection.close()
             proxy.shutdown()
             upstream.shutdown()
@@ -2965,6 +3089,83 @@ class LauncherTests(unittest.TestCase):
             self.assertNotIn(b'"finish_reason":"stop"', delivered)
             self.assertEqual(recorded[0]["max_tokens"], 8)
             self.assertEqual(recorded[0]["stream_options"], {"include_usage": True})
+        finally:
+            connection.close()
+            relay.shutdown()
+            upstream.shutdown()
+            relay.server_close()
+            upstream.server_close()
+            relay_thread.join(timeout=2)
+            upstream_thread.join(timeout=2)
+
+    def test_session_relay_delivers_incomplete_responses_limit_to_hub_codex(self) -> None:
+        self.port_patch.stop()
+        self.port_patch_active = False
+        try:
+            upstream_port = REAL_FREE_PORT()
+            relay_port = REAL_FREE_PORT(
+                upstream_port + 1 if upstream_port < 65_535 else 18_079,
+                exclude={upstream_port},
+            )
+        except PermissionError:
+            self.skipTest("this sandbox does not permit loopback sockets")
+        recorded: list[dict[str, object]] = []
+
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                recorded.append(json.loads(self.rfile.read(length)))
+                frames = (
+                    b'event: response.reasoning_summary_text.delta\n'
+                    b'data: {"type":"response.reasoning_summary_text.delta","delta":"bounded"}\n\n'
+                    b'event: response.completed\n'
+                    b'data: {"type":"response.completed","response":{"id":"resp-hub",'
+                    b'"status":"completed","usage":{"input_tokens":20,"output_tokens":1024}}}\n\n'
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(frames)))
+                self.end_headers()
+                self.wfile.write(frames)
+
+        codex = {"id": str(uuid.uuid4()), "client": "codex", "key": "codex-" + "g" * 32}
+        upstream = ThreadingHTTPServer(("127.0.0.1", upstream_port), Upstream)
+        relay = ThreadingHTTPServer(("127.0.0.1", relay_port), session_proxy.ProxyHandler)
+        relay.config = {
+            "upstreamPort": upstream_port, "upstreamKey": "upstream-" + "h" * 32,
+            "controlKey": "control-" + "i" * 32, "lanes": 1, "outputLimit": 1_024,
+            "reasoning": "auto", "backend": "lmstudio", "servedModel": "served-model",
+            "templateReasoningEfforts": [],
+        }
+        relay.registry = session_proxy.SurfaceRegistry([codex])
+        relay.scheduler = session_proxy.RequestScheduler(1)
+        upstream.daemon_threads = relay.daemon_threads = True
+        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        relay_thread = threading.Thread(target=relay.serve_forever, daemon=True)
+        upstream_thread.start()
+        relay_thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", relay_port, timeout=3)
+        try:
+            payload = json.dumps({
+                "model": "served-model", "stream": True, "max_output_tokens": 99_999,
+                "input": "hard task",
+            }).encode()
+            connection.request("POST", "/v1/responses", body=payload, headers={
+                "Authorization": f"Bearer {codex['key']}", "Content-Type": "application/json",
+            })
+            response = connection.getresponse()
+            delivered = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertIsNone(response.getheader("Content-Length"))
+            self.assertIn(b"response.reasoning_summary_text.delta", delivered)
+            self.assertIn(b"response.incomplete", delivered)
+            self.assertNotIn(b"response.completed", delivered)
+            self.assertEqual(recorded[0]["max_output_tokens"], 1_024)
+            snapshot = relay.scheduler.snapshot(relay.registry.public())
+            self.assertEqual(snapshot["recent"][0]["completionTokens"], 1_024)
         finally:
             connection.close()
             relay.shutdown()

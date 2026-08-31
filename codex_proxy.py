@@ -19,6 +19,7 @@ from responses_bridge import BridgeRequest, ChatStreamBridge, translate_response
 
 
 MAX_BODY = 128 * 1024 * 1024
+MAX_RESPONSE_GUARD_BUFFER = 16 * 1024 * 1024
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade",
@@ -121,6 +122,196 @@ def transform_response_request(body: bytes, config: dict[str, Any]) -> bytes:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+def _response_record(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    nested = value.get("response")
+    if isinstance(nested, dict):
+        return nested
+    if value.get("object") == "response" or "usage" in value:
+        return value
+    return None
+
+
+def correct_completed_response_at_limit(value: Any, output_limit: int) -> bool:
+    """Relabel a falsely completed Responses result at its exact token cap."""
+    if not isinstance(value, dict):
+        return False
+    response = _response_record(value)
+    if response is None:
+        return False
+    event_completed = value.get("type") == "response.completed"
+    if not event_completed and response.get("status") != "completed":
+        return False
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return False
+    output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
+    if (
+        isinstance(output_tokens, bool) or not isinstance(output_tokens, int)
+        or output_tokens < int(output_limit)
+    ):
+        return False
+    if event_completed:
+        value["type"] = "response.incomplete"
+    response["status"] = "incomplete"
+    response["incomplete_details"] = {"reason": "max_output_tokens"}
+    return True
+
+
+class ResponsesLimitGuard:
+    """Hold only the terminal Responses event long enough to verify its usage.
+
+    oMLX-compatible servers can emit ``response.completed`` after consuming the
+    complete ``max_output_tokens`` budget. Codex then settles the turn instead
+    of offering continuation. Earlier output streams immediately; only the
+    terminal event (or one bounded non-stream JSON response) is inspected.
+    """
+
+    def __init__(self, output_limit: int, streaming: bool) -> None:
+        self.output_limit = max(1, int(output_limit))
+        self.streaming = bool(streaming)
+        self.pending = bytearray()
+        self.terminal = bytearray()
+        self.terminal_started = False
+        self.disabled = False
+
+    @staticmethod
+    def _split_event(buffer: bytearray) -> bytes | None:
+        endings = []
+        for separator in (b"\n\n", b"\r\n\r\n"):
+            index = buffer.find(separator)
+            if index >= 0:
+                endings.append((index + len(separator), index))
+        if not endings:
+            return None
+        end, _index = min(endings, key=lambda item: item[1])
+        event = bytes(buffer[:end])
+        del buffer[:end]
+        return event
+
+    @staticmethod
+    def _event_value(event: bytes) -> dict[str, Any] | None:
+        payload_lines = []
+        for line in event.splitlines():
+            if line.startswith(b"data:"):
+                payload_lines.append(line[5:].lstrip())
+        payload = b"\n".join(payload_lines).strip()
+        if not payload or payload == b"[DONE]" or len(payload) > MAX_RESPONSE_GUARD_BUFFER:
+            return None
+        try:
+            value = json.loads(payload)
+        except (ValueError, UnicodeError, TypeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    @classmethod
+    def _is_completed_event(cls, event: bytes) -> bool:
+        value = cls._event_value(event)
+        if value is None:
+            return False
+        response = _response_record(value)
+        return bool(
+            value.get("type") == "response.completed"
+            or (response is not None and response.get("status") == "completed")
+        )
+
+    def _correct_event(self, event: bytes) -> bytes:
+        value = self._event_value(event)
+        if value is None or not correct_completed_response_at_limit(value, self.output_limit):
+            return event
+        newline = b"\r\n" if b"\r\n" in event else b"\n"
+        output = []
+        data_written = False
+        for line in event.splitlines():
+            if line.startswith(b"event:"):
+                output.append(b"event: response.incomplete")
+            elif line.startswith(b"data:"):
+                if not data_written:
+                    output.append(
+                        b"data: " + json.dumps(
+                            value, ensure_ascii=False, separators=(",", ":"),
+                        ).encode("utf-8")
+                    )
+                    data_written = True
+            else:
+                output.append(line)
+        return newline.join(output) + newline + newline
+
+    def feed(self, chunk: bytes) -> bytes:
+        if not chunk:
+            return b""
+        if self.disabled:
+            return chunk
+        if not self.streaming:
+            if len(self.pending) + len(chunk) > MAX_RESPONSE_GUARD_BUFFER:
+                released = bytes(self.pending) + chunk
+                self.pending.clear()
+                self.disabled = True
+                return released
+            self.pending.extend(chunk)
+            return b""
+        if self.terminal_started:
+            if len(self.terminal) + len(chunk) > MAX_RESPONSE_GUARD_BUFFER:
+                released = bytes(self.terminal) + chunk
+                self.terminal.clear()
+                self.disabled = True
+                return released
+            self.terminal.extend(chunk)
+            return b""
+
+        self.pending.extend(chunk)
+        released = bytearray()
+        while True:
+            event = self._split_event(self.pending)
+            if event is None:
+                break
+            if self._is_completed_event(event):
+                self.terminal_started = True
+                self.terminal.extend(event)
+                self.terminal.extend(self.pending)
+                self.pending.clear()
+                break
+            released.extend(event)
+        if not self.terminal_started and len(self.pending) > MAX_RESPONSE_GUARD_BUFFER:
+            released.extend(self.pending)
+            self.pending.clear()
+            self.disabled = True
+        return bytes(released)
+
+    def finish(self) -> bytes:
+        if self.disabled:
+            return b""
+        if not self.streaming:
+            payload = bytes(self.pending)
+            self.pending.clear()
+            try:
+                value = json.loads(payload)
+            except (ValueError, UnicodeError, TypeError):
+                return payload
+            if correct_completed_response_at_limit(value, self.output_limit):
+                return json.dumps(
+                    value, ensure_ascii=False, separators=(",", ":"),
+                ).encode("utf-8")
+            return payload
+        if not self.terminal_started:
+            released = bytes(self.pending)
+            self.pending.clear()
+            return released
+        self.terminal.extend(self.pending)
+        self.pending.clear()
+        source = bytearray(self.terminal)
+        self.terminal.clear()
+        output = bytearray()
+        while source:
+            event = self._split_event(source)
+            if event is None:
+                output.extend(source)
+                break
+            output.extend(self._correct_event(event))
+        return bytes(output)
+
+
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
     server_version = "LLMLauncherCodexGuard/1"
@@ -189,6 +380,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         base_path = self.path.split("?", 1)[0]
         bridge_request: BridgeRequest | None = None
+        request_output_limit: int | None = None
         upstream_path = self.path
         if config["backend"] == "mtplx" and base_path.startswith("/v1/responses") and base_path != "/v1/responses":
             self.send_json_error(
@@ -199,6 +391,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if self.command == "POST" and base_path == "/v1/responses":
             try:
                 body = transform_response_request(body, config)
+                request_output_limit = int(json.loads(body)["max_output_tokens"])
                 if config["backend"] == "mtplx":
                     bridge_request = translate_responses_request(body, config)
                     body = bridge_request.body
@@ -255,10 +448,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     self.wfile.write(translated)
                     self.wfile.flush()
                 return
+            upstream_content_type = upstream.getheader("Content-Type") or ""
+            limit_guard = (
+                ResponsesLimitGuard(
+                    request_output_limit,
+                    upstream_content_type.lower().startswith("text/event-stream"),
+                )
+                if request_output_limit is not None and 200 <= upstream.status < 300
+                else None
+            )
             response_started = True
             self.send_response(upstream.status, upstream.reason)
             for key, value in upstream.getheaders():
-                if key.lower() not in HOP_HEADERS:
+                if key.lower() not in HOP_HEADERS and not (
+                    limit_guard is not None and key.lower() == "content-length"
+                ):
                     self.send_header(key, value)
             self.send_header("Connection", "close")
             self.end_headers()
@@ -266,8 +470,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 chunk = upstream.read1(16 * 1024)
                 if not chunk:
                     break
-                self.wfile.write(chunk)
-                self.wfile.flush()
+                relayed = limit_guard.feed(chunk) if limit_guard is not None else chunk
+                if relayed:
+                    self.wfile.write(relayed)
+                    self.wfile.flush()
+            if limit_guard is not None:
+                terminal = limit_guard.finish()
+                if terminal:
+                    self.wfile.write(terminal)
+                    self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass
         except (OSError, http.client.HTTPException) as error:

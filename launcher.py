@@ -168,24 +168,24 @@ RUNTIME_PROMOTION_LOCK = threading.Lock()
 RUNTIME_UPDATE_CATALOG: dict[str, dict[str, Any]] = {
     "stable": {
         "runtime": "omlx", "channel": "stable", "label": "Stable",
-        "version": "0.6.2", "tag": "v0.6.2",
-        "commit": "f2d36f3d25a7e7a2401a92eecafc28b8f8968ec7",
-        "releasedAt": "2026-08-18T16:28:00Z", "preview": False,
-        "fileName": "omlx-0.6.2-cp311-cp311-macosx_15_0_universal2.whl",
-        "url": "https://github.com/jundot/omlx/releases/download/v0.6.2/omlx-0.6.2-cp311-cp311-macosx_15_0_universal2.whl",
-        "sha256": "4be2a3ac7c3a08f2f2a828e618227d4932c04cdb0e501203e70864126a8d3c8e",
-        "sizeLabel": "35.8 MB",
-        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.2",
-        "summary": "Current stable release with the built-in ANE/GPU split tuner and 0.6.2 hotfixes.",
+        "version": "0.6.4", "tag": "v0.6.4",
+        "commit": "1d7826185c5b5b69b38b27cbe57d7597b7551fd7",
+        "releasedAt": "2026-08-29T17:05:15Z", "preview": False,
+        "fileName": "omlx-0.6.4-cp311-cp311-macosx_15_0_universal2.whl",
+        "url": "https://github.com/jundot/omlx/releases/download/v0.6.4/omlx-0.6.4-cp311-cp311-macosx_15_0_universal2.whl",
+        "sha256": "26213a3962010367356a5a1954e0912b1d04752f563fe29c249a5ab510c02d4c",
+        "sizeLabel": "36.3 MB",
+        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.4",
+        "summary": "Current stable release with faster Qwen3.8 Flash-Next, safer long decode, and repaired prefix/speculative state.",
         "directSources": [
             {"name": "mlx-lm", "repository": "ml-explore/mlx-lm", "commit": "ab1806e8f5d6aa035973af194a1b9198ab4754dc"},
             {"name": "mlx-embeddings", "repository": "Blaizzy/mlx-embeddings", "commit": "32981fa4e8064ed664b52071789dd18271fe4206"},
             {"name": "mlx-vlm", "repository": "Blaizzy/mlx-vlm", "commit": "78b96eb5462141447b9a6b4943ef553891da56dd"},
-            {"name": "dflash-mlx", "repository": "jundot/dflash-mlx", "commit": "2eb169f461ad6b3c5b58e29025f8afb07f23cf3e"},
+            {"name": "dflash-mlx", "repository": "jundot/dflash-mlx", "commit": "c55324c86540c369f6818a0f47eae544d405475b"},
         ],
     },
     "preview": {
-        "runtime": "omlx", "channel": "preview", "label": "Preview",
+        "runtime": "omlx", "channel": "preview", "label": "Previous preview",
         "version": "0.6.3rc3", "tag": "v0.6.3rc3",
         "commit": "8662ad0998985a73dc04f2542cf8afb22600fa4f",
         "releasedAt": "2026-08-24T18:27:30Z", "preview": True,
@@ -194,7 +194,7 @@ RUNTIME_UPDATE_CATALOG: dict[str, dict[str, Any]] = {
         "sha256": "53578cc8e8a1bba3600363bc3273ace3f36c56f3b6516a7862665c66b301175f",
         "sizeLabel": "37.7 MB",
         "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3",
-        "summary": "Release candidate with restored Lightning MTP, fused Qwen ANE prefill, and cache/reliability fixes.",
+        "summary": "Retained audited 0.6.3 preview for side-by-side rollback; stable 0.6.4 is the current track.",
         "directSources": [
             {"name": "mlx-lm", "repository": "ml-explore/mlx-lm", "commit": "ab1806e8f5d6aa035973af194a1b9198ab4754dc"},
             {"name": "mlx-embeddings", "repository": "Blaizzy/mlx-embeddings", "commit": "32981fa4e8064ed664b52071789dd18271fe4206"},
@@ -204,30 +204,31 @@ RUNTIME_UPDATE_CATALOG: dict[str, dict[str, Any]] = {
     },
 }
 RUNTIME_RELEASE_CATALOG_VERSION = 1
-RUNTIME_RELEASE_CATALOG_AUDITED_AT = "2026-08-25"
+RUNTIME_RELEASE_CATALOG_AUDITED_AT = "2026-08-31"
 RUNTIME_RELEASE_CATALOG: dict[str, dict[str, Any]] = {
     "omlx": {
-        "version": "0.6.3rc3", "displayVersion": "0.6.3rc3",
-        "channel": "preview", "releasedAt": "2026-08-24T18:27:30Z",
-        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3",
-        "summary": "Current release candidate with restored Lightning MTP, fused Qwen ANE prefill, and long-session cache fixes.",
+        "version": "0.6.4", "displayVersion": "0.6.4",
+        "channel": "stable", "releasedAt": "2026-08-29T17:05:15Z",
+        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.4",
+        "summary": "Current stable release with Qwen3.8 Flash-Next acceleration and long-session correctness fixes.",
         "highlights": [
-            {"value": "MTP + DFlash", "label": "decode paths"},
-            {"value": "Fused ANE", "label": "Qwen prefill"},
-            {"value": "Preview", "label": "release channel"},
+            {"value": "+14.6%", "label": "reported 32K Flash-Next TG"},
+            {"value": "QSA", "label": "exact sparse acceleration"},
+            {"value": "Stable", "label": "release channel"},
         ],
         "workflow": [
-            "Keep the checksum-verified side-by-side copy until a final 0.6.3 release is audited.",
-            "Compare rc3 with the selected copy through Measured Runtime Promotion before switching.",
+            "Install the checksum-verified 0.6.4 wheel beside the selected copy; nothing switches automatically.",
+            "Compare 0.6.4 with the selected copy through Measured Runtime Promotion before preferring it for speed.",
         ],
     },
     "lms": {
-        "version": "0.4.21", "displayVersion": "0.4.21+2",
-        "channel": "stable", "releasedAt": "2026-08-12T00:00:00Z",
-        "releaseUrl": "https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.21",
-        "summary": "Current stable LM Studio app release; engine packs continue to update independently.",
+        "version": "0.4.23", "displayVersion": "0.4.23+1",
+        "channel": "stable", "releasedAt": "2026-08-28T00:00:00Z",
+        "releaseUrl": "https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23",
+        "summary": "Current stable LM Studio app release with improved Qwen3.8 Flash-Next reliability.",
         "highlights": [
-            {"value": "0.4.21+2", "label": "stable app"},
+            {"value": "0.4.23+1", "label": "stable app"},
+            {"value": "Flash-Next", "label": "reliability update"},
             {"value": "Separate", "label": "engine packs"},
         ],
         "workflow": [
@@ -236,30 +237,54 @@ RUNTIME_RELEASE_CATALOG: dict[str, dict[str, Any]] = {
         ],
     },
     "mtplx": {
-        "version": "2.9.2", "displayVersion": "2.9.2",
-        "channel": "stable", "releasedAt": "2026-08-25T11:47:00Z",
-        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.9.2",
+        "version": "2.10.1", "displayVersion": "2.10.1",
+        "channel": "stable", "releasedAt": "2026-08-30T10:43:56Z",
+        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.10.1",
         "summary": (
-            "Agent transcripts now pass through by default, greedy decode is faster below "
-            "12K context, and the model forge no longer collapses draft acceptance."
+            "Flash-Next gains sparse long-prefill acceleration, reasoning-only agent turns "
+            "no longer return empty answers, and M2/M3/96 GB compatibility is repaired."
         ),
         "highlights": [
-            {"value": "Passthrough", "label": "agent transcripts"},
-            {"value": "+2.5–9.8%", "label": "reported greedy decode"},
-            {"value": "Forge fix", "label": "draft acceptance"},
+            {"value": "−35%", "label": "reported 98K Flash prefill"},
+            {"value": "Visible answer", "label": "reasoning-only turns"},
+            {"value": "96 GB", "label": "Flash-Next admission"},
         ],
-        "advisories": [{
-            "affectedVersion": "2.9.0",
-            "headline": "Re-test Turbo after updating",
-            "detail": (
-                "MTPLX says one 2.9.0 Turbo fast-path flag was runtime-dead. "
-                "Legacy 2.9.0 Turbo evidence is retained as history but cannot choose a fastest route."
-            ),
-        }],
+        "advisories": [
+            {
+                "affectedVersion": "2.9.0",
+                "headline": "Re-test Turbo after updating",
+                "detail": (
+                    "MTPLX says one 2.9.0 Turbo fast-path flag was runtime-dead. "
+                    "Legacy 2.9.0 Turbo evidence is retained as history but cannot choose a fastest route."
+                ),
+            },
+            {
+                "affectedVersion": "2.10.0",
+                "headline": "Use 2.10.1 for agent and Flash-Next fixes",
+                "detail": (
+                    "MTPLX 2.10.1 fixes tool-enabled turns that ended in reasoning and returned "
+                    "an empty answer, plus Flash-Next memory and compatibility defects."
+                ),
+            },
+        ],
         "workflow": [
-            "Keep representative 2.8.3 or 2.9.1 evidence, but skip affected 2.9.0 Turbo results.",
+            "Keep valid older evidence as history, but never reuse it as proof for the changed 2.10.1 runtime.",
             "Update the app-managed engine through MTPLX's signed app updater or official DMG.",
-            "Run mtplx models --check, then repeat the same local benchmark on 2.9.2 before preferring it as fastest.",
+            "Run mtplx models --check, then repeat the same local benchmark on 2.10.1 before preferring it for TPS.",
+        ],
+    },
+    "swiftlm": {
+        "version": "b709", "displayVersion": "b709",
+        "channel": "stable", "releasedAt": "2026-08-31T15:48:40Z",
+        "releaseUrl": "https://github.com/SharpAI/SwiftLM/releases/tag/b709",
+        "summary": "Current signed Apple-Silicon build with Aegis shutdown signalling and repaired benchmark/submodule pins.",
+        "highlights": [
+            {"value": "b709", "label": "signed build"},
+            {"value": "Aegis v1", "label": "clean shutdown"},
+        ],
+        "workflow": [
+            "Install the signed arm64 archive from the official release and keep mlx.metallib beside the binary.",
+            "Calibrate only accepted source-bound SSD model families; b709 still does not advertise Qwen3.8 Flash-Next.",
         ],
     },
 }
@@ -342,10 +367,10 @@ BENCHMARK_SUITES = {
     },
 }
 DFLASH2_MINIMUM_RUNTIME = "0.6.3rc1"
-DFLASH2_RECOMMENDED_RUNTIME = "0.6.3rc3"
+DFLASH2_RECOMMENDED_RUNTIME = "0.6.4"
 DFLASH2_DRAFT_REPO = "z-lab/Qwen3.8-27B-DFlash2"
 DFLASH2_DRAFT_URL = "https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2"
-DFLASH2_RELEASE_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3"
+DFLASH2_RELEASE_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.4"
 DFLASH2_DRAFT_SIZE_LABEL = "3.85 GB"
 DFLASH2_DRAFT_REVISION = "ac04198556d7e8867853cbc356807b969f311b05"
 DFLASH2_DRAFT_BYTES = 3_850_000_000
@@ -355,7 +380,7 @@ SETUP_DOWNLOAD_RESERVE_BYTES = 2 * 1024**3
 ANE_TUNER_STORE_VERSION = 1
 ANE_TUNER_MAX_RECORDS = 32
 ANE_TUNER_MINIMUM_RUNTIME = "0.6.3rc2"
-ANE_TUNER_RELEASE_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3"
+ANE_TUNER_RELEASE_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.4"
 ANE_TUNER_SEQUENCE_LENGTH = 2_048
 ANE_TUNER_REPEATS = 2
 ANE_TUNER_RESERVE_BYTES = 8 * 1024**3
@@ -381,6 +406,7 @@ OMLX_ACTIVITY_MAX_RESPONSE = 512 * 1024
 OMLX_ADMIN_SESSION_MAX = 4_096
 MTPLX_FLIGHT_TELEMETRY_VERSION = 1
 MTPLX_FLIGHT_MINIMUM_RUNTIME = "2.9.1"
+MTPLX_AGENT_RECOMMENDED_RUNTIME = "2.10.1"
 MTPLX_FLIGHT_MAX_RESPONSE = 256 * 1024
 AGENT_CONSOLE_VERSION = 3
 AGENT_CONSOLE_MAX_BUFFER = 2 * 1024 * 1024
@@ -396,7 +422,7 @@ SESSION_IDLE_TIMEOUT_CHOICES = {0, 5, 15, 30, 60, 120}
 SESSION_RUNTIME_BASE_RESERVE_BYTES = 3 * 1024**3
 SESSION_OS_RESERVE_MIN_BYTES = 4 * 1024**3
 SESSION_OS_RESERVE_FRACTION = 0.10
-OMLX_INSTALL_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3"
+OMLX_INSTALL_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.4"
 OMLX_INSTALL_DOCS_URL = "https://github.com/jundot/omlx#install"
 LMSTUDIO_RUNTIME_DOCS_URL = "https://lmstudio.ai/docs/cli/runtime/runtime"
 LMSTUDIO_UPDATE_DOCS_URL = "https://lmstudio.ai/docs/app/offline"
@@ -1317,7 +1343,7 @@ def omlx_supports_dflash2(version_text: str) -> bool:
 
 
 def omlx_has_recommended_dflash2_runtime(version_text: str) -> bool:
-    """rc3 is the currently audited DFlash/Lightning-MTP preview build."""
+    """0.6.4 is the current audited stable DFlash/Lightning-MTP build."""
     return omlx_version_at_least(version_text, DFLASH2_RECOMMENDED_RUNTIME)
 
 
@@ -1337,14 +1363,22 @@ def semantic_version_key(text: str) -> tuple[int, int, int, int]:
     return parsed_omlx_version(text) or (-1, -1, -1, -1)
 
 
+def runtime_release_key(runtime: str, text: str) -> tuple[int, int, int, int]:
+    """Parse the audited version scheme used by one runtime, or fail closed."""
+    if runtime == "swiftlm":
+        match = re.search(r"(?<![A-Za-z0-9])b(\d+)(?!\d)", text, re.IGNORECASE)
+        return (int(match.group(1)), 0, 0, 1_000_000) if match else (-1, -1, -1, -1)
+    return semantic_version_key(text)
+
+
 def audited_runtime_release(runtime: str, installed_version: str | None) -> dict[str, Any]:
     """Compare one local runtime with the launcher's last audited official release."""
     release = copy.deepcopy(RUNTIME_RELEASE_CATALOG.get(runtime) or {})
     if not release:
         raise ValueError("No audited release catalog exists for this runtime.")
     installed = str(installed_version or "").strip()[:160]
-    current_key = semantic_version_key(installed)
-    release_key = semantic_version_key(str(release.get("version") or ""))
+    current_key = runtime_release_key(runtime, installed)
+    release_key = runtime_release_key(runtime, str(release.get("version") or ""))
     if not installed:
         state = "not-installed"
         label = "Not installed"
@@ -1379,7 +1413,9 @@ def audited_runtime_release(runtime: str, installed_version: str | None) -> dict
         for item in release.get("advisories", [])
         if isinstance(item, dict)
         and current_key != (-1, -1, -1, -1)
-        and current_key == semantic_version_key(str(item.get("affectedVersion") or ""))
+        and current_key == runtime_release_key(
+            runtime, str(item.get("affectedVersion") or ""),
+        )
     ), None)
     release.update({
         "schemaVersion": RUNTIME_RELEASE_CATALOG_VERSION,
@@ -1402,17 +1438,18 @@ def launch_runtime_advisory(backend: str, model: dict[str, Any]) -> dict[str, An
     version_label = version_match.group(0) if version_match else runtime_version
     if (
         backend == "mtplx"
-        and semantic_version_key(runtime_version) < semantic_version_key(MTPLX_FLIGHT_MINIMUM_RUNTIME)
+        and semantic_version_key(runtime_version) < semantic_version_key(MTPLX_AGENT_RECOMMENDED_RUNTIME)
         and semantic_version_key(runtime_version) != (-1, -1, -1, -1)
     ):
         return {
             "id": "mtplx-long-agent-update",
             "level": "warning",
-            "title": "Update MTPLX for long agent sessions",
+            "title": "Update MTPLX for complete agent answers",
             "detail": (
-                f"MTPLX {version_label} is selected. Upstream {MTPLX_FLIGHT_MINIMUM_RUNTIME} "
-                "fixes a long-agent truncation and crash near 19K tokens; open Tools → Runtimes "
-                "before relying on a long Pi, OpenCode, or Codex session."
+                f"MTPLX {version_label} is selected. Upstream {MTPLX_AGENT_RECOMMENDED_RUNTIME} "
+                "includes the long-session fixes and now continues a tool-enabled turn that ends "
+                "inside reasoning until it has a visible answer. Open Tools → Runtimes before "
+                "relying on a hard Pi, OpenCode, or Codex task."
             ),
             "releaseUrl": RUNTIME_RELEASE_CATALOG["mtplx"]["releaseUrl"],
         }
@@ -2055,7 +2092,7 @@ def runtime_inventory() -> dict[str, Any]:
                     "The documented Homebrew custom-kernel path tracks HEAD and needs full Xcode."
                 ),
                 "primaryUrl": OMLX_INSTALL_URL,
-                "primaryLabel": "Open official oMLX rc3 release",
+                "primaryLabel": f"Open official oMLX {omlx_release['displayVersion']} release",
                 "docsUrl": OMLX_INSTALL_DOCS_URL,
                 "developerCommand": "brew install omlx --HEAD --with-custom-kernel",
                 "developerCommandReady": bool(metal.get("ready")),
@@ -2112,10 +2149,11 @@ def runtime_inventory() -> dict[str, Any]:
                     "Prefer the app-managed engine and inspect duplicate CLI installs separately."
                 ),
                 "detail": (
-                    "Upstream says 2.9.2 makes agent transcripts passthrough by default, enables a "
-                    "bounded greedy-draft fast path below 12K context, and fixes forge output whose "
-                    "draft acceptance had collapsed. Preserve valid older evidence, then measure "
-                    "2.9.2 locally before calling it faster on this Mac."
+                    "Upstream says 2.10.1 adds sparse Flash-Next prefill beyond 32K on supported "
+                    "M4/M5 GPUs, fixes empty answers after reasoning-only tool turns, and repairs "
+                    "Flash-Next admission on 96 GB plus M2/M3 launch compatibility. Preserve valid "
+                    "older evidence as history, then measure 2.10.1 locally before calling it faster "
+                    "on this Mac."
                     if mtplx_release["updateAvailable"] else
                     "The MTPLX app refreshes its managed engine; a Homebrew or user CLI can remain at a different version without affecting the selected path."
                 ),
@@ -2144,37 +2182,66 @@ def runtime_inventory() -> dict[str, Any]:
         candidates = runtime_candidate_details(runtime_id)
         selected = next((item for item in candidates if item["selected"]), None)
         installed_runtime = selected is not None
+        release = (
+            audited_runtime_release(
+                runtime_id, str((selected or {}).get("version") or ""),
+            )
+            if runtime_id in RUNTIME_RELEASE_CATALOG else None
+        )
+        runtime_level = (
+            "blocked" if not installed_runtime else
+            "advisory" if release and release.get("needsReview") else
+            "ready"
+        )
+        checks = [
+            {
+                "label": "SSD-streaming server",
+                "ready": installed_runtime,
+                "detail": str(selected.get("version") if selected else "Not installed"),
+            },
+            {
+                "label": "Exact model contract",
+                "ready": installed_runtime,
+                "detail": detail,
+            },
+            {"label": "Platform", "ready": True, "detail": minimum},
+        ]
+        if release:
+            checks.insert(1, {
+                "label": "Audited upstream release",
+                "ready": bool(release.get("catalogCurrent")),
+                "advisory": installed_runtime,
+                "detail": str(release.get("detail") or ""),
+            })
         runtimes.append({
             "id": runtime_id,
             "label": label,
-            "level": "ready" if installed_runtime else "blocked",
+            "level": runtime_level,
             "headline": (
+                f"{label} {release['displayVersion']} is available; the selected copy needs review."
+                if installed_runtime and release and release.get("updateAvailable") else
                 f"{label} is ready for accepted SSD-streamed models."
                 if installed_runtime else
                 f"{label} is optional and not installed."
             ),
             "selected": selected,
             "candidates": candidates,
-            "checks": [
-                {
-                    "label": "SSD-streaming server",
-                    "ready": installed_runtime,
-                    "detail": str(selected.get("version") if selected else "Not installed"),
-                },
-                {
-                    "label": "Exact model contract",
-                    "ready": installed_runtime,
-                    "detail": detail,
-                },
-                {"label": "Platform", "ready": True, "detail": minimum},
-            ],
+            "release": release,
+            "checks": checks,
             "update": {
                 "mode": "manual-review", "automatic": False,
-                "headline": f"Install and update {label} from its upstream source.",
+                "headline": (
+                    f"Install or update to audited {label} {release['displayVersion']}."
+                    if release else f"Install and update {label} from its upstream source."
+                ),
                 "detail": "The launcher never downloads runtimes or very large model weights while inspecting this optional lane.",
-                "primaryUrl": SSD_STREAMING_RUNTIME_URLS[runtime_id],
-                "primaryLabel": f"Open {label} source",
+                "primaryUrl": str((release or {}).get("releaseUrl") or SSD_STREAMING_RUNTIME_URLS[runtime_id]),
+                "primaryLabel": (
+                    f"Open {label} {release['displayVersion']} release"
+                    if release else f"Open {label} source"
+                ),
                 "docsUrl": SSD_STREAMING_RUNTIME_URLS[runtime_id],
+                "release": release,
                 "rollback": "Runtime selection changes only the executable used for new sessions; model files are not rewritten.",
             },
         })
@@ -9358,7 +9425,7 @@ def accelerated_model_alternatives(
 def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> dict[str, Any]:
     """Choose an engine only when a complete, like-for-like local matrix proves it."""
     current = optimal_request(payload, models)
-    preference = str(payload.get("enginePreference") or "fastest")
+    preference = str(payload.get("enginePreference") or "throughput")
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported measured engine preference.")
     current_backend = str(current["backend"])
@@ -9734,7 +9801,7 @@ def _load_launch_profiles_unlocked() -> list[dict[str, Any]]:
         profile_id = _profile_identifier(raw.get("id"))
         name = _profile_text(raw.get("name"), LAUNCH_PROFILE_NAME_MAX).strip()
         policy = str(raw.get("enginePolicy") or "")
-        preference = str(raw.get("enginePreference") or "fastest")
+        preference = str(raw.get("enginePreference") or "throughput")
         if (
             not profile_id or profile_id in seen or not name
             or policy not in {"fixed", "measured"}
@@ -10113,7 +10180,7 @@ def save_launch_profile(payload: dict[str, Any], models: list[dict[str, Any]]) -
     policy = str(payload.get("enginePolicy") or "fixed")
     if policy not in {"fixed", "measured"}:
         raise ValueError("Choose a fixed engine or an auto measured engine profile.")
-    preference = str(payload.get("enginePreference") or "fastest")
+    preference = str(payload.get("enginePreference") or "throughput")
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported measured engine goal.")
     request = validated_launch_profile_request(payload.get("request"), models)
@@ -10561,7 +10628,7 @@ def benchmark_history_request(
     suite = BENCHMARK_SUITES.get(suite_name)
     if not suite:
         raise ValueError("Choose a Quick, Standard, Thorough, or Agentic Route Lab suite.")
-    preference = str(payload.get("enginePreference") or "fastest")
+    preference = str(payload.get("enginePreference") or "throughput")
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported benchmark history goal.")
     eligible: list[str] = []
@@ -13172,7 +13239,7 @@ def validated_engine_shootout_request(
     payload: dict[str, Any], models: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Lock one visible contract across every compatible installed engine."""
-    preference = str(payload.get("enginePreference") or "fastest")
+    preference = str(payload.get("enginePreference") or "throughput")
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported Engine Shootout decision goal.")
     model_id = str(payload.get("modelId") or "")
@@ -13318,7 +13385,7 @@ def calibration_plan(
     suite = BENCHMARK_SUITES.get(suite_name)
     if not suite:
         raise ValueError("Choose a Quick, Standard, Thorough, or Agentic calibration workload.")
-    preference = str(payload.get("enginePreference") or "fastest")
+    preference = str(payload.get("enginePreference") or "throughput")
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported calibration goal.")
     model = next(item for item in models if item.get("id") == visible_request["modelId"])
@@ -19393,8 +19460,8 @@ class BenchmarkManager:
                 "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
                 "outputWarning": str(workload_comparison.get("warning") or ""),
             }
-        selected_preference = str(shootout["request"].get("enginePreference") or "fastest")
-        public_decision = profiles.get(selected_preference) or profiles["fastest"]
+        selected_preference = str(shootout["request"].get("enginePreference") or "throughput")
+        public_decision = profiles.get(selected_preference) or profiles["throughput"]
         return {
             "id": shootout["id"], "kind": "engine-shootout",
             "modelId": shootout["modelId"], "model": shootout["model"],

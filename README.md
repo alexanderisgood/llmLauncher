@@ -16,6 +16,7 @@ Its primary in-memory engines are **oMLX**, **LM Studio**, and **MTPLX**. Oversi
 - Launches one model into Pi, OpenCode, Codex, or local Chat without rewriting those tools' permanent configuration.
 - Preserves context, output, reasoning, sampling, and KV-cache choices across the complete route.
 - Measures like-for-like engine and accelerator performance before claiming a fastest option.
+- Defaults every automatic engine decision to correctness-verified **generation TPS**, including older profiles and API requests that do not carry a goal; total workload, first response, memory, and thermal rankings remain explicit alternatives.
 - Exposes a separate **Huge models on SSD** lane for supported MoEs, with source-bound SwiftLM/Mference calibration rather than comparing unrelated repacks by filename.
 - Keeps cooling user-owned: optimisation and Calibration use automatic cooling by default and never select maximum fans without an explicit choice.
 - Supports streaming thinking, message queues, history, branching, TPS, warm-route reuse, and resumable local Chat.
@@ -23,6 +24,8 @@ Its primary in-memory engines are **oMLX**, **LM Studio**, and **MTPLX**. Oversi
 - Includes a polished light **Frost** appearance plus Focused progressive disclosure for a calmer Mac-style interface; the Hub Console remains a black terminal workspace in every appearance.
 - Keeps generated routes on authenticated loopback addresses and stops only launcher-owned processes.
 - Provides profiles, Session Sets, model acquisition, runtime inspection, route checks, and capacity controls.
+
+Runtime Manager uses a reviewable release snapshot rather than an unchecked “latest” query. The snapshot audited on 31 August 2026 covers [oMLX 0.6.4](https://github.com/jundot/omlx/releases/tag/v0.6.4), [LM Studio 0.4.23 Build 1](https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23), [MTPLX 2.10.1](https://github.com/youssofal/MTPLX/releases/tag/v2.10.1), and optional [SwiftLM b709](https://github.com/SharpAI/SwiftLM/releases/tag/b709). A newer release is only a candidate: it does not replace a selected runtime or inherit old speed evidence.
 
 The experimental FreeToken integration remains implemented and tested but is hidden behind an off-by-default UI feature flag while the native route matures.
 

@@ -117,6 +117,7 @@ CONTROLLER_FRESHNESS_REQUIRED_PATHS = frozenset({
     "/api/runtime/promotion/start",
     "/api/runtime/promotion/apply",
     "/api/runtime/select",
+    "/api/runtime/open",
     "/api/freetoken/connect",
     "/api/freetoken/disconnect",
     "/api/route-check/start",
@@ -1020,6 +1021,25 @@ RUNTIME_CANDIDATE_SPECS: dict[str, tuple[tuple[str, str, str], ...]] = {
     ),
 }
 
+RUNTIME_APP_SPECS: dict[str, dict[str, Any]] = {
+    "lms": {
+        "label": "LM Studio",
+        "bundleIds": ("ai.elementlabs.lmstudio",),
+        "paths": ("/Applications/LM Studio.app", "~/Applications/LM Studio.app"),
+    },
+    "mtplx": {
+        "label": "MTPLX",
+        "bundleIds": ("com.youssofal.mtplx",),
+        "paths": ("/Applications/MTPLX.app", "~/Applications/MTPLX.app"),
+    },
+    "whallm": {
+        "label": "Whallm",
+        "bundleIds": ("com.deepseekv4ssd.app",),
+        "paths": ("/Applications/Whallm.app", "~/Applications/Whallm.app"),
+    },
+}
+MACOS_APP_OPENER = Path("/usr/bin/open")
+
 
 def launcher_managed_runtime_specs(runtime: str) -> tuple[tuple[str, str, str], ...]:
     """Discover isolated, versioned runtimes installed for this launcher."""
@@ -1452,6 +1472,86 @@ def plist_version(path: Path) -> str | None:
     except (OSError, ValueError, plistlib.InvalidFileException):
         return None
     return str(value)[:80] if value is not None else None
+
+
+def runtime_app_status(runtime: str) -> dict[str, Any]:
+    """Identify one explicitly supported macOS app without starting it."""
+    spec = RUNTIME_APP_SPECS.get(runtime)
+    if not spec:
+        return {"available": False, "runtime": runtime}
+    label = str(spec["label"])
+    allowed_bundle_ids = set(spec["bundleIds"])
+    for requested in spec["paths"]:
+        bundle = Path(str(requested)).expanduser()
+        try:
+            resolved = bundle.resolve(strict=True)
+            if not resolved.is_dir() or resolved.suffix != ".app":
+                continue
+            with open(resolved / "Contents" / "Info.plist", "rb") as handle:
+                metadata = plistlib.load(handle)
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            continue
+        bundle_id = metadata.get("CFBundleIdentifier")
+        executable_name = metadata.get("CFBundleExecutable")
+        if (
+            bundle_id not in allowed_bundle_ids
+            or not isinstance(executable_name, str)
+            or not executable_name
+            or len(executable_name) > 160
+            or "/" in executable_name
+            or "\0" in executable_name
+        ):
+            continue
+        executable_path = resolved / "Contents" / "MacOS" / executable_name
+        if not executable_path.is_file() or not os.access(executable_path, os.X_OK):
+            continue
+        version = metadata.get("CFBundleShortVersionString")
+        return {
+            "available": True,
+            "runtime": runtime,
+            "label": label,
+            "path": str(bundle),
+            "resolvedPath": str(resolved),
+            "bundleId": str(bundle_id),
+            "version": str(version)[:80] if version is not None else "Installed",
+        }
+    return {
+        "available": False,
+        "runtime": runtime,
+        "label": label,
+    }
+
+
+def open_runtime_app(payload: dict[str, Any]) -> dict[str, Any]:
+    """Open one verified vendor app after a direct button press."""
+    runtime = str(payload.get("runtime") or "")
+    if runtime not in RUNTIME_APP_SPECS:
+        raise ValueError("Choose LM Studio, MTPLX, or Whallm.")
+    app = runtime_app_status(runtime)
+    if app.get("available") is not True:
+        raise ValueError(f"{app.get('label') or 'That runtime app'} is not installed in a supported Applications folder.")
+    opener = MACOS_APP_OPENER
+    if not opener.is_file() or not os.access(opener, os.X_OK):
+        raise ValueError("The macOS app opener is unavailable.")
+    try:
+        subprocess.run(
+            [str(opener), str(app["resolvedPath"])],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True, timeout=15, check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError(f"macOS could not open {app['label']}.") from error
+    detail = (
+        "Whallm opened. Download or select its pinned Qwen model, start the local server, then choose Rescan in the launcher."
+        if runtime == "whallm" else
+        f"{app['label']} opened. Return here after its model or runtime setup is ready."
+    )
+    return {
+        "opened": True,
+        "runtime": runtime,
+        "label": app["label"],
+        "detail": detail,
+    }
 
 
 def semantic_version_key(text: str) -> tuple[int, int, int, int]:
@@ -2206,6 +2306,7 @@ def runtime_inventory() -> dict[str, Any]:
             "selected": lms_selected, "candidates": lms_candidates,
             "appVersion": lms_app_version, "runtimePacks": packs,
             "benchmarkIdentity": lms_identity, "release": lms_release,
+            "app": runtime_app_status("lms"),
             "checks": [
                 {"label": "Desktop app", "ready": bool(lms_app_version), "detail": lms_app_version or "Not detected"},
                 {"label": "Audited upstream release", "ready": lms_release["catalogCurrent"], "advisory": bool(lms_selected), "detail": lms_release["detail"]},
@@ -2230,6 +2331,7 @@ def runtime_inventory() -> dict[str, Any]:
             "headline": mtplx_headline, "selected": mtplx_selected,
             "candidates": mtplx_candidates, "appVersion": mtplx_app_version,
             "shadowedCount": len(mtplx_shadowed), "release": mtplx_release,
+            "app": runtime_app_status("mtplx"),
             "checks": [
                 {"label": "Selected engine", "ready": bool(mtplx_selected), "detail": str(mtplx_selected.get("version") if mtplx_selected else "Not installed")},
                 {"label": "Desktop app", "ready": bool(mtplx_app_version), "detail": mtplx_app_version or "Not detected"},
@@ -2327,6 +2429,7 @@ def runtime_inventory() -> dict[str, Any]:
             "candidates": candidates,
             "release": release,
             "checks": checks,
+            "app": runtime_app_status(runtime_id),
             "update": {
                 "mode": "manual-review", "automatic": False,
                 "headline": (
@@ -2372,6 +2475,7 @@ def runtime_inventory() -> dict[str, Any]:
             "changesNothingOnOpen": True,
             "usesNetwork": False,
             "startsApplications": False,
+            "startsApplicationsOnExplicitRequest": True,
             "selectionOnly": True,
         },
     }
@@ -2382,7 +2486,7 @@ def select_runtime_candidate(payload: dict[str, Any]) -> dict[str, Any]:
     candidate_id = str(payload.get("candidateId") or "")
     confirmation = str(payload.get("confirmation") or "")
     if runtime not in RUNTIME_CANDIDATE_SPECS:
-        raise ValueError("Choose oMLX, LM Studio, or MTPLX.")
+        raise ValueError("Choose a supported installed runtime.")
     candidate = next(
         (item for item in runtime_candidates(runtime) if item["id"] == candidate_id),
         None,
@@ -24346,6 +24450,9 @@ class Handler(SimpleHTTPRequestHandler):
             elif self.path == "/api/runtime/update/stop":
                 RUNTIME_UPDATE.cancel()
                 self.json_response({"ok": True})
+            elif self.path == "/api/runtime/open":
+                opened = open_runtime_app(payload)
+                self.json_response({"ok": True, **opened}, HTTPStatus.ACCEPTED)
             elif self.path == "/api/runtime/select":
                 with SESSION_OPERATION_LOCK:
                     ensure_session_set_idle("changing a runtime path")

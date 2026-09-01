@@ -393,6 +393,7 @@ class LauncherTests(unittest.TestCase):
             self.assertFalse(launcher.controller_source_is_current())
         self.assertIn("/api/benchmark/start", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
         self.assertIn("/api/launch", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
+        self.assertIn("/api/runtime/open", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
 
     def test_qwen38_flash_ssd_streaming_is_detected_but_fails_closed(self) -> None:
         model_path = Path(self.temp.name) / "Qwen3.8-Flash-Next-4bit"
@@ -1848,7 +1849,11 @@ class LauncherTests(unittest.TestCase):
         binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         binary.chmod(0o700)
         with (app / "Contents" / "Info.plist").open("wb") as handle:
-            launcher.plistlib.dump({"CFBundleShortVersionString": "1.1.2"}, handle)
+            launcher.plistlib.dump({
+                "CFBundleIdentifier": "com.deepseekv4ssd.app",
+                "CFBundleExecutable": "dsv4-app",
+                "CFBundleShortVersionString": "1.1.2",
+            }, handle)
 
         with mock.patch.dict(
             launcher.RUNTIME_CANDIDATE_SPECS,
@@ -1860,6 +1865,51 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["path"], str(binary))
         self.assertEqual(launcher.command_version(str(binary)), "Whallm 1.1.2")
+
+    def test_runtime_app_open_revalidates_exact_bundle_and_needs_no_confirmation(self) -> None:
+        app = Path(self.temp.name) / "Whallm.app"
+        binary = app / "Contents" / "MacOS" / "dsv4-app"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        binary.chmod(0o700)
+        info = app / "Contents" / "Info.plist"
+        with info.open("wb") as handle:
+            launcher.plistlib.dump({
+                "CFBundleIdentifier": "com.deepseekv4ssd.app",
+                "CFBundleExecutable": "dsv4-app",
+                "CFBundleShortVersionString": "1.1.2",
+            }, handle)
+        opener = Path(self.temp.name) / "open"
+        opener.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        opener.chmod(0o700)
+        spec = {
+            "label": "Whallm",
+            "bundleIds": ("com.deepseekv4ssd.app",),
+            "paths": (str(app),),
+        }
+        with mock.patch.dict(
+            launcher.RUNTIME_APP_SPECS, {"whallm": spec}, clear=False,
+        ), mock.patch.object(
+            launcher, "MACOS_APP_OPENER", opener,
+        ), mock.patch.object(launcher.subprocess, "run") as opened:
+            status = launcher.runtime_app_status("whallm")
+            result = launcher.open_runtime_app({"runtime": "whallm"})
+
+        self.assertTrue(status["available"])
+        self.assertEqual(status["bundleId"], "com.deepseekv4ssd.app")
+        self.assertTrue(result["opened"])
+        self.assertIn("start the local server", result["detail"])
+        self.assertEqual(opened.call_args.args[0], [str(opener), str(app.resolve())])
+
+        with info.open("wb") as handle:
+            launcher.plistlib.dump({
+                "CFBundleIdentifier": "example.substituted.app",
+                "CFBundleExecutable": "dsv4-app",
+            }, handle)
+        with mock.patch.dict(
+            launcher.RUNTIME_APP_SPECS, {"whallm": spec}, clear=False,
+        ), self.assertRaisesRegex(ValueError, "not installed"):
+            launcher.open_runtime_app({"runtime": "whallm"})
 
     def test_model_library_reports_every_engine_surface_and_mode_without_mutation(self) -> None:
         models = copy.deepcopy(self.models)
@@ -9820,6 +9870,8 @@ for line in sys.stdin:
         self.assertIn(".model-library-engine.experimental", styles)
         self.assertIn("/api/runtime/status", script)
         self.assertIn("/api/runtime/select", script)
+        self.assertIn("/api/runtime/open", script)
+        self.assertIn("data-runtime-open", script)
         for endpoint in (
             "/api/runtime/promotion/status", "/api/runtime/promotion/plan",
             "/api/runtime/promotion/start", "/api/runtime/promotion/stop",

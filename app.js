@@ -5,6 +5,7 @@ const state = {
   optimizationGeneration: 0, optimalSignature: "", optimalLabel: "",
   pendingOptimizerSnapshot: null, pendingOptimizerBackend: "",
   optimizerMenuOpen: false, themeMenuOpen: false, hubToolsMenuOpen: false, runtimeInventory: null, runtimeLoading: false,
+  runtimeOpening: false,
   runtimeUpdateCatalog: null, runtimeUpdatePlan: null, runtimeUpdateStatus: null,
   runtimeUpdatePhase: "idle", runtimeUpdateLoading: false, runtimeUpdateCompletionId: "",
   runtimePromotionPlan: null, runtimePromotionStatus: null,
@@ -11102,6 +11103,9 @@ function runtimeCardMarkup(runtime) {
     update.primaryUrl ? `<a href="${esc(update.primaryUrl)}" target="_blank" rel="noopener">${esc(update.primaryLabel || "Official update guidance")} ↗</a>` : "",
     update.docsUrl && update.docsUrl !== update.primaryUrl ? `<a href="${esc(update.docsUrl)}" target="_blank" rel="noopener">Installation docs ↗</a>` : "",
   ].filter(Boolean).join("");
+  const appAction = runtime.app?.available
+    ? `<button type="button" class="text-button runtime-open-app" data-runtime-open="${esc(runtime.id)}">Open ${esc(runtime.app.label || runtime.label)}</button>`
+    : "";
   const advanced = update.developerCommand
     ? `<details class="runtime-advanced"><summary>Advanced Homebrew path</summary><p>${esc(update.detail || "")}</p><code>${esc(update.developerCommand)}</code><small>${update.developerCommandReady ? "Full Metal compiler detected." : "Blocked here: the full Xcode Metal compiler was not detected."}</small></details>`
     : `<p class="runtime-update-detail">${esc(update.detail || "")}</p>`;
@@ -11109,14 +11113,14 @@ function runtimeCardMarkup(runtime) {
   const auditedVersion = release?.displayVersion || release?.version || "Not audited";
   const detailOpen = activeDetail() === "detailed" ? " open" : "";
   return `<article class="runtime-card ${esc(runtime.level)}">
-    <header><div><span class="runtime-icon ${esc(runtime.id)}" aria-hidden="true">${runtime.id === "lms" ? "LM" : runtime.id === "omlx" ? "O" : "M"}</span><span><strong>${esc(runtime.label)}</strong><small>${esc(runtime.headline)}</small></span></div><em>${runtime.level === "ready" ? "Ready" : runtime.level === "advisory" ? "Review" : "Missing"}</em></header>
+    <header><div><span class="runtime-icon ${esc(runtime.id)}" aria-hidden="true">${esc(backendMark(runtime.id))}</span><span><strong>${esc(runtime.label)}</strong><small>${esc(runtime.headline)}</small></span></div><em>${runtime.level === "ready" ? "Ready" : runtime.level === "advisory" ? "Review" : "Missing"}</em></header>
     <div class="runtime-card-overview"><span><small>Selected</small><strong>${esc(selectedVersion)}</strong></span><span><small>Audited</small><strong>${esc(auditedVersion)}</strong></span></div>
     <details class="runtime-card-details"${detailOpen}><summary><span><strong>Checks, copies &amp; guidance</strong><small>${runtime.checks?.length || 0} checks · ${runtime.candidates?.length || 0} installed ${runtime.candidates?.length === 1 ? "copy" : "copies"}</small></span><em>${detailOpen ? "Hide" : "Details"}</em></summary><div class="runtime-card-details-body">
       <div class="runtime-selected"><span>Selected for new sessions</span><strong>${esc(selectedVersion)}</strong><code title="${esc(selected?.path || "")}">${esc(selected?.path || "No executable selected")}</code></div>
       ${runtimeReleaseMarkup(release)}
       <div class="runtime-checks">${(runtime.checks || []).map(runtimeCheckMarkup).join("")}</div>
       <details class="runtime-copies" ${runtime.candidates?.length > 1 ? "open" : ""}><summary>Installed copies <span>${runtime.candidates?.length || 0}</span></summary><div>${(runtime.candidates || []).map(candidate => runtimeCandidateMarkup(runtime, candidate)).join("") || '<p class="runtime-empty">No supported local executable was found.</p>'}</div></details>
-      <div class="runtime-update"><strong>${esc(update.headline || "Review the official installation guidance.")}</strong>${advanced}<div class="runtime-links">${links}</div><small>${esc(update.rollback || "")}</small></div>
+      <div class="runtime-update"><strong>${esc(update.headline || "Review the official installation guidance.")}</strong>${advanced}<div class="runtime-links">${appAction}${links}</div><small>${esc(update.rollback || "")}</small></div>
     </div></details>
   </article>`;
 }
@@ -11170,6 +11174,25 @@ async function openRuntimeManager() {
   }
   await loadRuntimeManager();
   syncRuntimeAdvancedDetailMode();
+}
+
+async function openRuntimeApp(runtime, button) {
+  if (state.runtimeOpening) return;
+  state.runtimeOpening = true;
+  if (button) button.disabled = true;
+  $("runtimeManagerStatus").textContent = `Opening ${backendName(runtime === "lms" ? "lmstudio" : runtime)}…`;
+  try {
+    const data = await api("/api/runtime/open", {
+      method:"POST",
+      body:JSON.stringify({runtime}),
+    });
+    $("runtimeManagerStatus").textContent = data.detail || `${data.label || "Runtime app"} opened.`;
+  } catch (error) {
+    $("runtimeManagerStatus").textContent = error.message;
+  } finally {
+    state.runtimeOpening = false;
+    if (button) button.disabled = false;
+  }
 }
 
 async function selectRuntime(runtime, candidateId, button) {
@@ -11615,9 +11638,11 @@ $("runtimeUpdateTracks").addEventListener("click", event => {
   if (button && !button.disabled) inspectRuntimeUpdate(button.dataset.runtimeUpdateChannel);
 });
 $("runtimeCards").addEventListener("click", event => {
+  const open = event.target.closest("[data-runtime-open]");
   const compare = event.target.closest("[data-runtime-compare]");
   const button = event.target.closest("[data-runtime-select]");
-  if (compare && !compare.disabled) inspectRuntimePromotion(compare.dataset.runtimeCompare);
+  if (open && !open.disabled) openRuntimeApp(open.dataset.runtimeOpen, open);
+  else if (compare && !compare.disabled) inspectRuntimePromotion(compare.dataset.runtimeCompare);
   else if (button) selectRuntime(button.dataset.runtimeSelect, button.dataset.candidateId, button);
 });
 $("openProfileManager").addEventListener("click", openProfileManager);

@@ -24,6 +24,7 @@ Its primary in-memory engines are **oMLX**, **LM Studio**, and **MTPLX**. Oversi
 - Includes a polished light **Frost** appearance plus Focused progressive disclosure for a calmer Mac-style interface; the Hub Console remains a black terminal workspace in every appearance.
 - Keeps generated routes on authenticated loopback addresses and stops only launcher-owned processes.
 - Provides profiles, Session Sets, model acquisition, runtime inspection, route checks, and capacity controls.
+- Opens installed LM Studio, MTPLX, and Whallm apps directly from Runtime Manager after revalidating their exact macOS bundles; opening an app remains distinct from loading a model.
 
 Runtime Manager uses a reviewable release snapshot rather than an unchecked “latest” query. The snapshot audited on 31 August 2026 covers [oMLX 0.6.4](https://github.com/jundot/omlx/releases/tag/v0.6.4), [LM Studio 0.4.23 Build 1](https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23), [MTPLX 2.10.1](https://github.com/youssofal/MTPLX/releases/tag/v2.10.1), optional [SwiftLM b709](https://github.com/SharpAI/SwiftLM/releases/tag/b709), and experimental [Whallm 1.1.2](https://github.com/yanun0323/Whallm/releases/tag/v1.1.2). A newer release is only a candidate: it does not replace a selected runtime or inherit old speed evidence.
 

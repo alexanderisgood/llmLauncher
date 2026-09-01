@@ -223,6 +223,7 @@ const optimizerControls = {
   acceleration: "accelerationSelect", depth: "depthInput", profile: "profileSelect",
   fan: "fanSelect", burst: "burstSelect", dflashVerify: "dflashVerifySelect",
   dflashDraftQuant: "dflashDraftQuantSelect", anePrefill: "anePrefillSelect",
+  memoryGuard: "memoryGuardSelect",
   gpu: "gpuSelect", parallel: "parallelInput",
   mtpMinTokens: "mtpMinTokensInput",
   mtpMinContinueProbability: "mtpMinContinueProbabilityInput",
@@ -2798,6 +2799,10 @@ function formatChatTimestamp(value) {
   };
 }
 
+function normaliseChatFailure(value) {
+  return typeof value === "string" ? value.replace(/\0/g, "").trim().slice(0, 800) : "";
+}
+
 function normaliseChatMessage(message = {}) {
   return {
     id:nextChatMessageId(),
@@ -2809,6 +2814,7 @@ function normaliseChatMessage(message = {}) {
     stopped:Boolean(message.stopped),
     exclude:Boolean(message.exclude),
     interrupted:Boolean(message.interrupted),
+    failure:normaliseChatFailure(message.failure),
     continuation:Boolean(message.continuation),
     truncated:Boolean(message.truncated),
     createdAt:normaliseChatTimestamp(message.createdAt),
@@ -2897,7 +2903,15 @@ function emitThinkTaggedText(parser, chunk, onPart) {
 
 async function consumeChatResponse(response, onPart) {
   const thinkParser = {buffer:"", thinking:false};
+  let terminalState = "";
+  let terminalEvent = null;
   const consumeEvent = event => {
+    const observedTerminal = ChatStreamCore.responseTerminalState(event);
+    terminalState = ChatStreamCore.mergeResponseTerminalState(terminalState, observedTerminal);
+    if (["failed", "aborted"].includes(observedTerminal)) terminalEvent = event;
+    // Keep any already streamed answer intact; the terminal failure is raised
+    // after the parser flushes a possible partial <think> tag fragment.
+    if (event?.error) return;
     const parts = ChatStreamCore.eventParts(event);
     if (parts.reasoning) onPart("reasoning", parts.reasoning);
     if (parts.text) emitThinkTaggedText(thinkParser, parts.text, onPart);
@@ -2906,12 +2920,24 @@ async function consumeChatResponse(response, onPart) {
     const limitReason = ChatStreamCore.responseLimitReason(event);
     if (limitReason) onPart("truncated", limitReason);
   };
+  const finish = doneSeen => {
+    if (thinkParser.buffer) {
+      onPart(thinkParser.thinking ? "reasoning" : "content", thinkParser.buffer);
+      thinkParser.buffer = "";
+    }
+    const finalState = ChatStreamCore.finalResponseTerminalState(terminalState, doneSeen);
+    if (["failed", "aborted", "unexpected-eof"].includes(finalState)) {
+      const error = new Error(ChatStreamCore.responseTerminalMessage(finalState, terminalEvent));
+      error.terminalState = finalState;
+      throw error;
+    }
+    return finalState;
+  };
   const contentType = response.headers.get("Content-Type") || "";
   if (contentType.toLowerCase().includes("application/json")) {
     const data = await response.json();
     consumeEvent(data);
-    if (thinkParser.buffer) onPart(thinkParser.thinking ? "reasoning" : "content", thinkParser.buffer);
-    return;
+    return finish(false);
   }
   if (!response.body) throw new Error("This browser could not read the model stream.");
   const reader = response.body.getReader();
@@ -2929,7 +2955,7 @@ async function consumeChatResponse(response, onPart) {
   if (!sse.sawData() && rawText.trim().startsWith("{")) {
     consumeEvent(JSON.parse(rawText));
   }
-  if (thinkParser.buffer) onPart(thinkParser.thinking ? "reasoning" : "content", thinkParser.buffer);
+  return finish(sse.sawDone());
 }
 
 function renderCacheObservatory(cache = state.cacheObservatory) {
@@ -3888,10 +3914,12 @@ function renderChatMessages({forceBottom = false} = {}) {
       const reasoningOnly = Boolean(message.role === "assistant" && message.reasoning && !message.content);
       const recovery = document.createElement("em");
       recovery.className = "chat-message-recovery";
-      recovery.textContent = reasoningOnly ? "No final answer" : "Recovered partial · interrupted";
-      recovery.title = reasoningOnly
+      recovery.textContent = reasoningOnly
+        ? "No final answer"
+        : message.content ? "Partial answer · incomplete" : "Generation incomplete";
+      recovery.title = message.failure || (reasoningOnly
         ? "The runtime emitted thinking but completed without answer text. This turn is excluded from later prompts."
-        : "The page closed during generation. This is only the visible text checkpointed before the stream ended.";
+        : "The model turn ended without a clean completion. Any visible partial output was preserved.");
       head.append(recovery);
     }
     if (message.truncated) {
@@ -3953,7 +3981,7 @@ function renderChatMessages({forceBottom = false} = {}) {
             "Retry the incomplete turn and preserve any paused follow-up messages",
           );
         }
-        if (message.content) {
+        if (hasEarlierUser && (message.content || incompleteKind === "truncated")) {
           const target = message.truncated ? actions : moreMenu;
           addAction(
             "continue",
@@ -4035,6 +4063,13 @@ function renderChatMessages({forceBottom = false} = {}) {
       article.append(answerLabel);
     }
     if (!editing) article.append(body);
+    if (!editing && message.role === "assistant" && message.failure) {
+      const failure = document.createElement("div");
+      failure.className = "chat-message-failure";
+      failure.setAttribute("role", "status");
+      failure.textContent = message.failure;
+      article.append(failure);
+    }
     if (!editing && message.role === "assistant" && message.usage) {
       const usage = document.createElement("div");
       usage.className = "chat-message-usage";
@@ -4284,6 +4319,7 @@ function currentChatCheckpointPayload(checkpoint) {
       stopped:message.id === checkpoint.assistantId || Boolean(message.stopped),
       exclude:[checkpoint.userId, checkpoint.assistantId].includes(message.id) || Boolean(message.exclude),
       interrupted:message.id === checkpoint.assistantId || Boolean(message.interrupted),
+      failure:message.failure || undefined,
       continuation:Boolean(message.continuation),
       truncated:Boolean(message.truncated),
       createdAt:message.createdAt || undefined,
@@ -4426,7 +4462,16 @@ async function startChatTurn(content = "", options = {}) {
     state.chatMessages.push(user);
   }
   const requestMessages = state.chatMessages
-    .filter(message => !message.pending && !message.exclude && message.content)
+    .filter(message => (
+      !message.pending && !message.exclude
+      && (
+        message.content
+        || (
+          operation === "continue" && message.role === "assistant"
+          && message.truncated && String(message.reasoning || "").trim()
+        )
+      )
+    ))
     .map(({role, content: text, reasoning}) => ({
       role,
       content:text,
@@ -4469,7 +4514,7 @@ async function startChatTurn(content = "", options = {}) {
   const controller = new AbortController();
   state.chatAbort = controller;
   const checkpoint = beginChatTurnCheckpoint(surfaceId, ownerRunId, checkpointUser, assistant);
-  let turnOutcome = "complete";
+  let turnOutcome = "incomplete";
   renderChatMessages({forceBottom:true});
   setChatBusy(true);
   try {
@@ -4498,7 +4543,19 @@ async function startChatTurn(content = "", options = {}) {
       queueChatRender();
     });
     if (!assistant.content && !assistant.reasoning) throw new Error("The runtime completed without returning text or exposed reasoning.");
-    if (!ChatStreamCore.hasFinalAnswer(assistant)) {
+    if (assistant.truncated) {
+      turnOutcome = "truncated";
+      if (state.chatQueue.length) {
+        state.chatQueuePaused = true;
+        state.chatQueueRecovered = false;
+        persistChatQueue();
+      }
+      const reasoningOnlyLimit = !ChatStreamCore.hasFinalAnswer(assistant);
+      showNotice(
+        `${reasoningOnlyLimit ? "The model reached its response limit before returning a final answer." : "The answer reached its response limit."}${state.chatQueue.length ? " The message queue was paused until you continue the answer." : " Choose Continue answer to finish it."}`,
+        true,
+      );
+    } else if (!ChatStreamCore.hasFinalAnswer(assistant)) {
       assistant.content = "";
       assistant.exclude = true;
       assistant.stopped = true;
@@ -4513,42 +4570,41 @@ async function startChatTurn(content = "", options = {}) {
         `The model finished its reasoning without a final answer.${state.chatQueue.length ? " The message queue was paused so nothing sends against an incomplete turn." : " Send Continue or retry the message."}`,
         true,
       );
-    } else if (assistant.truncated) {
-      turnOutcome = "truncated";
-      if (state.chatQueue.length) {
-        state.chatQueuePaused = true;
-        state.chatQueueRecovered = false;
-        persistChatQueue();
-      }
-      showNotice(
-        `The answer reached its response limit.${state.chatQueue.length ? " The message queue was paused until you continue the answer." : " Choose Continue answer to finish it."}`,
-        true,
-      );
-    }
+    } else turnOutcome = "complete";
   } catch (error) {
     if (error.name === "AbortError") {
       turnOutcome = "stopped";
       if (user) user.exclude = true;
       assistant.exclude = true;
       assistant.stopped = true;
-      if (!assistant.content) assistant.content = "Generation stopped.";
+      assistant.interrupted = true;
+      assistant.failure = "Generation stopped before the model returned a clean completion.";
       if (state.chatQueue.length) {
         state.chatQueuePaused = true;
         state.chatQueueRecovered = false;
         persistChatQueue();
-        showNotice("Generation stopped. The message queue was paused until you retry or clear the incomplete turn.");
       }
+      showNotice(
+        `Generation stopped.${state.chatQueue.length ? " The message queue was paused until you retry or clear the incomplete turn." : " Any partial output was preserved."}`,
+        true,
+      );
     } else {
       turnOutcome = "failed";
       if (user) user.exclude = true;
       assistant.exclude = true;
       assistant.stopped = true;
-      assistant.content = assistant.content || `Chat error: ${error.message}`;
+      assistant.interrupted = true;
+      assistant.failure = normaliseChatFailure(error.message)
+        || "The model turn ended without a clean completion.";
       if (state.chatQueue.length) {
         state.chatQueuePaused = true;
         state.chatQueueRecovered = false;
         persistChatQueue();
       }
+      showNotice(
+        `${assistant.failure}${state.chatQueue.length ? " The message queue was paused so it cannot continue against an incomplete answer." : " Any partial output was preserved."}`,
+        true,
+      );
     }
   } finally {
     assistant.pending = false;
@@ -4688,7 +4744,16 @@ async function continueChatMessage(messageId) {
   if (selectedIndex < 0 || state.chatMessages[selectedIndex].role !== "assistant") return;
   const activeIndices = state.chatMessages
     .map((message, index) => ({message, index}))
-    .filter(item => !item.message.pending && !item.message.exclude && item.message.content);
+    .filter(item => (
+      !item.message.pending && !item.message.exclude
+      && (
+        item.message.content
+        || (
+          item.message.role === "assistant" && item.message.truncated
+          && String(item.message.reasoning || "").trim()
+        )
+      )
+    ));
   const selected = state.chatMessages[selectedIndex];
   const isActiveTail = activeIndices.at(-1)?.index === selectedIndex && !selected.stopped;
   const recoverPausedQueue = Boolean(
@@ -4697,7 +4762,16 @@ async function continueChatMessage(messageId) {
   );
   if (!isActiveTail) {
     const messages = state.chatMessages.slice(0, selectedIndex + 1)
-      .filter(message => !message.pending && message.content)
+      .filter(message => (
+        !message.pending
+        && (
+          message.content
+          || (
+            message.role === "assistant" && message.truncated
+            && String(message.reasoning || "").trim()
+          )
+        )
+      ))
       .map(message => ({...message, usage:message.usage ? {...message.usage} : null}));
     messages.at(-1).exclude = false;
     messages.at(-1).stopped = false;
@@ -4820,7 +4894,7 @@ async function newChat() {
 
 function currentChatHistoryPayload() {
   const messages = state.chatMessages
-    .filter(message => !message.pending && (message.content || message.interrupted))
+    .filter(ChatStreamCore.shouldPersistHistoryMessage)
     .map(message => ({
       role:message.role,
       content:message.content,
@@ -4829,6 +4903,7 @@ function currentChatHistoryPayload() {
       stopped:Boolean(message.stopped),
       exclude:Boolean(message.exclude),
       interrupted:Boolean(message.interrupted),
+      failure:message.failure || undefined,
       continuation:Boolean(message.continuation),
       truncated:Boolean(message.truncated),
       createdAt:message.createdAt || undefined,
@@ -5659,7 +5734,10 @@ function chatHistoryMarkdown(thread) {
     lines.push(`## ${message.role === "user" ? "You" : message.continuation ? "Local model · continuation" : "Local model"}`, "");
     if (message.createdAt) lines.push(`_${chatHistoryDate(message.createdAt)}_`, "");
     if (message.interrupted) {
-      lines.push("_Recovered partial response: generation was interrupted when the launcher page closed._", "");
+      lines.push("_Incomplete model turn: any visible partial output was preserved and excluded from later prompts._", "");
+    }
+    if (message.failure) {
+      lines.push(`_Terminal status: ${message.failure}_`, "");
     }
     if (message.truncated) {
       lines.push("_Response limit reached. The following continuation, if any, was requested separately._", "");
@@ -7777,12 +7855,16 @@ function renderCalibrationPlan() {
     && promoteCompletedCalibrationResult()
   ) plan = state.calibrationPlan;
   const routeQualification = plan?.routeQualification === true;
-  $("calibrationDialogTitle").textContent = routeQualification ? "Route Qualification" : "Calibration Assistant";
-  $("calibrationDialogSubtitle").textContent = routeQualification
+  const qualificationPreparation = plan?.qualificationPreparation || null;
+  const qualificationFlow = routeQualification
+    || qualificationPreparation?.kind === "qwen-ple-safe-qualification-v1";
+  $("calibrationDialog").classList.toggle("route-qualification", qualificationFlow);
+  $("calibrationDialogTitle").textContent = qualificationFlow ? "Route Qualification" : "Calibration Assistant";
+  $("calibrationDialogSubtitle").textContent = qualificationFlow
     ? "Measure and qualify the exact oMLX Qwen PLE route without inventing a second engine."
     : "Find the best installed engine for the exact model and work you selected.";
-  $("calibrationPreferenceLabel").textContent = routeQualification ? "Result metric" : "Decision goal";
-  $("calibrationEnginesTitle").textContent = routeQualification ? "Route being qualified" : "Included engines";
+  $("calibrationPreferenceLabel").textContent = qualificationFlow ? "Result metric" : "Decision goal";
+  $("calibrationEnginesTitle").textContent = qualificationFlow ? "Route being qualified" : "Included engines";
   const active = calibrationBenchmarkActive();
   const controlsLocked = state.calibrationLoading || state.calibrationStarting
     || active || state.calibrationApplying;
@@ -7791,6 +7873,7 @@ function renderCalibrationPlan() {
   $("calibrationPreferenceSelect").disabled = controlsLocked;
   $("calibrationCoolingSelect").disabled = controlsLocked;
   if (!plan) {
+    $("calibrationPhase").closest(".calibration-progress")?.classList.remove("hidden");
     calibrationStateBadge("calibrationContractState", state.calibrationLoading ? "Checking" : "Unavailable", state.calibrationLoading ? "" : "blocked");
     calibrationStateBadge("calibrationEngineState", "Waiting", "");
     calibrationStateBadge("calibrationEvidenceState", "Waiting", "");
@@ -7804,6 +7887,7 @@ function renderCalibrationPlan() {
     $("calibrationConsent").checked = false;
     $("calibrationConsentPanel").classList.add("hidden");
     $("calibrationStartButton").disabled = true;
+    $("calibrationStartButton").dataset.action = "measure";
     $("calibrationStartButton").className = "secondary";
     $("calibrationStartButton").querySelector("strong").textContent = state.calibrationLoading
       ? "Checking route" : "Test unavailable";
@@ -7872,15 +7956,41 @@ function renderCalibrationPlan() {
     qualifiedRoutes:completedDecision.qualifiedRoutes || completedResult.qualifiedRoutes || [],
   } : evidence;
   const resultReady = evidenceReady || resultPending;
+  const preparationAvailable = Boolean(
+    !resultReady && !plan.ready
+    && qualificationPreparation?.applicable === true
+    && qualificationPreparation?.resolvesVisibleSettings === true
+    && qualificationPreparation?.doesNotChangeMacOS === true
+  );
   calibrationStateBadge(
     "calibrationEvidenceState",
-    resultReady ? (routeQualification ? "Route qualified" : shownEvidence.trusted ? "Winner ready" : "Result ready") : (plan.ready ? routeQualification ? "Ready to qualify" : "Ready to test" : "Blocked"),
-    resultReady ? "ready" : (plan.ready ? "" : "blocked"),
+    resultReady ? (routeQualification ? "Route qualified" : shownEvidence.trusted ? "Winner ready" : "Result ready") : (plan.ready ? routeQualification ? "Ready to qualify" : "Ready to test" : preparationAvailable ? "Prepare settings" : "Blocked"),
+    resultReady ? "ready" : (plan.ready || preparationAvailable ? "" : "blocked"),
   );
   const blockers = (plan.blockers || []).join(" ");
   const routePreview = calibrationRoutePreview(plan);
+  const preparationAdmission = qualificationPreparation?.nextAdmission || {};
+  const memoryBlocker = plan.memoryAdmission || {};
+  const systemSettingBlocked = routeQualification
+    && memoryBlocker.decision === "system-setting";
+  const requiredMetalLimitBytes = Number(
+    memoryBlocker.estimate?.requiredMetalWiredLimitBytes || 0,
+  );
+  const requiredMetalLimitGiB = requiredMetalLimitBytes > 0
+    ? Math.ceil(requiredMetalLimitBytes / (1024 ** 3)) : null;
+  const metalApprovalLabel = requiredMetalLimitGiB
+    ? `${requiredMetalLimitGiB} GiB Metal approval required`
+    : "Temporary Metal approval required";
+  const preparationDetail = preparationAvailable
+    ? [
+        qualificationPreparation.summary,
+        preparationAdmission.label ? `Next check: ${preparationAdmission.label}.` : "",
+        "This changes only the visible launcher settings; macOS is not changed.",
+      ].filter(Boolean).join(" ")
+    : "";
   const evidenceDetail = resultReady
     ? [shownEvidence.detail, shownEvidence.outputWarning].filter(Boolean).join(" ")
+    : preparationAvailable ? preparationDetail
     : plan.ready
       ? routeQualification
         ? `One exact oMLX AR + PLE mmap load will run four generated reasoning turns. Authoritative usage, generation TPS, time to first output, memory pressure, and thermal state are recorded; every turn must expose separate reasoning and a final answer.${routePreview ? ` Route: ${routePreview}.` : ""}`
@@ -7888,8 +7998,11 @@ function renderCalibrationPlan() {
         ? `${plan.eligibleEngineCount} SSD runtimes will be tested one at a time using generated prompts. First-turn and warm-prefix TPS, time to first output, memory pressure, and thermal state are recorded. The OS file cache is observed rather than forcibly purged.${routePreview ? ` Routes: ${routePreview}.` : ""}`
         : `${plan.eligibleEngineCount} engines will be tested one at a time using generated prompts.${routePreview ? ` Routes: ${routePreview}.` : ""}`
       : blockers;
-  $("calibrationEvidence").className = `calibration-evidence${resultReady ? " trusted" : plan.ready ? "" : " blocked"}`;
-  $("calibrationEvidence").innerHTML = `<i aria-hidden="true">${resultReady ? "◆" : plan.ready ? "◇" : "×"}</i><span><strong>${esc(resultReady ? shownEvidence.label : plan.ready ? routeQualification ? "Ready to qualify this route" : "Ready to test the engines" : "This setup cannot be tested yet")}</strong><small>${esc(evidenceDetail)}</small></span>`;
+  $("calibrationEvidence").className = `calibration-evidence${resultReady ? " trusted" : plan.ready || preparationAvailable ? "" : " blocked"}`;
+  $("calibrationEvidence").innerHTML = `<i aria-hidden="true">${resultReady ? "◆" : plan.ready || preparationAvailable ? "◇" : "×"}</i><span><strong>${esc(resultReady ? shownEvidence.label : plan.ready ? routeQualification ? "Ready to qualify this route" : "Ready to test the engines" : preparationAvailable ? "Prepare this route safely" : systemSettingBlocked ? metalApprovalLabel : "This setup cannot be tested yet")}</strong><small>${esc(evidenceDetail)}</small></span>`;
+  $("calibrationPhase").closest(".calibration-progress")?.classList.toggle(
+    "hidden", !active && !resultReady && !plan.ready,
+  );
   const measuredDecision = completedDecision || (evidenceReady ? evidence : null);
   const measuredEngines = routeQualification
     ? Array.isArray(measuredDecision?.qualifiedRoutes) ? measuredDecision.qualifiedRoutes : []
@@ -7936,13 +8049,15 @@ function renderCalibrationPlan() {
   const canMeasure = ["measure", "apply-existing"].includes(plan.action)
     && plan.ready && !resultPending && !calibrationOperationBlocked();
   const canRefreshResult = resultPending && !calibrationOperationBlocked();
+  const canPrepare = preparationAvailable && !calibrationOperationBlocked();
   $("calibrationConsent").disabled = true;
   $("calibrationConsent").checked = false;
   $("calibrationConsentPanel").classList.add("hidden");
   $("calibrationConsentCopy").textContent = plan.ready
     ? `${routeQualification ? "1 exact route" : `${plan.eligibleEngineCount} engines`} · ${plan.countsAreMaximum ? "up to " : ""}${plan.modelReloadCount} isolated reloads · ${plan.countsAreMaximum ? "up to " : ""}${plan.measuredRequestCount} generated local requests · ${plan.calibrationCoolingLabel || "Automatic"} cooling · up to ${Math.round(plan.resourceCooldownMaxSecondsPerRoute)} seconds of cancellable settling before each route.`
     : blockers || "Resolve the engine blockers before measurement.";
-  $("calibrationStartButton").disabled = !(canMeasure || canRefreshResult);
+  $("calibrationStartButton").disabled = !(canMeasure || canRefreshResult || canPrepare);
+  $("calibrationStartButton").dataset.action = canPrepare ? "prepare" : "measure";
   let measurementAction = evidenceReady
     ? "Retest engines" : resultPending ? "Use saved result" : "Test engines";
   let measurementDetail = evidenceReady
@@ -7956,7 +8071,12 @@ function renderCalibrationPlan() {
     measurementDetail = evidenceReady
       ? "Replace this saved qualification"
       : resultPending ? "The qualification is complete — this will not run it again"
-      : plan.ready ? "1 route · 4 bounded reasoning turns" : "Resolve the blockers above";
+      : plan.ready ? "1 route · 4 bounded reasoning turns"
+        : systemSettingBlocked ? metalApprovalLabel : "Resolve the blockers above";
+  }
+  if (canPrepare) {
+    measurementAction = "Prepare safe test";
+    measurementDetail = "Visible settings only · does not change macOS";
   }
   $("calibrationStartButton").querySelector("strong").textContent = measurementAction;
   $("calibrationStartLabel").textContent = measurementDetail;
@@ -8041,13 +8161,20 @@ function renderCalibrationBenchmark(status = state.benchmarkStatus || {}) {
     return;
   }
   const plan = state.calibrationPlan;
-  $("calibrationBadge").textContent = state.calibrationLoading ? "Checking" : plan?.action === "apply-existing" ? "Result ready" : plan?.ready ? "Ready" : "Blocked";
+  const preparationAvailable = Boolean(
+    plan?.qualificationPreparation?.applicable === true
+    && plan?.qualificationPreparation?.resolvesVisibleSettings === true
+    && plan?.qualificationPreparation?.doesNotChangeMacOS === true
+  );
+  $("calibrationBadge").textContent = state.calibrationLoading ? "Checking" : plan?.action === "apply-existing" ? "Result ready" : plan?.ready ? "Ready" : preparationAvailable ? "Prepare" : "Blocked";
   $("calibrationBadge").className = `setup-badge${plan?.action === "apply-existing" ? " ready" : !plan?.ready && plan ? " warning" : ""}`;
   $("calibrationPhase").textContent = plan?.action === "apply-existing" ? "Ready to use" : plan?.ready ? "Ready to test" : "Needs attention";
   if (!state.calibrationLoading) {
     $("calibrationStatus").textContent = plan?.action === "apply-existing"
       ? "Your saved result matches these settings. No new test is needed."
-      : plan?.ready ? plan.routeQualification ? "Choose Qualify route when you are ready." : "Choose Test engines when you are ready." : ((plan?.blockers || ["Choose a valid comparable setup."])[0]);
+      : plan?.ready ? plan.routeQualification ? "Choose Qualify route when you are ready." : "Choose Test engines when you are ready."
+        : preparationAvailable ? "Prepare the visible safe qualification settings first; macOS stays unchanged."
+          : ((plan?.blockers || ["Choose a valid comparable setup."])[0]);
   }
 }
 
@@ -8147,6 +8274,65 @@ async function selectCalibrationAlternative(modelId) {
   state.calibrationEntry = null;
   await loadCalibrationPlan(true);
   showNotice(`Selected ${selectedModel()?.name || "the accelerated model"}. Review its quantisation and measured routes before testing.`);
+}
+
+async function prepareQwenRouteQualification() {
+  const preparation = state.calibrationPlan?.qualificationPreparation;
+  const settings = preparation?.settings;
+  if (
+    preparation?.kind !== "qwen-ple-safe-qualification-v1"
+    || preparation.applicable !== true
+    || preparation.resolvesVisibleSettings !== true
+    || preparation.doesNotChangeMacOS !== true
+    || !settings || calibrationOperationBlocked()
+  ) return;
+  if (String(preparation.modelId || "") !== String(selectedModel()?.id || "")) {
+    showNotice("The selected Qwen artifact changed. Reopen Route Qualification.", true);
+    return;
+  }
+  if (settings.backend !== "omlx" || state.backend !== "omlx") {
+    showNotice("This preparation is bound to the visible oMLX route.", true);
+    return;
+  }
+  const optionValues = settings.options || {};
+  const selectTargets = [
+    ["accelerationSelect", optionValues.acceleration],
+    ["burstSelect", optionValues.burst],
+    ["anePrefillSelect", optionValues.anePrefill],
+    ["memoryGuardSelect", optionValues.memoryGuard],
+    ["reasoningSelect", settings.reasoning],
+    ["calibrationCoolingSelect", settings.calibrationCooling],
+  ];
+  const invalid = selectTargets.find(([id, value]) =>
+    ![...$(id).options].some(item => item.value === String(value) && !item.disabled)
+  );
+  if (invalid || !Number.isInteger(settings.context) || !Number.isInteger(settings.output)) {
+    showNotice("The safe qualification controls are no longer available. Refresh models and try again.", true);
+    return;
+  }
+  if (!setRuntimeKvValue("omlx", optionValues.kv)) {
+    showNotice("The full-precision KV route is no longer available.", true);
+    return;
+  }
+
+  cancelOptimization("Prepared the explicit Qwen qualification settings.");
+  $("contextInput").value = String(settings.context);
+  $("outputInput").value = String(settings.output);
+  $("depthInput").value = String(optionValues.depth);
+  for (const [id, value] of selectTargets) $(id).value = String(value);
+  setRangeVisual($("depthInput"), $("depthValue"));
+  updateAccelerationState();
+  state.sessionAcknowledgementId = "";
+  refreshLaunchability();
+  persistVisibleRoute();
+  scheduleBenchmarkHistory();
+  schedulePerformanceReceipt();
+
+  const next = await loadCalibrationPlan(true);
+  const admission = next?.memoryAdmission || next?.qualificationPreparation?.nextAdmission;
+  const remaining = admission?.decision === "system-setting"
+    ? ` ${admission.label}: ${admission.detail}` : "";
+  showNotice(`Safe Qwen test settings prepared. macOS was not changed.${remaining}`);
 }
 
 async function startCalibration() {
@@ -11460,7 +11646,11 @@ $("agentHostSelect").addEventListener("change", () => {
 $("omlxKv").addEventListener("change", () => { cancelOptimization("KV precision changed; reapply to refresh the benchmark match."); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
 $("mtplxKv").addEventListener("change", () => { cancelOptimization("KV precision changed; reapply to refresh the benchmark match."); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
 $("memoryGuardSelect").addEventListener("change", () => {
-  cancelOptimization("Memory mode changed; reapply to refresh the benchmark match.");
+  // The optimiser dispatches the same change event after moving this control.
+  // Treat only a user edit as invalidating the in-flight recommendation.
+  if (!state.applyingOptimal) {
+    cancelOptimization("Memory mode changed; reapply to refresh the benchmark match.");
+  }
   clearWarmRoutePlan();
   refreshLaunchability();
   scheduleBenchmarkHistory();
@@ -11701,7 +11891,11 @@ $("calibrationPreferenceSelect").addEventListener("change", () => {
   loadCalibrationPlan(true);
 });
 $("calibrationProfileName").addEventListener("input", renderCalibrationPlan);
-$("calibrationStartButton").addEventListener("click", startCalibration);
+$("calibrationStartButton").addEventListener("click", () => {
+  if ($("calibrationStartButton").dataset.action === "prepare") {
+    void prepareQwenRouteQualification();
+  } else void startCalibration();
+});
 $("calibrationStopButton").addEventListener("click", stopCalibration);
 $("calibrationApplyButton").addEventListener("click", () => applyCalibrationResult(false));
 $("calibrationSaveButton").addEventListener("click", () => applyCalibrationResult(true));

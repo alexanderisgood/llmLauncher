@@ -44,6 +44,33 @@ for (const event of [
 
 assert.equal(stream.responseLimitReached({incompleteDetails:{reason:"max tokens"}}), true);
 
+assert.equal(stream.responseTerminalState({choices:[{finish_reason:"stop"}]}), "clean");
+assert.equal(stream.responseTerminalState({choices:[{finish_reason:"length"}]}), "limited");
+assert.equal(stream.responseTerminalState({error:{message:"route failed"}}), "failed");
+assert.equal(stream.responseTerminalState({stopReason:"aborted"}), "aborted");
+assert.equal(stream.responseTerminalState({type:"response.completed"}), "clean");
+assert.equal(stream.responseTerminalState({type:"response.incomplete", response:{status:"incomplete"}}), "failed");
+assert.equal(stream.responseTerminalState({
+  type:"response.incomplete",
+  response:{status:"incomplete", incomplete_details:{reason:"max_output_tokens"}},
+}), "limited");
+assert.equal(
+  stream.responseTerminalState({type:"response.completed", response:{status:"failed"}}),
+  "failed",
+);
+assert.equal(
+  stream.responseTerminalState({choices:[{finish_reason:"length"}], status:"failed"}),
+  "failed",
+);
+assert.equal(stream.finalResponseTerminalState("", false), "unexpected-eof");
+assert.equal(stream.finalResponseTerminalState("", true), "unexpected-eof");
+assert.equal(stream.finalResponseTerminalState("limited", true), "limited");
+assert.equal(stream.mergeResponseTerminalState("clean", "failed"), "failed");
+assert.equal(
+  stream.responseTerminalMessage("unexpected-eof"),
+  "The model stream ended before reporting a clean completion.",
+);
+
 assert.deepEqual(stream.partitionContent([
   {type:"thinking", thinking:"inspect "},
   {type:"reasoning_text", text:"route "},
@@ -75,6 +102,12 @@ assert.equal(
 );
 assert.equal(
   stream.incompleteAnswerKind({role:"assistant", content:"partial", truncated:true}),
+  "truncated",
+);
+assert.equal(
+  stream.incompleteAnswerKind({
+    role:"assistant", content:"", reasoning:"long reasoning", interrupted:true, truncated:true,
+  }),
   "truncated",
 );
 assert.equal(
@@ -127,6 +160,12 @@ assert.equal(
 );
 assert.equal(
   stream.pausedQueueRecoveryAction(
+    "continue", {role:"assistant", content:"", reasoning:"work", truncated:true}, true,
+  ),
+  true,
+);
+assert.equal(
+  stream.pausedQueueRecoveryAction(
     "continue", {role:"assistant", content:"partial", truncated:true}, false,
   ),
   false,
@@ -160,6 +199,17 @@ assert.equal(
   stream.blocksIncompleteTailRecovery({role:"assistant", content:"partial", truncated:true}),
   true,
 );
+assert.equal(stream.shouldPersistHistoryMessage({role:"user", content:"hello"}), true);
+assert.equal(stream.shouldPersistHistoryMessage({role:"assistant", content:"answer"}), true);
+assert.equal(stream.shouldPersistHistoryMessage({
+  role:"assistant", content:"", reasoning:"long reasoning", truncated:true,
+}), true);
+assert.equal(stream.shouldPersistHistoryMessage({
+  role:"assistant", content:"", reasoning:"long reasoning", truncated:true, pending:true,
+}), false);
+assert.equal(stream.shouldPersistHistoryMessage({
+  role:"assistant", content:"", reasoning:"long reasoning", truncated:false,
+}), false);
 
 const sseEvents = [];
 const sse = stream.createSseDataParser(data => sseEvents.push(JSON.parse(data)));
@@ -168,6 +218,7 @@ sse.push("\ndata: \"choices\":[{\"delta\":{\"thinking\":\"plan\",\"content\":\"d
 sse.push("data: }\r\n\r\ndata: [DONE]\r\n\r\n");
 sse.finish();
 assert.equal(sse.sawData(), true);
+assert.equal(sse.sawDone(), true);
 assert.equal(sseEvents.length, 1);
 assert.deepEqual(stream.eventParts(sseEvents[0]), {text:"done", reasoning:"plan"});
 
@@ -176,6 +227,8 @@ const unterminated = stream.createSseDataParser(data => finalEvent.push(JSON.par
 unterminated.push('data: {"choices":[{"delta":{"content":"tail"}}]}');
 unterminated.finish();
 assert.equal(finalEvent[0].choices[0].delta.content, "tail");
+assert.equal(unterminated.sawDone(), false);
+assert.equal(stream.finalResponseTerminalState("", unterminated.sawDone()), "unexpected-eof");
 
 const looseEvents = [];
 const loose = stream.createSseDataParser(data => looseEvents.push(JSON.parse(data)));
@@ -184,5 +237,6 @@ loose.push('data: {"choices":[{"delta":{"content":"two"}}]}\ndata: [DONE]\n');
 loose.finish();
 assert.equal(looseEvents.length, 2);
 assert.equal(looseEvents[1].choices[0].delta.content, "two");
+assert.equal(loose.sawDone(), true);
 
-console.log("Authoritative Chat response-limit detection passed.");
+console.log("Authoritative Chat response-limit detection passed; terminal-state detection passed.");

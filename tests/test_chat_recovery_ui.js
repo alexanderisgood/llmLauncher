@@ -15,7 +15,16 @@ assert.match(app, /incompleteRecoveryOperation\(selected\) === "continue"/);
 assert.match(app, /operation:"continue", recoverPausedQueue:true/);
 assert.match(app, /state\.chatMessages\[userIndex\]\.exclude = false/);
 assert.match(app, /recoverPausedQueue:true/);
+assert.match(app, /let turnOutcome = "incomplete"/);
+assert.match(app, /ChatStreamCore\.responseTerminalState\(event\)/);
+assert.match(app, /ChatStreamCore\.finalResponseTerminalState\(terminalState, doneSeen\)/);
+assert.match(app, /assistant\.failure = normaliseChatFailure\(error\.message\)/);
+assert.match(app, /assistant\.interrupted = true/);
+assert.match(app, /if \(assistant\.truncated\) \{[^]*?reasoningOnlyLimit/);
+assert.match(app, /message\.content \|\| incompleteKind === "truncated"/);
+assert.match(app, /operation === "continue" && message\.role === "assistant"[^]*?message\.truncated/);
 assert.match(app, /turnOutcome = "truncated"/);
 assert.match(app, /ChatStreamCore\.shouldDrainQueue\(turnOutcome\)/);
+assert.match(app, /\.filter\(ChatStreamCore\.shouldPersistHistoryMessage\)/);
 
 console.log("Incomplete local-chat turns preserve and safely resume the paused queue.");

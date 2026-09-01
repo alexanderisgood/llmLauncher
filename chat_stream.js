@@ -12,6 +12,12 @@
     "max_completion_tokens",
     "token_limit",
   ]);
+  const CLEAN_TERMINAL_REASONS = new Set(["stop", "completed", "complete", "success", "succeeded"]);
+  const FAILED_TERMINAL_REASONS = new Set([
+    "error", "failed", "failure", "incomplete", "content_filter", "tool_calls", "function_call",
+  ]);
+  const ABORTED_TERMINAL_REASONS = new Set(["abort", "aborted", "cancel", "cancelled", "canceled"]);
+  const TERMINAL_STATE_PRIORITY = Object.freeze({clean:1, limited:2, aborted:3, failed:4});
 
   function normaliseReason(value) {
     if (typeof value !== "string" || value.length > 80) return "";
@@ -44,6 +50,92 @@
 
   function responseLimitReached(event) {
     return Boolean(responseLimitReason(event));
+  }
+
+  function responseTerminalState(event) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) return "";
+    const choice = Array.isArray(event.choices) ? event.choices[0] : null;
+    const response = event.response && typeof event.response === "object" && !Array.isArray(event.response)
+      ? event.response : null;
+    if (event.error || response?.error) return "failed";
+    let state = responseLimitReached(event) ? "limited" : "";
+
+    const eventType = String(event.type || "").trim().toLocaleLowerCase()
+      .replace(/[.\s-]+/g, "_");
+    if (["response_failed", "error"].includes(eventType)) {
+      state = mergeResponseTerminalState(state, "failed");
+    } else if (eventType === "response_incomplete" && state !== "limited") {
+      state = mergeResponseTerminalState(state, "failed");
+    } else if (["response_cancelled", "response_canceled"].includes(eventType)) {
+      state = mergeResponseTerminalState(state, "aborted");
+    } else if (eventType === "response_completed") {
+      state = mergeResponseTerminalState(state, "clean");
+    }
+
+    const candidates = [
+      choice?.finish_reason,
+      choice?.finishReason,
+      event.finish_reason,
+      event.finishReason,
+      event.stop_reason,
+      event.stopReason,
+      event.status,
+      response?.status,
+    ];
+    for (const candidate of candidates) {
+      const reason = normaliseReason(candidate);
+      if (!reason) continue;
+      if (ABORTED_TERMINAL_REASONS.has(reason)) {
+        state = mergeResponseTerminalState(state, "aborted");
+      } else if (FAILED_TERMINAL_REASONS.has(reason) && !(reason === "incomplete" && state === "limited")) {
+        state = mergeResponseTerminalState(state, "failed");
+      } else if (CLEAN_TERMINAL_REASONS.has(reason)) {
+        state = mergeResponseTerminalState(state, "clean");
+      }
+    }
+    return state;
+  }
+
+  function mergeResponseTerminalState(current, next) {
+    const left = Object.hasOwn(TERMINAL_STATE_PRIORITY, current) ? current : "";
+    const right = Object.hasOwn(TERMINAL_STATE_PRIORITY, next) ? next : "";
+    if (!right) return left;
+    if (!left) return right;
+    return TERMINAL_STATE_PRIORITY[right] >= TERMINAL_STATE_PRIORITY[left] ? right : left;
+  }
+
+  function finalResponseTerminalState(state, doneSeen = false) {
+    if (Object.hasOwn(TERMINAL_STATE_PRIORITY, state)) return state;
+    // [DONE] is framing, not semantic proof that the model completed. Require
+    // an explicit finish reason or Responses terminal event before advancing a queue.
+    return "unexpected-eof";
+  }
+
+  function responseTerminalFailure(event) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) return "";
+    const response = event.response && typeof event.response === "object" && !Array.isArray(event.response)
+      ? event.response : null;
+    const candidates = [
+      event.error?.message,
+      typeof event.error === "string" ? event.error : "",
+      response?.error?.message,
+      typeof response?.error === "string" ? response.error : "",
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string") continue;
+      const text = candidate.replace(/\0/g, "").trim();
+      if (text) return text.slice(0, 800);
+    }
+    return "";
+  }
+
+  function responseTerminalMessage(state, event = null) {
+    const detail = responseTerminalFailure(event);
+    if (detail) return detail;
+    if (state === "aborted") return "The model aborted generation before returning a clean completion.";
+    if (state === "failed") return "The model reported that generation failed before returning a clean completion.";
+    if (state === "unexpected-eof") return "The model stream ended before reporting a clean completion.";
+    return "";
   }
 
   function contentText(value) {
@@ -111,13 +203,15 @@
 
   function incompleteAnswerKind(message) {
     if (!message || message.role !== "assistant") return "";
+    // A model can spend its entire allowance in exposed reasoning. Preserve
+    // that as a continuable response-limit state even when answer text is empty.
+    if (message.truncated) return "truncated";
     if (message.interrupted) {
       if (!hasFinalAnswer(message) && String(message.reasoning || "").trim()) {
         return "reasoning-only";
       }
       return "interrupted";
     }
-    if (message.truncated && hasFinalAnswer(message)) return "truncated";
     if (
       message.exclude && message.stopped && !message.interrupted
       && !message.truncated && hasFinalAnswer(message)
@@ -144,6 +238,12 @@
     return Boolean(message.content || message.reasoning || message.interrupted);
   }
 
+  function shouldPersistHistoryMessage(message) {
+    if (!message || typeof message !== "object" || message.pending) return false;
+    if (message.content || message.interrupted) return true;
+    return Boolean(message.truncated && String(message.reasoning || "").trim());
+  }
+
   function shouldDrainQueue(outcome) {
     return String(outcome || "") === "complete";
   }
@@ -153,12 +253,17 @@
     let buffer = "";
     let dataLines = [];
     let dataSeen = false;
+    let doneSeen = false;
 
     const dispatch = () => {
       if (!dataLines.length) return;
       const data = dataLines.join("\n");
       dataLines = [];
-      if (!data.trim() || data.trim() === "[DONE]") return;
+      if (!data.trim()) return;
+      if (data.trim() === "[DONE]") {
+        doneSeen = true;
+        return;
+      }
       dataSeen = true;
       onData(data);
     };
@@ -216,6 +321,7 @@
       },
       finish() { drain(true); },
       sawData() { return dataSeen; },
+      sawDone() { return doneSeen; },
     });
   }
 
@@ -224,14 +330,20 @@
     contentText,
     createSseDataParser,
     eventParts,
+    finalResponseTerminalState,
     hasFinalAnswer,
     incompleteAnswerKind,
     incompleteRecoveryOperation,
     messageContextCharacters,
     partitionContent,
     pausedQueueRecoveryAction,
+    mergeResponseTerminalState,
     responseLimitReached,
     responseLimitReason,
+    responseTerminalFailure,
+    responseTerminalMessage,
+    responseTerminalState,
+    shouldPersistHistoryMessage,
     shouldDrainQueue,
   });
 });

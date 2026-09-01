@@ -348,6 +348,9 @@ BENCHMARK_REASONING_POLICY_ALL_ENGINES = "all-engines-model-default"
 ROUTE_QUALIFICATION_VERSION = 1
 ROUTE_QUALIFICATION_MAX_TOKENS = 512
 ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS = 128
+QWEN_PLE_QUALIFICATION_CONTEXT = 16_384
+QWEN_PLE_QUALIFICATION_OUTPUT = 8_192
+QWEN_PLE_QUALIFICATION_REASONING = "medium"
 BENCHMARK_MTP_TUNER_VERSION = 1
 BENCHMARK_MTP_TUNER_MAX_CANDIDATES = 10
 BENCHMARK_MTP_TUNER_CUTOFFS = (0.0, 0.25, 0.50, 0.75)
@@ -434,7 +437,7 @@ ANE_FP16_CLONE_SOURCE_URL = (
     "https://github.com/jundot/omlx/blob/v0.6.3rc2/tools/clone_mlx_model_fp16.py"
 )
 ANE_FP16_CLONE_HELPER = APP_DIR / "ane_fp16_clone.py"
-SESSION_MEMORY_ESTIMATE_VERSION = 2
+SESSION_MEMORY_ESTIMATE_VERSION = 3
 SESSION_DASHBOARD_VERSION = 5
 SURFACE_ATTACHMENT_VERSION = 2
 SURFACE_ATTACHMENT_MAX = 12
@@ -476,12 +479,16 @@ OMLX_QWEN4_HIGH_MEMORY_HARD_BYTES = round(
     OMLX_QWEN4_HIGH_MEMORY_CEILING_BYTES
     * OMLX_QWEN4_HIGH_MEMORY_HARD_THRESHOLD
 )
-# This is a separate Metal wired-memory floor. It matches the documented
-# 43,008 MiB launch setting and can rise with context without redefining the
-# oMLX process guard above.
+# This is a separate Metal wired-memory floor. The final requirement can rise
+# with model/context size without redefining the oMLX process guard above.
 OMLX_QWEN4_METAL_FLOOR_GIB = 42.0
 OMLX_QWEN4_METAL_FLOOR_BYTES = int(OMLX_QWEN4_METAL_FLOOR_GIB * 1024**3)
 OMLX_QWEN4_METAL_WORKSPACE_BYTES = 512 * 1024**2
+# oMLX rejects prefill when the resident allocation plus its minimum transient
+# would cross 95% of the effective Metal ceiling. Admission must account for
+# that same fail-closed margin instead of treating the kernel limit as wholly
+# available working space.
+OMLX_QWEN4_METAL_PREFILL_SAFE_RATIO = 0.95
 OMLX_INSTALL_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.4"
 OMLX_INSTALL_DOCS_URL = "https://github.com/jundot/omlx#install"
 LMSTUDIO_RUNTIME_DOCS_URL = "https://lmstudio.ai/docs/cli/runtime/runtime"
@@ -532,7 +539,10 @@ DFLASH2_TARGET_GEOMETRY = {
     "intermediate_size": 17_408,
 }
 OPTIMIZER_KEYS = {
-    "omlx": ("acceleration", "depth", "dflashVerify", "dflashDraftQuant", "burst", "anePrefill"),
+    "omlx": (
+        "acceleration", "depth", "dflashVerify", "dflashDraftQuant", "burst",
+        "anePrefill", "memoryGuard",
+    ),
     "lmstudio": (
         "acceleration", "depth", "mtpMinTokens",
         "mtpMinContinueProbability", "gpu", "parallel",
@@ -8786,7 +8796,7 @@ def validated_chat_messages(payload: dict[str, Any], system_prompt: str) -> list
         messages.append({"role": "system", "content": effective_system_prompt})
     if context_message:
         messages.append({"role": "user", "content": context_message})
-    for item in raw_messages:
+    for index, item in enumerate(raw_messages):
         if not isinstance(item, dict):
             raise ValueError("Every chat message must have a role and text content.")
         role = item.get("role")
@@ -8794,7 +8804,15 @@ def validated_chat_messages(payload: dict[str, Any], system_prompt: str) -> list
         reasoning = item.get("reasoning_content", item.get("reasoning", ""))
         if role not in {"user", "assistant"}:
             raise ValueError("Chat history may contain only user and assistant messages.")
-        if not isinstance(content, str) or not content.strip() or "\x00" in content:
+        reasoning_only_continuation = bool(
+            operation == "continue" and index == len(raw_messages) - 1
+            and role == "assistant" and isinstance(reasoning, str)
+            and reasoning.strip()
+        )
+        if (
+            not isinstance(content, str) or "\x00" in content
+            or (not content.strip() and not reasoning_only_continuation)
+        ):
             raise ValueError("Chat messages must contain non-empty text.")
         if not isinstance(reasoning, str) or "\x00" in reasoning:
             raise ValueError("Displayed model reasoning must be text.")
@@ -8928,16 +8946,29 @@ def _validated_chat_history_messages(value: Any) -> list[dict[str, Any]]:
         content = item.get("content")
         reasoning = item.get("reasoning", "")
         interrupted = item.get("interrupted") is True
+        truncated = item.get("truncated") is True
+        failure = item.get("failure", "")
         if interrupted and role != "assistant":
             raise ValueError("Only an assistant response may be marked as interrupted.")
+        if not isinstance(failure, str) or "\x00" in failure or len(failure) > 800:
+            raise ValueError("A saved terminal failure must be bounded text.")
+        failure = failure.strip()
+        if failure and (role != "assistant" or not interrupted):
+            raise ValueError("A terminal failure may be stored only on an interrupted assistant response.")
         if (
             not isinstance(content, str) or "\x00" in content
-            or (not content.strip() and not interrupted)
+            or (
+                not content.strip() and not interrupted
+                and not (
+                    truncated and role == "assistant"
+                    and isinstance(reasoning, str) and reasoning.strip()
+                )
+            )
         ):
             raise ValueError("Every saved chat message must contain text.")
         if not isinstance(reasoning, str) or "\x00" in reasoning:
             raise ValueError("Displayed model reasoning must be text.")
-        total += len(content) + len(reasoning)
+        total += len(content) + len(reasoning) + len(failure)
         if total > CHAT_HISTORY_MAX_CHARACTERS:
             raise ValueError(
                 f"One saved chat may contain at most {CHAT_HISTORY_MAX_CHARACTERS:,} characters."
@@ -8954,7 +8985,9 @@ def _validated_chat_history_messages(value: Any) -> list[dict[str, Any]]:
             message["exclude"] = True
         if interrupted:
             message["interrupted"] = True
-        if item.get("truncated") is True:
+        if failure:
+            message["failure"] = failure
+        if truncated:
             if role != "assistant":
                 raise ValueError("Only an assistant response may be marked as response-limited.")
             message["truncated"] = True
@@ -12723,6 +12756,7 @@ class AgentConsole:
     rpc_last_queue_count: int = -1
     rpc_prompt_id: str = ""
     rpc_prompt_acknowledged: bool = False
+    rpc_queued_prompt_message: str = field(default="", repr=False)
     rpc_queue_paused: bool = False
     rpc_queue_advance_allowed: bool = False
     rpc_settle_revision: int = 0
@@ -12953,25 +12987,33 @@ def pi_rpc_settled_output(console: AgentConsole) -> bytes:
     console.rpc_prompt_inflight = False
     console.rpc_prompt_id = ""
     console.rpc_prompt_acknowledged = False
+    console.rpc_queued_prompt_message = ""
     console.rpc_interactions.clear()
     last = console.rpc_last_assistant
     console.rpc_queue_paused = bool(
         console.rpc_follow_up_queue and not console.rpc_queue_advance_allowed
     )
+    terminal_state = str(last.get("terminalState") or "unexpected-eof")
     if (
-        last.get("thinkingCharacters", 0) > 0
+        terminal_state == "clean"
         and last.get("textCharacters", 0) == 0
         and last.get("toolCalls", 0) == 0
-        and last.get("stopReason") != "length"
     ):
         section("incomplete", "NO FINAL ANSWER", "38;5;214")
         output.extend(
-            b"Pi received model reasoning but no final response. Send continue to resume the task."
+            b"Pi finished the turn without a final response. Send continue to resume the task."
+            if last.get("thinkingCharacters", 0) > 0 else
+            b"Pi finished the turn without visible output. Retry the message."
+        )
+    elif terminal_state == "unexpected-eof":
+        section("incomplete", "TURN INCOMPLETE", "38;5;214")
+        output.extend(
+            b"Pi became idle without reporting a clean terminal result. Any partial output above was preserved."
         )
     if console.rpc_queue_paused:
         section("queue-paused", "QUEUE PAUSED", "38;5;214")
         output.extend(
-            b"Queued follow-ups were kept in place because this turn has no final answer. "
+            b"Queued follow-ups were kept in place because the previous turn did not finish cleanly. "
             b"Send continue to finish the response, or clear the queue."
         )
     console.rpc_last_assistant = {}
@@ -12980,12 +13022,48 @@ def pi_rpc_settled_output(console: AgentConsole) -> bytes:
     return bytes(output)
 
 
+def pi_rpc_unexpected_eof_output(console: AgentConsole) -> bytes:
+    """Fail one active Pi turn closed when its RPC process ends mid-response."""
+    if not (console.rpc_streaming or console.rpc_prompt_inflight):
+        return b""
+    console.rpc_queue_advance_allowed = False
+    console.rpc_queue_paused = bool(console.rpc_follow_up_queue)
+    output = bytearray(pi_rpc_heading("PI SESSION ENDED", "38;5;203"))
+    output.extend(
+        b"The Pi process ended before the active turn reported a clean completion. "
+        b"Any partial thinking, response, and tool output above was preserved."
+    )
+    if console.rpc_queue_paused:
+        output.extend(pi_rpc_heading("QUEUE PAUSED", "38;5;214"))
+        output.extend(
+            b"Queued follow-ups were kept in place and were not sent against the incomplete turn."
+        )
+    return bytes(output)
+
+
+def pi_rpc_accept_queued_prompt(console: AgentConsole) -> None:
+    """Commit a launcher-queued prompt once Pi proves it accepted the write."""
+    message = console.rpc_queued_prompt_message
+    if message and console.rpc_follow_up_queue and console.rpc_follow_up_queue[0] == message:
+        console.rpc_follow_up_queue.pop(0)
+    console.rpc_queued_prompt_message = ""
+    console.rpc_pending_messages = (
+        len(console.rpc_follow_up_queue) + console.rpc_external_pending_messages
+    )
+
+
 def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
     """Translate Pi's structured RPC events into a stable append-only transcript."""
     if not isinstance(event, dict):
         return b""
     event_type = str(event.get("type") or "")
     output = bytearray()
+
+    if event_type in {
+        "agent_start", "message_start", "message_update", "message_end",
+        "tool_execution_start", "tool_execution_update", "tool_execution_end",
+    }:
+        pi_rpc_accept_queued_prompt(console)
 
     def section(name: str, label: str, colour: str) -> None:
         if console.rpc_section != name:
@@ -12996,22 +13074,38 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
         command = str(event.get("command") or "")
         response_id = str(event.get("id") or "")
         if event.get("success") is False:
-            section("error", "PI ERROR", "38;5;203")
-            output.extend(safe_agent_transcript_text(
+            error_text = safe_agent_transcript_text(
                 event.get("error") or f"{command} failed",
-            ).encode("utf-8"))
+            )
+            section("error", "PI ERROR", "38;5;203")
+            output.extend(error_text.encode("utf-8"))
             if command == "prompt" and (
                 not response_id or not console.rpc_prompt_id
                 or response_id == console.rpc_prompt_id
             ):
-                console.rpc_prompt_inflight = False
-                console.rpc_streaming = False
-                console.rpc_prompt_id = ""
-                console.rpc_prompt_acknowledged = False
+                queued_message = console.rpc_queued_prompt_message
+                if queued_message and (
+                    not console.rpc_follow_up_queue
+                    or console.rpc_follow_up_queue[0] != queued_message
+                ):
+                    console.rpc_follow_up_queue.insert(0, queued_message)
+                console.rpc_queue_advance_allowed = False
+                console.rpc_last_assistant = {
+                    "thinkingCharacters": 0,
+                    "textCharacters": 0,
+                    "toolCalls": 0,
+                    "stopReason": "error",
+                    "terminalState": "failed",
+                    "errorMessage": error_text,
+                }
+                # Pi emits no agent_settled after rejecting a prompt command.
+                # Settle it here so queued follow-ups become visibly paused.
+                output.extend(pi_rpc_settled_output(console))
         elif command == "prompt" and (
             not response_id or not console.rpc_prompt_id
             or response_id == console.rpc_prompt_id
         ):
+            pi_rpc_accept_queued_prompt(console)
             console.rpc_prompt_acknowledged = True
         elif command == "get_messages" and not console.rpc_history_loaded:
             data = event.get("data") if isinstance(event.get("data"), dict) else {}
@@ -13178,22 +13272,44 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
                     if kind == "thinking" else final.encode("utf-8")
                 )
         stop_reason = safe_agent_ui_text(message.get("stopReason"), 80)
+        normalized_stop_reason = stop_reason.strip().casefold().replace("-", "_").replace(" ", "_")
+        terminal_state = {
+            "stop": "clean",
+            "length": "limited",
+            "error": "failed",
+            "aborted": "aborted",
+        }.get(normalized_stop_reason, "unexpected-eof")
+        error_message = safe_agent_transcript_text(message.get("errorMessage"), 2_000)
         console.rpc_last_assistant = {
             "thinkingCharacters": thinking_characters,
             "textCharacters": text_characters,
             "toolCalls": tool_calls,
             "stopReason": stop_reason,
+            "terminalState": terminal_state,
+            "errorMessage": error_message,
         }
         console.rpc_queue_advance_allowed = bool(
-            (text_characters > 0 or tool_calls > 0) and stop_reason != "length"
+            (text_characters > 0 or tool_calls > 0) and terminal_state == "clean"
         )
         console.rpc_message_blocks.clear()
-        if stop_reason == "length":
+        if terminal_state == "limited":
             section("limit", "RESPONSE LIMIT REACHED", "38;5;214")
             output.extend(
                 b"The model used the complete response allowance. Send continue to resume this task, "
                 b"or raise Max response before the next hard task."
             )
+        elif terminal_state == "failed":
+            section("error", "PI ERROR", "38;5;203")
+            output.extend((
+                error_message
+                or "Pi reported that the model turn failed before a clean completion."
+            ).encode("utf-8"))
+        elif terminal_state == "aborted":
+            section("aborted", "RESPONSE ABORTED", "38;5;214")
+            output.extend((
+                error_message
+                or "Pi reported that the model turn was aborted before a clean completion."
+            ).encode("utf-8"))
         return bytes(output)
     if event_type == "tool_execution_start":
         section(
@@ -15083,6 +15199,91 @@ def validated_calibration_cooling(payload: dict[str, Any]) -> str:
     return cooling
 
 
+def qwen_ple_qualification_preparation(
+    request: dict[str, Any], model: dict[str, Any], models: list[dict[str, Any]],
+    calibration_cooling: str,
+) -> dict[str, Any]:
+    """Return one explicit, side-effect-free 48 GiB qualification preset.
+
+    This helper changes only the visible request contract.  It never changes a
+    macOS system setting, starts a runtime, or assumes that the resulting route
+    has passed the separate live memory-admission gate.
+    """
+    prepared_payload = copy.deepcopy(request)
+    prepared_payload.update({
+        "backend": "omlx",
+        "context": QWEN_PLE_QUALIFICATION_CONTEXT,
+        "output": QWEN_PLE_QUALIFICATION_OUTPUT,
+        "reasoning": QWEN_PLE_QUALIFICATION_REASONING,
+    })
+    prepared_options = copy.deepcopy(prepared_payload.get("options") or {})
+    prepared_options.update({
+        "acceleration": "off",
+        "depth": 1,
+        "kv": "off",
+        "burst": "aggressive",
+        "anePrefill": "off",
+        "memoryGuard": "high",
+        "fan": "smart",
+    })
+    prepared_payload["options"] = prepared_options
+    prepared = validated_launch_profile_request(prepared_payload, models)
+
+    current_options = request.get("options") if isinstance(request.get("options"), dict) else {}
+    changes: list[dict[str, str | int]] = []
+
+    def changed(key: str, current: Any, value: Any, label: str) -> None:
+        if current != value:
+            changes.append({"key": key, "value": value, "label": label})
+
+    changed("context", request.get("context"), prepared["context"], "16,384 context")
+    changed("output", request.get("output"), prepared["output"], "8,192 max response")
+    changed(
+        "reasoning", request.get("reasoning"), prepared["reasoning"],
+        "Medium reasoning",
+    )
+    for key, label in (
+        ("acceleration", "Exact autoregressive route"),
+        ("kv", "Full-precision KV"),
+        ("burst", "Throughput stream batching"),
+        ("anePrefill", "Approximate ANE prefill off"),
+        ("memoryGuard", "High memory guard"),
+    ):
+        changed(key, current_options.get(key), prepared["options"].get(key), label)
+    if calibration_cooling != "smart":
+        changes.append({
+            "key": "calibrationCooling", "value": "smart",
+            "label": "Automatic cooling",
+        })
+
+    return {
+        "kind": "qwen-ple-safe-qualification-v1",
+        "applicable": bool(changes),
+        "modelId": str(model.get("id") or request.get("modelId") or ""),
+        "settings": {
+            "backend": "omlx",
+            "context": prepared["context"],
+            "output": prepared["output"],
+            "reasoning": prepared["reasoning"],
+            "calibrationCooling": "smart",
+            "options": {
+                key: prepared["options"][key]
+                for key in (
+                    "acceleration", "depth", "kv", "burst", "anePrefill",
+                    "memoryGuard",
+                )
+            },
+        },
+        "request": prepared,
+        "changes": changes,
+        "summary": (
+            "Prepare the exact oMLX AR route at 16K context, 8K response, medium "
+            "reasoning, full-precision KV, High memory guard, and Automatic cooling."
+        ),
+        "doesNotChangeMacOS": True,
+    }
+
+
 def calibration_plan(
     payload: dict[str, Any], models: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -15280,6 +15481,14 @@ def calibration_plan(
         and jobs[0].get("modes") == ["ar"]
         and reasoning_contract.get("reasoningEnabled") is True
     )
+    qualification_preparation: dict[str, Any] | None = None
+    if route_qualification_candidate:
+        try:
+            qualification_preparation = qwen_ple_qualification_preparation(
+                visible_request, model, models, calibration_cooling,
+            )
+        except (KeyError, StopIteration, ValueError):
+            qualification_preparation = None
     blockers: list[str] = []
     fingerprints = {str(job.get("modelFingerprint") or "") for job in jobs}
     if route_qualification_candidate and reasoning_contract.get("reasoningEnabled") is not True:
@@ -15322,6 +15531,21 @@ def calibration_plan(
                     f"{memory_admission.get('label') or 'Qwen route is not loadable'}: "
                     f"{memory_admission.get('detail') or 'refresh capacity before qualification.'}"
                 )
+    if qualification_preparation and qualification_preparation.get("applicable") is True:
+        try:
+            qualification_preparation["nextAdmission"] = route_qualification_memory_admission(
+                qualification_preparation["request"], models,
+            )
+        except (KeyError, StopIteration, ValueError) as error:
+            qualification_preparation["nextAdmission"] = {
+                "decision": "unknown", "launchable": False,
+                "requiresAcknowledgement": False,
+                "label": "Capacity will be rechecked",
+                "detail": str(error) or "Refresh capacity after preparing the visible route.",
+            }
+        qualification_preparation["resolvesVisibleSettings"] = (
+            qualification_preparation["nextAdmission"].get("decision") != "configuration"
+        )
     ready = not blockers
     route_count = sum(
         benchmark_job_maximum_route_count(job) for job in jobs
@@ -15392,6 +15616,7 @@ def calibration_plan(
         "action": action,
         "ready": ready,
         "routeQualification": route_qualification,
+        "qualificationPreparation": copy.deepcopy(qualification_preparation),
         "blockers": blockers,
         "memoryAdmission": copy.deepcopy(memory_admission),
         "request": request,
@@ -15609,9 +15834,12 @@ def launch_memory_estimate(
         )
         metal_estimate = model_bytes + kv_bytes + OMLX_QWEN4_METAL_WORKSPACE_BYTES
         gib = 1024**3
+        guarded_metal_estimate = math.ceil(
+            metal_estimate / OMLX_QWEN4_METAL_PREFILL_SAFE_RATIO
+        )
         required_metal_limit = max(
             OMLX_QWEN4_METAL_FLOOR_BYTES,
-            ((metal_estimate + gib - 1) // gib) * gib,
+            ((guarded_metal_estimate + gib - 1) // gib) * gib,
         )
         memory_guard = str(options.get("memoryGuard") or "balanced")
         return {
@@ -15649,8 +15877,9 @@ def launch_memory_estimate(
             "basis": (
                 "Qwen4 PLE capacity: the indexed N-gram table is read-only SSD mmap, the remaining checkpoint "
                 "uses oMLX's 1.05 resident estimate, QSA index keys and MRoPE positions stay full precision, "
-                "and runtime plus macOS reserves remain separate. The context-derived Metal limit is checked "
-                "independently from the oMLX process guard. This is not swap or expert streaming."
+                "and runtime plus macOS reserves remain separate. The context-derived Metal limit includes "
+                "oMLX's 95% prefill safety margin and is checked independently from the process guard. "
+                "This is not swap or expert streaming."
             ),
         }
     if backend in SSD_STREAMING_BACKENDS:
@@ -16077,6 +16306,30 @@ def _benchmark_cached_prompt_tokens(usage: dict[str, Any], prompt_tokens: int) -
     return None
 
 
+def _openai_error_detail(payload: Any) -> str | None:
+    """Return one bounded OpenAI-compatible error without exposing raw payloads."""
+    if not isinstance(payload, dict):
+        return None
+    raw_error = payload.get("error")
+    if raw_error is None and str(payload.get("type") or "") == "response.failed":
+        response = payload.get("response")
+        if isinstance(response, dict):
+            raw_error = response.get("error")
+    if raw_error is None:
+        return None
+    code = ""
+    if isinstance(raw_error, dict):
+        message = str(raw_error.get("message") or raw_error.get("detail") or "").strip()
+        code = str(raw_error.get("omlx_code") or raw_error.get("code") or "").strip()
+    else:
+        message = str(raw_error).strip()
+    message = re.sub(r"\s+", " ", message)[:1_200]
+    code = re.sub(r"[^A-Za-z0-9_.-]", "", code)[:80]
+    if not message:
+        message = "The runtime reported an unspecified error."
+    return f"{message} [{code}]" if code and code not in message else message
+
+
 def run_benchmark_completion(
     plan: LaunchPlan, prompt: str | list[dict[str, str]], max_tokens: int,
     sampling: dict[str, Any],
@@ -16111,6 +16364,9 @@ def run_benchmark_completion(
         content_type = response.headers.get("Content-Type", "").lower()
         if content_type.startswith("application/json"):
             data = json.loads(response.read(MAX_JSON))
+            runtime_error = _openai_error_detail(data)
+            if runtime_error:
+                raise RuntimeError(f"Benchmark runtime rejected the request: {runtime_error}")
             total = time.monotonic() - started
             choice = (data.get("choices") or [{}])[0]
             message = choice.get("message") if isinstance(choice, dict) else {}
@@ -16135,6 +16391,9 @@ def run_benchmark_completion(
                     event = json.loads(payload)
                 except ValueError:
                     continue
+                runtime_error = _openai_error_detail(event)
+                if runtime_error:
+                    raise RuntimeError(f"Benchmark runtime rejected the request: {runtime_error}")
                 if isinstance(event.get("usage"), dict):
                     usage = event["usage"]
                 choices = event.get("choices")
@@ -16389,6 +16648,91 @@ def chat_cache_observation_event(event: Any) -> dict[str, Any]:
                 "cachedPromptTokens": cached_tokens,
             }
     return facts
+
+
+_CHAT_CLEAN_TERMINAL_REASONS = {"stop", "completed", "complete", "success", "succeeded"}
+_CHAT_FAILED_TERMINAL_REASONS = {
+    "error", "failed", "failure", "incomplete", "content_filter", "tool_calls",
+    "function_call",
+}
+_CHAT_ABORTED_TERMINAL_REASONS = {"abort", "aborted", "cancel", "cancelled", "canceled"}
+_CHAT_LIMIT_TERMINAL_REASONS = {
+    "length", "max_tokens", "max_output_tokens", "max_completion_tokens", "token_limit",
+}
+_CHAT_TERMINAL_PRIORITY = {"clean": 1, "limited": 2, "aborted": 3, "failed": 4}
+
+
+def _chat_terminal_reason(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > 80:
+        return ""
+    return re.sub(r"[\s-]+", "_", value.strip().casefold())
+
+
+def chat_stream_terminal_state(event: Any) -> str:
+    """Classify only explicit upstream terminal evidence; missing evidence stays unknown."""
+    if not isinstance(event, dict):
+        return ""
+    choices = event.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    response = event.get("response") if isinstance(event.get("response"), dict) else {}
+    if event.get("error") or response.get("error"):
+        return "failed"
+
+    candidates = [
+        choice.get("finish_reason"), choice.get("finishReason"),
+        event.get("finish_reason"), event.get("finishReason"),
+        event.get("stop_reason"), event.get("stopReason"),
+        deep_get(event, ("incomplete_details", "reason"), ("incompleteDetails", "reason")),
+        deep_get(response, ("incomplete_details", "reason"), ("incompleteDetails", "reason")),
+    ]
+    reasons = [_chat_terminal_reason(candidate) for candidate in candidates]
+    state = (
+        "limited" if any(reason in _CHAT_LIMIT_TERMINAL_REASONS for reason in reasons)
+        else ""
+    )
+
+    event_type = re.sub(r"[.\s-]+", "_", str(event.get("type") or "").strip().casefold())
+    if event_type in {"response_failed", "error"}:
+        state = merge_chat_stream_terminal_state(state, "failed")
+    elif event_type == "response_incomplete" and state != "limited":
+        state = merge_chat_stream_terminal_state(state, "failed")
+    elif event_type in {"response_cancelled", "response_canceled"}:
+        state = merge_chat_stream_terminal_state(state, "aborted")
+    elif event_type == "response_completed":
+        state = merge_chat_stream_terminal_state(state, "clean")
+
+    for candidate in (choice.get("finish_reason"), choice.get("finishReason"),
+                      event.get("finish_reason"), event.get("finishReason"),
+                      event.get("stop_reason"), event.get("stopReason"),
+                      event.get("status"), response.get("status")):
+        reason = _chat_terminal_reason(candidate)
+        if reason in _CHAT_ABORTED_TERMINAL_REASONS:
+            state = merge_chat_stream_terminal_state(state, "aborted")
+        elif reason in _CHAT_FAILED_TERMINAL_REASONS and not (
+            reason == "incomplete" and state == "limited"
+        ):
+            state = merge_chat_stream_terminal_state(state, "failed")
+        elif reason in _CHAT_CLEAN_TERMINAL_REASONS:
+            state = merge_chat_stream_terminal_state(state, "clean")
+    return state
+
+
+def merge_chat_stream_terminal_state(current: str, next_state: str) -> str:
+    left = current if current in _CHAT_TERMINAL_PRIORITY else ""
+    right = next_state if next_state in _CHAT_TERMINAL_PRIORITY else ""
+    if not right:
+        return left
+    if not left:
+        return right
+    return right if _CHAT_TERMINAL_PRIORITY[right] >= _CHAT_TERMINAL_PRIORITY[left] else left
+
+
+def final_chat_stream_terminal_state(state: str, done_seen: bool = False) -> str:
+    if state in _CHAT_TERMINAL_PRIORITY:
+        return state
+    # [DONE] only closes SSE framing.  It cannot prove that generation reached
+    # a semantic terminal state, so queues still require an explicit finish.
+    return "unexpected-eof"
 
 
 def session_cache_policy(plan: LaunchPlan | None) -> dict[str, Any]:
@@ -17086,6 +17430,9 @@ def run_route_check_request(
         streamed = content_type.startswith("text/event-stream")
         if content_type.startswith("application/json"):
             data = json.loads(response.read(MAX_JSON))
+            runtime_error = _openai_error_detail(data)
+            if runtime_error:
+                raise RuntimeError(f"The {protocol} probe was rejected: {runtime_error}")
             if protocol == "responses":
                 content, reasoning, names, found_usage = _route_check_response_parts(data)
                 content_characters += len(content)
@@ -17122,6 +17469,9 @@ def run_route_check_request(
                 except ValueError:
                     continue
                 event_count += 1
+                runtime_error = _openai_error_detail(event)
+                if runtime_error:
+                    raise RuntimeError(f"The {protocol} stream reported an error: {runtime_error}")
                 before = content_characters + reasoning_characters + len(tool_names)
                 if protocol == "responses":
                     if event.get("type") in {"error", "response.failed"}:
@@ -19063,12 +19413,8 @@ class RunManager:
                 )
                 return
             next_message = (
-                console.rpc_follow_up_queue.pop(0)
+                console.rpc_follow_up_queue[0]
                 if console.rpc_follow_up_queue else None
-            )
-            console.rpc_pending_messages = (
-                len(console.rpc_follow_up_queue)
-                + console.rpc_external_pending_messages
             )
             if next_message is not None:
                 prompt_id = f"launcher-prompt-{secrets.token_hex(8)}"
@@ -19076,6 +19422,7 @@ class RunManager:
                 console.rpc_streaming = True
                 console.rpc_prompt_id = prompt_id
                 console.rpc_prompt_acknowledged = False
+                console.rpc_queued_prompt_message = next_message
                 console.rpc_queue_paused = False
                 console.rpc_queue_advance_allowed = False
         if next_message is None:
@@ -19085,6 +19432,13 @@ class RunManager:
             self._write_pi_rpc_command(console, {
                 "id": prompt_id, "type": "prompt", "message": next_message,
             })
+            with console.lock:
+                # Keep the head queued until Pi explicitly accepts the prompt.
+                # A successful OS write alone cannot prove that Pi parsed it.
+                console.rpc_pending_messages = (
+                    len(console.rpc_follow_up_queue)
+                    + console.rpc_external_pending_messages
+                )
         except ValueError as error:
             with console.lock:
                 if console.rpc_prompt_id == prompt_id:
@@ -19092,9 +19446,21 @@ class RunManager:
                     console.rpc_streaming = False
                     console.rpc_prompt_id = ""
                     console.rpc_prompt_acknowledged = False
+                    console.rpc_queued_prompt_message = ""
+                console.rpc_queue_advance_allowed = False
+                console.rpc_queue_paused = bool(console.rpc_follow_up_queue)
+                console.rpc_pending_messages = (
+                    len(console.rpc_follow_up_queue)
+                    + console.rpc_external_pending_messages
+                )
             console.append(
                 pi_rpc_heading("PI ERROR", "38;5;203")
                 + safe_agent_transcript_text(error, 2_000).encode("utf-8")
+                + (
+                    pi_rpc_heading("QUEUE PAUSED", "38;5;214")
+                    + b"The queued message was not sent and remains available to retry."
+                    if console.rpc_queue_paused else b""
+                )
             )
 
     def _read_agent_console(self, console: AgentConsole) -> None:
@@ -19134,11 +19500,20 @@ class RunManager:
             except (OSError, subprocess.TimeoutExpired):
                 exit_code = console.process.poll()
             self._close_agent_console_fd(console)
+            unexpected_rpc_eof = False
+            unexpected_rpc_output = b""
             with console.lock:
+                if console.protocol == "pi-rpc" and console.state != "stopping":
+                    unexpected_rpc_eof = bool(
+                        console.rpc_streaming or console.rpc_prompt_inflight
+                    )
+                    if unexpected_rpc_eof:
+                        unexpected_rpc_output = pi_rpc_unexpected_eof_output(console)
                 console.rpc_streaming = False
                 console.rpc_prompt_inflight = False
                 console.rpc_prompt_id = ""
                 console.rpc_prompt_acknowledged = False
+                console.rpc_queued_prompt_message = ""
                 console.rpc_interactions.clear()
                 console.exit_code = int(exit_code) if exit_code is not None else None
                 console.ended_at = datetime.now(timezone.utc).isoformat()
@@ -19147,11 +19522,18 @@ class RunManager:
                     console.detail = "Agent stopped. The shared model remains loaded."
                 else:
                     console.state = "exited" if console.exit_code == 0 else "failed"
-                    console.detail = (
-                        "Agent exited normally. The shared model remains loaded."
-                        if console.exit_code == 0 else
-                        f"Agent exited with status {console.exit_code}. The shared model remains loaded."
-                    )
+                    if unexpected_rpc_eof:
+                        console.detail = (
+                            "Pi ended before the active response reported a clean completion. "
+                            "Partial output was preserved and queued follow-ups were not sent."
+                        )
+                    else:
+                        console.detail = (
+                            "Agent exited normally. The shared model remains loaded."
+                            if console.exit_code == 0 else
+                            f"Agent exited with status {console.exit_code}. The shared model remains loaded."
+                        )
+            console.append(unexpected_rpc_output)
             with self.lock:
                 if self.agent_consoles.get(console.plan.run_id) is console:
                     attachment = self.attachments.get(console.plan.run_id)
@@ -19280,6 +19662,7 @@ class RunManager:
                     console.rpc_streaming = True
                     console.rpc_prompt_id = prompt_id
                     console.rpc_prompt_acknowledged = False
+                    console.rpc_queued_prompt_message = ""
                     console.rpc_queue_paused = False
                     console.rpc_queue_advance_allowed = False
                     pending = 0
@@ -19342,6 +19725,7 @@ class RunManager:
             with console.lock:
                 cleared = len(console.rpc_follow_up_queue)
                 console.rpc_follow_up_queue.clear()
+                console.rpc_queued_prompt_message = ""
                 console.rpc_pending_messages = console.rpc_external_pending_messages
                 console.rpc_queue_paused = False
             console.append(
@@ -19361,6 +19745,13 @@ class RunManager:
                         console.rpc_streaming = False
                         console.rpc_prompt_id = ""
                         console.rpc_prompt_acknowledged = False
+                        console.rpc_queued_prompt_message = ""
+                    console.rpc_queue_advance_allowed = False
+                    console.rpc_queue_paused = bool(console.rpc_follow_up_queue)
+                    console.rpc_pending_messages = (
+                        len(console.rpc_follow_up_queue)
+                        + console.rpc_external_pending_messages
+                    )
             raise
         return console.public()
 
@@ -26626,8 +27017,10 @@ class Handler(SimpleHTTPRequestHandler):
         first_output_at: float | None = None
         last_usage: dict[str, Any] | None = None
         output_observed = False
-        interrupted = False
-        completed = False
+        terminal_state = ""
+        done_seen = False
+        upstream_interrupted = False
+        browser_interrupted = False
         try:
             response = urllib.request.urlopen(request, timeout=900)
         except urllib.error.HTTPError as error:
@@ -26648,6 +27041,7 @@ class Handler(SimpleHTTPRequestHandler):
             or content_type.lower().startswith("application/json")
         ):
             content_type = "text/event-stream; charset=utf-8"
+        is_sse = content_type.lower().startswith("text/event-stream")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Connection", "close")
@@ -26657,21 +27051,32 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             with response:
                 while True:
-                    line = response.readline()
-                    if not line:
-                        completed = True
+                    try:
+                        line = response.readline()
+                    except (ConnectionResetError, TimeoutError, OSError):
+                        upstream_interrupted = True
                         break
-                    self.wfile.write(line)
-                    self.wfile.flush()
+                    if not line:
+                        break
+                    try:
+                        self.wfile.write(line)
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+                        browser_interrupted = True
+                        break
                     try:
                         decoded = line.decode("utf-8", "replace").strip()
                         payload_text = decoded[5:].strip() if decoded.startswith("data:") else decoded
                         if payload_text == "[DONE]":
-                            completed = True
+                            done_seen = True
                             continue
                         if not payload_text:
                             continue
-                        facts = chat_cache_observation_event(json.loads(payload_text))
+                        event = json.loads(payload_text)
+                        terminal_state = merge_chat_stream_terminal_state(
+                            terminal_state, chat_stream_terminal_state(event),
+                        )
+                        facts = chat_cache_observation_event(event)
                         if facts.get("outputObserved") is True:
                             output_observed = True
                             if first_output_at is None:
@@ -26682,25 +27087,52 @@ class Handler(SimpleHTTPRequestHandler):
                         # The relay remains byte-for-byte authoritative. An
                         # unrecognised line merely leaves observability unknown.
                         pass
-        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
-            # Closing the browser stream intentionally cancels this relay. The
-            # upstream connection closes with the response context as well.
-            interrupted = True
-        finally:
-            total = time.monotonic() - started
-            MANAGER.record_chat_cache_observation(observation_context, {
-                "completed": completed and not interrupted,
-                "interrupted": interrupted,
-                "outputObserved": output_observed,
-                "promptTokens": last_usage.get("promptTokens") if last_usage else None,
-                "completionTokens": last_usage.get("completionTokens") if last_usage else None,
-                "cacheTelemetryReported": (
-                    last_usage.get("cacheTelemetryReported") is True if last_usage else False
-                ),
-                "cachedPromptTokens": last_usage.get("cachedPromptTokens") if last_usage else None,
-                "ttftSeconds": first_output_at,
-                "totalSeconds": total,
-            })
+        except (ConnectionResetError, TimeoutError, OSError):
+            upstream_interrupted = True
+
+        final_terminal_state = final_chat_stream_terminal_state(terminal_state, done_seen)
+        if upstream_interrupted:
+            final_terminal_state = merge_chat_stream_terminal_state(
+                final_terminal_state, "failed",
+            )
+        if (
+            is_sse and not browser_interrupted
+            and (upstream_interrupted or final_terminal_state == "unexpected-eof")
+        ):
+            message = (
+                "The upstream model stream failed before reporting a clean completion."
+                if upstream_interrupted else
+                "The model stream ended before reporting a clean completion."
+            )
+            frame = (
+                "\n\ndata: " + json.dumps({
+                    "type": "launcher.stream_error", "error": {"message": message},
+                }, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+            ).encode("utf-8")
+            try:
+                self.wfile.write(frame)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+                browser_interrupted = True
+        total = time.monotonic() - started
+        completed = final_terminal_state == "clean" and not browser_interrupted
+        interrupted = bool(
+            browser_interrupted
+            or final_terminal_state in {"failed", "aborted", "unexpected-eof"}
+        )
+        MANAGER.record_chat_cache_observation(observation_context, {
+            "completed": completed,
+            "interrupted": interrupted,
+            "outputObserved": output_observed,
+            "promptTokens": last_usage.get("promptTokens") if last_usage else None,
+            "completionTokens": last_usage.get("completionTokens") if last_usage else None,
+            "cacheTelemetryReported": (
+                last_usage.get("cacheTelemetryReported") is True if last_usage else False
+            ),
+            "cachedPromptTokens": last_usage.get("cachedPromptTokens") if last_usage else None,
+            "ttftSeconds": first_output_at,
+            "totalSeconds": total,
+        })
 
 
 def serve(no_browser: bool, requested_port: int) -> None:

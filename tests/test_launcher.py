@@ -2224,6 +2224,26 @@ class LauncherTests(unittest.TestCase):
             continued_body["messages"][-1],
             {"role": "user", "content": launcher.CHAT_CONTINUE_INSTRUCTION},
         )
+        reasoning_only_continued = manager.chat_request({
+            "runId": plan.run_id,
+            "operation": "continue",
+            "messages": [
+                {"role": "user", "content": "Solve the hard problem."},
+                {
+                    "role": "assistant", "content": "",
+                    "reasoning_content": "The response limit arrived during reasoning.",
+                },
+            ],
+        })
+        reasoning_only_body = json.loads(reasoning_only_continued.data)
+        self.assertEqual(reasoning_only_body["messages"][-2], {
+            "role": "assistant", "content": "",
+            "reasoning_content": "The response limit arrived during reasoning.",
+        })
+        self.assertEqual(
+            reasoning_only_body["messages"][-1],
+            {"role": "user", "content": launcher.CHAT_CONTINUE_INSTRUCTION},
+        )
         with self.assertRaisesRegex(ValueError, "latest chat message"):
             manager.chat_request({
                 "runId": plan.run_id,
@@ -2595,6 +2615,15 @@ class LauncherTests(unittest.TestCase):
                     {"role": "user", "content": "Hello", "truncated": True},
                 ],
             })
+        limited_reasoning = launcher._validated_chat_history_messages([
+            {"role": "user", "content": "Finish this hard task."},
+            {
+                "role": "assistant", "content": "", "reasoning": "Still working",
+                "truncated": True,
+            },
+        ])
+        self.assertEqual(limited_reasoning[-1]["reasoning"], "Still working")
+        self.assertTrue(limited_reasoning[-1]["truncated"])
 
     def test_chat_turn_journal_is_private_bounded_route_scoped_and_idempotent(self) -> None:
         tab_id = str(uuid.uuid4())
@@ -2613,6 +2642,7 @@ class LauncherTests(unittest.TestCase):
                 {
                     "role": "assistant", "content": "", "reasoning": "",
                     "interrupted": True,
+                    "failure": "The model stream ended before reporting a clean completion.",
                 },
             ],
             "contextFiles": [{"name": "private.txt", "content": "must-not-enter-journal"}],
@@ -2637,6 +2667,10 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(interrupted["interrupted"])
         self.assertTrue(interrupted["stopped"])
         self.assertTrue(interrupted["exclude"])
+        self.assertEqual(
+            interrupted["failure"],
+            "The model stream ended before reporting a clean completion.",
+        )
         summary = next(item for item in recovered["threads"] if item["id"] == history_id)
         self.assertTrue(summary["hasInterruptedTurn"])
         repeated = launcher.recover_chat_turn_checkpoint({"tabId": tab_id})
@@ -4037,7 +4071,258 @@ for line in sys.stdin:
             write_rpc.call_args.args[1]["message"], "Run only after a complete answer",
         )
         self.assertFalse(console.rpc_queue_paused)
+        self.assertEqual(
+            console.rpc_follow_up_queue,
+            ["Run only after a complete answer"],
+        )
+        consume({
+            "type": "response", "command": "prompt",
+            "id": write_rpc.call_args.args[1]["id"], "success": True,
+        })
         self.assertEqual(console.rpc_follow_up_queue, [])
+
+    def test_pi_rpc_failed_and_aborted_turns_preserve_partial_output_and_pause_queue(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        manager = launcher.RunManager()
+
+        for stop_reason, heading, detail in (
+            ("error", b"PI ERROR", "upstream connection failed"),
+            ("aborted", b"RESPONSE ABORTED", "generation was cancelled"),
+        ):
+            with self.subTest(stopReason=stop_reason):
+                console = launcher.AgentConsole(
+                    owner_run_id=plan.run_id, plan=plan, process=process,
+                    master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+                )
+                console.rpc_follow_up_queue = ["Must remain queued"]
+                console.rpc_pending_messages = 1
+
+                def consume(event: dict[str, object]) -> None:
+                    manager._consume_pi_rpc_line(
+                        console, json.dumps(event, separators=(",", ":")).encode("utf-8"),
+                    )
+
+                consume({"type": "agent_start"})
+                consume({
+                    "type": "message_end", "message": {
+                        "role": "assistant", "stopReason": stop_reason,
+                        "errorMessage": detail,
+                        "content": [{"type": "text", "text": "Useful partial answer"}],
+                    },
+                })
+                with mock.patch.object(manager, "_write_pi_rpc_command") as write_rpc:
+                    consume({"type": "agent_settled"})
+
+                write_rpc.assert_not_called()
+                self.assertEqual(console.rpc_follow_up_queue, ["Must remain queued"])
+                self.assertTrue(console.rpc_queue_paused)
+                self.assertFalse(console.rpc_queue_advance_allowed)
+                self.assertIn(b"Useful partial answer", console.output)
+                self.assertIn(heading, console.output)
+                self.assertIn(detail.encode("utf-8"), console.output)
+                self.assertIn(b"previous turn did not finish cleanly", console.output)
+
+    def test_pi_rpc_prompt_rejection_settles_and_pauses_follow_ups(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        console.rpc_prompt_inflight = True
+        console.rpc_streaming = True
+        console.rpc_prompt_id = "prompt-rejected"
+        console.rpc_follow_up_queue = ["Keep this queued"]
+        console.rpc_pending_messages = 1
+        manager = launcher.RunManager()
+
+        manager._consume_pi_rpc_line(console, json.dumps({
+            "type": "response", "command": "prompt", "id": "prompt-rejected",
+            "success": False, "error": "Prompt preflight rejected the route",
+        }, separators=(",", ":")).encode("utf-8"))
+
+        self.assertFalse(console.rpc_prompt_inflight)
+        self.assertFalse(console.rpc_streaming)
+        self.assertEqual(console.rpc_prompt_id, "")
+        self.assertEqual(console.rpc_settle_revision, 1)
+        self.assertTrue(console.rpc_queue_paused)
+        self.assertEqual(console.rpc_follow_up_queue, ["Keep this queued"])
+        self.assertEqual(console.rpc_pending_messages, 1)
+        self.assertIn(b"Prompt preflight rejected the route", console.output)
+        self.assertIn(b"QUEUE PAUSED", console.output)
+
+    def test_pi_rpc_queued_write_failure_preserves_message_and_pauses_queue(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        console.rpc_follow_up_queue = ["Never lose this message"]
+        console.rpc_pending_messages = 1
+        manager = launcher.RunManager()
+
+        def consume(event: dict[str, object]) -> None:
+            manager._consume_pi_rpc_line(
+                console, json.dumps(event, separators=(",", ":")).encode("utf-8"),
+            )
+
+        consume({"type": "agent_start"})
+        consume({
+            "type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": "Clean answer"}],
+            },
+        })
+        with mock.patch.object(
+            manager, "_write_pi_rpc_command",
+            side_effect=ValueError("Could not send input to Pi"),
+        ):
+            consume({"type": "agent_settled"})
+
+        self.assertEqual(console.rpc_follow_up_queue, ["Never lose this message"])
+        self.assertEqual(console.rpc_pending_messages, 1)
+        self.assertTrue(console.rpc_queue_paused)
+        self.assertFalse(console.rpc_prompt_inflight)
+        self.assertFalse(console.rpc_streaming)
+        self.assertIn(b"Could not send input to Pi", console.output)
+        self.assertIn(b"remains available to retry", console.output)
+
+    def test_pi_rpc_queued_prompt_rejection_restores_the_sent_message(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        console.rpc_follow_up_queue = ["Restore me if Pi rejects me"]
+        console.rpc_pending_messages = 1
+        manager = launcher.RunManager()
+
+        def consume(event: dict[str, object]) -> None:
+            manager._consume_pi_rpc_line(
+                console, json.dumps(event, separators=(",", ":")).encode("utf-8"),
+            )
+
+        consume({"type": "agent_start"})
+        consume({
+            "type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": "Previous answer complete"}],
+            },
+        })
+        with mock.patch.object(manager, "_write_pi_rpc_command"):
+            consume({"type": "agent_settled"})
+        prompt_id = console.rpc_prompt_id
+        self.assertTrue(prompt_id)
+        self.assertEqual(console.rpc_follow_up_queue, ["Restore me if Pi rejects me"])
+        self.assertEqual(console.rpc_queued_prompt_message, "Restore me if Pi rejects me")
+
+        consume({
+            "type": "response", "command": "prompt", "id": prompt_id,
+            "success": False, "error": "Pi rejected the queued prompt",
+        })
+
+        self.assertEqual(console.rpc_follow_up_queue, ["Restore me if Pi rejects me"])
+        self.assertTrue(console.rpc_queue_paused)
+        self.assertEqual(console.rpc_pending_messages, 1)
+        self.assertEqual(console.rpc_queued_prompt_message, "")
+        self.assertIn(b"Pi rejected the queued prompt", console.output)
+
+    def test_pi_rpc_process_eof_preserves_partial_output_and_never_drains_queue(self) -> None:
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        process = mock.Mock()
+        process.wait.return_value = 0
+        process.poll.return_value = 0
+        read_fd, write_fd = os.pipe()
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=read_fd, cols=100, rows=30, protocol="pi-rpc",
+        )
+        console.rpc_follow_up_queue = ["Do not send after EOF"]
+        console.rpc_pending_messages = 1
+        manager = launcher.RunManager()
+        manager.plan = plan
+        manager.state = {
+            "phase": "running", "message": "Running", "run": plan.public(), "events": [],
+        }
+        manager.agent_consoles[plan.run_id] = console
+        manager.attachments[plan.run_id] = launcher.SurfaceAttachment(
+            owner_run_id=plan.run_id, plan=plan, primary=True,
+        )
+        events = [
+            {"type": "agent_start"},
+            {"type": "message_update", "assistantMessageEvent": {
+                "type": "text_delta", "contentIndex": 0, "delta": "Partial before EOF",
+            }},
+        ]
+        os.write(write_fd, b"\n".join(json.dumps(event).encode("utf-8") for event in events))
+        os.close(write_fd)
+
+        with mock.patch.object(manager, "_write_pi_rpc_command") as write_rpc:
+            manager._read_agent_console(console)
+
+        write_rpc.assert_not_called()
+        self.assertEqual(console.rpc_follow_up_queue, ["Do not send after EOF"])
+        self.assertTrue(console.rpc_queue_paused)
+        transcript = bytes(console.output)
+        self.assertIn(b"Partial before EOF", transcript)
+        self.assertIn(b"PI SESSION ENDED", transcript)
+        self.assertIn(b"were not sent", transcript)
+        self.assertIn("Partial output was preserved", console.detail)
+
+    def test_pi_rpc_pre_ack_eof_keeps_the_queued_prompt(self) -> None:
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        process = mock.Mock()
+        process.wait.return_value = 0
+        process.poll.return_value = 0
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=read_fd, cols=100, rows=30, protocol="pi-rpc",
+        )
+        console.rpc_streaming = True
+        console.rpc_prompt_inflight = True
+        console.rpc_prompt_id = "queued-before-ack"
+        console.rpc_queued_prompt_message = "Must survive pre-ack EOF"
+        console.rpc_follow_up_queue = ["Must survive pre-ack EOF"]
+        console.rpc_pending_messages = 1
+        manager = launcher.RunManager()
+        manager.plan = plan
+        manager.state = {
+            "phase": "running", "message": "Running", "run": plan.public(), "events": [],
+        }
+        manager.agent_consoles[plan.run_id] = console
+        manager.attachments[plan.run_id] = launcher.SurfaceAttachment(
+            owner_run_id=plan.run_id, plan=plan, primary=True,
+        )
+
+        manager._read_agent_console(console)
+
+        self.assertEqual(console.rpc_follow_up_queue, ["Must survive pre-ack EOF"])
+        self.assertEqual(console.rpc_pending_messages, 1)
+        self.assertTrue(console.rpc_queue_paused)
+        self.assertEqual(console.rpc_queued_prompt_message, "")
+        self.assertIn(b"PI SESSION ENDED", console.output)
+        self.assertIn(b"QUEUE PAUSED", console.output)
 
     def test_pi_rpc_authoritative_idle_repairs_missed_settle_and_advances_safely(self) -> None:
         process = mock.Mock()
@@ -4082,6 +4367,14 @@ for line in sys.stdin:
             write_rpc.call_args.args[1]["message"], "Run after the recovered settle",
         )
         self.assertEqual(complete.rpc_settle_revision, 1)
+        self.assertEqual(
+            complete.rpc_follow_up_queue,
+            ["Run after the recovered settle"],
+        )
+        consume(complete, {
+            "type": "response", "command": "prompt",
+            "id": write_rpc.call_args.args[1]["id"], "success": True,
+        })
         self.assertEqual(complete.rpc_follow_up_queue, [])
         self.assertFalse(complete.rpc_queue_paused)
         self.assertIn(b"STARTING QUEUED MESSAGE", complete.output)
@@ -4616,7 +4909,8 @@ for line in sys.stdin:
                 return iter(self.lines)
 
         complete = Response([
-            b'data: {"choices":[{"delta":{"content":"hello"}}]}\n',
+            b'data: {"choices":[{"delta":{"reasoning_content":"inspect"}}]}\n',
+            b'data: {"choices":[{"delta":{"content":"hello"},"finish_reason":"stop"}]}\n',
             b'data: {"choices":[],"usage":{"prompt_tokens":512,"completion_tokens":32,"prompt_tokens_details":{"cached_tokens":400}}}\n',
             b'data: [DONE]\n',
         ])
@@ -4630,13 +4924,30 @@ for line in sys.stdin:
         self.assertEqual(measured["cacheHitRate"], 0.78125)
         self.assertEqual(measured["completionTokens"], 32)
         self.assertGreater(measured["endToEndTokensPerSecond"], 0)
-        self.assertIsNone(measured["finishReason"])
-        self.assertEqual(measured["terminalState"], "unknown")
-        self.assertFalse(measured["terminalComplete"])
+        self.assertTrue(measured["reasoningObserved"])
+        self.assertTrue(measured["answerObserved"])
+        self.assertEqual(measured["finishReason"], "stop")
+        self.assertEqual(measured["terminalState"], "complete")
+        self.assertTrue(measured["terminalComplete"])
 
         missing_usage = Response([b'data: {"choices":[{"delta":{"content":"hello"}}]}\n'])
         with mock.patch.object(launcher.urllib.request, "urlopen", return_value=missing_usage):
             with self.assertRaisesRegex(RuntimeError, "authoritative"):
+                launcher.run_benchmark_completion(
+                    plan, "synthetic", 32, {}, threading.Event(),
+                )
+
+        prefill_error = Response([
+            b'data: {"type":"error","error":{"message":"oMLX prefill memory guard rejected this prompt",'
+            b'"type":"invalid_request_error","code":"prefill_memory_exceeded",'
+            b'"omlx_code":"prefill_memory_exceeded","estimated_bytes":43443503104,'
+            b'"limit_bytes":42842298777}}\n',
+            b'data: [DONE]\n',
+        ])
+        with mock.patch.object(launcher.urllib.request, "urlopen", return_value=prefill_error):
+            with self.assertRaisesRegex(
+                RuntimeError, "prefill memory guard rejected.*prefill_memory_exceeded",
+            ):
                 launcher.run_benchmark_completion(
                     plan, "synthetic", 32, {}, threading.Event(),
                 )
@@ -6069,6 +6380,12 @@ for line in sys.stdin:
         self.assertEqual(model["memoryGeometry"]["fullBytesPerToken"], 27_936)
         payload = self.payload("omlx", "chat", model)
         payload["reasoning"] = "medium"
+        optimized = launcher.fastest_safe_options(
+            "omlx", model["backends"]["omlx"], payload["options"],
+        )
+        self.assertEqual(optimized["options"]["memoryGuard"], "high")
+        self.assertIn("memoryGuard", optimized["changedKeys"])
+        self.assertIn("memoryGuard", optimized["appliedKeys"])
         with (
             mock.patch.object(launcher, "command_version", return_value="omlx 0.6.4"),
             self.assertRaisesRegex(ValueError, "require High memory mode"),
@@ -6134,6 +6451,61 @@ for line in sys.stdin:
         capacity_high_payload = copy.deepcopy(capacity_payload)
         capacity_high_payload["options"]["memoryGuard"] = "high"
         capacity_models = [capacity_model]
+        visible_capacity_request = launcher.validated_launch_profile_request(
+            capacity_payload, capacity_models,
+        )
+        preparation = launcher.qwen_ple_qualification_preparation(
+            visible_capacity_request, capacity_model, capacity_models, "default",
+        )
+        self.assertTrue(preparation["applicable"])
+        self.assertTrue(preparation["doesNotChangeMacOS"])
+        self.assertEqual(preparation["settings"]["context"], 16_384)
+        self.assertEqual(preparation["settings"]["output"], 8_192)
+        self.assertEqual(preparation["settings"]["reasoning"], "medium")
+        self.assertEqual(preparation["settings"]["calibrationCooling"], "smart")
+        self.assertEqual(preparation["settings"]["options"]["acceleration"], "off")
+        self.assertEqual(preparation["settings"]["options"]["kv"], "off")
+        self.assertEqual(preparation["settings"]["options"]["anePrefill"], "off")
+        self.assertEqual(preparation["settings"]["options"]["memoryGuard"], "high")
+        prepared_capped_admission = launcher.session_memory_admission(
+            preparation["request"], capacity_models,
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 45 * 1024**3, "metalWiredLimitBytes": 0,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertEqual(prepared_capped_admission["decision"], "system-setting")
+        self.assertLess(
+            prepared_capped_admission["estimate"]["estimatedWorkingSetBytes"],
+            44.01 * 1024**3,
+        )
+        prepared_42_gib_admission = launcher.session_memory_admission(
+            preparation["request"], capacity_models,
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 45 * 1024**3,
+                "metalWiredLimitBytes": 42 * 1024**3,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertFalse(prepared_42_gib_admission["launchable"])
+        self.assertEqual(prepared_42_gib_admission["decision"], "system-setting")
+        prepared_ready_admission = launcher.session_memory_admission(
+            preparation["request"], capacity_models,
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 45 * 1024**3,
+                "metalWiredLimitBytes": 44 * 1024**3,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertTrue(prepared_ready_admission["launchable"])
+        self.assertEqual(prepared_ready_admission["decision"], "ready")
+        self.assertEqual(
+            prepared_ready_admission["estimate"]["requiredMetalWiredLimitBytes"],
+            44 * 1024**3,
+        )
         canonical_high_profile = launcher.validated_launch_profile_request(
             capacity_high_payload, capacity_models,
         )
@@ -6235,12 +6607,23 @@ for line in sys.stdin:
         self.assertFalse(capped_admission["launchable"])
         self.assertEqual(capped_admission["decision"], "system-setting")
         self.assertIn("separate from the 45 GiB oMLX process guard", capped_admission["detail"])
-        high_admission = launcher.session_memory_admission(
+        undersized_metal_admission = launcher.session_memory_admission(
             capacity_high_payload, capacity_models,
             {
                 "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
                 "headroomBytes": 20 * 1024**3,
                 "metalWiredLimitBytes": 42 * 1024**3,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertFalse(undersized_metal_admission["launchable"])
+        self.assertEqual(undersized_metal_admission["decision"], "system-setting")
+        high_admission = launcher.session_memory_admission(
+            capacity_high_payload, capacity_models,
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 20 * 1024**3,
+                "metalWiredLimitBytes": 45 * 1024**3,
             },
             idle_hub, idle_operation,
         )
@@ -6254,7 +6637,7 @@ for line in sys.stdin:
         )
         self.assertEqual(
             high_admission["estimate"]["requiredMetalWiredLimitBytes"],
-            42 * 1024**3,
+            45 * 1024**3,
         )
 
         balanced_evidence = launcher.optimizer_evidence(
@@ -6312,6 +6695,10 @@ for line in sys.stdin:
         )
         self.assertIn(
             'cancelOptimization("Memory mode changed; reapply to refresh the benchmark match.")',
+            script,
+        )
+        self.assertIn(
+            'if (!state.applyingOptimal) {\n    cancelOptimization("Memory mode changed; reapply to refresh the benchmark match.")',
             script,
         )
         self.assertIn('["Required Metal limit", formatGiB(estimate.requiredMetalWiredLimitBytes)]', script)
@@ -9179,6 +9566,12 @@ for line in sys.stdin:
         self.assertEqual(plan["evidence"]["tier"], "single-route-qualification-needed")
         self.assertIsInstance(plan["memoryAdmission"], dict)
         self.assertTrue(plan["memoryAdmission"]["launchable"])
+        self.assertTrue(plan["qualificationPreparation"]["applicable"])
+        self.assertTrue(plan["qualificationPreparation"]["resolvesVisibleSettings"])
+        self.assertTrue(plan["qualificationPreparation"]["doesNotChangeMacOS"])
+        self.assertEqual(
+            plan["qualificationPreparation"]["settings"]["context"], 16_384,
+        )
 
         request = copy.deepcopy(payload)
         request["scope"] = "qualification"
@@ -9963,6 +10356,112 @@ for line in sys.stdin:
         self.assertEqual(manager.state["phase"], "failed")
         self.assertIs(manager.plan, owner)
         self.assertIn("private shared-request relay exited", manager.state["message"])
+
+    def test_chat_relay_requires_a_clean_terminal_event_and_surfaces_unexpected_eof(self) -> None:
+        self.assertEqual(launcher.chat_stream_terminal_state({
+            "choices": [{"finish_reason": "stop"}],
+        }), "clean")
+        self.assertEqual(launcher.chat_stream_terminal_state({
+            "choices": [{"finish_reason": "length"}],
+        }), "limited")
+        self.assertEqual(launcher.chat_stream_terminal_state({
+            "error": {"message": "failed"},
+        }), "failed")
+        self.assertEqual(launcher.chat_stream_terminal_state({
+            "stopReason": "aborted",
+        }), "aborted")
+        self.assertEqual(launcher.chat_stream_terminal_state({
+            "type": "response.completed", "response": {"status": "failed"},
+        }), "failed")
+        self.assertEqual(launcher.chat_stream_terminal_state({
+            "type": "response.incomplete",
+            "response": {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+        }), "limited")
+        self.assertEqual(launcher.final_chat_stream_terminal_state("", False), "unexpected-eof")
+        self.assertEqual(launcher.final_chat_stream_terminal_state("", True), "unexpected-eof")
+
+        class RelayResponse:
+            headers = {"Content-Type": "text/event-stream; charset=utf-8"}
+
+            def __init__(self, lines: list[bytes]) -> None:
+                self.lines = iter(lines)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def readline(self) -> bytes:
+                return next(self.lines, b"")
+
+        class RelayHandler:
+            def __init__(self) -> None:
+                self.wfile = io.BytesIO()
+                self.close_connection = False
+
+            def send_response(self, _status: HTTPStatus) -> None:
+                pass
+
+            def send_header(self, _name: str, _value: str) -> None:
+                pass
+
+            def end_headers(self) -> None:
+                pass
+
+        request = mock.Mock()
+        request._launcher_cache_context = {"ownerRunId": "owner", "attachmentId": "chat"}
+        partial_response = RelayResponse([
+            b'data: {"choices":[{"delta":{"content":"Useful partial"}}]}',
+        ])
+        partial_handler = RelayHandler()
+        with (
+            mock.patch.object(launcher.urllib.request, "urlopen", return_value=partial_response),
+            mock.patch.object(launcher.MANAGER, "record_chat_cache_observation") as record,
+        ):
+            launcher.Handler.stream_chat(partial_handler, request)  # type: ignore[arg-type]
+        relayed = partial_handler.wfile.getvalue()
+        self.assertIn(b"Useful partial", relayed)
+        self.assertIn(b']}\n\ndata: {"type":"launcher.stream_error"', relayed)
+        self.assertIn(b"launcher.stream_error", relayed)
+        self.assertIn(b"ended before reporting a clean completion", relayed)
+        partial_observation = record.call_args.args[1]
+        self.assertFalse(partial_observation["completed"])
+        self.assertTrue(partial_observation["interrupted"])
+        self.assertTrue(partial_observation["outputObserved"])
+
+        done_only_response = RelayResponse([
+            b'data: {"choices":[{"delta":{"content":"Framed partial"}}]}\n',
+            b'data: [DONE]\n',
+        ])
+        done_only_handler = RelayHandler()
+        with (
+            mock.patch.object(launcher.urllib.request, "urlopen", return_value=done_only_response),
+            mock.patch.object(launcher.MANAGER, "record_chat_cache_observation") as record,
+        ):
+            launcher.Handler.stream_chat(done_only_handler, request)  # type: ignore[arg-type]
+        self.assertIn(b"launcher.stream_error", done_only_handler.wfile.getvalue())
+        done_only_observation = record.call_args.args[1]
+        self.assertFalse(done_only_observation["completed"])
+        self.assertTrue(done_only_observation["interrupted"])
+
+        clean_response = RelayResponse([
+            b'data: {"choices":[{"delta":{"content":"Complete answer"}}]}\n',
+            b'data: {"choices":[{"finish_reason":"stop"}]}\n',
+        ])
+        clean_handler = RelayHandler()
+        with (
+            mock.patch.object(launcher.urllib.request, "urlopen", return_value=clean_response),
+            mock.patch.object(launcher.MANAGER, "record_chat_cache_observation") as record,
+        ):
+            launcher.Handler.stream_chat(clean_handler, request)  # type: ignore[arg-type]
+        self.assertNotIn(b"launcher.stream_error", clean_handler.wfile.getvalue())
+        clean_observation = record.call_args.args[1]
+        self.assertTrue(clean_observation["completed"])
+        self.assertFalse(clean_observation["interrupted"])
 
     def test_cache_observatory_uses_only_runtime_reports_and_never_retains_text(self) -> None:
         event = {

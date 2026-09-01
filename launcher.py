@@ -163,9 +163,10 @@ LLAMACPP_RUNTIME_COMMIT = "fe2120bc9db242c4349a6f71810af1cd52ee8580"
 LLAMACPP_RUNTIME_DIR = MANAGED_RUNTIMES_DIR / f"llama.cpp-{LLAMACPP_RUNTIME_TAG}"
 LLAMACPP_SERVER_PATH = LLAMACPP_RUNTIME_DIR / "llama-server"
 LLAMACPP_RUNTIME_ARCHIVE_SHA256 = "1adfad815e1e8ceddd3e9e4f20de0d5fe4aa3b227366b11391ca14fd53508d06"
-# The server uses @loader_path and these ten bundled dylib load names.  Each
+# The server uses @loader_path and these ten bundled dylib load names. Each
 # alias target and its bytes are pinned to the verified official b10740 macOS
-# arm64 archive; version/help output is only a secondary capability check.
+# arm64 archive. Status/scan never executes this runtime; exact bytes establish
+# the already-audited CLI capability contract below.
 LLAMACPP_RUNTIME_FILE_MANIFEST = (
     (
         "llama-server", "llama-server",
@@ -211,6 +212,13 @@ LLAMACPP_RUNTIME_FILE_MANIFEST = (
         "libggml-base.0.dylib", "libggml-base.0.22.0.dylib",
         "ee5c1e1f3430f8c581b658da943a43f6f34211f58d6c0ae1d45a4a4f2e2ece21",
     ),
+)
+LLAMACPP_RUNTIME_REQUIRED_FLAGS = (
+    "--model", "-ngl", "-c", "--parallel", "--load-mode",
+    "--lazy-mode", "-fit", "--jinja", "-fa", "--reasoning",
+    "--reasoning-format", "--reasoning-preserve", "--spec-type",
+    "--cache-type-k", "--cache-type-v", "--host", "--port",
+    "--alias", "--api-key",
 )
 # Successful file checks are cached only for an exact current filesystem
 # identity. A controller restart intentionally empties this bounded cache.
@@ -1810,12 +1818,6 @@ def _prime_regular_file_sha256_cache(
     return True
 
 
-def _command_help_has_flag(help_text: str, flag: str) -> bool:
-    return re.search(
-        rf"(?<![A-Za-z0-9-]){re.escape(flag)}(?=[\s,=<]|$)", help_text,
-    ) is not None
-
-
 def _llamacpp_strong_path_identity(path: Path) -> tuple[Any, ...]:
     """Capture one runtime/model path strongly enough to detect replacement."""
     requested = path.expanduser()
@@ -1882,6 +1884,7 @@ def llamacpp_runtime_contract(path: str | None) -> dict[str, Any]:
         "version": f"llama.cpp {LLAMACPP_RUNTIME_TAG} · {LLAMACPP_RUNTIME_COMMIT[:12]}",
         "path": None,
         "missingFlags": [],
+        "requiredFlags": list(LLAMACPP_RUNTIME_REQUIRED_FLAGS),
         "verifiedFiles": [item[0] for item in LLAMACPP_RUNTIME_FILE_MANIFEST],
     }
     if not path:
@@ -1934,72 +1937,12 @@ def llamacpp_runtime_contract(path: str | None) -> dict[str, Any]:
             **base,
             "reason": "The managed llama.cpp runtime changed during byte verification.",
         }
-    try:
-        before_version = _llamacpp_runtime_closure_identities(LLAMACPP_RUNTIME_DIR)
-    except OSError:
-        before_version = ()
-    if before_version != verified_closure:
-        return {
-            **base,
-            "reason": "The managed llama.cpp runtime changed before its version probe.",
-        }
-    version_text = command_help(str(resolved), "--version")
-    try:
-        after_version = _llamacpp_runtime_closure_identities(LLAMACPP_RUNTIME_DIR)
-    except OSError:
-        after_version = ()
-    if after_version != verified_closure:
-        return {
-            **base,
-            "reason": "The managed llama.cpp runtime changed during its version probe.",
-        }
-    if LLAMACPP_RUNTIME_COMMIT[:8].casefold() not in version_text.casefold():
-        return {
-            **base,
-            "reason": (
-                f"The managed server does not report the audited {LLAMACPP_RUNTIME_TAG} "
-                f"commit {LLAMACPP_RUNTIME_COMMIT[:12]}."
-            ),
-        }
-    try:
-        before_help = _llamacpp_runtime_closure_identities(LLAMACPP_RUNTIME_DIR)
-    except OSError:
-        before_help = ()
-    if before_help != verified_closure:
-        return {
-            **base,
-            "reason": "The managed llama.cpp runtime changed before its help probe.",
-        }
-    help_text = command_help(str(resolved), "--help")
-    try:
-        after_help = _llamacpp_runtime_closure_identities(LLAMACPP_RUNTIME_DIR)
-    except OSError:
-        after_help = ()
-    if after_help != verified_closure:
-        return {
-            **base,
-            "reason": "The managed llama.cpp runtime changed during its help probe.",
-        }
-    required_flags = (
-        "--model", "-ngl", "-c", "--parallel", "--load-mode",
-        "--lazy-mode", "-fit", "--jinja", "-fa", "--reasoning",
-        "--reasoning-format", "--reasoning-preserve", "--spec-type",
-        "--cache-type-k", "--cache-type-v", "--host", "--port",
-        "--alias", "--api-key",
-    )
-    missing = [flag for flag in required_flags if not _command_help_has_flag(help_text, flag)]
-    if missing:
-        return {
-            **base,
-            "missingFlags": missing,
-            "reason": "The managed llama.cpp server is missing the audited SSD-PLE flag contract.",
-        }
     return {
         **base,
         "ready": True,
         "reason": (
-            f"Audited llama.cpp {LLAMACPP_RUNTIME_TAG} commit "
-            f"{LLAMACPP_RUNTIME_COMMIT[:12]} exposes the fixed SSD-PLE route."
+            f"Exact audited llama.cpp {LLAMACPP_RUNTIME_TAG} commit "
+            f"{LLAMACPP_RUNTIME_COMMIT[:12]} bytes establish the fixed SSD-PLE flag contract."
         ),
     }
 

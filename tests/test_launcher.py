@@ -8291,59 +8291,32 @@ for line in sys.stdin:
         self.assertEqual(partial["size"], first_shard.stat().st_size)
         self.assertFalse(partial["backends"]["llamacpp"]["runnable"])
 
-    def test_llamacpp_runtime_contract_requires_exact_managed_build_and_flags(self) -> None:
+    def test_llamacpp_runtime_contract_uses_exact_bytes_and_static_flags_without_execution(self) -> None:
         runtime_root, server, manifest = self.llamacpp_runtime_fixture()
-        flags = (
-            "--model", "-ngl", "-c", "--parallel", "--load-mode", "--lazy-mode",
-            "-fit", "--jinja", "-fa", "--reasoning", "--reasoning-format",
-            "--reasoning-preserve", "--spec-type", "--cache-type-k", "--cache-type-v",
-            "--host", "--port", "--alias", "--api-key",
-        )
-        help_text = "\n".join(flags)
-
-        def command(_path: str, *arguments: str) -> str:
-            return (
-                f"llama.cpp version 10740 ({launcher.LLAMACPP_RUNTIME_COMMIT[:12]})"
-                if arguments == ("--version",) else help_text
-            )
-
         with (
             mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
             mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
             mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
-            mock.patch.object(launcher, "command_help", side_effect=command),
+            mock.patch.object(
+                launcher, "command_help",
+                side_effect=AssertionError("status must not execute llama-server"),
+            ) as command,
+            mock.patch.object(
+                launcher.subprocess, "run",
+                side_effect=AssertionError("status must not execute a subprocess"),
+            ) as run,
         ):
             contract = launcher.llamacpp_runtime_contract(str(server))
             candidates = launcher.runtime_candidates("llamacpp")
         self.assertTrue(contract["ready"])
+        self.assertEqual(
+            contract["requiredFlags"], list(launcher.LLAMACPP_RUNTIME_REQUIRED_FLAGS),
+        )
+        self.assertEqual(contract["missingFlags"], [])
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["resolvedPath"], str(server.resolve()))
-
-        for omitted in flags:
-            reduced = "\n".join(flag for flag in flags if flag != omitted)
-            with (
-                mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
-                mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
-                mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
-                mock.patch.object(
-                    launcher, "command_help",
-                    side_effect=lambda _path, *args, text=reduced: (
-                        f"{launcher.LLAMACPP_RUNTIME_COMMIT[:12]}"
-                        if args == ("--version",) else text
-                    ),
-                ),
-            ):
-                rejected = launcher.llamacpp_runtime_contract(str(server))
-            self.assertFalse(rejected["ready"], omitted)
-            self.assertIn(omitted, rejected["missingFlags"])
-
-        with (
-            mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
-            mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
-            mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
-            mock.patch.object(launcher, "command_help", return_value="llama.cpp stable v0.3.0"),
-        ):
-            self.assertFalse(launcher.llamacpp_runtime_contract(str(server))["ready"])
+        command.assert_not_called()
+        run.assert_not_called()
 
     def test_llamacpp_runtime_rejects_spoof_before_executing_it(self) -> None:
         runtime_root, server, manifest = self.llamacpp_runtime_fixture()
@@ -8413,47 +8386,54 @@ for line in sys.stdin:
         self.assertEqual(version, "Installed (unverified managed runtime)")
         run.assert_not_called()
 
-    def test_llamacpp_runtime_checks_strip_every_dyld_override(self) -> None:
+    def test_llamacpp_contract_and_status_are_prompt_off_main_thread_without_execution(self) -> None:
         runtime_root, server, manifest = self.llamacpp_runtime_fixture()
-        flags = " ".join((
-            "--model", "-ngl", "-c", "--parallel", "--load-mode", "--lazy-mode",
-            "-fit", "--jinja", "-fa", "--reasoning", "--reasoning-format",
-            "--reasoning-preserve", "--spec-type", "--cache-type-k", "--cache-type-v",
-            "--host", "--port", "--alias", "--api-key",
-        ))
-        observed: list[dict[str, str]] = []
-
-        def run(argv, **kwargs):
-            environment = dict(kwargs.get("env") or {})
-            observed.append(environment)
-            output = (
-                f"llama.cpp {launcher.LLAMACPP_RUNTIME_COMMIT}"
-                if argv[-1] == "--version" else flags
-            )
-            return subprocess.CompletedProcess(argv, 0, stdout=output)
-
-        inherited = {
-            "DYLD_VERSIONED_LIBRARY_PATH": "/tmp/versioned",
-            "DYLD_IMAGE_SUFFIX": "_spoof",
-            "DYLD_ROOT_PATH": "/tmp/root",
-            "DYLD_FUTURE_OVERRIDE": "/tmp/future",
-            "LLM_LAUNCHER_SAFE_SENTINEL": "preserved",
+        native_status = {
+            "installed": False, "detected": False, "supportedHost": True,
+            "path": None, "version": "Not installed",
         }
+        result: dict[str, object] = {}
+        errors: list[BaseException] = []
+
+        def inspect_from_http_thread() -> None:
+            try:
+                result["contract"] = launcher.llamacpp_runtime_contract(str(server))
+                result["status"] = launcher.public_binary_status()["llamacpp"]
+                result["version"] = launcher.command_version(str(server))
+            except BaseException as error:  # pragma: no cover - asserted below
+                errors.append(error)
+
         with launcher._VERIFIED_FILE_SHA256_CACHE_LOCK:
             launcher._VERIFIED_FILE_SHA256_CACHE.clear()
         with (
             mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
             mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
             mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
-            mock.patch.dict(os.environ, inherited),
-            mock.patch.object(launcher.subprocess, "run", side_effect=run),
+            mock.patch.dict(launcher.BINARIES, {"llamacpp": str(server)}, clear=True),
+            mock.patch.object(launcher, "native_freetoken_public_status", return_value=native_status),
+            mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
+            mock.patch.object(
+                launcher, "command_help",
+                side_effect=AssertionError("HTTP status must not execute llama-server"),
+            ) as command,
+            mock.patch.object(
+                launcher.subprocess, "run",
+                side_effect=AssertionError("HTTP status must not execute a subprocess"),
+            ) as run,
         ):
-            contract = launcher.llamacpp_runtime_contract(str(server))
-        self.assertTrue(contract["ready"], contract)
-        self.assertEqual(len(observed), 2)
-        for environment in observed:
-            self.assertFalse(any(key.startswith("DYLD_") for key in environment))
-            self.assertEqual(environment["LLM_LAUNCHER_SAFE_SENTINEL"], "preserved")
+            started = time.monotonic()
+            thread = threading.Thread(target=inspect_from_http_thread)
+            thread.start()
+            thread.join(timeout=2)
+            elapsed = time.monotonic() - started
+        self.assertFalse(thread.is_alive(), "llama.cpp status blocked outside the main thread")
+        self.assertLess(elapsed, 2)
+        self.assertEqual(errors, [])
+        self.assertTrue(result["contract"]["ready"])
+        self.assertTrue(result["status"]["installed"])
+        self.assertEqual(result["version"], result["contract"]["version"])
+        command.assert_not_called()
+        run.assert_not_called()
 
     def test_llamacpp_runtime_rejects_changed_loaded_dylib_before_execution(self) -> None:
         runtime_root, server, manifest = self.llamacpp_runtime_fixture()
@@ -8491,33 +8471,6 @@ for line in sys.stdin:
         self.assertFalse(contract["ready"])
         self.assertEqual(contract["failedFile"], "libggml-metal.0.dylib")
         command.assert_not_called()
-
-    def test_llamacpp_runtime_rejects_post_hash_mutation_during_version_probe(self) -> None:
-        runtime_root, server, manifest = self.llamacpp_runtime_fixture()
-        metal = runtime_root / "libggml-metal.0.22.0.dylib"
-        probes: list[tuple[str, ...]] = []
-
-        def command_output(_path: str, *args: str) -> str:
-            probes.append(args)
-            if args != ("--version",):
-                raise AssertionError("help probe must not run after the closure changes")
-            changed = bytearray(metal.read_bytes())
-            changed[len(changed) // 2] ^= 1
-            metal.write_bytes(changed)
-            return f"llama.cpp {launcher.LLAMACPP_RUNTIME_COMMIT}"
-
-        with launcher._VERIFIED_FILE_SHA256_CACHE_LOCK:
-            launcher._VERIFIED_FILE_SHA256_CACHE.clear()
-        with (
-            mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
-            mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
-            mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
-            mock.patch.object(launcher, "command_help", side_effect=command_output),
-        ):
-            contract = launcher.llamacpp_runtime_contract(str(server))
-        self.assertFalse(contract["ready"])
-        self.assertIn("during its version probe", contract["reason"])
-        self.assertEqual(probes, [("--version",)])
 
     def test_acquisition_verification_primes_strong_sha256_cache(self) -> None:
         destination = Path(self.temp.name) / "cache-prime"

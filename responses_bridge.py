@@ -212,42 +212,64 @@ def _translate_input(
     if not isinstance(value, list):
         raise ValueError("Responses input must be text or an item list")
 
+    assistant_seen = False
+    pending_content: list[str] = []
+    pending_reasoning: list[str] = []
     pending_calls: list[dict[str, Any]] = []
 
-    def flush_calls() -> None:
+    def flush_assistant() -> None:
+        nonlocal assistant_seen
+        if not assistant_seen and not pending_calls and not pending_reasoning:
+            return
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": "\n\n".join(pending_content) if pending_content else None,
+        }
+        if pending_reasoning:
+            message["reasoning_content"] = "\n".join(pending_reasoning)
         if pending_calls:
-            messages.append({"role": "assistant", "content": None, "tool_calls": list(pending_calls)})
-            pending_calls.clear()
+            message["tool_calls"] = list(pending_calls)
+        messages.append(message)
+        assistant_seen = False
+        pending_content.clear()
+        pending_reasoning.clear()
+        pending_calls.clear()
 
     for item in value:
         if not isinstance(item, dict):
             raise ValueError("Responses input entries must be objects")
         item_type = item.get("type")
         if item_type == "message":
-            flush_calls()
             role = item.get("role")
             if role == "developer":
                 role = "system"
             if role not in {"system", "user", "assistant"}:
                 raise ValueError(f"MTPLX Codex bridge cannot preserve message role: {role}")
-            messages.append({"role": role, "content": _content_text(item.get("content"))})
+            content = _content_text(item.get("content"))
+            if role == "assistant":
+                assistant_seen = True
+                pending_content.append(content)
+            else:
+                flush_assistant()
+                messages.append({"role": role, "content": content})
         elif item_type == "reasoning":
-            flush_calls()
             text = _reasoning_text(item)
             if text:
-                messages.append({"role": "assistant", "content": None, "reasoning_content": text})
+                assistant_seen = True
+                pending_reasoning.append(text)
         elif item_type == "function_call":
             call_id = item.get("call_id")
             arguments = item.get("arguments")
             if not isinstance(call_id, str) or not call_id or not isinstance(arguments, str):
                 raise ValueError("Responses function call is invalid")
+            assistant_seen = True
             pending_calls.append({
                 "id": call_id,
                 "type": "function",
                 "function": {"name": _lookup_wire(item, by_target), "arguments": arguments},
             })
         elif item_type == "function_call_output":
-            flush_calls()
+            flush_assistant()
             call_id = item.get("call_id")
             if not isinstance(call_id, str) or not call_id:
                 raise ValueError("Responses function output has no call id")
@@ -257,7 +279,7 @@ def _translate_input(
             })
         else:
             raise ValueError(f"MTPLX Codex bridge cannot preserve input item type: {item_type}")
-    flush_calls()
+    flush_assistant()
     if not messages:
         raise ValueError("Responses input contains no translatable messages")
     return messages
@@ -586,6 +608,15 @@ class ChatStreamBridge:
             response.update({
                 "status": "failed",
                 "error": {"code": "content_filter", "message": "MTPLX stopped the response"},
+            })
+            output.extend(self._event("response.failed", response=response))
+        elif self.reasoning.strip() and not self.text.strip() and not self.tool_calls:
+            response.update({
+                "status": "failed",
+                "error": {
+                    "code": "reasoning_without_final_output",
+                    "message": "MTPLX stopped after reasoning without an answer or tool call.",
+                },
             })
             output.extend(self._event("response.failed", response=response))
         else:

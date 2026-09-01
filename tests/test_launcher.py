@@ -21,6 +21,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -668,6 +669,77 @@ class LauncherTests(unittest.TestCase):
                 "mtpMinContinueProbability": 0.0,
             },
         }
+
+    def qwen4_ple_fixture(self) -> tuple[Path, Path]:
+        root = Path(self.temp.name) / "qwen4-models"
+        model_path = root / "Qwen3.8-Flash-Next-REAP-test"
+        model_path.mkdir(parents=True)
+        layer_types = [
+            "full_attention" if (index + 1) % 4 == 0 else "linear_attention"
+            for index in range(48)
+        ]
+        config = {
+            "model_type": "qwen4_exp",
+            "architectures": ["Qwen4ExpForConditionalGeneration"],
+            "text_config": {
+                "model_type": "qwen4_exp_text",
+                "max_position_embeddings": 262_144,
+                "num_hidden_layers": 48,
+                "layer_types": layer_types,
+                "num_attention_heads": 24,
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "hidden_size": 2_560,
+                "vocab_size": 32,
+                "indexer_head_dim": 128,
+                "mtp_num_hidden_layers": 1,
+                "ple_layer_ids": [2],
+                "ple_embed_dim": 4,
+                "ngram_size": 3,
+                "heads_per_ngram": 1,
+                "ngram_vocab_size_base": 5,
+                "make_ngram_vocab_size_divisible_by": 2,
+                "split_ngram_parts": 2,
+                "eos_token_id": 1,
+                "rope_parameters": {"mrope_section": [11, 11, 10]},
+            },
+            "quantization": {"bits": 4, "group_size": 32, "mode": "affine"},
+        }
+        (model_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        (model_path / "chat_template.jinja").write_text(
+            "{% if reasoning_effort == 'low' or reasoning_effort == 'medium' or reasoning_effort == 'xhigh' %}{{ reasoning_effort }}{% endif %}",
+            encoding="utf-8",
+        )
+        (model_path / "generation_config.json").write_text(
+            json.dumps({"temperature": 1.0, "top_p": 0.95, "top_k": 20}), encoding="utf-8",
+        )
+        shard_a = model_path / "model-00001-of-00002.safetensors"
+        shard_b = model_path / "model-00002-of-00002.safetensors"
+        write_raw_safetensors(shard_a, {
+            "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight": {
+                "dtype": "F16", "shape": [6, 2], "data_offsets": [0, 24],
+            },
+            "language_model.model.embed_tokens.weight": {
+                "dtype": "U8", "shape": [2], "data_offsets": [24, 26],
+            },
+        }, 26)
+        write_raw_safetensors(shard_b, {
+            "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.1.weight": {
+                "dtype": "F16", "shape": [6, 2], "data_offsets": [0, 24],
+            },
+            "language_model.model.layers.0.self_attn.q_proj.weight": {
+                "dtype": "U8", "shape": [3], "data_offsets": [24, 27],
+            },
+        }, 27)
+        (model_path / "model.safetensors.index.json").write_text(json.dumps({
+            "weight_map": {
+                "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight": shard_a.name,
+                "language_model.model.embed_tokens.weight": shard_a.name,
+                "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.1.weight": shard_b.name,
+                "language_model.model.layers.0.self_attn.q_proj.weight": shard_b.name,
+            },
+        }), encoding="utf-8")
+        return root, model_path
 
     def ane_clone_fixture(
         self, *, name: str = "Synthetic-Qwen3.8-oQ4e-mtp",
@@ -1832,6 +1904,102 @@ class LauncherTests(unittest.TestCase):
                 request, b'{"model":"another-model","input":"hello"}',
             )
 
+    def test_freetoken_bridge_releases_delayed_reasoning_frame_before_answer(self) -> None:
+        self.port_patch.stop()
+        self.port_patch_active = False
+        try:
+            upstream_port = REAL_FREE_PORT()
+            bridge_port = REAL_FREE_PORT(
+                upstream_port + 1 if upstream_port < 65_535 else 18_079,
+                exclude={upstream_port},
+            )
+        except PermissionError:
+            self.skipTest("this sandbox does not permit loopback sockets")
+
+        reasoning_frame = (
+            b'data: {"choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]}\n\n'
+        )
+        answer_frame = (
+            b'data: {"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        upstream_sent_reasoning = threading.Event()
+        release_answer = threading.Event()
+
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(reasoning_frame)
+                self.wfile.flush()
+                upstream_sent_reasoning.set()
+                release_answer.wait(3)
+                self.wfile.write(answer_frame)
+                self.wfile.flush()
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", upstream_port), Upstream)
+        bridge = ThreadingHTTPServer(("127.0.0.1", bridge_port), freetoken_bridge.BridgeHandler)
+        bridge.config = {
+            "clientKey": "client-" + "a" * 32,
+            "upstreamKey": "",
+            "upstreamLabel": "Whallm",
+            "servedModel": "served-model",
+            "parsedEndpoint": freetoken_bridge.urllib.parse.urlsplit(
+                f"http://127.0.0.1:{upstream_port}",
+            ),
+        }
+        upstream.daemon_threads = bridge.daemon_threads = True
+        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        bridge_thread = threading.Thread(target=bridge.serve_forever, daemon=True)
+        upstream_thread.start()
+        bridge_thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", bridge_port, timeout=4)
+        delivered = threading.Event()
+        first_line: list[bytes] = []
+        reader: threading.Thread | None = None
+        arrived_before_answer = False
+        try:
+            body = json.dumps({
+                "model": "served-model", "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+            }).encode()
+            connection.request("POST", "/v1/chat/completions", body=body, headers={
+                "Authorization": "Bearer client-" + "a" * 32,
+                "Content-Type": "application/json",
+            })
+            response = connection.getresponse()
+
+            def read_first_line() -> None:
+                first_line.append(response.readline())
+                delivered.set()
+
+            reader = threading.Thread(target=read_first_line, daemon=True)
+            reader.start()
+            self.assertTrue(upstream_sent_reasoning.wait(1))
+            arrived_before_answer = delivered.wait(1)
+            release_answer.set()
+            reader.join(timeout=2)
+            remainder = response.read()
+            self.assertIn(b'"content":"answer"', remainder)
+        finally:
+            release_answer.set()
+            connection.close()
+            bridge.shutdown()
+            upstream.shutdown()
+            bridge.server_close()
+            upstream.server_close()
+            bridge_thread.join(timeout=2)
+            upstream_thread.join(timeout=2)
+        self.assertTrue(arrived_before_answer, "the bridge buffered the first SSE frame until EOF")
+        self.assertTrue(first_line)
+        self.assertIn(b'"reasoning_content":"thinking"', first_line[0])
+
     def test_command_version_ignores_cli_warning_preambles(self) -> None:
         completed = mock.Mock(
             returncode=0,
@@ -2019,7 +2187,10 @@ class LauncherTests(unittest.TestCase):
             "runId": plan.run_id,
             "messages": [
                 {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi"},
+                {
+                    "role": "assistant", "content": "Hi",
+                    "reasoning": "I checked the active route before answering.",
+                },
                 {"role": "user", "content": "Count to three"},
             ],
         })
@@ -2030,6 +2201,10 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(body["stream"])
         self.assertEqual(body["stream_options"], {"include_usage": True})
         self.assertEqual(body["messages"][0], {"role": "system", "content": "You are local."})
+        self.assertEqual(
+            body["messages"][2]["reasoning_content"],
+            "I checked the active route before answering.",
+        )
         self.assertEqual(body["temperature"], 0.25)
         self.assertEqual(body["top_p"], 0.8)
         self.assertEqual(body["top_k"], 12)
@@ -2070,6 +2245,97 @@ class LauncherTests(unittest.TestCase):
                 "runId": plan.run_id,
                 "messages": [{"role": "system", "content": "Override"}],
             })
+        with self.assertRaisesRegex(ValueError, "Only assistant messages"):
+            manager.chat_request({
+                "runId": plan.run_id,
+                "messages": [{
+                    "role": "user", "content": "Hello",
+                    "reasoning": "This must not be accepted as model reasoning.",
+                }],
+            })
+
+    def test_whallm_reasoning_contract_reaches_chat_benchmark_and_agent_relay(self) -> None:
+        reasoning_levels = ["auto", "off", "low", "medium", "high", "xhigh", "max"]
+        model = {
+            "id": "whallm-test",
+            "name": "Whallm Qwen test",
+            "servedId": "served-model",
+            "backends": {"whallm": {"agentReasoning": reasoning_levels}},
+        }
+
+        def make_plan(reasoning: str, client: str = "chat") -> launcher.LaunchPlan:
+            return launcher.LaunchPlan(
+                run_id=str(uuid.uuid4()), backend="whallm", client=client,
+                model=copy.deepcopy(model), project=str(ROOT), context=16_384,
+                output=2_048, reasoning=reasoning, port=18_180, mode="custom",
+                options={}, client_port=18_181,
+                chat={"systemPrompt": "", "sampling": "model"},
+                secrets={"apiKey": "engine-key", "clientApiKey": "client-key"},
+            )
+
+        plan = make_plan("medium")
+        chat = json.loads(launcher.build_chat_completion_request(plan, {
+            "messages": [{"role": "user", "content": "hello"}],
+        }).data)
+        benchmark = json.loads(launcher.build_benchmark_completion_request(
+            plan, "synthetic", 128, {},
+        ).data)
+        route_check = json.loads(launcher.build_route_check_request(plan).data)
+        for body in (chat, benchmark, route_check):
+            self.assertEqual(body["thinking_mode"], "thinking")
+            self.assertEqual(body["reasoning_effort"], "medium")
+
+        off = launcher.apply_chat_reasoning_contract({
+            "reasoning_effort": "ultra", "thinking_mode": "thinking",
+        }, "whallm", "off")
+        self.assertEqual(off["thinking_mode"], "chat")
+        self.assertEqual(off["reasoning_effort"], "none")
+        automatic = launcher.apply_chat_reasoning_contract({
+            "reasoning_effort": "ultra", "thinking_mode": "thinking",
+        }, "whallm", "auto")
+        self.assertNotIn("thinking_mode", automatic)
+        self.assertNotIn("reasoning_effort", automatic)
+        omlx = launcher.apply_chat_reasoning_contract({
+            "reasoning_effort": "max", "thinking_mode": "thinking", "messages": [],
+        }, "omlx", "medium")
+        self.assertEqual(omlx, {"messages": []})
+        with self.assertRaisesRegex(ValueError, "Unknown reasoning"):
+            launcher.apply_chat_reasoning_contract({}, "whallm", "ultra")
+
+        config = {
+            "servedModel": "served-model", "outputLimit": 256,
+            "backend": "whallm", "reasoning": "xhigh",
+        }
+        relayed = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "max_tokens": 9_999,
+            "reasoning_effort": "ultra", "thinking_mode": "chat",
+        }).encode(), config))
+        self.assertEqual(relayed["max_tokens"], 256)
+        self.assertEqual(relayed["thinking_mode"], "thinking")
+        self.assertEqual(relayed["reasoning_effort"], "xhigh")
+        auto_relay = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "reasoning_effort": "ultra", "thinking_mode": "thinking",
+        }).encode(), {**config, "reasoning": "auto"}))
+        self.assertNotIn("thinking_mode", auto_relay)
+        self.assertNotIn("reasoning_effort", auto_relay)
+        with self.assertRaisesRegex(ValueError, "invalid reasoning effort"):
+            session_proxy.transform_chat_request(
+                b'{"model":"served-model"}', {**config, "reasoning": "ultra"},
+            )
+
+        pi_plan = make_plan("xhigh", "pi")
+        launcher.build_pi_client(pi_plan, launcher.ClientRoute(
+            provider="launcher-whallm-test", served="served-model",
+            base_url="http://127.0.0.1:18181/v1", api_key="client-key",
+        ))
+        provider = json.loads(pi_plan.client_env["LLM_LAUNCHER_PI_PROVIDER"])
+        self.assertTrue(provider["model"]["supportsReasoningEffort"])
+        self.assertEqual(provider["model"]["thinkingLevelMap"]["off"], "none")
+        self.assertIsNone(provider["model"]["thinkingLevelMap"]["minimal"])
+        self.assertEqual(provider["model"]["thinkingLevelMap"]["xhigh"], "xhigh")
+        pi_source = (ROOT / "pi-provider.js").read_text(encoding="utf-8")
+        self.assertIn("thinkingLevelMap: model.thinkingLevelMap", pi_source)
+        self.assertIn("supportsReasoningEffort: Boolean(model.supportsReasoningEffort)", pi_source)
 
     def test_running_chat_controls_update_the_next_request_without_reloading(self) -> None:
         model = self.model_for("omlx")
@@ -3722,6 +3988,130 @@ for line in sys.stdin:
         self.assertIn("final answer", transcript)
         self.assertEqual(console.state, "exited")
 
+    def test_pi_rpc_queue_waits_for_a_real_final_answer(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        console.rpc_follow_up_queue = ["Run only after a complete answer"]
+        console.rpc_pending_messages = 1
+        manager = launcher.RunManager()
+
+        def consume(event: dict[str, object]) -> None:
+            manager._consume_pi_rpc_line(
+                console, json.dumps(event, separators=(",", ":")).encode("utf-8"),
+            )
+
+        consume({"type": "agent_start"})
+        consume({
+            "type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "thinking", "thinking": "unfinished work"}],
+            },
+        })
+        with mock.patch.object(manager, "_write_pi_rpc_command") as write_rpc:
+            consume({"type": "agent_settled"})
+        write_rpc.assert_not_called()
+        self.assertTrue(console.rpc_queue_paused)
+        self.assertEqual(console.rpc_follow_up_queue, ["Run only after a complete answer"])
+        self.assertEqual(console.rpc_pending_messages, 1)
+        self.assertTrue(console.public()["queuePaused"])
+        self.assertIn(b"QUEUE PAUSED", console.output)
+
+        consume({"type": "agent_start"})
+        consume({
+            "type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": "Complete answer"}],
+            },
+        })
+        with mock.patch.object(manager, "_write_pi_rpc_command") as write_rpc:
+            consume({"type": "agent_settled"})
+        write_rpc.assert_called_once()
+        self.assertEqual(
+            write_rpc.call_args.args[1]["message"], "Run only after a complete answer",
+        )
+        self.assertFalse(console.rpc_queue_paused)
+        self.assertEqual(console.rpc_follow_up_queue, [])
+
+    def test_pi_rpc_authoritative_idle_repairs_missed_settle_and_advances_safely(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        manager = launcher.RunManager()
+
+        def new_console(message: str) -> launcher.AgentConsole:
+            console = launcher.AgentConsole(
+                owner_run_id=plan.run_id, plan=plan, process=process,
+                master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+            )
+            console.rpc_follow_up_queue = [message]
+            console.rpc_pending_messages = 1
+            return console
+
+        def consume(console: launcher.AgentConsole, event: dict[str, object]) -> None:
+            manager._consume_pi_rpc_line(
+                console, json.dumps(event, separators=(",", ":")).encode("utf-8"),
+            )
+
+        complete = new_console("Run after the recovered settle")
+        consume(complete, {"type": "agent_start"})
+        consume(complete, {
+            "type": "response", "command": "prompt", "success": True,
+        })
+        consume(complete, {
+            "type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": "Complete answer"}],
+            },
+        })
+        with mock.patch.object(manager, "_write_pi_rpc_command") as write_rpc:
+            consume(complete, {
+                "type": "response", "command": "get_state", "success": True,
+                "data": {"isStreaming": False, "pendingMessageCount": 0},
+            })
+        write_rpc.assert_called_once()
+        self.assertEqual(
+            write_rpc.call_args.args[1]["message"], "Run after the recovered settle",
+        )
+        self.assertEqual(complete.rpc_settle_revision, 1)
+        self.assertEqual(complete.rpc_follow_up_queue, [])
+        self.assertFalse(complete.rpc_queue_paused)
+        self.assertIn(b"STARTING QUEUED MESSAGE", complete.output)
+
+        incomplete = new_console("Do not run without a final answer")
+        consume(incomplete, {"type": "agent_start"})
+        consume(incomplete, {
+            "type": "response", "command": "prompt", "success": True,
+        })
+        consume(incomplete, {
+            "type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "thinking", "thinking": "Still working"}],
+            },
+        })
+        with mock.patch.object(manager, "_write_pi_rpc_command") as write_rpc:
+            consume(incomplete, {
+                "type": "response", "command": "get_state", "success": True,
+                "data": {"isStreaming": False, "pendingMessageCount": 0},
+            })
+        write_rpc.assert_not_called()
+        self.assertEqual(incomplete.rpc_settle_revision, 1)
+        self.assertTrue(incomplete.rpc_queue_paused)
+        self.assertEqual(
+            incomplete.rpc_follow_up_queue,
+            ["Do not run without a final answer"],
+        )
+        self.assertIn(b"NO FINAL ANSWER", incomplete.output)
+        self.assertIn(b"QUEUE PAUSED", incomplete.output)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Hub Console parser test")
     def test_hub_console_javascript_terminal_core(self) -> None:
         result = subprocess.run(
@@ -4240,6 +4630,9 @@ for line in sys.stdin:
         self.assertEqual(measured["cacheHitRate"], 0.78125)
         self.assertEqual(measured["completionTokens"], 32)
         self.assertGreater(measured["endToEndTokensPerSecond"], 0)
+        self.assertIsNone(measured["finishReason"])
+        self.assertEqual(measured["terminalState"], "unknown")
+        self.assertFalse(measured["terminalComplete"])
 
         missing_usage = Response([b'data: {"choices":[{"delta":{"content":"hello"}}]}\n'])
         with mock.patch.object(launcher.urllib.request, "urlopen", return_value=missing_usage):
@@ -4247,6 +4640,50 @@ for line in sys.stdin:
                 launcher.run_benchmark_completion(
                     plan, "synthetic", 32, {}, threading.Event(),
                 )
+
+        response_limited = Response([
+            b'data: {"choices":[{"delta":{"reasoning_content":"reasoning"}}]}\n',
+            b'data: {"choices":[{"delta":{"content":"partial answer"},"finish_reason":"length"}]}\n',
+            b'data: {"choices":[],"usage":{"prompt_tokens":8000,"completion_tokens":512}}\n',
+            b'data: [DONE]\n',
+        ])
+        with mock.patch.object(
+            launcher.urllib.request, "urlopen", return_value=response_limited,
+        ):
+            truncated = launcher.run_benchmark_completion(
+                plan, "synthetic", 512, {"temperature": 0}, threading.Event(),
+            )
+        self.assertTrue(truncated["reasoningObserved"])
+        self.assertTrue(truncated["answerObserved"])
+        self.assertEqual(truncated["finishReason"], "length")
+        self.assertEqual(truncated["terminalState"], "truncated")
+        self.assertFalse(truncated["terminalComplete"])
+        self.assertTrue(truncated["responseLimitReached"])
+
+        qualification_record = {
+            "kind": "route-qualification",
+            "qualificationVersion": launcher.ROUTE_QUALIFICATION_VERSION,
+            "backend": "omlx", "winner": "ar", "comparedModes": ["ar"],
+            "modes": {"ar": {"samples": [truncated]}},
+        }
+        self.assertIsNone(launcher.route_qualification_metrics(qualification_record))
+
+        completed_sample = copy.deepcopy(truncated)
+        completed_sample.update({
+            "completionTokens": 511,
+            "finishReason": "stop", "terminalState": "complete",
+            "terminalComplete": True, "responseLimitReached": False,
+        })
+        qualification_record["modes"]["ar"]["samples"] = [completed_sample]
+        self.assertIsNotNone(launcher.route_qualification_metrics(qualification_record))
+
+        unknown_terminal = copy.deepcopy(completed_sample)
+        unknown_terminal.update({
+            "finishReason": None, "terminalState": "unknown",
+            "terminalComplete": False,
+        })
+        qualification_record["modes"]["ar"]["samples"] = [unknown_terminal]
+        self.assertIsNone(launcher.route_qualification_metrics(qualification_record))
 
     def test_route_check_plan_is_read_only_bounded_and_protocol_specific(self) -> None:
         model = self.model_for("mtplx")
@@ -4602,6 +5039,17 @@ for line in sys.stdin:
         )
         self.assertNotIn(str(ROOT), json.dumps(cases))
 
+        qualification_cases = launcher.benchmark_agentic_cases(
+            job["suite"], require_complete_answer=True,
+        )
+        for case in qualification_cases:
+            final_user = next(
+                message for message in reversed(case["messages"])
+                if message["role"] == "user"
+            )
+            self.assertIn("complete final answer in at most 80 tokens", final_user["content"])
+        self.assertNotIn("use the full response budget", json.dumps(qualification_cases).lower())
+
         def sample(scenario: str, speed: float, ttft: float, prompt: int, cached: int | None) -> dict:
             return {
                 "scenario": scenario, "promptTokens": prompt, "completionTokens": 128,
@@ -4931,6 +5379,15 @@ for line in sys.stdin:
             "a": shard_b.name, "b": shard_a.name,
         }}), encoding="utf-8")
         self.assertFalse(launcher.safetensors_inventory(root)[0])
+
+        duplicate_root = Path(self.temp.name) / "duplicate-safetensors-header"
+        duplicate_root.mkdir()
+        duplicate_entry = '{"dtype":"U8","shape":[1],"data_offsets":[0,1]}'
+        duplicate_header = f'{{"a":{duplicate_entry},"a":{duplicate_entry}}}'.encode()
+        (duplicate_root / "model.safetensors").write_bytes(
+            len(duplicate_header).to_bytes(8, "little") + duplicate_header + b"\0",
+        )
+        self.assertFalse(launcher.safetensors_inventory(duplicate_root)[0])
 
     def test_legacy_fastest_plan_matches_custom_plan_after_visible_optimisation(self) -> None:
         model = self.model_for("mtplx", "optimized-speed")
@@ -5337,6 +5794,549 @@ for line in sys.stdin:
         self.assertEqual(security["state"], "advisory")
         self.assertFalse(unsafe_plan["canStart"])
         self.assertTrue(unsafe_plan["safety"]["explicitUnsafeFile"])
+
+    def test_model_acquisition_accepts_bounded_flash_index_without_ple_sidecar(self) -> None:
+        root = Path(self.temp.name) / "flash-root"
+        files = [
+            {"path": "config.json", "size": 300, "sha256": "", "securitySafe": True, "securityStatus": "safe"},
+            {"path": "model.safetensors.index.json", "size": 500, "sha256": "", "securitySafe": True, "securityStatus": "safe"},
+            *[
+                {
+                    "path": f"model-{index:05d}-of-00131.safetensors",
+                    "size": 1_000,
+                    "sha256": f"{index:064x}",
+                    "securitySafe": True,
+                    "securityStatus": "safe",
+                }
+                for index in range(1, 132)
+            ],
+        ]
+        snapshot = {
+            "repoId": "author/Flash-REAP-MLX", "pinnedRevision": "f" * 40,
+            "gated": False, "private": False, "disabled": False,
+            "license": "other", "tags": ["mlx", "safetensors", "4-bit"],
+            "draftOnly": False, "customCode": False, "files": files,
+        }
+        roots = [{"id": "omlx", "label": "oMLX models", "path": str(root)}]
+        with (
+            mock.patch.object(launcher, "model_acquisition_roots", return_value=roots),
+            mock.patch.object(launcher, "disk_free_for", return_value=20 * 1024**3),
+            mock.patch.object(launcher, "physical_memory_bytes", return_value=32 * 1024**3),
+        ):
+            plan = launcher.build_model_acquisition_plan(snapshot, "omlx")
+            argv = launcher.build_model_acquisition_download_argv(plan)
+        selected = [item["path"] for item in plan["selection"]["files"]]
+        self.assertEqual(plan["selection"]["fileCount"], 133)
+        self.assertIn("model.safetensors.index.json", selected)
+        self.assertNotIn("ple-store.json", selected)
+        self.assertIn("model-00131-of-00131.safetensors", selected)
+        self.assertTrue(plan["canStart"])
+        self.assertIn("model.safetensors.index.json", argv)
+        self.assertNotIn("ple-store.json", argv)
+        self.assertIn("model-00131-of-00131.safetensors", argv)
+
+    def test_qwen4_direct_ple_profile_is_manifest_free_and_deterministic(self) -> None:
+        _root, model_path = self.qwen4_ple_fixture()
+        config = launcher.read_json(model_path / "config.json")
+        ready, _status, _size = launcher.weight_completeness(model_path, config)
+        first = launcher.qwen4_ple_profile(model_path, config, ready, "omlx 0.6.4")
+        second = launcher.qwen4_ple_profile(model_path, config, ready, "omlx 0.6.4")
+        self.assertTrue(first["supported"])
+        self.assertFalse((model_path / "ple-store.json").exists())
+        self.assertNotIn("ple_storage", config["text_config"])
+        self.assertEqual(first["storage"], "mmap")
+        self.assertEqual(first["storageSource"], "indexed-safetensors")
+        self.assertEqual(first["index"], "model.safetensors.index.json")
+        self.assertIsNone(first["manifest"])
+        self.assertRegex(first["configFingerprint"], r"^[0-9a-f]{64}$")
+        self.assertRegex(first["indexFingerprint"], r"^[0-9a-f]{64}$")
+        self.assertRegex(first["inventoryFingerprint"], r"^[0-9a-f]{64}$")
+        self.assertRegex(first["sourceFingerprint"], r"^[0-9a-f]{64}$")
+        self.assertEqual(first["inventoryFingerprint"], second["inventoryFingerprint"])
+        self.assertEqual(first["sourceFingerprint"], second["sourceFingerprint"])
+        self.assertEqual(first["shardCount"], 2)
+        self.assertEqual(first["tensorCount"], 4)
+        self.assertEqual(first["pleLayerCount"], 1)
+        self.assertEqual(first["pleShardCount"], 2)
+        self.assertEqual(first["pleTensorCount"], 2)
+        self.assertEqual(first["pleLayouts"], ["dense-f16"])
+        self.assertEqual(first["pleBytes"], 48)
+
+    def test_qwen4_direct_ple_contract_tracks_config_and_same_size_payload_changes(self) -> None:
+        _root, model_path = self.qwen4_ple_fixture()
+        config_path = model_path / "config.json"
+        config = launcher.read_json(config_path)
+        ready, _status, _size = launcher.weight_completeness(model_path, config)
+        baseline = launcher.qwen4_ple_profile(model_path, config, ready, "omlx 0.6.4")
+        self.assertTrue(baseline["supported"])
+
+        changed_config = copy.deepcopy(config)
+        changed_config["text_config"]["seed"] = 9_999
+        config_path.write_text(json.dumps(changed_config), encoding="utf-8")
+        changed = launcher.qwen4_ple_profile(
+            model_path, changed_config, ready, "omlx 0.6.4",
+        )
+        self.assertTrue(changed["supported"])
+        self.assertNotEqual(baseline["configFingerprint"], changed["configFingerprint"])
+        self.assertNotEqual(baseline["inventoryFingerprint"], changed["inventoryFingerprint"])
+
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        restored = launcher.qwen4_ple_profile(model_path, config, ready, "omlx 0.6.4")
+        self.assertEqual(baseline["inventoryFingerprint"], restored["inventoryFingerprint"])
+        shard = model_path / "model-00002-of-00002.safetensors"
+        original_size = shard.stat().st_size
+        with open(shard, "r+b") as handle:
+            handle.seek(-1, os.SEEK_END)
+            final_byte = handle.read(1)
+            handle.seek(-1, os.SEEK_END)
+            handle.write(bytes([final_byte[0] ^ 1]))
+            handle.flush()
+            os.fsync(handle.fileno())
+        self.assertEqual(shard.stat().st_size, original_size)
+        payload_changed = launcher.qwen4_ple_profile(
+            model_path, config, ready, "omlx 0.6.4",
+        )
+        self.assertTrue(payload_changed["supported"])
+        self.assertEqual(
+            restored["inventoryFingerprint"], payload_changed["inventoryFingerprint"],
+        )
+        self.assertNotEqual(
+            restored["sourceFingerprint"], payload_changed["sourceFingerprint"],
+        )
+
+    def test_qwen4_direct_ple_accepts_affine_layout_and_rejects_missing_bias(self) -> None:
+        _root, model_path = self.qwen4_ple_fixture()
+        config_path = model_path / "config.json"
+        config = launcher.read_json(config_path)
+        config["text_config"]["ple_embed_dim"] = 64
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        prefix = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding"
+        shard_a = model_path / "model-00001-of-00002.safetensors"
+        shard_b = model_path / "model-00002-of-00002.safetensors"
+        first = {
+            f"{prefix}.shard_0.weight": {
+                "dtype": "U32", "shape": [6, 4], "data_offsets": [0, 96],
+            },
+            f"{prefix}.shard_0.scales": {
+                "dtype": "BF16", "shape": [6, 1], "data_offsets": [96, 108],
+            },
+            f"{prefix}.shard_0.biases": {
+                "dtype": "BF16", "shape": [6, 1], "data_offsets": [108, 120],
+            },
+            f"{prefix}.weight_scale": {
+                "dtype": "BF16", "shape": [1], "data_offsets": [120, 122],
+            },
+            "language_model.model.embed_tokens.weight": {
+                "dtype": "U8", "shape": [2], "data_offsets": [122, 124],
+            },
+        }
+        second = {
+            f"{prefix}.shards.1.weight": {
+                "dtype": "U32", "shape": [6, 4], "data_offsets": [0, 96],
+            },
+            f"{prefix}.shards.1.scales": {
+                "dtype": "BF16", "shape": [6, 1], "data_offsets": [96, 108],
+            },
+            f"{prefix}.shards.1.biases": {
+                "dtype": "BF16", "shape": [6, 1], "data_offsets": [108, 120],
+            },
+            "language_model.model.layers.0.self_attn.q_proj.weight": {
+                "dtype": "U8", "shape": [3], "data_offsets": [120, 123],
+            },
+        }
+
+        def write_layout(second_header: dict[str, object], second_bytes: int) -> None:
+            write_raw_safetensors(shard_a, first, 124)
+            write_raw_safetensors(shard_b, second_header, second_bytes)
+            weight_map = {
+                **{name: shard_a.name for name in first},
+                **{name: shard_b.name for name in second_header},
+            }
+            (model_path / "model.safetensors.index.json").write_text(json.dumps({
+                "weight_map": weight_map,
+            }), encoding="utf-8")
+
+        write_layout(second, 123)
+        ready, _status, _size = launcher.weight_completeness(model_path, config)
+        profile = launcher.qwen4_ple_profile(model_path, config, ready, "omlx 0.6.4")
+        self.assertTrue(profile["supported"])
+        self.assertEqual(profile["pleLayouts"], ["affine-q4-g32"])
+        self.assertEqual(profile["pleTensorCount"], 6)
+        self.assertEqual(profile["pleBytes"], 240)
+
+        incomplete_second = {
+            name: metadata
+            for name, metadata in second.items()
+            if name != f"{prefix}.shards.1.biases"
+        }
+        incomplete_second[
+            "language_model.model.layers.0.self_attn.q_proj.weight"
+        ]["data_offsets"] = [108, 111]
+        write_layout(incomplete_second, 111)
+        rejected = launcher.qwen4_ple_profile(
+            model_path, config, ready, "omlx 0.6.4",
+        )
+        self.assertFalse(rejected["supported"])
+        self.assertIn("incomplete scales or biases", rejected["reason"])
+
+    def test_qwen4_direct_ple_profile_rejects_incomplete_and_unsafe_layouts(self) -> None:
+        _root, model_path = self.qwen4_ple_fixture()
+        config = launcher.read_json(model_path / "config.json")
+        ready, _status, _size = launcher.weight_completeness(model_path, config)
+
+        incomplete = copy.deepcopy(config)
+        incomplete["text_config"]["ple_layer_ids"] = [2, 3]
+        (model_path / "config.json").write_text(json.dumps(incomplete), encoding="utf-8")
+        rejected = launcher.qwen4_ple_profile(
+            model_path, incomplete, ready, "omlx 0.6.4",
+        )
+        self.assertFalse(rejected["supported"])
+        self.assertIn("missing or has duplicate aliases", rejected["reason"])
+
+        wrong_width = copy.deepcopy(config)
+        wrong_width["text_config"]["ple_embed_dim"] = 6
+        (model_path / "config.json").write_text(json.dumps(wrong_width), encoding="utf-8")
+        rejected = launcher.qwen4_ple_profile(
+            model_path, wrong_width, ready, "omlx 0.6.4",
+        )
+        self.assertFalse(rejected["supported"])
+        self.assertIn("supported dense mmap row table", rejected["reason"])
+
+        (model_path / "model.safetensors.index.json").unlink()
+        (model_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        rejected = launcher.qwen4_ple_profile(
+            model_path, config, ready, "omlx 0.6.4",
+        )
+        self.assertFalse(rejected["supported"])
+        self.assertIn("requires a non-empty safetensors weight index", rejected["reason"])
+
+    def test_qwen4_launch_rejects_changed_index_inventory_after_scan(self) -> None:
+        root, model_path = self.qwen4_ple_fixture()
+        with (
+            mock.patch.object(launcher, "model_roots", return_value=[("oMLX test", root)]),
+            mock.patch.object(launcher, "command_version", return_value="omlx 0.6.4"),
+            mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
+            mock.patch.object(
+                launcher, "omlx_qwen_kernel_status",
+                return_value={"ready": True, "state": "ready", "reason": "fixture"},
+            ),
+        ):
+            scanned = launcher.scan_models()
+        model = next(item for item in scanned if item["path"] == str(model_path.resolve()))
+        original_fingerprint = model["qwen4Ple"]["inventoryFingerprint"]
+        index_path = model_path / "model.safetensors.index.json"
+        index_document = launcher.read_json(index_path)
+        index_document["metadata"] = {"revision": "changed-after-scan"}
+        index_path.write_text(json.dumps(index_document), encoding="utf-8")
+        config = launcher.read_json(model_path / "config.json")
+        ready, _status, _size = launcher.weight_completeness(model_path, config)
+        live = launcher.qwen4_ple_profile(model_path, config, ready, "omlx 0.6.4")
+        self.assertTrue(live["supported"])
+        self.assertNotEqual(original_fingerprint, live["inventoryFingerprint"])
+        payload = self.payload("omlx", "chat", model)
+        payload["options"]["memoryGuard"] = "high"
+        with (
+            mock.patch.object(launcher, "command_version", return_value="omlx 0.6.4"),
+            self.assertRaisesRegex(ValueError, "contract changed after scanning"),
+        ):
+            launcher.normalized_request(payload, [model])
+
+    def test_qwen4_flash_omlx_pins_ssd_ple_and_preserves_reasoning(self) -> None:
+        root, model_path = self.qwen4_ple_fixture()
+        with (
+            mock.patch.object(launcher, "model_roots", return_value=[("oMLX test", root)]),
+            mock.patch.object(launcher, "command_version", return_value="omlx 0.6.4"),
+            mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
+            mock.patch.object(
+                launcher, "omlx_qwen_kernel_status",
+                return_value={"ready": True, "state": "ready", "reason": "fixture"},
+            ),
+        ):
+            scanned = launcher.scan_models()
+        model = next(item for item in scanned if item["path"] == str(model_path.resolve()))
+        self.assertEqual(model["rootModelType"], "qwen4_exp")
+        self.assertEqual(model["textModelType"], "qwen4_exp_text")
+        self.assertEqual(model["modelType"], "qwen4_exp_text")
+        self.assertTrue(model["qwen4Ple"]["supported"])
+        self.assertEqual(model["qwen4Ple"]["storageSource"], "indexed-safetensors")
+        self.assertIsNone(model["qwen4Ple"]["manifest"])
+        self.assertFalse(model["ssdStreaming"]["candidate"])
+        self.assertTrue(model["backends"]["omlx"]["runnable"])
+        self.assertFalse(model["backends"]["omlx"]["kv"])
+        self.assertFalse(model["backends"]["omlx"]["mtp"])
+        self.assertFalse(model["backends"]["lmstudio"]["runnable"])
+        self.assertFalse(model["backends"]["mtplx"]["runnable"])
+        self.assertEqual(model["memoryGeometry"]["fullBytesPerToken"], 27_936)
+        payload = self.payload("omlx", "chat", model)
+        payload["reasoning"] = "medium"
+        with (
+            mock.patch.object(launcher, "command_version", return_value="omlx 0.6.4"),
+            self.assertRaisesRegex(ValueError, "require High memory mode"),
+        ):
+            launcher.normalized_request(payload, [model])
+
+        high_payload = copy.deepcopy(payload)
+        high_payload["options"]["memoryGuard"] = "high"
+        with mock.patch.object(launcher, "command_version", return_value="omlx 0.6.4"):
+            plan = launcher.normalized_request(high_payload, [model])
+        selected = json.loads(
+            (plan.run_dir / "omlx" / "model_settings.json").read_text(encoding="utf-8")
+        )["models"][plan.model["servedId"]]
+        high_settings = json.loads(
+            (plan.run_dir / "omlx" / "settings.json").read_text(encoding="utf-8")
+        )["memory"]
+        self.assertTrue(selected["qwen4_ple_ssd_offload"])
+        self.assertTrue(selected["preserve_thinking"])
+        self.assertTrue(selected["chat_template_kwargs"]["enable_thinking"])
+        self.assertEqual(selected["chat_template_kwargs"]["reasoning_effort"], "medium")
+        self.assertTrue(any("N-gram table SSD-backed" in item for item in plan.warnings))
+        self.assertEqual(high_settings["memory_guard_tier"], "custom")
+        self.assertEqual(
+            high_settings["memory_guard_custom_ceiling_gb"],
+            launcher.OMLX_QWEN4_HIGH_MEMORY_CEILING_GIB,
+        )
+        self.assertEqual(high_settings["soft_threshold"], 0.925)
+        self.assertEqual(high_settings["hard_threshold"], 1.0)
+        self.assertTrue(any("45 GiB oMLX process ceiling" in item for item in plan.warnings))
+
+        bounded_reasoning_payload = copy.deepcopy(high_payload)
+        bounded_reasoning_payload["options"]["_qualificationThinkingBudgetTokens"] = 384
+        bounded_reasoning_payload["options"]["_qualificationAnswerReserveTokens"] = 128
+        with mock.patch.object(launcher, "command_version", return_value="omlx 0.6.4"):
+            bounded_reasoning_plan = launcher.normalized_request(
+                bounded_reasoning_payload, [model], purpose="benchmark",
+            )
+        bounded_model_settings = json.loads(
+            (bounded_reasoning_plan.run_dir / "omlx" / "model_settings.json").read_text(
+                encoding="utf-8",
+            )
+        )["models"][bounded_reasoning_plan.model["servedId"]]
+        self.assertEqual(bounded_reasoning_plan.output, high_payload["output"])
+        self.assertEqual(bounded_model_settings["max_tokens"], high_payload["output"])
+        self.assertEqual(bounded_model_settings["thinking_budget_tokens"], 384)
+        self.assertNotIn(
+            "_qualificationThinkingBudgetTokens",
+            bounded_reasoning_plan.public()["options"],
+        )
+        self.assertTrue(any(
+            "saved response limit is unchanged" in item
+            for item in bounded_reasoning_plan.warnings
+        ))
+
+        idle_hub = {"phase": "idle"}
+        idle_operation = {"active": False}
+        capacity_model = copy.deepcopy(model)
+        # The installed REAP artifact leaves 40.574 GiB resident after its
+        # indexed 29.8 GiB PLE table is excluded from the checkpoint estimate.
+        capacity_model["qwen4Ple"]["residentBytes"] = 43_566_103_226
+        capacity_payload = copy.deepcopy(payload)
+        capacity_payload["context"] = 32_768
+        capacity_high_payload = copy.deepcopy(capacity_payload)
+        capacity_high_payload["options"]["memoryGuard"] = "high"
+        capacity_models = [capacity_model]
+        canonical_high_profile = launcher.validated_launch_profile_request(
+            capacity_high_payload, capacity_models,
+        )
+        self.assertEqual(canonical_high_profile["options"]["memoryGuard"], "high")
+        balanced_admission = launcher.session_memory_admission(
+            capacity_payload, capacity_models,
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 1, "metalWiredLimitBytes": 0,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertFalse(balanced_admission["launchable"])
+        self.assertEqual(balanced_admission["decision"], "configuration")
+        self.assertEqual(balanced_admission["label"], "Choose Qwen high-memory mode")
+
+        mixed_2bit_model = copy.deepcopy(capacity_model)
+        mixed_2bit_model["name"] = "Qwen3.8-Flash-Next-MLX-Mixed-2bit"
+        mixed_2bit_model["qwen4Ple"]["residentBytes"] = 43_149_941_450
+        mixed_2bit_payload = copy.deepcopy(capacity_payload)
+        mixed_2bit_payload["context"] = 16_384
+        mixed_2bit_payload["output"] = 8_192
+        mixed_2bit_admission = launcher.session_memory_admission(
+            mixed_2bit_payload, [mixed_2bit_model],
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 45 * 1024**3, "metalWiredLimitBytes": 0,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertFalse(mixed_2bit_admission["launchable"])
+        self.assertFalse(mixed_2bit_admission["requiresAcknowledgement"])
+        self.assertEqual(mixed_2bit_admission["decision"], "configuration")
+        self.assertEqual(
+            mixed_2bit_admission["label"], "Choose Qwen high-memory mode",
+        )
+        oversized_payload = copy.deepcopy(capacity_high_payload)
+        oversized_payload["context"] = 65_536
+        oversized_admission = launcher.session_memory_admission(
+            oversized_payload, capacity_models,
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 20 * 1024**3,
+                "metalWiredLimitBytes": 43 * 1024**3,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertFalse(oversized_admission["launchable"])
+        self.assertEqual(oversized_admission["decision"], "configuration")
+        self.assertEqual(oversized_admission["label"], "Reduce Qwen context")
+        self.assertGreater(
+            oversized_admission["estimate"]["estimatedWorkingSetBytes"],
+            oversized_admission["estimate"]["memoryGuardHardWatermarkBytes"],
+        )
+        unknown_geometry_model = copy.deepcopy(capacity_model)
+        unknown_geometry_model["memoryGeometry"]["ready"] = False
+        unknown_geometry_admission = launcher.session_memory_admission(
+            capacity_high_payload, [unknown_geometry_model],
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 20 * 1024**3,
+                "metalWiredLimitBytes": 42 * 1024**3,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertFalse(unknown_geometry_admission["launchable"])
+        self.assertEqual(unknown_geometry_admission["label"], "KV capacity unavailable")
+        unknown_admission = launcher.session_memory_admission(
+            capacity_high_payload, capacity_models,
+            {
+                "memoryAvailable": False, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": None, "metalWiredLimitBytes": 42 * 1024**3,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertFalse(unknown_admission["launchable"])
+        self.assertFalse(unknown_admission["requiresAcknowledgement"])
+        self.assertEqual(unknown_admission["decision"], "unknown")
+        low_headroom_admission = launcher.session_memory_admission(
+            capacity_high_payload, capacity_models,
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 1, "metalWiredLimitBytes": 42 * 1024**3,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertFalse(low_headroom_admission["launchable"])
+        self.assertFalse(low_headroom_admission["requiresAcknowledgement"])
+        self.assertEqual(low_headroom_admission["decision"], "pressure")
+        self.assertEqual(low_headroom_admission["label"], "Free memory before launch")
+        capped_admission = launcher.session_memory_admission(
+            capacity_high_payload, capacity_models,
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 20 * 1024**3, "metalWiredLimitBytes": 0,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertFalse(capped_admission["launchable"])
+        self.assertEqual(capped_admission["decision"], "system-setting")
+        self.assertIn("separate from the 45 GiB oMLX process guard", capped_admission["detail"])
+        high_admission = launcher.session_memory_admission(
+            capacity_high_payload, capacity_models,
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 20 * 1024**3,
+                "metalWiredLimitBytes": 42 * 1024**3,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertTrue(high_admission["launchable"])
+        self.assertFalse(high_admission["requiresAcknowledgement"])
+        self.assertEqual(high_admission["decision"], "ready")
+        self.assertEqual(high_admission["label"], "Qwen high-memory route ready")
+        self.assertLessEqual(
+            high_admission["estimate"]["estimatedWorkingSetBytes"],
+            high_admission["estimate"]["memoryGuardHardWatermarkBytes"],
+        )
+        self.assertEqual(
+            high_admission["estimate"]["requiredMetalWiredLimitBytes"],
+            42 * 1024**3,
+        )
+
+        balanced_evidence = launcher.optimizer_evidence(
+            model, 32_768, 8_192, "chat", "medium", "off",
+        )
+        launcher.add_benchmark_engine_evidence(
+            balanced_evidence, model, payload["options"], ["omlx"],
+        )
+        high_evidence = launcher.optimizer_evidence(
+            model, 32_768, 8_192, "chat", "medium", "off",
+        )
+        launcher.add_benchmark_engine_evidence(
+            high_evidence, model, high_payload["options"], ["omlx"],
+        )
+        self.assertEqual(balanced_evidence["engineSettings"]["pleStorage"], "mmap")
+        self.assertEqual(balanced_evidence["engineSettings"]["memoryGuard"], "balanced")
+        self.assertEqual(high_evidence["engineSettings"]["memoryGuard"], "high")
+        self.assertIn(
+            "balanced memory guard",
+            launcher.benchmark_engine_settings_label(
+                "omlx", balanced_evidence["engineSettings"],
+            ),
+        )
+        self.assertIn(
+            "45 GiB high-memory guard",
+            launcher.benchmark_engine_settings_label(
+                "omlx", high_evidence["engineSettings"],
+            ),
+        )
+        self.assertNotEqual(
+            launcher.benchmark_record_identity({
+                "backend": "omlx", "engineSettings": balanced_evidence["engineSettings"],
+            }),
+            launcher.benchmark_record_identity({
+                "backend": "omlx", "engineSettings": high_evidence["engineSettings"],
+            }),
+        )
+
+        estimate = launcher.launch_memory_estimate(
+            {**payload, "context": 32_768}, model,
+            {"totalMemoryBytes": 48 * 1024**3},
+        )
+        self.assertTrue(estimate["pleMmap"])
+        self.assertEqual(estimate["pleBytes"], 48)
+        self.assertEqual(estimate["checkpointBytes"], sum(
+            path.stat().st_size for path in model_path.glob("model*.safetensors")
+        ))
+        self.assertEqual(estimate["kvCacheBytes"], 27_936 * 32_768)
+        self.assertNotIn("ssdStreamedBytes", estimate)
+        index = (ROOT / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("High memory · 45 GiB process guard", index)
+        self.assertIn(
+            '"burst", "anePrefill", "memoryGuard"', script,
+        )
+        self.assertIn(
+            'cancelOptimization("Memory mode changed; reapply to refresh the benchmark match.")',
+            script,
+        )
+        self.assertIn('["Required Metal limit", formatGiB(estimate.requiredMetalWiredLimitBytes)]', script)
+
+    def test_incomplete_numbered_acquisition_never_scans_ready(self) -> None:
+        path = Path(self.temp.name) / "partial-acquisition"
+        path.mkdir()
+        shard = path / "model-00001-of-00131.safetensors"
+        write_raw_safetensors(
+            shard, {"a": {"dtype": "U8", "shape": [1], "data_offsets": [0, 1]}}, 1,
+        )
+        marker = {
+            "status": "downloading", "verification": {},
+            "files": [{"path": shard.name, "size": shard.stat().st_size, "sha256": ""}],
+        }
+        (path / launcher.MODEL_ACQUISITION_MARKER).write_text(json.dumps(marker), encoding="utf-8")
+        ready, status, _ = launcher.weight_completeness(path, {})
+        self.assertFalse(ready)
+        self.assertEqual(status, "Downloading")
+
+        marker.update({"status": "verified", "verification": {"verified": True}})
+        (path / launcher.MODEL_ACQUISITION_MARKER).write_text(json.dumps(marker), encoding="utf-8")
+        ready, status, _ = launcher.weight_completeness(path, {})
+        self.assertFalse(ready)
+        self.assertIn("130 weight shards missing", status)
 
     def test_model_acquisition_requires_explicit_gguf_variant_and_blocks_collisions(self) -> None:
         root = Path(self.temp.name) / "gguf-root"
@@ -8114,6 +9114,290 @@ for line in sys.stdin:
         with self.assertRaisesRegex(ValueError, "calibration cooling"):
             launcher.calibration_plan({**request, "calibrationCooling": "silent"}, [model])
 
+    def test_qwen_ple_single_route_qualification_is_measured_saved_and_reused(self) -> None:
+        model = copy.deepcopy(self.models[0])
+        model.update({
+            "id": "qwen4-ple-qualification",
+            "name": "Qwen3.8 Flash-Next REAP PLE",
+            "modelType": "qwen4_exp_text",
+            "architecture": "Qwen4ExpForConditionalGeneration",
+            "qwen4Ple": {"supported": True, "storage": "mmap"},
+        })
+        model["backends"]["omlx"].update({
+            "runnable": True,
+            "mtp": False, "mtpReason": "No integrated MTP tensors",
+            "dflash": False, "dflashReason": "No exact DFlash pair",
+            "kv": False, "depth": 1, "depthMax": 1,
+            "benchmarkModelFingerprint": "qwen4-ple-qualified-model",
+            "runtimeVersion": "omlx 0.6.4 qualification runtime",
+            "agentReasoning": ["auto", "off", "low", "medium", "xhigh"],
+            "codexReasoning": ["auto", "low", "medium", "xhigh"],
+        })
+        for backend in ("lmstudio", "mtplx"):
+            model["backends"][backend].update({
+                "runnable": False,
+                "reason": "No verified external Qwen4 PLE mmap route.",
+                "mtp": False,
+            })
+        payload = self.payload("omlx", "pi", model)
+        payload.update({
+            "suite": "quick", "enginePreference": "throughput",
+            "calibrationCooling": "smart",
+        })
+        payload["options"].update({"memoryGuard": "high", "acceleration": "off"})
+
+        ready_admission = {
+            "decision": "ready", "label": "Qwen high-memory route ready",
+            "detail": "Every dedicated high-memory capacity check passed.",
+            "launchable": True, "requiresAcknowledgement": False,
+            "contractId": "qualification-ready", "estimate": {},
+        }
+
+        balanced_qualification = copy.deepcopy(payload)
+        balanced_qualification["scope"] = "qualification"
+        balanced_qualification["options"]["memoryGuard"] = "balanced"
+        with self.assertRaisesRegex(ValueError, "high-memory mode"):
+            launcher.validated_route_qualification_request(
+                balanced_qualification, [model],
+            )
+
+        with mock.patch.object(
+            launcher, "route_qualification_memory_admission",
+            return_value=ready_admission,
+        ):
+            plan = launcher.calibration_plan(payload, [model])
+        self.assertTrue(plan["routeQualification"])
+        self.assertTrue(plan["ready"])
+        self.assertEqual(plan["action"], "measure")
+        self.assertEqual(plan["suite"]["id"], "agentic")
+        self.assertEqual(plan["suiteAdjustment"]["requested"], "quick")
+        self.assertEqual(plan["eligibleEngineCount"], 1)
+        self.assertEqual(plan["modelReloadCount"], 1)
+        self.assertEqual(plan["measuredRequestCount"], 6)
+        self.assertEqual(plan["request"]["reasoning"], "medium")
+        self.assertTrue(plan["reasoningContract"]["reasoningEnabled"])
+        self.assertEqual(plan["evidence"]["tier"], "single-route-qualification-needed")
+        self.assertIsInstance(plan["memoryAdmission"], dict)
+        self.assertTrue(plan["memoryAdmission"]["launchable"])
+
+        request = copy.deepcopy(payload)
+        request["scope"] = "qualification"
+        qualification = launcher.validated_route_qualification_request(request, [model])
+        self.assertEqual(qualification["kind"], "route-qualification")
+        self.assertEqual(qualification["job"]["modes"], ["ar"])
+        self.assertEqual(qualification["job"]["reasoning"], "medium")
+        self.assertEqual(qualification["job"]["suite"]["maxTokens"], 512)
+        self.assertEqual(qualification["job"]["qualificationThinkingBudgetTokens"], 384)
+        self.assertEqual(qualification["job"]["qualificationAnswerReserveTokens"], 128)
+        bounded_payload = launcher.BenchmarkManager(
+            launcher.RunManager(),
+        )._mode_payload(qualification["job"], "ar")
+        self.assertEqual(bounded_payload["output"], payload["output"])
+        self.assertEqual(
+            bounded_payload["options"]["_qualificationThinkingBudgetTokens"], 384,
+        )
+        self.assertNotIn("_qualificationThinkingBudgetTokens", qualification["request"]["options"])
+        start_manager = launcher.BenchmarkManager(launcher.RunManager())
+        with mock.patch.object(
+            launcher, "route_qualification_memory_admission",
+            return_value=ready_admission,
+        ), mock.patch.object(launcher.threading, "Thread") as worker_thread:
+            accepted = start_manager.start(request, [model])
+        self.assertEqual(accepted["kind"], "route-qualification")
+        self.assertEqual(accepted["executionOrder"], ["omlx"])
+        self.assertEqual(accepted["engines"][0]["measurementRouteCount"], 1)
+        self.assertEqual(accepted["reasoningBudget"]["thinkingMaxTokens"], 384)
+        self.assertEqual(accepted["reasoningBudget"]["answerReserveTokens"], 128)
+        self.assertEqual(accepted["reasoningBudget"]["visibleResponseLimit"], payload["output"])
+        worker_thread.return_value.start.assert_called_once()
+
+        blocked_admission = {
+            "decision": "pressure", "label": "Capacity needs approval",
+            "detail": "This route is launchable only after a generic memory-pressure approval.",
+            "launchable": True, "requiresAcknowledgement": True,
+        }
+        with mock.patch.object(
+            launcher, "route_qualification_memory_admission",
+            return_value=blocked_admission,
+        ):
+            blocked_plan = launcher.calibration_plan(payload, [model])
+            blocked_manager = launcher.BenchmarkManager(launcher.RunManager())
+            with mock.patch.object(launcher.threading, "Thread") as blocked_thread:
+                with self.assertRaisesRegex(ValueError, "Capacity needs approval"):
+                    blocked_manager.start(request, [model])
+        self.assertFalse(blocked_plan["ready"])
+        self.assertEqual(blocked_plan["action"], "blocked")
+        self.assertEqual(blocked_plan["memoryAdmission"]["decision"], "pressure")
+        self.assertTrue(any("Capacity needs approval" in item for item in blocked_plan["blockers"]))
+        blocked_thread.assert_not_called()
+
+        recheck_manager = launcher.BenchmarkManager(launcher.RunManager())
+        recheck_manager.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {"id": qualification["id"], "kind": "route-qualification"},
+            "modes": {}, "engines": {
+                "omlx": {"backend": "omlx", "phase": "queued", "modes": {}, "record": None},
+            },
+            "result": None, "events": [],
+        }
+        with mock.patch.object(
+            recheck_manager, "_wait_for_resource_baseline", return_value={},
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission",
+            return_value=blocked_admission,
+        ), mock.patch.object(recheck_manager, "_measure_mode") as measure:
+            recheck_manager._qualification_worker(qualification, [model])
+        self.assertEqual(recheck_manager.snapshot()["phase"], "failed")
+        self.assertIn("Capacity changed", recheck_manager.snapshot()["message"])
+        measure.assert_not_called()
+
+        load_gate_manager = launcher.BenchmarkManager(launcher.RunManager())
+        load_gate_manager.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {}, "modes": {}, "engines": {
+                "omlx": {"backend": "omlx", "phase": "queued", "modes": {}, "record": None},
+            },
+            "result": None, "events": [],
+        }
+        with mock.patch.object(
+            launcher, "normalized_request", return_value=mock.Mock(),
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission",
+            return_value=blocked_admission,
+        ), mock.patch.object(load_gate_manager.run_manager, "start") as load:
+            with self.assertRaisesRegex(RuntimeError, "immediately before"):
+                load_gate_manager._measure_mode(
+                    qualification["job"], [model], "ar", 0, 6,
+                )
+        load.assert_not_called()
+
+        samples = []
+        for index, scenario in enumerate(("cold", "warmPrefix", "toolIngest", "steadyTurn")):
+            samples.append({
+                "scenario": scenario,
+                "scenarioLabel": scenario,
+                "cacheExpected": index in {1, 3},
+                "targetPromptTokens": 8_192 + index * 512,
+                "repetition": 1,
+                "promptTokens": 8_100 + index * 500,
+                "cachedPromptTokens": None,
+                "uncachedPromptTokens": None,
+                "cacheHitRate": None,
+                "completionTokens": 256,
+                "ttftSeconds": 1.0 + index * 0.1,
+                "totalSeconds": 17.0 + index,
+                "decodeTokensPerSecond": 16.0 + index,
+                "endToEndTokensPerSecond": 15.0 + index,
+                "reasoningObserved": True,
+                "answerObserved": True,
+                "finishReason": "stop",
+                "terminalState": "complete",
+                "terminalComplete": True,
+                "responseLimitReached": False,
+                "outputHash": f"sample-{index}",
+            })
+        measured = {
+            "label": "AR + PLE mmap", "settings": {},
+            "qualityHash": "a" * 64, "qualityCompletionTokens": 64,
+            "medianTTFT": 1.15,
+            "medianDecodeTokensPerSecond": 17.5,
+            "medianEndToEndTokensPerSecond": 16.5,
+            "samples": samples,
+            "agenticMetrics": launcher.summarize_agentic_samples(samples),
+            "resourceTelemetry": {
+                "version": 1, "sampleCount": 4,
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "baselineHeadroomPercent": 20.0,
+                "peakPressureDeltaBytes": 4 * 1024**3,
+                "minimumHeadroomPercent": 11.0,
+                "thermalAvailable": True,
+                "thermalStartValue": 0, "thermalStart": "nominal",
+                "thermalWorstValue": 1, "thermalWorst": "fair",
+                "lowPowerMode": False,
+            },
+            "resourceCooldown": {"version": 1, "status": "reference-ready"},
+        }
+        manager = launcher.BenchmarkManager(launcher.RunManager())
+        manager.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {"id": qualification["id"], "kind": "route-qualification"},
+            "modes": {}, "engines": {
+                "omlx": {"backend": "omlx", "phase": "queued", "modes": {}, "record": None},
+            },
+            "result": None, "events": [],
+        }
+        ready_gate = {
+            "version": 1, "status": "reference-ready", "reference": {},
+            "observed": {}, "_initialSnapshot": {},
+        }
+        with mock.patch.object(
+            manager, "_wait_for_resource_baseline", return_value=ready_gate,
+        ), mock.patch.object(
+            manager, "_measure_mode", return_value=(measured, 6),
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="qwen-ple-test-mac",
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission",
+            return_value=ready_admission,
+        ), mock.patch.object(launcher, "save_benchmark_record") as saved:
+            manager._qualification_worker(qualification, [model])
+        status = manager.snapshot()
+        self.assertEqual(status["phase"], "completed", status.get("message"))
+        self.assertEqual(status["result"]["kind"], "route-qualification")
+        self.assertTrue(status["result"]["qualified"])
+        self.assertEqual(status["result"]["authoritativeUsage"]["completionTokens"], 1_024)
+        self.assertAlmostEqual(
+            status["result"]["qualifiedRoutes"][0]["decodeTokensPerSecond"], 17.5,
+        )
+        record = saved.call_args.args[0]
+        self.assertEqual(record["kind"], "route-qualification")
+        self.assertTrue(record["qualification"]["reasoningObserved"])
+        self.assertTrue(record["qualification"]["answerObserved"])
+        self.assertTrue(record["qualification"]["terminalCompletionObserved"])
+        self.assertEqual(record["qualification"]["metrics"]["promptTokens"], 35_400)
+
+        model["backends"]["omlx"]["localBenchmark"] = copy.deepcopy(record)
+        model["backends"]["omlx"]["localBenchmarks"] = [copy.deepcopy(record)]
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="qwen-ple-test-mac",
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission",
+            return_value=ready_admission,
+        ):
+            reused = launcher.calibration_plan(payload, [model])
+            fastest = launcher.best_engine_request(payload, [model])
+        self.assertEqual(reused["action"], "apply-existing")
+        self.assertEqual(reused["evidence"]["tier"], "local-route-qualification")
+        self.assertEqual(len(reused["evidence"]["qualifiedRoutes"]), 1)
+        self.assertEqual(fastest["engineEvidenceTier"], "local-route-qualification")
+        self.assertEqual(fastest["engineNextAction"]["id"], "keep-current")
+        self.assertFalse(fastest["engineNextAction"]["requiresCalibration"])
+        self.assertEqual(fastest["options"]["memoryGuard"], "high")
+
+        broken = copy.deepcopy(record)
+        broken["modes"]["ar"]["samples"][0]["answerObserved"] = False
+        model["backends"]["omlx"]["localBenchmark"] = broken
+        model["backends"]["omlx"]["localBenchmarks"] = [broken]
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="qwen-ple-test-mac",
+        ):
+            rejected = launcher.best_engine_request(payload, [model])
+        self.assertEqual(rejected["engineEvidenceTier"], "single-route-qualification-needed")
+        self.assertTrue(rejected["engineNextAction"]["requiresCalibration"])
+
+        accelerated = copy.deepcopy(model)
+        accelerated["backends"]["omlx"]["mtp"] = True
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="qwen-ple-test-mac",
+        ):
+            no_longer_single_route = launcher.best_engine_request(payload, [accelerated])
+        self.assertEqual(
+            no_longer_single_route["engineEvidenceTier"], "single-compatible-engine",
+        )
+        self.assertFalse(
+            no_longer_single_route["engineDecision"]["routeQualification"],
+        )
+
     def test_all_engine_reasoning_policy_normalizes_the_shootout_without_weakening_strict_mode(self) -> None:
         model = json.loads(json.dumps(self.models[0]))
         for backend, capability in model["backends"].items():
@@ -8758,6 +10042,19 @@ for line in sys.stdin:
                 "cacheTelemetryReported": True, "cachedPromptTokens": index % 2,
             })
         self.assertEqual(manager.cache_observatory()["observationCount"], launcher.CACHE_OBSERVATION_MAX)
+
+    def test_cache_policy_never_mislabels_whallm_as_lm_studio(self) -> None:
+        plan = launcher.LaunchPlan(
+            run_id="whallm-cache-policy", backend="whallm", client="chat",
+            model={"name": "Qwen3.8 Flash-Next", "backends": {"whallm": {}}},
+            project="/tmp/project", context=16_384, output=2_048,
+            reasoning="medium", port=18_080, mode="custom", options={},
+        )
+        policy = launcher.session_cache_policy(plan)
+        self.assertEqual(policy["engine"], "whallm")
+        self.assertEqual(policy["engineLabel"], launcher.BACKEND_LABELS["whallm"])
+        self.assertIn("Whallm owns", policy["detail"])
+        self.assertNotIn("LM Studio", json.dumps(policy))
 
     def test_warm_route_requires_an_exact_resident_engine_contract(self) -> None:
         owner = launcher.normalized_request(
@@ -9539,6 +10836,7 @@ for line in sys.stdin:
         index = (ROOT / "index.html").read_text(encoding="utf-8")
         styles = (ROOT / "styles.css").read_text(encoding="utf-8")
         script = (ROOT / "app.js").read_text(encoding="utf-8")
+        decision_script = (ROOT / "calibration_decision.js").read_text(encoding="utf-8")
         for element_id in (
             "performanceReceipt", "performanceReceiptIcon",
             "performanceReceiptTitle", "performanceReceiptDetail",
@@ -9559,7 +10857,8 @@ for line in sys.stdin:
         self.assertIn('button.classList.toggle("measured-best", best)', script)
         self.assertIn('title:focused ? "Compare compatible engines" : "No exact engine result"', script)
         self.assertIn('source:"performance-receipt"', script)
-        self.assertIn('return ["pi", "opencode", "codex"].includes(state.client) ? "agentic" : "standard"', script)
+        self.assertIn("CalibrationDecision.receiptSuite", script)
+        self.assertIn('if (qwenPleQualification === true) return "agentic"', decision_script)
         self.assertIn('.performance-receipt[data-state="trusted"]', styles)
         self.assertIn('.choice.measured-best .choice-evidence{display:block}', styles)
         self.assertIn(':root[data-detail="focused"] #optimizationBadge', styles)

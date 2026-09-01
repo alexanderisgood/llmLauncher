@@ -11,17 +11,26 @@
 
   function summary(decision = {}) {
     const label = backendLabel(decision);
+    if (decision.qualified === true || decision.evidenceTier === "local-route-qualification") {
+      return `${label} route qualified`;
+    }
     if (decision.trusted === true || decision.trustedWinner === true) return `${label} is fastest`;
     if (decision.engineChanged === true) return `Leading engines tied — use ${label}`;
     return `No clear winner — keep ${label}`;
   }
 
   function applyLabel(decision = {}) {
+    if (decision.qualified === true || decision.tier === "local-route-qualification") {
+      return `Use qualified route · ${backendLabel(decision)}`;
+    }
     return `Apply result · ${backendLabel(decision)}`;
   }
 
   function resultBadge(decision = {}, engine = {}, index = 0) {
     const selected = String(engine.backend || "") === String(decision.backend || "");
+    if (selected && (decision.qualified === true || decision.evidenceTier === "local-route-qualification")) {
+      return "Qualified";
+    }
     if (selected && (decision.trusted === true || decision.trustedWinner === true)) return "Best result";
     if (selected && decision.engineChanged === true) return "Recommended";
     if (selected) return "Kept · within 3%";
@@ -29,5 +38,11 @@
     return `#${Number(index) + 1}`;
   }
 
-  return {backendLabel, summary, applyLabel, resultBadge};
+  function receiptSuite(client, qwenPleQualification = false) {
+    if (qwenPleQualification === true) return "agentic";
+    return ["pi", "opencode", "codex"].includes(String(client || ""))
+      ? "agentic" : "standard";
+  }
+
+  return {backendLabel, summary, applyLabel, receiptSuite, resultBadge};
 });

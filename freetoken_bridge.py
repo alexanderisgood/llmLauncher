@@ -225,7 +225,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("X-FreeToken-Bridge", VERSION)
         self.end_headers()
         while True:
-            chunk = response.read(64 * 1024)
+            # ``HTTPResponse.read(amt)`` may wait for the full amount or EOF,
+            # which turns a token stream into one late blob. ``read1`` returns
+            # promptly with the bytes already available from the upstream SSE.
+            chunk = response.read1(16 * 1024)
             if not chunk:
                 break
             self.wfile.write(chunk)

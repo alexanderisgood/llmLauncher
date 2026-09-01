@@ -16,6 +16,8 @@ const path = require("node:path");
     id:"launcher-test", name:"Launcher test", baseUrl:"http://127.0.0.1:1/v1",
     apiKey:"local", headers:{}, model:{
       id:"model-test", name:"Model test", reasoning:true,
+      supportsReasoningEffort:true,
+      thinkingLevelMap:{off:"none", medium:"medium"},
       contextWindow:131072, maxTokens:16384,
     },
   });
@@ -25,6 +27,8 @@ const path = require("node:path");
       registerProvider(id, value) { registered = {id, value}; },
     });
     assert.equal(registered.id, "launcher-test");
+    assert.equal(registered.value.models[0].compat.supportsReasoningEffort, true);
+    assert.deepEqual(registered.value.models[0].thinkingLevelMap, {off:"none", medium:"medium"});
     assert.ok(handlers.has("message_end"));
     const context = {hasUI:true, ui:{notify:(message, level) => notices.push({message, level})}};
     handlers.get("message_end")({message:{role:"assistant", stopReason:"stop"}}, context);
@@ -33,6 +37,18 @@ const path = require("node:path");
     assert.equal(notices.length, 1);
     assert.equal(notices[0].level, "warning");
     assert.match(notices[0].message, /Send “continue”/);
+    handlers.get("message_end")({message:{
+      role:"assistant", stopReason:"stop",
+      content:[{type:"thinking", thinking:"still working"}],
+    }}, context);
+    assert.equal(notices.length, 2);
+    assert.match(notices[1].message, /without a final response/);
+    assert.match(notices[1].message, /queued follow-ups stay paused/);
+    handlers.get("message_end")({message:{
+      role:"assistant", stopReason:"stop",
+      content:[{type:"thinking", thinking:"work"}, {type:"text", text:"done"}],
+    }}, context);
+    assert.equal(notices.length, 2);
     console.log("Pi provider response-limit recovery notice passed");
   } finally {
     if (previous === undefined) delete process.env.LLM_LAUNCHER_PI_PROVIDER;

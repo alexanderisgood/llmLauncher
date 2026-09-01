@@ -27,7 +27,7 @@ HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade",
 }
-EFFORT_ORDER = ("auto", "minimal", "low", "medium", "high", "xhigh")
+EFFORT_ORDER = ("auto", "off", "minimal", "low", "medium", "high", "xhigh", "max")
 THINKING_BUDGETS = {"minimal": 1_024, "low": 2_048, "medium": 4_096, "high": 8_192, "xhigh": 16_384}
 
 
@@ -69,7 +69,7 @@ def load_config(path: Path) -> dict[str, Any]:
 
 
 def transform_response_request(body: bytes, config: dict[str, Any]) -> bytes:
-    """Set the exact output cap and translate Codex effort for oMLX."""
+    """Set the exact output cap and translate the launcher's effort vocabulary."""
     value = json.loads(body)
     if not isinstance(value, dict):
         raise ValueError("Responses request must be a JSON object")
@@ -104,11 +104,15 @@ def transform_response_request(body: bytes, config: dict[str, Any]) -> bytes:
         reasoning = value.get("reasoning")
         if not isinstance(reasoning, dict):
             reasoning = {}
-        reasoning["effort"] = effort
+        # The launcher calls the no-reasoning choice ``off``. Responses APIs,
+        # including Whallm's route, call the same wire value ``none``.
+        reasoning["effort"] = "none" if effort == "off" else effort
         value["reasoning"] = reasoning
+        if effort == "off":
+            value.pop("thinking_budget", None)
     if config["backend"] == "omlx" and effort != "auto":
         supported = list(config.get("templateReasoningEfforts") or [])
-        if effort not in supported:
+        if effort not in supported or effort not in THINKING_BUDGETS:
             raise ValueError("The oMLX model template does not support this reasoning effort")
         if effective_output_limit < 2:
             raise ValueError("max_output_tokens is too small for explicit reasoning")
@@ -162,6 +166,89 @@ def correct_completed_response_at_limit(value: Any, output_limit: int) -> bool:
     return True
 
 
+def _nonempty_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _output_item_signals(item: Any) -> tuple[bool, bool]:
+    """Return whether an output item contains reasoning and usable final output."""
+    if not isinstance(item, dict):
+        return False, False
+    item_type = str(item.get("type") or "")
+    reasoning = item_type == "reasoning"
+    final_output = item_type.endswith("_call")
+    if item_type == "message":
+        content = item.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get("type") or "")
+                if part_type.endswith("_call"):
+                    final_output = True
+                if part_type in {"output_text", "text"} and _nonempty_text(part.get("text")):
+                    final_output = True
+                if part_type == "refusal" and (
+                    _nonempty_text(part.get("refusal")) or _nonempty_text(part.get("text"))
+                ):
+                    final_output = True
+    return reasoning, final_output
+
+
+def response_output_signals(value: Any) -> tuple[bool, bool]:
+    """Inspect one Responses event/result without retaining its private text."""
+    if not isinstance(value, dict):
+        return False, False
+    event_type = str(value.get("type") or "")
+    reasoning = event_type.startswith("response.reasoning")
+    final_output = False
+    if event_type.startswith("response.output_text"):
+        final_output = _nonempty_text(value.get("delta")) or _nonempty_text(value.get("text"))
+    elif event_type.startswith("response.refusal"):
+        final_output = _nonempty_text(value.get("delta")) or _nonempty_text(value.get("refusal"))
+    elif "_call" in event_type:
+        final_output = True
+
+    item_reasoning, item_final = _output_item_signals(value.get("item"))
+    reasoning = reasoning or item_reasoning
+    final_output = final_output or item_final
+    response = _response_record(value)
+    if response is not None:
+        output = response.get("output")
+        if isinstance(output, list):
+            for item in output:
+                item_reasoning, item_final = _output_item_signals(item)
+                reasoning = reasoning or item_reasoning
+                final_output = final_output or item_final
+    return reasoning, final_output
+
+
+def fail_completed_reasoning_only_response(
+    value: Any, *, saw_reasoning: bool = False, saw_final_output: bool = False,
+) -> bool:
+    """Reject a terminal success that contains thought but no answer or tool call."""
+    if not isinstance(value, dict):
+        return False
+    response = _response_record(value)
+    if response is None:
+        return False
+    event_completed = value.get("type") == "response.completed"
+    if not event_completed and response.get("status") != "completed":
+        return False
+    local_reasoning, local_final = response_output_signals(value)
+    if not (saw_reasoning or local_reasoning) or saw_final_output or local_final:
+        return False
+    if event_completed:
+        value["type"] = "response.failed"
+    response["status"] = "failed"
+    response.pop("incomplete_details", None)
+    response["error"] = {
+        "code": "reasoning_without_final_output",
+        "message": "The local model stopped after reasoning without an answer or tool call.",
+    }
+    return True
+
+
 class ResponsesLimitGuard:
     """Hold only the terminal Responses event long enough to verify its usage.
 
@@ -178,6 +265,8 @@ class ResponsesLimitGuard:
         self.terminal = bytearray()
         self.terminal_started = False
         self.disabled = False
+        self.saw_reasoning = False
+        self.saw_final_output = False
 
     @staticmethod
     def _split_event(buffer: bytearray) -> bytes | None:
@@ -219,16 +308,39 @@ class ResponsesLimitGuard:
             or (response is not None and response.get("status") == "completed")
         )
 
+    def _observe_event(self, event: bytes) -> None:
+        value = self._event_value(event)
+        reasoning, final_output = response_output_signals(value)
+        self.saw_reasoning = self.saw_reasoning or reasoning
+        self.saw_final_output = self.saw_final_output or final_output
+
     def _correct_event(self, event: bytes) -> bytes:
         value = self._event_value(event)
-        if value is None or not correct_completed_response_at_limit(value, self.output_limit):
+        if value is None:
             return event
+        corrected = correct_completed_response_at_limit(value, self.output_limit)
+        if not corrected:
+            corrected = fail_completed_reasoning_only_response(
+                value,
+                saw_reasoning=self.saw_reasoning,
+                saw_final_output=self.saw_final_output,
+            )
+        if not corrected:
+            return event
+        response = _response_record(value) or {}
+        event_kind = str(value.get("type") or "")
+        if not event_kind:
+            event_kind = {
+                "failed": "response.failed",
+                "incomplete": "response.incomplete",
+            }.get(str(response.get("status") or ""), "response.completed")
+            value["type"] = event_kind
         newline = b"\r\n" if b"\r\n" in event else b"\n"
         output = []
         data_written = False
         for line in event.splitlines():
             if line.startswith(b"event:"):
-                output.append(b"event: response.incomplete")
+                output.append(f"event: {event_kind}".encode("utf-8"))
             elif line.startswith(b"data:"):
                 if not data_written:
                     output.append(
@@ -269,6 +381,7 @@ class ResponsesLimitGuard:
             event = self._split_event(self.pending)
             if event is None:
                 break
+            self._observe_event(event)
             if self._is_completed_event(event):
                 self.terminal_started = True
                 self.terminal.extend(event)
@@ -292,7 +405,10 @@ class ResponsesLimitGuard:
                 value = json.loads(payload)
             except (ValueError, UnicodeError, TypeError):
                 return payload
-            if correct_completed_response_at_limit(value, self.output_limit):
+            corrected = correct_completed_response_at_limit(value, self.output_limit)
+            if not corrected:
+                corrected = fail_completed_reasoning_only_response(value)
+            if corrected:
                 return json.dumps(
                     value, ensure_ascii=False, separators=(",", ":"),
                 ).encode("utf-8")

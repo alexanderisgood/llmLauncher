@@ -45,6 +45,9 @@ CLIENT_LABELS = {"chat": "Chat", "pi": "Pi", "opencode": "OpenCode", "codex": "C
 SUPPORTED_BACKENDS = {
     "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
 }
+CHAT_REASONING_LEVELS = frozenset({
+    "auto", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+})
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade",
@@ -108,6 +111,8 @@ def load_config(path: Path) -> dict[str, Any]:
         fail("invalid scheduler or output limit")
     if value.get("backend") not in SUPPORTED_BACKENDS:
         fail("unsupported backend")
+    if value.get("reasoning") not in CHAT_REASONING_LEVELS:
+        fail("invalid reasoning effort")
     if not all(_valid_secret(value.get(key)) for key in ("controlKey", "upstreamKey")):
         fail("invalid relay secret")
     if not isinstance(value.get("servedModel"), str) or not value["servedModel"]:
@@ -620,7 +625,7 @@ class ResponseMetrics:
                     if not isinstance(container, dict):
                         continue
                     if any(self._nonempty(container.get(key)) for key in (
-                        "content", "reasoning", "reasoning_content", "tool_calls", "text",
+                        "content", "reasoning", "reasoning_content", "thinking", "tool_calls", "text",
                     )):
                         emitted = True
                         break
@@ -835,6 +840,20 @@ def transform_chat_request(body: bytes, config: dict[str, Any]) -> bytes:
     value = json.loads(body)
     if not isinstance(value, dict) or value.get("model") != config.get("servedModel"):
         raise ValueError("chat request targets a different model")
+    # Unit-level callers and older in-memory diagnostics predate the explicit
+    # field; a real proxy configuration is still validated strictly at load.
+    reasoning = config.get("reasoning", "auto")
+    if reasoning not in CHAT_REASONING_LEVELS:
+        raise ValueError("invalid reasoning effort")
+    backend = str(config.get("backend") or "")
+    if backend in {"whallm", "omlx"}:
+        value.pop("thinking_mode", None)
+        value.pop("reasoning_effort", None)
+    if backend == "whallm" and reasoning != "auto":
+        if reasoning == "off":
+            value.update({"thinking_mode": "chat", "reasoning_effort": "none"})
+        else:
+            value.update({"thinking_mode": "thinking", "reasoning_effort": reasoning})
     limit = int(config["outputLimit"])
     requested = value.get("max_tokens")
     if requested is None:

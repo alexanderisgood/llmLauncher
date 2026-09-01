@@ -95,7 +95,10 @@ MODEL_ACQUISITION_SEARCH_LIMIT = 10
 MODEL_ACQUISITION_PLAN_TTL_SECONDS = 30 * 60
 MODEL_ACQUISITION_DOWNLOAD_RESERVE_BYTES = 4 * 1024**3
 MODEL_ACQUISITION_MEMORY_RESERVE_BYTES = 8 * 1024**3
-MODEL_ACQUISITION_MAX_FILES = 128
+# Modern sparse MLX checkpoints can legitimately exceed 128 weight shards.
+# Keep the list bounded, but leave room for a 131-shard Flash checkpoint plus
+# its tokenizer and indexed safetensors metadata.
+MODEL_ACQUISITION_MAX_FILES = 256
 MODEL_ACQUISITION_MAX_REMOTE_BYTES = 512 * 1024**3
 MODEL_ACQUISITION_MARKER = ".llm-launcher-acquisition.json"
 ROUTE_CHECK_VERSION = 1
@@ -330,6 +333,9 @@ SESSION_SET_MAX = 16
 SESSION_SET_NAME_MAX = 60
 SESSION_SET_LOCK = threading.Lock()
 THINKING_BUDGETS = {"minimal": 1_024, "low": 2_048, "medium": 4_096, "high": 8_192, "xhigh": 16_384}
+CHAT_REASONING_LEVELS = frozenset({
+    "auto", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+})
 BENCHMARK_STORE_VERSION = 1
 BENCHMARK_MAX_RECORDS = 192
 BENCHMARK_MAX_HISTORY_PER_ROUTE = 12
@@ -339,6 +345,9 @@ BENCHMARK_MINIMUM_SPEEDUP = 1.03
 BENCHMARK_COMPARISON_CONTRACT_VERSION = 4
 BENCHMARK_REASONING_POLICY_EXACT = "exact"
 BENCHMARK_REASONING_POLICY_ALL_ENGINES = "all-engines-model-default"
+ROUTE_QUALIFICATION_VERSION = 1
+ROUTE_QUALIFICATION_MAX_TOKENS = 512
+ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS = 128
 BENCHMARK_MTP_TUNER_VERSION = 1
 BENCHMARK_MTP_TUNER_MAX_CANDIDATES = 10
 BENCHMARK_MTP_TUNER_CUTOFFS = (0.0, 0.25, 0.50, 0.75)
@@ -425,7 +434,7 @@ ANE_FP16_CLONE_SOURCE_URL = (
     "https://github.com/jundot/omlx/blob/v0.6.3rc2/tools/clone_mlx_model_fp16.py"
 )
 ANE_FP16_CLONE_HELPER = APP_DIR / "ane_fp16_clone.py"
-SESSION_MEMORY_ESTIMATE_VERSION = 1
+SESSION_MEMORY_ESTIMATE_VERSION = 2
 SESSION_DASHBOARD_VERSION = 5
 SURFACE_ATTACHMENT_VERSION = 2
 SURFACE_ATTACHMENT_MAX = 12
@@ -455,6 +464,24 @@ SESSION_IDLE_TIMEOUT_CHOICES = {0, 5, 15, 30, 60, 120}
 SESSION_RUNTIME_BASE_RESERVE_BYTES = 3 * 1024**3
 SESSION_OS_RESERVE_MIN_BYTES = 4 * 1024**3
 SESSION_OS_RESERVE_FRACTION = 0.10
+OMLX_QWEN4_HIGH_MEMORY_CEILING_GIB = 45.0
+OMLX_QWEN4_HIGH_MEMORY_CEILING_BYTES = int(
+    OMLX_QWEN4_HIGH_MEMORY_CEILING_GIB * 1024**3
+)
+OMLX_QWEN4_HIGH_MEMORY_SOFT_THRESHOLD = 0.925
+# oMLX applies the hard threshold to the custom ceiling. Keep the threshold at
+# 1.0 so the user-visible 45 GiB ceiling is also the actual hard watermark.
+OMLX_QWEN4_HIGH_MEMORY_HARD_THRESHOLD = 1.0
+OMLX_QWEN4_HIGH_MEMORY_HARD_BYTES = round(
+    OMLX_QWEN4_HIGH_MEMORY_CEILING_BYTES
+    * OMLX_QWEN4_HIGH_MEMORY_HARD_THRESHOLD
+)
+# This is a separate Metal wired-memory floor. It matches the documented
+# 43,008 MiB launch setting and can rise with context without redefining the
+# oMLX process guard above.
+OMLX_QWEN4_METAL_FLOOR_GIB = 42.0
+OMLX_QWEN4_METAL_FLOOR_BYTES = int(OMLX_QWEN4_METAL_FLOOR_GIB * 1024**3)
+OMLX_QWEN4_METAL_WORKSPACE_BYTES = 512 * 1024**2
 OMLX_INSTALL_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.4"
 OMLX_INSTALL_DOCS_URL = "https://github.com/jundot/omlx#install"
 LMSTUDIO_RUNTIME_DOCS_URL = "https://lmstudio.ai/docs/cli/runtime/runtime"
@@ -517,7 +544,7 @@ OPTIMIZER_KEYS = {
     "whallm": (),
 }
 BENCHMARK_ENGINE_SETTING_KEYS = {
-    "omlx": ("burst", "anePrefill"),
+    "omlx": ("burst", "anePrefill", "memoryGuard"),
     "lmstudio": ("gpu", "parallel"),
     "mtplx": ("profile", "fan"),
     "freetoken": ("maxBatchSize", "expertCacheSize", "prefixCacheEntries"),
@@ -921,6 +948,22 @@ def display_size(size: int) -> str:
     return "Unknown"
 
 
+def is_qwen4_exp_config(config: dict[str, Any]) -> bool:
+    """Match the root architecture that oMLX uses to dispatch Qwen4-Exp."""
+    if not isinstance(config, dict):
+        return False
+    root_type = str(config.get("model_type") or "").replace("-", "_").casefold()
+    text = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
+    text_type = str(text.get("model_type") or "").replace("-", "_").casefold()
+    return root_type == "qwen4_exp" and text_type in {"", "qwen4_exp_text"}
+
+
+def is_qwen4_exp_record(model: dict[str, Any]) -> bool:
+    """Use the scan-time, structurally verified PLE contract at launch time."""
+    profile = model.get("qwen4Ple") if isinstance(model, dict) else None
+    return bool(isinstance(profile, dict) and profile.get("supported") is True)
+
+
 def model_memory_geometry(config: dict[str, Any]) -> dict[str, Any]:
     """Extract the bounded attention geometry needed for a full-context KV estimate."""
     text = config.get("text_config") if isinstance(config.get("text_config"), dict) else config
@@ -963,7 +1006,7 @@ def model_memory_geometry(config: dict[str, Any]) -> dict[str, Any]:
         layers and full_attention_layers and kv_heads and head_dim
         and 0 < int(full_attention_layers) <= int(layers)
     )
-    return {
+    geometry = {
         "ready": ready,
         "layers": layers,
         "fullAttentionLayers": int(full_attention_layers) if full_attention_layers else None,
@@ -971,6 +1014,27 @@ def model_memory_geometry(config: dict[str, Any]) -> dict[str, Any]:
         "headDimension": head_dim,
         "layerSource": layer_source,
     }
+    if ready and is_qwen4_exp_config(config):
+        indexer_head_dim = positive("indexer_head_dim")
+        rope = text.get("rope_parameters") if isinstance(text.get("rope_parameters"), dict) else {}
+        sections = rope.get("mrope_section") if isinstance(rope, dict) else None
+        position_channels = (
+            len(sections)
+            if isinstance(sections, list) and sections
+            and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in sections)
+            else 1
+        )
+        if indexer_head_dim:
+            fixed_qsa_bytes = int(indexer_head_dim) * 2 + position_channels * 8
+            kv_bytes = 2 * int(kv_heads) * int(head_dim) * 2
+            geometry.update({
+                "qwen4Qsa": True,
+                "indexerHeadDimension": int(indexer_head_dim),
+                "positionChannels": position_channels,
+                "fixedIndexBytesPerTokenPerLayer": fixed_qsa_bytes,
+                "fullBytesPerToken": int(full_attention_layers) * (kv_bytes + fixed_qsa_bytes),
+            })
+    return geometry
 
 
 def executable(candidates: list[str]) -> str | None:
@@ -2740,7 +2804,9 @@ def mference_bundle_validation(path: Path) -> tuple[bool, str, int]:
     return True, f"Verified Mference {family} receipt and SSD-streaming payload layout.", total
 
 
-def weight_completeness(path: Path, config: dict[str, Any]) -> tuple[bool, str, int]:
+def weight_completeness(
+    path: Path, config: dict[str, Any], *, ignore_acquisition_marker: bool = False,
+) -> tuple[bool, str, int]:
     if path.name.endswith(".gturbo"):
         ready, reason, total = mference_bundle_validation(path)
         return ready, "Ready" if ready else reason, total
@@ -2752,6 +2818,41 @@ def weight_completeness(path: Path, config: dict[str, Any]) -> tuple[bool, str, 
     total = sum(p.stat().st_size for p in files if p.suffix in {".safetensors", ".gguf", ".part"})
     if partial:
         return False, f"Downloading ({len(partial)} partial file{'s' if len(partial) != 1 else ''})", total
+    marker_path = path / MODEL_ACQUISITION_MARKER
+    if marker_path.is_file() and not ignore_acquisition_marker:
+        marker = read_json(marker_path)
+        marker_status = str(marker.get("status") or "").casefold()
+        verification = marker.get("verification") if isinstance(marker.get("verification"), dict) else {}
+        if marker_status != "verified" or verification.get("verified") is not True:
+            label = {
+                "downloading": "Downloading",
+                "verifying": "Verifying",
+                "partial": "Partial download",
+                "failed": "Download failed",
+            }.get(marker_status, "Unverified acquisition")
+            return False, label, total
+        declared = marker.get("files") if isinstance(marker.get("files"), list) else []
+        if not declared:
+            return False, "Invalid acquisition receipt", total
+        for item in declared:
+            relative = item.get("path") if isinstance(item, dict) else None
+            expected_size = item.get("size") if isinstance(item, dict) else None
+            if (
+                not isinstance(relative, str)
+                or not isinstance(expected_size, int) or isinstance(expected_size, bool) or expected_size < 0
+            ):
+                return False, "Invalid acquisition receipt", total
+            parts = Path(relative).parts
+            if Path(relative).is_absolute() or not parts or any(part in {"", ".", ".."} for part in parts):
+                return False, "Invalid acquisition receipt", total
+            candidate = path / relative
+            try:
+                candidate.resolve(strict=True).relative_to(path.resolve(strict=True))
+                stat_result = candidate.stat()
+            except (OSError, ValueError):
+                return False, "Verified acquisition file missing", total
+            if candidate.is_symlink() or not candidate.is_file() or stat_result.st_size != expected_size:
+                return False, "Verified acquisition file changed", total
     ggufs = [p for p in files if p.suffix.lower() == ".gguf" and p.stat().st_size > 1_000_000]
     if ggufs:
         return True, "Ready", sum(p.stat().st_size for p in ggufs)
@@ -2764,6 +2865,23 @@ def weight_completeness(path: Path, config: dict[str, Any]) -> tuple[bool, str, 
             return False, f"Incomplete ({len(missing)} weight shard{'s' if len(missing) != 1 else ''} missing)", total
         return True, "Ready", total
     weights = [p for p in files if p.suffix == ".safetensors" and p.name != "mtp.safetensors" and p.stat().st_size > 0]
+    numbered: dict[int, int] = {}
+    denominators: set[int] = set()
+    for weight in weights:
+        match = re.fullmatch(r"model-(\d{5})-of-(\d{5})\.safetensors", weight.name)
+        if not match:
+            continue
+        index_number, denominator = int(match.group(1)), int(match.group(2))
+        numbered[index_number] = denominator
+        denominators.add(denominator)
+    if numbered:
+        if len(denominators) != 1:
+            return False, "Incomplete (inconsistent weight shard count)", total
+        expected = next(iter(denominators))
+        missing_count = len(set(range(1, expected + 1)) - set(numbered))
+        if missing_count:
+            return False, f"Incomplete ({missing_count} weight shards missing)", total
+        return False, "Incomplete (safetensors index missing)", total
     if weights:
         return True, "Ready", sum(p.stat().st_size for p in weights)
     return False, "Incomplete (no model weights)", total
@@ -2869,9 +2987,15 @@ def ssd_streaming_model_profile(
         if weight_bytes > 0 and installed_memory > 0 else None
     )
     oversized = bool(ratio is not None and ratio >= SSD_STREAMING_MIN_WEIGHT_RATIO)
-    candidate = bool(moe and weight_bytes > 0)
+    # Qwen4-Exp keeps only its indexed PLE N-gram tensors on SSD. That is a
+    # separate, exact mmap contract and must never enter the generic expert-
+    # streaming lane used by SwiftLM/Mference.
+    ple_architecture = is_qwen4_exp_config(config)
+    candidate = bool(moe and weight_bytes > 0 and not ple_architecture)
     recommended = bool(candidate and oversized)
-    if not moe:
+    if ple_architecture:
+        reason = "Qwen4 PLE mmap is checked separately from SSD expert streaming."
+    elif not moe:
         reason = "SSD expert streaming is reserved for Mixture-of-Experts checkpoints."
     elif not weight_bytes:
         reason = "Finish the model download before SSD-streaming admission can be checked."
@@ -2887,6 +3011,7 @@ def ssd_streaming_model_profile(
         "moe": moe,
         "oversized": oversized,
         "qwen38FlashNext": qwen38_flash,
+        "qwen4PleExcluded": ple_architecture,
         "expertCount": expert_count,
         "nativeExpertTopK": native_top_k,
         "weightBytes": weight_bytes,
@@ -2950,6 +3075,76 @@ def mference_model_supported(path: Path, profile: dict[str, Any]) -> tuple[bool,
     return False, "Mference requires its verified pinned .gturbo repack of this model."
 
 
+def _strict_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _source_stat_metadata(path_stat: os.stat_result, link_stat: os.stat_result, link_target: str | None) -> dict[str, Any]:
+    return {
+        "device": path_stat.st_dev,
+        "inode": path_stat.st_ino,
+        "size": path_stat.st_size,
+        "mtimeNs": path_stat.st_mtime_ns,
+        "ctimeNs": path_stat.st_ctime_ns,
+        "linkDevice": link_stat.st_dev,
+        "linkInode": link_stat.st_ino,
+        "linkSize": link_stat.st_size,
+        "linkMode": stat.S_IFMT(link_stat.st_mode),
+        "linkMtimeNs": link_stat.st_mtime_ns,
+        "linkCtimeNs": link_stat.st_ctime_ns,
+        "linkTarget": link_target,
+    }
+
+
+def _target_stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev, value.st_ino, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+
+
+def _link_stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev, value.st_ino, value.st_size, stat.S_IFMT(value.st_mode),
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+
+
+def _bounded_strict_json_file(path: Path, maximum_bytes: int = MAX_JSON) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read one JSON file through a stable descriptor and reject duplicate keys."""
+    try:
+        link_before = path.lstat()
+        link_target = os.readlink(path) if path.is_symlink() else None
+        with open(path, "rb") as handle:
+            opened_before = os.fstat(handle.fileno())
+            if not 2 <= opened_before.st_size <= maximum_bytes:
+                return {}, {}
+            payload = handle.read(maximum_bytes + 1)
+            opened_after = os.fstat(handle.fileno())
+        path_after = path.stat()
+        link_after = path.lstat()
+        link_target_after = os.readlink(path) if path.is_symlink() else None
+        if (
+            len(payload) != opened_before.st_size
+            or _target_stat_identity(opened_before) != _target_stat_identity(opened_after)
+            or _target_stat_identity(opened_before) != _target_stat_identity(path_after)
+            or _link_stat_identity(link_before) != _link_stat_identity(link_after)
+            or link_target != link_target_after
+        ):
+            return {}, {}
+        value = json.loads(payload, object_pairs_hook=_strict_json_pairs)
+        if not isinstance(value, dict):
+            return {}, {}
+        return value, _source_stat_metadata(opened_after, link_after, link_target_after)
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+        return {}, {}
+
+
 def safetensors_inventory(path: Path) -> tuple[bool, dict[str, dict[str, Any]], list[dict[str, Any]]]:
     """Validate safetensors metadata without reading multi-gigabyte payloads."""
     # mlx_lm's strict checkpoint loader consumes model*.safetensors only.
@@ -2963,9 +3158,11 @@ def safetensors_inventory(path: Path) -> tuple[bool, dict[str, dict[str, Any]], 
         try:
             file_stat = shard.stat()
             link_stat = shard.lstat()
+            link_target = os.readlink(shard) if shard.is_symlink() else None
             if file_stat.st_size <= 8:
                 return False, {}, []
             with open(shard, "rb") as handle:
+                opened_before = os.fstat(handle.fileno())
                 length_bytes = handle.read(8)
                 if len(length_bytes) != 8:
                     return False, {}, []
@@ -2973,7 +3170,19 @@ def safetensors_inventory(path: Path) -> tuple[bool, dict[str, dict[str, Any]], 
                 if not 2 <= header_length <= min(64 * 1024 * 1024, file_stat.st_size - 8):
                     return False, {}, []
                 header_bytes = handle.read(header_length)
-            header = json.loads(header_bytes)
+                opened_after = os.fstat(handle.fileno())
+            file_after = shard.stat()
+            link_after = shard.lstat()
+            link_target_after = os.readlink(shard) if shard.is_symlink() else None
+            if (
+                _target_stat_identity(file_stat) != _target_stat_identity(opened_before)
+                or _target_stat_identity(opened_before) != _target_stat_identity(opened_after)
+                or _target_stat_identity(opened_after) != _target_stat_identity(file_after)
+                or _link_stat_identity(link_stat) != _link_stat_identity(link_after)
+                or link_target != link_target_after
+            ):
+                return False, {}, []
+            header = json.loads(header_bytes, object_pairs_hook=_strict_json_pairs)
             if not isinstance(header, dict):
                 return False, {}, []
             payload_bytes = file_stat.st_size - 8 - header_length
@@ -2989,6 +3198,7 @@ def safetensors_inventory(path: Path) -> tuple[bool, dict[str, dict[str, Any]], 
                 dtype = metadata.get("dtype")
                 dtype_bytes = {
                     "BOOL": 1, "U8": 1, "I8": 1,
+                    "F8_E4M3": 1,
                     "I16": 2, "U16": 2, "F16": 2, "BF16": 2,
                     "I32": 4, "U32": 4, "F32": 4,
                     "I64": 8, "U64": 8, "F64": 8,
@@ -3032,16 +3242,23 @@ def safetensors_inventory(path: Path) -> tuple[bool, dict[str, dict[str, Any]], 
             manifest.append({
                 "name": shard.name,
                 "size": file_stat.st_size,
+                "device": file_stat.st_dev,
                 "mtime_ns": file_stat.st_mtime_ns,
+                "ctime_ns": file_stat.st_ctime_ns,
                 "inode": file_stat.st_ino,
+                "link_device": link_stat.st_dev,
+                "link_inode": link_stat.st_ino,
+                "link_size": link_stat.st_size,
+                "link_mode": stat.S_IFMT(link_stat.st_mode),
                 "link_mtime_ns": link_stat.st_mtime_ns,
-                "link_target": os.readlink(shard) if shard.is_symlink() else None,
+                "link_ctime_ns": link_stat.st_ctime_ns,
+                "link_target": link_target,
                 "header_sha256": hashlib.sha256(header_bytes).hexdigest(),
             })
         except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
             return False, {}, []
 
-    index = read_json(path / "model.safetensors.index.json")
+    index, _index_source = _bounded_strict_json_file(path / "model.safetensors.index.json")
     weight_map = index.get("weight_map")
     if isinstance(weight_map, dict) and weight_map:
         if any(not isinstance(name, str) or not isinstance(shard, str) for name, shard in weight_map.items()):
@@ -3053,6 +3270,444 @@ def safetensors_inventory(path: Path) -> tuple[bool, dict[str, dict[str, Any]], 
         if any(tensors[name]["shard"] != weight_map[name] for name in indexed):
             return False, {}, []
     return True, tensors, manifest
+
+
+_QWEN4_PLE_INVENTORY_SCHEMA_VERSION = 1
+_QWEN4_PLE_MARKER = ".ple.ple_embedding.ngram_embedding."
+_QWEN4_PLE_DENSE_DTYPES = frozenset({"BF16", "F16", "F32", "F8_E4M3"})
+_QWEN4_PLE_AFFINE_PARAMETER_DTYPES = frozenset({"BF16", "F16", "F32"})
+
+
+def _qwen4_ple_is_prime(value: int) -> bool:
+    """Deterministically test bounded 64-bit PLE vocabulary candidates."""
+    if value < 2:
+        return False
+    small_primes = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
+    for prime in small_primes:
+        if value % prime == 0:
+            return value == prime
+    divisor = value - 1
+    shifts = 0
+    while divisor % 2 == 0:
+        shifts += 1
+        divisor //= 2
+    # This base set is deterministic for every unsigned 64-bit integer.
+    for base in (2, 325, 9_375, 28_178, 450_775, 9_780_504, 1_795_265_022):
+        if base % value == 0:
+            continue
+        candidate = pow(base, divisor, value)
+        if candidate in {1, value - 1}:
+            continue
+        for _ in range(shifts - 1):
+            candidate = pow(candidate, 2, value)
+            if candidate == value - 1:
+                break
+        else:
+            return False
+    return True
+
+
+def _qwen4_ple_nth_prime_after(start: int, count: int) -> int:
+    candidate = start
+    for _ in range(count):
+        candidate += 1
+        while not _qwen4_ple_is_prime(candidate):
+            candidate += 1
+    return candidate
+
+
+def _qwen4_ple_geometry(config: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """Reproduce the bounded Qwen4 PLE constructor geometry used by oMLX."""
+    text = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
+
+    def integer(
+        key: str, default: int | None = None, *, minimum: int = 1, maximum: int,
+    ) -> int | None:
+        value = text.get(key, default)
+        if (
+            not isinstance(value, int) or isinstance(value, bool)
+            or not minimum <= value <= maximum
+        ):
+            return None
+        return value
+
+    layer_count = integer("num_hidden_layers", maximum=4_096)
+    hidden_size = integer("hidden_size", maximum=1_000_000)
+    vocab_size = integer("vocab_size", maximum=10_000_000)
+    ple_embed_dim = (
+        hidden_size
+        if text.get("ple_embed_dim") is None
+        else integer("ple_embed_dim", maximum=1_000_000)
+    )
+    ngram_size = integer("ngram_size", 3, minimum=2, maximum=64)
+    heads_per_ngram = integer("heads_per_ngram", 8, maximum=128)
+    ngram_vocab_base = integer(
+        "ngram_vocab_size_base", 20_000_000, minimum=2, maximum=2_147_483_647,
+    )
+    divisible_by = integer(
+        "make_ngram_vocab_size_divisible_by", 128, maximum=65_536,
+    )
+    split_parts = integer("split_ngram_parts", 128, maximum=4_096)
+    seed = text.get("seed", 1_234)
+    eos_token_id = text.get("eos_token_id")
+    ple_layer_ids = text.get("ple_layer_ids")
+    if any(value is None for value in (
+        layer_count, hidden_size, vocab_size, ple_embed_dim, ngram_size, heads_per_ngram,
+        ngram_vocab_base, divisible_by, split_parts,
+    )):
+        return None, "The Qwen4 PLE geometry contains missing or unsafe integer bounds."
+    assert layer_count is not None
+    assert hidden_size is not None
+    assert vocab_size is not None
+    assert ple_embed_dim is not None
+    assert ngram_size is not None
+    assert heads_per_ngram is not None
+    assert ngram_vocab_base is not None
+    assert divisible_by is not None
+    assert split_parts is not None
+    if (
+        not isinstance(seed, int) or isinstance(seed, bool)
+        or not -(2**63) <= seed < 2**63
+    ):
+        return None, "The Qwen4 PLE hashing seed is missing or unsafe."
+    eos_ids = eos_token_id if isinstance(eos_token_id, list) else [eos_token_id]
+    if (
+        not eos_ids
+        or any(
+            not isinstance(value, int) or isinstance(value, bool)
+            or not 0 <= value < vocab_size
+            for value in eos_ids
+        )
+    ):
+        return None, "The Qwen4 PLE end-of-sequence token contract is invalid."
+    if (
+        not isinstance(ple_layer_ids, list) or not ple_layer_ids
+        or any(
+            not isinstance(value, int) or isinstance(value, bool)
+            or not 1 <= value <= layer_count
+            for value in ple_layer_ids
+        )
+    ):
+        return None, "The checkpoint does not declare a valid one-indexed Qwen4 PLE layer list."
+    normalized_layers = sorted(set(ple_layer_ids))
+    layer_types = text.get("layer_types")
+    if layer_types is None:
+        interval = integer("full_attention_interval", 4, maximum=4_096)
+        if interval is None:
+            return None, "The Qwen4 attention interval is invalid."
+        normalized_types = [
+            "linear_attention" if (index + 1) % interval else "qwen_sparse_attention"
+            for index in range(layer_count)
+        ]
+    elif (
+        not isinstance(layer_types, list) or len(layer_types) != layer_count
+        or any(not isinstance(value, str) for value in layer_types)
+    ):
+        return None, "The Qwen4 layer-type list does not match the decoder depth."
+    else:
+        normalized_types = [
+            "qwen_sparse_attention" if value == "full_attention" else value
+            for value in layer_types
+        ]
+        if any(value not in {"linear_attention", "qwen_sparse_attention"} for value in normalized_types):
+            return None, "The Qwen4 layer-type list contains an unsupported attention kind."
+    if any(normalized_types[layer_id - 1] != "linear_attention" for layer_id in normalized_layers):
+        return None, "Qwen4 PLE is only valid on declared linear-attention layers."
+
+    ngram_heads = (ngram_size - 1) * heads_per_ngram
+    if ngram_heads <= 0 or ngram_heads > 1_024 or ple_embed_dim % ngram_heads:
+        return None, "The Qwen4 PLE embedding width is incompatible with its N-gram heads."
+    if len(normalized_layers) * ngram_heads > 4_096:
+        return None, "The Qwen4 PLE head count exceeds the launcher's bounded verifier."
+    shard_width = ple_embed_dim // ngram_heads
+    layers: list[dict[str, Any]] = []
+    for ple_index, layer_id in enumerate(normalized_layers):
+        head_vocab_sizes = [
+            _qwen4_ple_nth_prime_after(
+                ngram_vocab_base - 1,
+                ple_index * ngram_heads + head_index + 1,
+            )
+            for head_index in range(ngram_heads)
+        ]
+        total_vocab = sum(head_vocab_sizes)
+        padded_vocab = ((total_vocab + divisible_by - 1) // divisible_by) * divisible_by
+        if split_parts > padded_vocab:
+            return None, "The Qwen4 PLE split count exceeds its padded N-gram vocabulary."
+        base_rows, extra_rows = divmod(padded_vocab, split_parts)
+        layers.append({
+            "layerId": layer_id,
+            "layerIndex": layer_id - 1,
+            "pleIndex": ple_index,
+            "paddedVocabulary": padded_vocab,
+            "shardRows": [
+                base_rows + (1 if shard_index < extra_rows else 0)
+                for shard_index in range(split_parts)
+            ],
+        })
+    return {
+        "vocabSize": vocab_size,
+        "seed": seed,
+        "eosTokenIds": eos_ids,
+        "pleEmbedDim": ple_embed_dim,
+        "ngramHeads": ngram_heads,
+        "shardWidth": shard_width,
+        "splitParts": split_parts,
+        "layers": layers,
+    }, ""
+
+
+def qwen4_ple_profile(
+    path: Path, config: dict[str, Any], ready: bool, runtime_version: str,
+) -> dict[str, Any]:
+    """Prove Qwen4 PLE mmap eligibility from the exact indexed checkpoint."""
+    base = {
+        "supported": False,
+        "storage": "unavailable",
+        "checkpointBytes": 0,
+        "pleBytes": 0,
+        "rawResidentBytes": 0,
+        "residentBytes": 0,
+        "fullResidentBytes": 0,
+        "runtimeMinimum": "0.6.4",
+        "runtimeVersion": runtime_version,
+        "inventorySchema": _QWEN4_PLE_INVENTORY_SCHEMA_VERSION,
+        "inventoryFingerprint": "",
+        "sourceFingerprint": "",
+        "configFingerprint": "",
+        "indexFingerprint": "",
+        "index": None,
+        "storageSource": None,
+        "shardCount": 0,
+        "tensorCount": 0,
+        "pleLayerCount": 0,
+        "pleShardCount": 0,
+        "pleTensorCount": 0,
+        "pleLayouts": [],
+        # Kept for response-schema compatibility. Direct oMLX mmap deliberately
+        # has no publisher sidecar manifest.
+        "manifest": None,
+        "reason": "A complete indexed Qwen4-Exp checkpoint is required.",
+    }
+    if not is_qwen4_exp_config(config):
+        base["reason"] = "This checkpoint is not the root qwen4_exp architecture."
+        return base
+    if not ready:
+        return base
+    if not omlx_version_at_least(runtime_version, "0.6.4"):
+        base["reason"] = "Qwen4 PLE SSD mmap requires oMLX 0.6.4 or newer."
+        return base
+    config_document, config_source = _bounded_strict_json_file(path / "config.json")
+    if not config_document or config_document != config:
+        base["reason"] = "The Qwen4 config changed, contains duplicate keys, or could not be read safely."
+        return base
+    index_name = "model.safetensors.index.json"
+    valid, tensors, shard_manifest = safetensors_inventory(path)
+    if not valid:
+        base["reason"] = "The complete indexed safetensors layout could not be verified."
+        return base
+    index_document, index_source = _bounded_strict_json_file(path / index_name)
+    weight_map = index_document.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        base["reason"] = "Qwen4 direct PLE mmap requires a non-empty safetensors weight index."
+        return base
+    if (
+        set(weight_map) != set(tensors)
+        or set(weight_map.values()) != {str(item["name"]) for item in shard_manifest}
+        or any(tensors[name]["shard"] != weight_map[name] for name in tensors)
+    ):
+        base["reason"] = "The Qwen4 safetensors index changed during structural validation."
+        return base
+    geometry, geometry_reason = _qwen4_ple_geometry(config_document)
+    if geometry is None:
+        base["reason"] = geometry_reason
+        return base
+
+    storage_names: set[str] = set()
+    allowed_related_names: set[str] = set()
+    layouts: set[str] = set()
+    ple_bytes = 0
+    ple_shards = 0
+
+    def tensor_bytes(metadata: dict[str, Any]) -> int:
+        return int(metadata["data_offsets"][1]) - int(metadata["data_offsets"][0])
+
+    for layer in geometry["layers"]:
+        layer_index = int(layer["layerIndex"])
+        prefixes = (
+            f"model.language_model.layers.{layer_index}.ple.ple_embedding.ngram_embedding",
+            f"language_model.model.layers.{layer_index}.ple.ple_embedding.ngram_embedding",
+        )
+        scale_names = [f"{prefix}.weight_scale" for prefix in prefixes if f"{prefix}.weight_scale" in weight_map]
+        if len(scale_names) > 1:
+            base["reason"] = f"Qwen4 PLE layer {layer_index} declares duplicate shared scale aliases."
+            return base
+        if scale_names:
+            scale_metadata = tensors[scale_names[0]]
+            if scale_metadata.get("shape") != [1] or scale_metadata.get("dtype") not in _QWEN4_PLE_AFFINE_PARAMETER_DTYPES:
+                base["reason"] = f"Qwen4 PLE layer {layer_index} has an invalid shared FP8 scale."
+                return base
+            allowed_related_names.add(scale_names[0])
+
+        for shard_index, expected_rows in enumerate(layer["shardRows"]):
+            bases = (
+                *(f"{prefix}.shard_{shard_index}" for prefix in prefixes),
+                *(f"{prefix}.shards.{shard_index}" for prefix in prefixes),
+            )
+            matched = [candidate for candidate in bases if f"{candidate}.weight" in weight_map]
+            if len(matched) != 1:
+                base["reason"] = (
+                    f"Qwen4 PLE layer {layer_index} shard {shard_index} is missing or has duplicate aliases."
+                )
+                return base
+            tensor_base = matched[0]
+            weight_name = f"{tensor_base}.weight"
+            scales_name = f"{tensor_base}.scales"
+            biases_name = f"{tensor_base}.biases"
+            weight = tensors[weight_name]
+            shape = weight.get("shape")
+            if not isinstance(shape, list) or len(shape) != 2 or shape[0] != expected_rows:
+                base["reason"] = f"Qwen4 PLE tensor {weight_name} has an unexpected row shape."
+                return base
+            has_scales = scales_name in weight_map
+            has_biases = biases_name in weight_map
+            current_names = {weight_name}
+            if not has_scales and not has_biases:
+                if shape[1] != geometry["shardWidth"] or weight.get("dtype") not in _QWEN4_PLE_DENSE_DTYPES:
+                    base["reason"] = f"Qwen4 PLE tensor {weight_name} is not a supported dense mmap row table."
+                    return base
+                layouts.add(f"dense-{str(weight.get('dtype')).lower()}")
+            else:
+                if not has_scales or not has_biases:
+                    base["reason"] = f"Qwen4 PLE affine shard {tensor_base} has incomplete scales or biases."
+                    return base
+                scales = tensors[scales_name]
+                biases = tensors[biases_name]
+                scale_shape = scales.get("shape")
+                if (
+                    weight.get("dtype") != "U32"
+                    or not isinstance(scale_shape, list) or len(scale_shape) != 2
+                    or scale_shape != biases.get("shape")
+                    or scale_shape[0] != expected_rows or scale_shape[1] <= 0
+                    or scales.get("dtype") not in _QWEN4_PLE_AFFINE_PARAMETER_DTYPES
+                    or biases.get("dtype") not in _QWEN4_PLE_AFFINE_PARAMETER_DTYPES
+                    or scales.get("dtype") != biases.get("dtype")
+                ):
+                    base["reason"] = f"Qwen4 PLE affine shard {tensor_base} has incompatible parameter tensors."
+                    return base
+                dims = int(geometry["shardWidth"])
+                if dims % int(scale_shape[1]):
+                    base["reason"] = f"Qwen4 PLE affine shard {tensor_base} has a non-integral group size."
+                    return base
+                group_size = dims // int(scale_shape[1])
+                packed_bits = int(shape[1]) * 32
+                if packed_bits % dims:
+                    base["reason"] = f"Qwen4 PLE affine shard {tensor_base} has a non-integral packed precision."
+                    return base
+                bits = packed_bits // dims
+                if (
+                    bits not in {2, 3, 4, 5, 6, 8}
+                    or group_size not in {32, 64, 128}
+                    or dims % group_size
+                    or int(shape[1]) != dims * bits // 32
+                ):
+                    base["reason"] = f"Qwen4 PLE affine shard {tensor_base} uses an unsupported mmap layout."
+                    return base
+                layouts.add(f"affine-q{bits}-g{group_size}")
+                current_names.update({scales_name, biases_name})
+            storage_names.update(current_names)
+            allowed_related_names.update(current_names)
+            ple_bytes += sum(tensor_bytes(tensors[name]) for name in current_names)
+            ple_shards += 1
+
+    related_names = {name for name in tensors if _QWEN4_PLE_MARKER in name}
+    if related_names != allowed_related_names:
+        base["reason"] = "The indexed checkpoint contains unexpected or unclaimed Qwen4 PLE storage tensors."
+        return base
+    checkpoint_bytes = sum(int(item["size"]) for item in shard_manifest)
+    if ple_bytes <= 0 or ple_bytes >= checkpoint_bytes:
+        base["reason"] = "No valid indexed PLE N-gram tensor table was found."
+        return base
+
+    deterministic_shards = [
+        {
+            "name": str(item["name"]),
+            "size": int(item["size"]),
+            "headerSha256": str(item["header_sha256"]),
+        }
+        for item in sorted(shard_manifest, key=lambda value: str(value["name"]))
+    ]
+    deterministic_ple = [
+        {
+            "name": name,
+            "shard": str(tensors[name]["shard"]),
+            "dtype": str(tensors[name]["dtype"]),
+            "shape": list(tensors[name]["shape"]),
+            "dataOffsets": list(tensors[name]["data_offsets"]),
+        }
+        for name in sorted(allowed_related_names)
+    ]
+    index_encoded = json.dumps(
+        index_document, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    index_fingerprint = hashlib.sha256(index_encoded).hexdigest()
+    config_encoded = json.dumps(
+        config_document, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    config_fingerprint = hashlib.sha256(config_encoded).hexdigest()
+    inventory_identity = {
+        "schema": _QWEN4_PLE_INVENTORY_SCHEMA_VERSION,
+        "configFingerprint": config_fingerprint,
+        "index": index_document,
+        "shards": deterministic_shards,
+        "pleGeometry": geometry,
+        "pleTensors": deterministic_ple,
+    }
+    inventory_fingerprint = hashlib.sha256(json.dumps(
+        inventory_identity, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    source_identity = {
+        "schema": _QWEN4_PLE_INVENTORY_SCHEMA_VERSION,
+        "config": config_source,
+        "index": index_source,
+        "shards": [
+            {
+                key: item[key]
+                for key in (
+                    "name", "size", "device", "inode", "mtime_ns", "ctime_ns",
+                    "link_device", "link_inode", "link_size", "link_mode",
+                    "link_mtime_ns", "link_ctime_ns", "link_target",
+                )
+            }
+            for item in sorted(shard_manifest, key=lambda value: str(value["name"]))
+        ],
+    }
+    source_fingerprint = hashlib.sha256(json.dumps(
+        source_identity, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    raw_resident = checkpoint_bytes - ple_bytes
+    base.update({
+        "supported": True,
+        "storage": "mmap",
+        "storageSource": "indexed-safetensors",
+        "checkpointBytes": checkpoint_bytes,
+        "pleBytes": ple_bytes,
+        "rawResidentBytes": raw_resident,
+        "residentBytes": int(raw_resident * 1.05),
+        "fullResidentBytes": int(checkpoint_bytes * 1.05),
+        "inventoryFingerprint": inventory_fingerprint,
+        "sourceFingerprint": source_fingerprint,
+        "configFingerprint": config_fingerprint,
+        "indexFingerprint": index_fingerprint,
+        "index": index_name,
+        "shardCount": len(shard_manifest),
+        "tensorCount": len(tensors),
+        "pleLayerCount": len(geometry["layers"]),
+        "pleShardCount": ple_shards,
+        "pleTensorCount": len(storage_names),
+        "pleLayouts": sorted(layouts),
+        "reason": "oMLX will memory-map the exact indexed PLE N-gram tensors read-only from SSD and keep the remaining checkpoint resident.",
+    })
+    return base
 
 
 def dflash2_draft_shape(config: dict[str, Any]) -> dict[str, Any] | None:
@@ -3505,10 +4160,27 @@ def apple_memory_pressure_state() -> dict[str, Any]:
     }
 
 
+def apple_iogpu_wired_limit_bytes() -> int:
+    """Return an explicitly raised Apple GPU wired-memory limit, or zero."""
+    if sys.platform != "darwin":
+        return 0
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "iogpu.wired_limit_mb"], text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=2, check=False,
+        )
+        value_mib = int(result.stdout.strip())
+        return value_mib * 1024**2 if value_mib > 0 else 0
+    except (OSError, TypeError, ValueError, subprocess.TimeoutExpired):
+        return 0
+
+
 def apple_resource_snapshot() -> dict[str, Any]:
     return {
         **apple_memory_pressure_state(),
         **apple_process_resource_state(),
+        "metalWiredLimitBytes": apple_iogpu_wired_limit_bytes(),
         "capturedAt": time.monotonic(),
     }
 
@@ -5766,7 +6438,9 @@ def verify_model_acquisition(
     selected_format = str(selection.get("format") or "")
     if selected_format == "mlx":
         config = read_json(destination / "config.json")
-        ready, status, weight_bytes = weight_completeness(destination, config)
+        ready, status, weight_bytes = weight_completeness(
+            destination, config, ignore_acquisition_marker=True,
+        )
         tensor_ready, tensors, manifest = safetensors_inventory(destination)
         if not ready or not tensor_ready:
             raise ValueError(f"The MLX checkpoint failed structural validation ({status}).")
@@ -6416,11 +7090,14 @@ def scan_models() -> list[dict[str, Any]]:
                 context = None
         except (TypeError, ValueError):
             context = None
-        model_type = str(deep_get(config, ("text_config", "model_type"), ("model_type",)) or "unknown")
+        root_model_type = str(config.get("model_type") or "unknown")
+        text_model_type = str(deep_get(config, ("text_config", "model_type")) or "unknown")
+        model_type = text_model_type if text_model_type != "unknown" else root_model_type
         architectures = config.get("architectures") or deep_get(config, ("text_config", "architectures")) or []
         architecture = str(architectures[0]) if isinstance(architectures, list) and architectures else model_type
         quant = deep_get(config, ("quantization", "bits"), ("quantization_config", "bits"))
         quantization = f"{quant}-bit" if isinstance(quant, (int, float)) else "From artifact"
+        qwen4_ple = qwen4_ple_profile(real, config, ready and fmt == "mlx", omlx_version)
         ssd_profile = ssd_streaming_model_profile(
             real, config, weight_bytes, installed_memory,
         )
@@ -6537,12 +7214,23 @@ def scan_models() -> list[dict[str, Any]]:
                 derived_lm_key = "/".join(lm_relative.parts[:2]) if len(lm_relative.parts) >= 2 else lm_relative.name
                 lm_key = derived_lm_key.lower()
                 lm_catalogued = True
-        omlx_mtp = ready and fmt == "mlx" and integrated_mtp and not sidecar_mtp and model_type.startswith(("qwen3_5", "qwen3_6", "deepseek_v4"))
+        qwen4_architecture = is_qwen4_exp_config(config)
+        omlx_artifact_ready = bool(
+            ready and fmt == "mlx"
+            and (not qwen4_architecture or qwen4_ple.get("supported") is True)
+        )
+        omlx_mtp = bool(
+            omlx_artifact_ready and integrated_mtp and not sidecar_mtp
+            and model_type.startswith(("qwen3_5", "qwen3_6", "deepseek_v4", "qwen4_exp"))
+        )
         lmstudio_mtp_artifact = bool(
             ready and lm_catalogued and sidecar_mtp and mtplx_verified
         )
         lmstudio_mtp = bool(lmstudio_mtp_runtime and lmstudio_mtp_artifact)
-        dflash2_profile = dflash2_target_profile(real, config) if ready and fmt == "mlx" else None
+        dflash2_profile = (
+            dflash2_target_profile(real, config)
+            if ready and fmt == "mlx" and not qwen4_architecture else None
+        )
         dflash2_candidate = matching_dflash2_draft(real, config, dflash2_candidates) if dflash2_profile else None
         dflash2_complete_draft = matching_dflash2_draft(real, config, dflash2_drafts) if dflash2_profile else None
         dflash2_draft = dflash2_complete_draft if dflash2_runtime else None
@@ -6608,8 +7296,16 @@ def scan_models() -> list[dict[str, Any]]:
         }
         backend = {
             "omlx": {
-                "runnable": ready and fmt == "mlx",
-                "reason": "Ready for oMLX" if ready and fmt == "mlx" else "oMLX requires a complete MLX artifact",
+                "runnable": omlx_artifact_ready,
+                "reason": (
+                    "Ready for oMLX with read-only PLE N-gram SSD mmap"
+                    if qwen4_ple.get("supported") is True else
+                    str(qwen4_ple.get("reason"))
+                    if qwen4_architecture else
+                    "Ready for oMLX" if ready and fmt == "mlx" else
+                    "oMLX requires a complete MLX artifact"
+                ),
+                "qwen4Ple": copy.deepcopy(qwen4_ple),
                 "mtp": omlx_mtp,
                 "mtpReason": "Native integrated MTP tensors detected" if omlx_mtp else ("Config advertises MTP, but this conversion contains no MTP tensors" if mtp_declared and not sidecar_mtp else "No verified oMLX-native MTP tensors"),
                 "dflash": dflash2_ready,
@@ -6632,14 +7328,22 @@ def scan_models() -> list[dict[str, Any]]:
                 "aneTuningVerified": False,
                 "preferredAcceleration": "mtp" if omlx_mtp else "off",
                 "depth": dflash2_default_block if dflash2_ready else 1,
-                "depthMax": int(dflash2_shape["block_size"]) if dflash2_shape else (8 if omlx_mtp else 1),
-                "kv": True,
+                "depthMax": int(dflash2_shape["block_size"]) if dflash2_shape else (3 if omlx_mtp and qwen4_architecture else 8 if omlx_mtp else 1),
+                # Qwen4 QSA carries unquantised index keys and MRoPE positions.
+                # Keep TurboQuant fail-closed until this exact route is measured.
+                "kv": not qwen4_architecture,
                 "agentReasoning": ["auto", "off", *reasoning_efforts],
                 "codexReasoning": ["auto", *reasoning_efforts],
             },
             "lmstudio": {
-                    "runnable": ready and lm_catalogued,
-                    "reason": "LM Studio catalog model" if lm_catalogued else ("Detected external GGUF; register/import it in LM Studio first" if ready and fmt == "gguf" else "Not registered with LM Studio"),
+                    "runnable": ready and lm_catalogued and not qwen4_architecture,
+                    "reason": (
+                        "LM Studio has no verified external Qwen4 PLE mmap route."
+                        if qwen4_architecture else
+                        "LM Studio catalog model" if lm_catalogued else
+                        "Detected external GGUF; register/import it in LM Studio first"
+                        if ready and fmt == "gguf" else "Not registered with LM Studio"
+                    ),
                     "mtp": lmstudio_mtp,
                     "mtpReason": (
                         "Selected LM Studio CLI exposes load-time Draft MTP and the sidecar pairing/audit is valid; benchmark this route before the optimiser prefers it."
@@ -6667,8 +7371,14 @@ def scan_models() -> list[dict[str, Any]]:
                     "mtpMinContinueProbability": LMSTUDIO_MTP_MIN_CONTINUE_PROBABILITY_DEFAULT,
             },
             "mtplx": {
-                    "runnable": ready and fmt == "mlx",
-                    "reason": "MLX artifact; MTPLX validates again before loading" if ready and fmt == "mlx" else "MTPLX requires a complete compatible MLX artifact",
+                    "runnable": ready and fmt == "mlx" and not qwen4_architecture,
+                    "reason": (
+                        "MTPLX has no verified external Qwen4 PLE mmap route."
+                        if qwen4_architecture else
+                        "MLX artifact; MTPLX validates again before loading"
+                        if ready and fmt == "mlx" else
+                        "MTPLX requires a complete compatible MLX artifact"
+                    ),
                     "mtp": mtplx_verified,
                     "mtpReason": (
                         "Verified MTPLX runtime contract"
@@ -6960,11 +7670,14 @@ def scan_models() -> list[dict[str, Any]]:
             "format": fmt,
             "architecture": architecture,
             "modelType": model_type,
+            "rootModelType": root_model_type,
+            "textModelType": text_model_type,
             "nativeContext": context,
             "quantization": quantization,
             "size": weight_bytes,
             "sizeLabel": display_size(weight_bytes),
             "memoryGeometry": model_memory_geometry(config),
+            "qwen4Ple": copy.deepcopy(qwen4_ple),
             "mtpSidecarSize": mtp_sidecar_bytes,
             "ready": ready,
             "status": status,
@@ -7624,6 +8337,15 @@ def fastest_safe_options(
     )
     if backend == "omlx":
         options["burst"] = str(measured_engine_settings.get("burst") or "aggressive")
+        qwen_ple = capability.get("qwen4Ple")
+        measured_memory_guard = str(measured_engine_settings.get("memoryGuard") or "")
+        if isinstance(qwen_ple, dict) and qwen_ple.get("supported") is True:
+            options["memoryGuard"] = "high"
+            rationale.append(
+                "Use the dedicated Qwen PLE High memory guard required by this mmap route."
+            )
+        elif measured_memory_guard in {"balanced", "high"}:
+            options["memoryGuard"] = measured_memory_guard
         # ANE prefill currently requantises part of the path to INT8 and is
         # explicitly approximate upstream. Keep the quality-preserving preset
         # exact; a measured ANE result remains a separate user opt-in.
@@ -8069,14 +8791,25 @@ def validated_chat_messages(payload: dict[str, Any], system_prompt: str) -> list
             raise ValueError("Every chat message must have a role and text content.")
         role = item.get("role")
         content = item.get("content")
+        reasoning = item.get("reasoning_content", item.get("reasoning", ""))
         if role not in {"user", "assistant"}:
             raise ValueError("Chat history may contain only user and assistant messages.")
         if not isinstance(content, str) or not content.strip() or "\x00" in content:
             raise ValueError("Chat messages must contain non-empty text.")
-        total += len(content)
+        if not isinstance(reasoning, str) or "\x00" in reasoning:
+            raise ValueError("Displayed model reasoning must be text.")
+        if reasoning and role != "assistant":
+            raise ValueError("Only assistant messages may carry displayed model reasoning.")
+        total += len(content) + len(reasoning)
         if total > MAX_CHAT_CHARACTERS:
             raise ValueError(f"Chat history and context must be at most {MAX_CHAT_CHARACTERS:,} characters.")
-        messages.append({"role": str(role), "content": content})
+        message = {"role": str(role), "content": content}
+        if reasoning:
+            # reasoning_content is the OpenAI-compatible history field used by
+            # oMLX and other reasoning-aware local runtimes.  Only reasoning
+            # already exposed in the launcher UI is replayed.
+            message["reasoning_content"] = reasoning
+        messages.append(message)
     if operation == "continue":
         if messages[-1]["role"] != "assistant":
             raise ValueError("Continue response requires a completed assistant message.")
@@ -8763,7 +9496,10 @@ def add_benchmark_engine_evidence(
     for backend in backends:
         capability = model.get("backends", {}).get(backend, {})
         canonical = validated_profile_options(backend, model, capability, raw_options)
-        by_backend[backend] = benchmark_engine_settings(backend, canonical)
+        settings = benchmark_engine_settings(backend, canonical)
+        if backend == "omlx" and is_qwen4_exp_record(model):
+            settings["pleStorage"] = "mmap"
+        by_backend[backend] = settings
     evidence["engineSettingsByBackend"] = by_backend
     if len(backends) == 1:
         evidence["engineSettings"] = copy.deepcopy(by_backend[backends[0]])
@@ -8817,7 +9553,10 @@ def optimal_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> di
         model, context, output, client, reasoning, str(options.get("kv") or "off"), chat,
     )
     add_benchmark_engine_evidence(evidence, model, options, [backend])
-    result = fastest_safe_options(backend, capability, options, evidence)
+    optimizer_capability = copy.deepcopy(capability)
+    if backend == "omlx" and is_qwen4_exp_record(model):
+        optimizer_capability["qwen4Ple"] = copy.deepcopy(model.get("qwen4Ple"))
+    result = fastest_safe_options(backend, optimizer_capability, options, evidence)
     result.update({"backend": backend, "modelId": model_id, "model": model.get("name")})
     return result
 
@@ -8971,6 +9710,78 @@ def benchmark_reasoning_contract(
         "changesVisibleSettingWhenApplied": True,
     })
     return contract
+
+
+def qwen_ple_route_qualification_reasoning_contract(
+    payload: dict[str, Any], model: dict[str, Any],
+) -> dict[str, Any]:
+    """Lock one explicit reasoning level for a Qwen PLE route qualification.
+
+    A single route has no cross-engine reason to fall back to model-default
+    reasoning.  When the visible setting is Auto, choose a real advertised
+    level so the bounded qualification proves separate reasoning and answer
+    output rather than merely proving that the server accepts a request.
+    """
+    requested = str(payload.get("reasoning") or "auto")
+    capability = model.get("backends", {}).get("omlx", {})
+    reasoning_key = "codexReasoning" if payload.get("client") == "codex" else "agentReasoning"
+    choices = [str(item) for item in capability.get(reasoning_key) or []]
+    explicit = [
+        item for item in ("medium", "low", "high", "xhigh", "minimal", "max")
+        if item in choices
+    ]
+    measured = requested
+    normalized = False
+    detail = "The selected reasoning level is preserved for this route qualification."
+    if requested == "auto" and explicit:
+        measured = explicit[0]
+        normalized = True
+        detail = (
+            f"Auto is measured at {measured} so the qualification can verify both "
+            "separate reasoning and a final answer. The visible setting changes only if "
+            "you apply the qualified route."
+        )
+    enabled = measured not in {"auto", "off"} and measured in choices
+    if requested == "off":
+        detail = "Choose a reasoning level before qualifying this reasoning-capable route."
+    elif not enabled:
+        detail = (
+            "oMLX does not advertise an explicit reasoning level for this exact model route, "
+            "so reasoning reliability cannot be qualified yet."
+        )
+    return {
+        "policy": "single-route-explicit-reasoning",
+        "requested": requested,
+        "measured": measured,
+        "normalized": normalized,
+        "normalizedFor": ["omlx"] if normalized else [],
+        "normalizedForLabels": ["oMLX"] if normalized else [],
+        "label": measured,
+        "detail": detail,
+        "changesVisibleSettingWhenApplied": normalized,
+        "reasoningEnabled": enabled,
+    }
+
+
+def apply_qwen_ple_route_qualification_budget(job: dict[str, Any]) -> None:
+    """Reserve visible-answer space inside each bounded reasoning sample.
+
+    The saved launch contract keeps its original response ceiling.  These
+    fields apply only to the temporary qualification server and its 512-token
+    samples, preventing a reasoning-capable model from spending the complete
+    sample allowance before it can emit the final answer being qualified.
+    """
+    sample_tokens = min(
+        ROUTE_QUALIFICATION_MAX_TOKENS,
+        max(256, int(job["output"])),
+    )
+    answer_reserve = min(
+        ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS,
+        max(1, sample_tokens // 2),
+    )
+    job["suite"]["maxTokens"] = sample_tokens
+    job["qualificationThinkingBudgetTokens"] = max(1, sample_tokens - answer_reserve)
+    job["qualificationAnswerReserveTokens"] = answer_reserve
 
 
 def cross_engine_benchmark_measurement(
@@ -9572,6 +10383,8 @@ def _optimizer_with_forced_record(
     # client, reasoning, model, limit, or installation checks.
     validated = optimal_request(target_payload, models)
     capability = copy.deepcopy(model["backends"][backend])
+    if backend == "omlx" and is_qwen4_exp_record(model):
+        capability["qwen4Ple"] = copy.deepcopy(model.get("qwen4Ple"))
     capability["localBenchmark"] = copy.deepcopy(record)
     capability["localBenchmarks"] = [copy.deepcopy(record)]
     capability["preferredAccelerationSource"] = "local-benchmark"
@@ -9676,6 +10489,13 @@ def benchmark_engine_settings_label(backend: str, settings: Any) -> str:
     if backend == "omlx":
         burst = str(values.get("burst") or "balanced")
         parts = [f"{burst.replace('-', ' ').title()} burst"]
+        if values.get("pleStorage") == "mmap":
+            parts.insert(0, "PLE mmap")
+            parts.append(
+                "45 GiB high-memory guard"
+                if values.get("memoryGuard") == "high"
+                else "balanced memory guard"
+            )
         if values.get("anePrefill") == "tuned":
             parts.append("measured ANE prefill")
         return " · ".join(parts)
@@ -9784,6 +10604,145 @@ def accelerated_model_alternatives(
     return candidates[:2]
 
 
+def route_qualification_metrics(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Recompute the bounded, authoritative public metrics for one qualified route."""
+    if (
+        record.get("kind") != "route-qualification"
+        or record.get("qualificationVersion") != ROUTE_QUALIFICATION_VERSION
+        or record.get("backend") != "omlx"
+        or record.get("winner") != "ar"
+        or record.get("comparedModes") != ["ar"]
+    ):
+        return None
+    modes = record.get("modes")
+    route = modes.get("ar") if isinstance(modes, dict) else None
+    samples = route.get("samples") if isinstance(route, dict) else None
+    if not isinstance(samples, list) or not samples:
+        return None
+    prompt_tokens = 0
+    completion_tokens = 0
+    decode: list[float] = []
+    ttft: list[float] = []
+    reasoning_turns = 0
+    answer_turns = 0
+    for sample in samples:
+        if not isinstance(sample, dict):
+            return None
+        prompt = sample.get("promptTokens")
+        completion = sample.get("completionTokens")
+        speed = sample.get("decodeTokensPerSecond")
+        first = sample.get("ttftSeconds")
+        if (
+            isinstance(prompt, bool) or not isinstance(prompt, int) or prompt <= 0
+            or isinstance(completion, bool) or not isinstance(completion, int) or completion <= 0
+            or isinstance(speed, bool) or not isinstance(speed, (int, float))
+            or not math.isfinite(float(speed)) or float(speed) <= 0
+            or isinstance(first, bool) or not isinstance(first, (int, float))
+            or not math.isfinite(float(first)) or float(first) <= 0
+            or sample.get("finishReason") != "stop"
+            or sample.get("terminalState") != "complete"
+            or sample.get("terminalComplete") is not True
+            or sample.get("responseLimitReached") is not False
+        ):
+            return None
+        prompt_tokens += prompt
+        completion_tokens += completion
+        decode.append(float(speed))
+        ttft.append(float(first))
+        reasoning_turns += int(sample.get("reasoningObserved") is True)
+        answer_turns += int(sample.get("answerObserved") is True)
+    return {
+        "promptTokens": prompt_tokens,
+        "completionTokens": completion_tokens,
+        "sampleCount": len(samples),
+        "reasoningTurns": reasoning_turns,
+        "answerTurns": answer_turns,
+        "medianDecodeTokensPerSecond": round(statistics.median(decode), 3),
+        "medianTTFTSeconds": round(statistics.median(ttft), 4),
+    }
+
+
+def verified_route_qualification(
+    model: dict[str, Any], backend: str, evidence: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return only a complete local Qwen PLE reasoning-route qualification."""
+    if backend != "omlx" or not is_qwen4_exp_record(model):
+        return None
+    capability = model.get("backends", {}).get("omlx", {})
+    candidates = capability.get("localBenchmarks")
+    records = [item for item in candidates if isinstance(item, dict)] if isinstance(candidates, list) else []
+    latest = capability.get("localBenchmark")
+    if isinstance(latest, dict) and latest not in records:
+        records.append(latest)
+    matches: list[dict[str, Any]] = []
+    for record in records:
+        metrics = route_qualification_metrics(record)
+        stored = record.get("qualification")
+        if (
+            metrics is None
+            or not isinstance(stored, dict)
+            or stored.get("reasoningEnabled") is not True
+            or stored.get("reasoningObserved") is not True
+            or stored.get("answerObserved") is not True
+            or stored.get("terminalCompletionObserved") is not True
+            or stored.get("authoritativeUsage") is not True
+            or stored.get("metrics") != metrics
+            or not _local_benchmark_record_verified(capability, record, evidence)
+        ):
+            continue
+        matches.append(record)
+    if not matches:
+        return None
+    return copy.deepcopy(max(matches, key=lambda item: str(item.get("createdAt") or "")))
+
+
+def public_route_qualification_result(
+    model: dict[str, Any], record: dict[str, Any], preference: str = "throughput",
+) -> dict[str, Any]:
+    """Expose one qualified route without presenting it as a competition winner."""
+    measurement = cross_engine_benchmark_measurement(record)
+    metrics = route_qualification_metrics(record)
+    if measurement is None or metrics is None:
+        raise RuntimeError("The saved route qualification is incomplete.")
+    value, profile_display, _lower_is_better = _benchmark_history_value(
+        measurement, preference,
+    )
+    return {
+        "backend": "omlx", "label": BACKEND_LABELS["omlx"],
+        "qualified": True, "mode": "ar", "modeLabel": "AR",
+        "testedModes": ["ar"],
+        "modeDetail": (
+            "Qualified the exact Qwen PLE mmap autoregressive route with separate reasoning "
+            "and final-answer output."
+        ),
+        "settingsLabel": benchmark_engine_settings_label(
+            "omlx", record.get("engineSettings"),
+        ),
+        "routeSettingsLabel": "AR · PLE mmap",
+        "display": measurement["display"],
+        "profileDisplay": profile_display if value is not None else measurement["display"],
+        "firstTokenSeconds": measurement.get("firstTokenSeconds"),
+        "decodeTokensPerSecond": measurement.get("decodeTokensPerSecond"),
+        "peakPressureDeltaBytes": measurement.get("peakPressureDeltaBytes"),
+        "baselineHeadroomPercent": measurement.get("baselineHeadroomPercent"),
+        "minimumHeadroomPercent": measurement.get("minimumHeadroomPercent"),
+        "totalMemoryBytes": measurement.get("totalMemoryBytes"),
+        "thermalStart": measurement.get("thermalStart"),
+        "thermalStartValue": measurement.get("thermalStartValue"),
+        "thermalWorst": measurement.get("thermalWorst"),
+        "thermalWorstValue": measurement.get("thermalWorstValue"),
+        "lowPowerMode": measurement.get("lowPowerMode"),
+        "resourceCooldownStatus": measurement.get("resourceCooldownStatus"),
+        "promptTokens": metrics["promptTokens"],
+        "completionTokens": metrics["completionTokens"],
+        "reasoningTurns": metrics["reasoningTurns"],
+        "answerTurns": metrics["answerTurns"],
+        "sampleCount": metrics["sampleCount"],
+        "recordId": record.get("id"),
+        "runtimeVersion": record.get("runtimeVersion"),
+    }
+
+
 def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> dict[str, Any]:
     """Choose an engine only when a complete, like-for-like local matrix proves it."""
     current = optimal_request(payload, models)
@@ -9841,20 +10800,73 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         "excludedBackends": excluded,
     }
     if eligible == [current_backend]:
+        qualification = verified_route_qualification(
+            model, current_backend, evidence,
+        )
+        if qualification is not None:
+            qualified_route = public_route_qualification_result(
+                model, qualification, preference,
+            )
+            metrics = qualification["qualification"]["metrics"]
+            reason = (
+                f"The exact oMLX AR + PLE mmap route is locally qualified at "
+                f"{float(metrics['medianDecodeTokensPerSecond']):.1f} generation tok/s "
+                f"with {float(metrics['medianTTFTSeconds']):.2f}s median time to first output; "
+                "separate reasoning and final-answer output were both observed."
+            )
+            result = _optimizer_with_forced_record(
+                payload, models, model, current_backend, qualification, evidence,
+            )
+            result.update({
+                "engineChanged": False,
+                "engineEvidenceTier": "local-route-qualification",
+                "engineEvidenceLabel": "Qualified oMLX route",
+                "comparedEngines": [], "qualifiedRoutes": [qualified_route],
+                "missingEngines": [], "engineRationale": [reason],
+                "engineDecision": {**engine_meta, "routeQualification": True},
+                "enginePreference": preference,
+                "engineNextAction": engine_selection_next_action(
+                    "keep-current", preference, current_backend, client, reason,
+                ),
+                "settingsEvidenceTier": result.get("evidenceTier"),
+                "settingsEvidenceLabel": result.get("evidenceLabel"),
+                "evidenceTier": "local-route-qualification",
+                "evidenceLabel": "Qualified oMLX route",
+            })
+            result["rationale"] = result["engineRationale"] + list(result.get("rationale") or [])
+            return result
+        omlx_capability = model.get("backends", {}).get("omlx", {})
+        qwen_qualification = bool(
+            current_backend == "omlx"
+            and is_qwen4_exp_record(model)
+            and omlx_capability.get("mtp") is not True
+            and omlx_capability.get("dflash") is not True
+        )
         reason = (
+            "oMLX AR + PLE mmap is the only honest route for this exact Qwen checkpoint. "
+            "Run one bounded route qualification to measure authoritative generation TPS, "
+            "time to first output, usage, reasoning, and final-answer reliability."
+            if qwen_qualification else
             f"{BACKEND_LABELS[current_backend]} is the only installed route that can run this exact "
             "model and work contract; there is no honest cross-engine calibration to perform."
         )
         current.update({
             "engineChanged": False,
-            "engineEvidenceTier": "single-compatible-engine",
-            "engineEvidenceLabel": "Only compatible engine",
+            "engineEvidenceTier": (
+                "single-route-qualification-needed"
+                if qwen_qualification else "single-compatible-engine"
+            ),
+            "engineEvidenceLabel": (
+                "Route qualification needed"
+                if qwen_qualification else "Only compatible engine"
+            ),
             "comparedEngines": [],
             "missingEngines": [],
             "engineRationale": [reason],
-            "engineDecision": engine_meta,
+            "engineDecision": {**engine_meta, "routeQualification": qwen_qualification},
             "engineNextAction": engine_selection_next_action(
-                "keep-current", preference, current_backend, client, reason,
+                "calibrate" if qwen_qualification else "keep-current",
+                preference, current_backend, client, reason,
             ),
         })
         current["rationale"] = current["engineRationale"] + list(current.get("rationale") or [])
@@ -10110,7 +11122,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
 
 PROFILE_OPTION_KEYS = {
     "acceleration", "depth", "profile", "kv", "fan", "burst",
-    "dflashVerify", "dflashDraftQuant", "anePrefill", "gpu", "parallel",
+    "dflashVerify", "dflashDraftQuant", "anePrefill", "memoryGuard", "gpu", "parallel",
     "mtpMinTokens", "mtpMinContinueProbability",
     "maxBatchSize", "expertCacheSize", "prefixCacheEntries",
     "prefillSize", "nativeExpertTopK", "promptCacheMode", "queueLimit",
@@ -10336,6 +11348,13 @@ def validated_profile_options(
             raise ValueError(str(capability.get("aneReason") or "The saved ANE result no longer matches this model, runtime, and Mac."))
         if acceleration == "dflash" and ane_prefill == "tuned":
             raise ValueError("DFlash 2 and tuned ANE prefill cannot share one oMLX engine.")
+        memory_guard = _profile_choice(
+            raw, "memoryGuard", "balanced", {"balanced", "high"}, "oMLX memory mode",
+        )
+        if memory_guard == "high" and not is_qwen4_exp_record(model):
+            raise ValueError(
+                "High-memory mode is reserved for a verified Qwen3.8 Flash PLE mmap checkpoint."
+            )
         return {
             "acceleration": acceleration,
             "depth": depth,
@@ -10344,6 +11363,7 @@ def validated_profile_options(
             "dflashVerify": _profile_choice(raw, "dflashVerify", "adaptive", {"adaptive", "dflash", "ddtree"}, "DFlash verification"),
             "dflashDraftQuant": _profile_choice(raw, "dflashDraftQuant", "native", {"native", "q2", "q4", "q8"}, "DFlash draft precision"),
             "anePrefill": ane_prefill,
+            "memoryGuard": memory_guard,
         }
     if backend == "lmstudio":
         acceleration = _profile_choice(
@@ -11703,6 +12723,9 @@ class AgentConsole:
     rpc_last_queue_count: int = -1
     rpc_prompt_id: str = ""
     rpc_prompt_acknowledged: bool = False
+    rpc_queue_paused: bool = False
+    rpc_queue_advance_allowed: bool = False
+    rpc_settle_revision: int = 0
     rpc_last_state_probe_at: float = 0.0
     rpc_message_blocks: dict[str, str] = field(default_factory=dict, repr=False)
     rpc_last_assistant: dict[str, Any] = field(default_factory=dict, repr=False)
@@ -11750,6 +12773,7 @@ class AgentConsole:
                 "protocol": self.protocol,
                 "streaming": self.rpc_streaming,
                 "pendingMessages": self.rpc_pending_messages,
+                "queuePaused": self.rpc_queue_paused,
                 "interactions": copy.deepcopy(self.rpc_interactions),
             }
 
@@ -11784,6 +12808,7 @@ class AgentConsole:
                 "protocol": self.protocol,
                 "streaming": self.rpc_streaming,
                 "pendingMessages": self.rpc_pending_messages,
+                "queuePaused": self.rpc_queue_paused,
                 "interactions": copy.deepcopy(self.rpc_interactions),
                 "persistent": False,
                 "canInput": self.state == "running" and self.process.poll() is None,
@@ -11915,6 +12940,46 @@ def pi_rpc_render_history(messages: Any) -> bytes:
     return bytes(output)
 
 
+def pi_rpc_settled_output(console: AgentConsole) -> bytes:
+    """Finish one Pi turn and make the queue decision in exactly one place."""
+    output = bytearray()
+
+    def section(name: str, label: str, colour: str) -> None:
+        if console.rpc_section != name:
+            output.extend(pi_rpc_heading(label, colour))
+            console.rpc_section = name
+
+    console.rpc_streaming = False
+    console.rpc_prompt_inflight = False
+    console.rpc_prompt_id = ""
+    console.rpc_prompt_acknowledged = False
+    console.rpc_interactions.clear()
+    last = console.rpc_last_assistant
+    console.rpc_queue_paused = bool(
+        console.rpc_follow_up_queue and not console.rpc_queue_advance_allowed
+    )
+    if (
+        last.get("thinkingCharacters", 0) > 0
+        and last.get("textCharacters", 0) == 0
+        and last.get("toolCalls", 0) == 0
+        and last.get("stopReason") != "length"
+    ):
+        section("incomplete", "NO FINAL ANSWER", "38;5;214")
+        output.extend(
+            b"Pi received model reasoning but no final response. Send continue to resume the task."
+        )
+    if console.rpc_queue_paused:
+        section("queue-paused", "QUEUE PAUSED", "38;5;214")
+        output.extend(
+            b"Queued follow-ups were kept in place because this turn has no final answer. "
+            b"Send continue to finish the response, or clear the queue."
+        )
+    console.rpc_last_assistant = {}
+    console.rpc_message_blocks.clear()
+    console.rpc_settle_revision += 1
+    return bytes(output)
+
+
 def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
     """Translate Pi's structured RPC events into a stable append-only transcript."""
     if not isinstance(event, dict):
@@ -11969,16 +13034,22 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
                 # The state reply is authoritative once Pi accepted the prompt.
                 # This repairs a missed agent_settled event without racing prompt
                 # preflight, which is not acknowledged until it succeeds.
-                console.rpc_streaming = False
-                console.rpc_prompt_inflight = False
-                console.rpc_prompt_id = ""
-                console.rpc_prompt_acknowledged = False
-                console.rpc_interactions.clear()
+                was_active = console.rpc_streaming or console.rpc_prompt_inflight
+                if was_active:
+                    output.extend(pi_rpc_settled_output(console))
+                else:
+                    console.rpc_streaming = False
+                    console.rpc_prompt_inflight = False
+                    console.rpc_prompt_id = ""
+                    console.rpc_prompt_acknowledged = False
+                    console.rpc_interactions.clear()
         return bytes(output)
 
     if event_type == "agent_start":
         console.rpc_prompt_inflight = True
         console.rpc_streaming = True
+        console.rpc_queue_paused = False
+        console.rpc_queue_advance_allowed = False
         console.rpc_last_assistant.clear()
         return b""
     if event_type == "agent_end":
@@ -11988,25 +13059,7 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
             console.rpc_prompt_inflight = True
         return b""
     if event_type == "agent_settled":
-        console.rpc_streaming = False
-        console.rpc_prompt_inflight = False
-        console.rpc_prompt_id = ""
-        console.rpc_prompt_acknowledged = False
-        console.rpc_interactions.clear()
-        last = console.rpc_last_assistant
-        if (
-            last.get("thinkingCharacters", 0) > 0
-            and last.get("textCharacters", 0) == 0
-            and last.get("toolCalls", 0) == 0
-            and last.get("stopReason") != "length"
-        ):
-            section("incomplete", "NO FINAL ANSWER", "38;5;214")
-            output.extend(
-                b"Pi received model reasoning but no final response. Send continue to resume the task."
-            )
-        console.rpc_last_assistant = {}
-        console.rpc_message_blocks.clear()
-        return bytes(output)
+        return pi_rpc_settled_output(console)
     if event_type == "queue_update":
         steering = event.get("steering") if isinstance(event.get("steering"), list) else []
         follow_up = event.get("followUp") if isinstance(event.get("followUp"), list) else []
@@ -12030,6 +13083,7 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
         elif isinstance(message, dict) and message.get("role") == "assistant":
             console.rpc_message_blocks.clear()
             console.rpc_last_assistant.clear()
+            console.rpc_queue_advance_allowed = False
         return bytes(output)
     if event_type == "message_update":
         update = event.get("assistantMessageEvent")
@@ -12130,6 +13184,9 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
             "toolCalls": tool_calls,
             "stopReason": stop_reason,
         }
+        console.rpc_queue_advance_allowed = bool(
+            (text_characters > 0 or tool_calls > 0) and stop_reason != "length"
+        )
         console.rpc_message_blocks.clear()
         if stop_reason == "length":
             section("limit", "RESPONSE LIMIT REACHED", "38;5;214")
@@ -12411,6 +13468,47 @@ def build_omlx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     burst = str(plan.options.get("burst", "balanced"))
     if burst not in {"off", "light", "balanced", "aggressive"}:
         raise ValueError("Invalid burst mode.")
+    qwen4_flash = is_qwen4_exp_record(plan.model)
+    memory_guard = str(plan.options.get("memoryGuard", "balanced"))
+    if memory_guard not in {"balanced", "high"}:
+        raise ValueError("Invalid oMLX memory mode.")
+    if memory_guard == "high" and not qwen4_flash:
+        raise ValueError(
+            "High-memory mode is reserved for a verified Qwen3.8 Flash PLE mmap checkpoint."
+        )
+    if qwen4_flash and memory_guard != "high":
+        raise ValueError(
+            "Verified Qwen PLE mmap routes require High memory mode."
+        )
+    if qwen4_flash:
+        if kv != "off":
+            raise ValueError("Quantised KV is not qualified for the Qwen4 QSA cache; use full precision.")
+        try:
+            qwen4_path = Path(str(plan.model["path"])).resolve(strict=True)
+        except (KeyError, OSError, RuntimeError) as error:
+            raise ValueError("The Qwen4 checkpoint moved after scanning. Rescan models before launch.") from error
+        qwen4_config = read_json(qwen4_path / "config.json")
+        qwen4_ready, _qwen4_status, _qwen4_bytes = weight_completeness(qwen4_path, qwen4_config)
+        live_qwen4_ple = qwen4_ple_profile(
+            qwen4_path, qwen4_config, qwen4_ready, command_version(BINARIES.get("omlx")),
+        )
+        scanned_qwen4_ple = plan.model.get("qwen4Ple")
+        if (
+            live_qwen4_ple.get("supported") is not True
+            or not isinstance(scanned_qwen4_ple, dict)
+            or any(
+                live_qwen4_ple.get(key) != scanned_qwen4_ple.get(key)
+                for key in (
+                    "storage", "storageSource", "checkpointBytes", "pleBytes",
+                    "rawResidentBytes", "residentBytes", "inventorySchema",
+                    "inventoryFingerprint", "sourceFingerprint",
+                    "configFingerprint", "indexFingerprint", "index",
+                    "shardCount", "tensorCount", "pleLayerCount",
+                    "pleShardCount", "pleTensorCount", "pleLayouts",
+                )
+            )
+        ):
+            raise ValueError("The verified Qwen4 PLE mmap contract changed after scanning. Rescan models before launch.")
     chat_template_kwargs: dict[str, Any] = {}
     forced_ct_kwargs: list[str] = []
     thinking_budget_enabled = False
@@ -12425,20 +13523,49 @@ def build_omlx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
         chat_template_kwargs.update({"enable_thinking": True, "reasoning_effort": plan.reasoning})
         forced_ct_kwargs.extend(["enable_thinking", "reasoning_effort"])
         thinking_budget_enabled = True
-        thinking_budget_tokens = min(THINKING_BUDGETS[plan.reasoning], max(1, plan.output // 2))
+        qualification_budget = plan.options.get("_qualificationThinkingBudgetTokens")
+        if isinstance(qualification_budget, bool) or not isinstance(qualification_budget, int):
+            qualification_budget = None
+        thinking_budget_tokens = min(
+            THINKING_BUDGETS[plan.reasoning],
+            max(1, plan.output // 2),
+            qualification_budget if qualification_budget is not None else plan.output,
+        )
         if thinking_budget_tokens < THINKING_BUDGETS[plan.reasoning]:
-            plan.warnings.append("The selected response ceiling is too small for the full reasoning budget; half is reserved for the answer/tool call.")
+            if qualification_budget is not None:
+                plan.warnings.append(
+                    "Route qualification bounds thinking below each measured sample ceiling so a final answer has reserved space; the saved response limit is unchanged."
+                )
+            else:
+                plan.warnings.append("The selected response ceiling is too small for the full reasoning budget; half is reserved for the answer/tool call.")
     api_key = secrets.token_urlsafe(24)
     secret_key = secrets.token_hex(32)
     benchmark_mode = plan.purpose in {"benchmark", "runtime-promotion", "route-check"}
     tuner_mode = plan.purpose == "ane-tune"
     isolated_measurement = benchmark_mode or tuner_mode
     chunked_ane_prefill = tuner_mode or ane_tuned
+    memory_settings = {
+        "prefill_memory_guard": True,
+        "memory_guard_tier": "custom" if memory_guard == "high" else "balanced",
+        "memory_guard_custom_ceiling_gb": (
+            OMLX_QWEN4_HIGH_MEMORY_CEILING_GIB if memory_guard == "high" else 0.0
+        ),
+        "soft_threshold": (
+            OMLX_QWEN4_HIGH_MEMORY_SOFT_THRESHOLD
+            if memory_guard == "high" else 0.85
+        ),
+        "hard_threshold": (
+            OMLX_QWEN4_HIGH_MEMORY_HARD_THRESHOLD
+            if memory_guard == "high" else 0.95
+        ),
+        "prefill_safe_zone_ratio": 0.8,
+        "prefill_min_chunk_tokens": 32,
+    }
     settings = {
         "version": "1.0",
         "server": {"host": "127.0.0.1", "port": plan.port, "log_level": "info", "cors_origins": [], "server_aliases": ["localhost", "127.0.0.1"], "sse_keepalive_mode": "chunk", "auto_start_on_launch": False, "burst_decode_mode": burst, "preserve_mid_system_cache": not isolated_measurement},
         "model": {"model_dirs": [str(catalog)], "model_dir": str(catalog), "model_fallback": False, "hide_helper_models": False},
-        "memory": {"prefill_memory_guard": True, "memory_guard_tier": "balanced", "memory_guard_custom_ceiling_gb": 0.0, "soft_threshold": 0.85, "hard_threshold": 0.95, "prefill_safe_zone_ratio": 0.8, "prefill_min_chunk_tokens": 32},
+        "memory": memory_settings,
         "scheduler": {"max_concurrent_requests": 1, "embedding_batch_size": 8, "chunked_prefill": chunked_ane_prefill, "prefill_step_size": ANE_TUNER_SEQUENCE_LENGTH, "prefill_priority": "speed" if chunked_ane_prefill else "context"},
         "cache": {"enabled": not isolated_measurement, "hot_cache_only": False, "ssd_cache_dir": str(STATE_DIR / "cache" / "omlx"), "ssd_cache_max_size": "40GB", "hot_cache_max_size": "0", "initial_cache_blocks": 256},
         "auth": {"api_key": api_key, "secret_key": secret_key, "skip_api_key_verification": False, "sub_keys": []},
@@ -12456,8 +13583,12 @@ def build_omlx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
         "force_sampling": False,
         "chat_template_kwargs": chat_template_kwargs or None,
         "forced_ct_kwargs": forced_ct_kwargs,
+        "preserve_thinking": plan.reasoning != "off",
         "thinking_budget_enabled": thinking_budget_enabled,
         "thinking_budget_tokens": thinking_budget_tokens,
+        # Flash-Next's PLE is the large N-gram table. Pin mmap mode instead of
+        # relying on macOS swap or on oMLX's last-minute admission fallback.
+        "qwen4_ple_ssd_offload": qwen4_flash,
         "turboquant_kv_enabled": kv != "off",
         "turboquant_kv_bits": {"q8": 8, "q6": 6, "q4": 4}.get(kv, 4),
         "turboquant_skip_last": True,
@@ -12467,6 +13598,14 @@ def build_omlx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
         "trust_remote_code": False,
         "is_default": True,
     }
+    if qwen4_flash:
+        plan.warnings.append(
+            "Qwen3.8 Flash-Next keeps its PLE N-gram table SSD-backed through oMLX mmap; the launcher does not treat macOS swap as model offload."
+        )
+    if memory_guard == "high":
+        plan.warnings.append(
+            "Qwen high-memory mode uses a 45 GiB oMLX process ceiling. Sessions separately checks the selected context, current memory headroom, and temporary Apple GPU wired-memory limit."
+        )
     if ane_tuned:
         recommendation = ane_record["recommendation"]
         per_model_settings.update({
@@ -12977,13 +14116,31 @@ def build_chat_client(plan: LaunchPlan, _route: ClientRoute) -> None:
 
 def build_pi_client(plan: LaunchPlan, route: ClientRoute) -> None:
     request_headers = {"x-mtplx-client": "pi"} if plan.backend == "mtplx" else {}
+    model_contract: dict[str, Any] = {
+        "id": route.served,
+        "name": plan.model["name"],
+        "reasoning": plan.reasoning != "off",
+        "contextWindow": plan.context,
+        "maxTokens": plan.output,
+    }
+    if plan.backend == "whallm":
+        allowed = set(
+            plan.model.get("backends", {}).get("whallm", {}).get("agentReasoning") or []
+        )
+        model_contract.update({
+            "supportsReasoningEffort": True,
+            "thinkingLevelMap": {
+                level: ("none" if level == "off" else level) if level in allowed else None
+                for level in ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+            },
+        })
     provider_data = {
         "id": route.provider,
         "name": f"LLM Launcher · {plan.backend}",
         "baseUrl": route.base_url,
         "apiKey": route.api_key,
         "headers": request_headers,
-        "model": {"id": route.served, "name": plan.model["name"], "reasoning": plan.reasoning != "off", "contextWindow": plan.context, "maxTokens": plan.output},
+        "model": model_contract,
     }
     plan.client_env["LLM_LAUNCHER_PI_PROVIDER"] = json.dumps(provider_data, separators=(",", ":"))
     plan.client_argv = [BINARIES["pi"], "--extension", str(APP_DIR / "pi-provider.js"), "--provider", route.provider, "--model", route.served]
@@ -13124,6 +14281,29 @@ def build_client_plan(plan: LaunchPlan) -> None:
     builder(plan, client_route(plan))
 
 
+def apply_chat_reasoning_contract(
+    body: dict[str, Any], backend: str, reasoning: str,
+) -> dict[str, Any]:
+    """Pin request-level thinking controls without merging reasoning into content."""
+    if reasoning not in CHAT_REASONING_LEVELS:
+        raise ValueError("Unknown reasoning level.")
+    if backend not in {"whallm", "omlx"}:
+        return body
+
+    # These top-level controls belong to Whallm. oMLX pins the same visible
+    # contract in its launcher-owned per-model settings, so remove inherited
+    # agent controls rather than letting them contradict that server contract.
+    body.pop("thinking_mode", None)
+    body.pop("reasoning_effort", None)
+    if backend == "omlx" or reasoning == "auto":
+        return body
+    if reasoning == "off":
+        body.update({"thinking_mode": "chat", "reasoning_effort": "none"})
+    else:
+        body.update({"thinking_mode": "thinking", "reasoning_effort": reasoning})
+    return body
+
+
 def build_chat_completion_request(
     plan: LaunchPlan, payload: dict[str, Any],
 ) -> urllib.request.Request:
@@ -13148,6 +14328,7 @@ def build_chat_completion_request(
         })
         if plan.chat.get("seed") is not None:
             body["seed"] = plan.chat["seed"]
+    apply_chat_reasoning_contract(body, plan.backend, plan.reasoning)
     return urllib.request.Request(
         f"http://127.0.0.1:{plan.client_port or plan.port}/v1/chat/completions",
         data=json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
@@ -13192,7 +14373,9 @@ def benchmark_prompt(target_tokens: int, salt: int) -> str:
     )
 
 
-def benchmark_agentic_cases(suite: dict[str, Any]) -> list[dict[str, Any]]:
+def benchmark_agentic_cases(
+    suite: dict[str, Any], *, require_complete_answer: bool = False,
+) -> list[dict[str, Any]]:
     """Build a deterministic request chain whose prefixes grow like an agent session."""
     if suite.get("kind") != "agentic":
         raise ValueError("Agentic benchmark cases require the Agentic Route Lab suite.")
@@ -13200,13 +14383,21 @@ def benchmark_agentic_cases(suite: dict[str, Any]) -> list[dict[str, Any]]:
     tool_tokens = int(suite.get("toolTokens") or 4_096)
     prefix = benchmark_words(max(512, prefix_tokens - 320), 183_211)
     tool_result = benchmark_words(max(256, tool_tokens - 192), 271_828)
+    completion_instruction = (
+        "\n\nAfter separate reasoning, return a complete final answer in at most 80 tokens, then stop."
+        if require_complete_answer else ""
+    )
     base = [
         {
             "role": "system",
             "content": (
                 "You are measuring a local coding-agent route. All repository and tool text in this "
                 "conversation is deterministic synthetic data. Use only that data, disclose no paths, "
-                "and continue the requested technical answer until the response budget is reached."
+                + (
+                    "and finish every requested technical answer completely within its response budget."
+                    if require_complete_answer else
+                    "and continue the requested technical answer until the response budget is reached."
+                )
             ),
         },
         {
@@ -13225,7 +14416,8 @@ def benchmark_agentic_cases(suite: dict[str, Any]) -> list[dict[str, Any]]:
         "role": "user",
         "content": (
             "Identify the most important runtime, cache, correctness, and reliability relationships in "
-            "the snapshot. Give a detailed engineering assessment."
+                "the snapshot. Give a detailed engineering assessment."
+                f"{completion_instruction}"
         ),
     }
     warm_messages = [*base, analysis_request]
@@ -13240,6 +14432,7 @@ def benchmark_agentic_cases(suite: dict[str, Any]) -> list[dict[str, Any]]:
             "content": (
                 "Synthetic tool result begins. It contains no project or user data.\n\n"
                 f"{tool_result}\n\nSynthetic tool result ends. Incorporate it into the engineering assessment."
+                f"{completion_instruction}"
             ),
         },
     ]
@@ -13253,7 +14446,12 @@ def benchmark_agentic_cases(suite: dict[str, Any]) -> list[dict[str, Any]]:
             "role": "user",
             "content": (
                 "Now produce the follow-up implementation priorities, failure modes, and verification plan. "
-                "Be concrete and use the full response budget."
+                + (
+                    "Be concrete."
+                    if require_complete_answer else
+                    "Be concrete and use the full response budget."
+                )
+                + completion_instruction
             ),
         },
     ]
@@ -13267,7 +14465,11 @@ def benchmark_agentic_cases(suite: dict[str, Any]) -> list[dict[str, Any]]:
                     "role": "user",
                     "content": (
                         "Perform a cold-start architecture review covering latency, memory, correctness, "
-                        "and reliability. Use the full response budget."
+                        "and reliability."
+                        + (
+                            completion_instruction if require_complete_answer else
+                            " Use the full response budget."
+                        )
                     ),
                 },
             ],
@@ -13670,6 +14872,85 @@ def rotated_engine_shootout_jobs(
     return ordered, strategy
 
 
+def validated_route_qualification_request(
+    payload: dict[str, Any], models: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Lock the one honest oMLX AR route for an exact Qwen PLE qualification."""
+    model_id = str(payload.get("modelId") or "")
+    model = next((item for item in models if item.get("id") == model_id), None)
+    if not model:
+        raise ValueError("The selected model is no longer in the scanned catalog. Refresh models.")
+    if not is_qwen4_exp_record(model):
+        raise ValueError("Route qualification is reserved for a verified Qwen PLE mmap artifact.")
+    preference = str(payload.get("enginePreference") or "throughput")
+    if preference not in ENGINE_PREFERENCE_LABELS:
+        raise ValueError("Choose a supported route-qualification metric.")
+    visible = validated_launch_profile_request(payload, models)
+    if visible.get("backend") != "omlx":
+        raise ValueError("This Qwen PLE route qualification must use oMLX.")
+    if visible.get("options", {}).get("memoryGuard") != "high":
+        raise ValueError(
+            "Choose Qwen high-memory mode before qualifying this PLE route."
+        )
+    reasoning_contract = qwen_ple_route_qualification_reasoning_contract(
+        visible, model,
+    )
+    if reasoning_contract.get("reasoningEnabled") is not True:
+        raise ValueError(str(reasoning_contract.get("detail") or "Choose a reasoning level first."))
+    request = copy.deepcopy(visible)
+    request["reasoning"] = reasoning_contract["measured"]
+    request["suite"] = "agentic"
+    request.setdefault("options", {})["fan"] = validated_calibration_cooling(payload)
+    job = validated_benchmark_request(
+        request, models, allow_baseline_only=True,
+    )
+    if job.get("modes") != ["ar"]:
+        raise ValueError(
+            "This model now exposes another verified oMLX route. Use engine/route calibration instead."
+        )
+    eligible: list[str] = []
+    excluded: list[dict[str, str]] = []
+    kv = str(request.get("options", {}).get("kv") or "off")
+    chat = request.get("chat") if isinstance(request.get("chat"), dict) else None
+    for backend in ENGINE_ADAPTERS:
+        allowed, reason = benchmark_backend_eligibility(
+            model, backend, request["client"], request["reasoning"], kv, chat,
+        )
+        if allowed:
+            eligible.append(backend)
+        else:
+            excluded.append({
+                "backend": backend, "label": BACKEND_LABELS[backend], "reason": reason,
+            })
+    if eligible != ["omlx"]:
+        raise ValueError(
+            "Single-route qualification is available only while oMLX AR is the sole exact-artifact route."
+        )
+    job.update({
+        "kind": "route-qualification",
+        "routeQualification": True,
+        "qualificationVersion": ROUTE_QUALIFICATION_VERSION,
+        "qualificationReasoningContract": copy.deepcopy(reasoning_contract),
+        "enginePreference": preference,
+    })
+    # Keep the four bounded agentic stages while reserving part of each sample
+    # for the final answer that makes the route usable.
+    apply_qwen_ple_route_qualification_budget(job)
+    return {
+        "id": job["id"], "kind": "route-qualification",
+        "request": copy.deepcopy(request),
+        "reasoningContract": reasoning_contract,
+        "enginePreference": job["enginePreference"],
+        "modelId": model_id, "model": model["name"],
+        "client": request["client"],
+        "suite": job["suiteName"], "suiteLabel": job["suite"]["label"],
+        "workloadKind": job["workloadKind"],
+        "job": job, "jobs": [job],
+        "executionOrder": ["omlx"],
+        "excludedEngines": excluded,
+    }
+
+
 def validated_engine_shootout_request(
     payload: dict[str, Any], models: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -13822,21 +15103,36 @@ def calibration_plan(
             calibration_payload, selected,
         )
     visible_request = validated_launch_profile_request(calibration_payload, models)
-    suite_name = str(payload.get("suite") or ("standard" if visible_request["client"] == "chat" else "agentic"))
-    suite = BENCHMARK_SUITES.get(suite_name)
-    if not suite:
-        raise ValueError("Choose a Quick, Standard, Thorough, or Agentic calibration workload.")
     preference = str(payload.get("enginePreference") or "throughput")
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported calibration goal.")
     model = next(item for item in models if item.get("id") == visible_request["modelId"])
-    reasoning_contract = benchmark_reasoning_contract(
-        {
-            **visible_request,
-            "reasoningPolicy": payload.get("reasoningPolicy")
-            or BENCHMARK_REASONING_POLICY_ALL_ENGINES,
-        },
-        model,
+    omlx_capability = model.get("backends", {}).get("omlx", {})
+    route_qualification_candidate = bool(
+        visible_request.get("backend") == "omlx"
+        and is_qwen4_exp_record(model)
+        and omlx_capability.get("mtp") is not True
+        and omlx_capability.get("dflash") is not True
+    )
+    requested_suite_name = str(
+        payload.get("suite")
+        or ("standard" if visible_request["client"] == "chat" else "agentic")
+    )
+    suite_name = "agentic" if route_qualification_candidate else requested_suite_name
+    suite = BENCHMARK_SUITES.get(suite_name)
+    if not suite:
+        raise ValueError("Choose a Quick, Standard, Thorough, or Agentic calibration workload.")
+    reasoning_contract = (
+        qwen_ple_route_qualification_reasoning_contract(visible_request, model)
+        if route_qualification_candidate else
+        benchmark_reasoning_contract(
+            {
+                **visible_request,
+                "reasoningPolicy": payload.get("reasoningPolicy")
+                or BENCHMARK_REASONING_POLICY_ALL_ENGINES,
+            },
+            model,
+        )
     )
     measurement_payload = copy.deepcopy(visible_request)
     measurement_payload["reasoning"] = reasoning_contract["measured"]
@@ -13871,6 +15167,18 @@ def calibration_plan(
                 job = validated_benchmark_request(
                     candidate, models, allow_baseline_only=True,
                 )
+                if (
+                    route_qualification_candidate and backend == "omlx"
+                    and job.get("modes") == ["ar"]
+                ):
+                    job.update({
+                        "kind": "route-qualification",
+                        "routeQualification": True,
+                        "qualificationVersion": ROUTE_QUALIFICATION_VERSION,
+                        "qualificationReasoningContract": copy.deepcopy(reasoning_contract),
+                        "enginePreference": preference,
+                    })
+                    apply_qwen_ple_route_qualification_budget(job)
                 if backend in SSD_STREAMING_BACKENDS:
                     job["options"]["ssdCacheState"] = "natural-cold-to-warm"
                     add_benchmark_engine_evidence(
@@ -13894,6 +15202,11 @@ def calibration_plan(
             benchmark_mode_summary(model, backend, measured_modes or ["ar"])
             if job is not None else ""
         )
+        if job is not None and job.get("routeQualification") is True:
+            mode_detail = (
+                "Qualifies one exact oMLX AR + read-only PLE mmap load across cold, "
+                "shared-prefix, tool-ingestion, and warm reasoning turns."
+            )
         if (
             job is not None and backend == "lmstudio"
             and isinstance(job.get("calibrationTuningPlan"), dict)
@@ -13926,6 +15239,8 @@ def calibration_plan(
             "label": BACKEND_LABELS[backend],
             "eligible": bool(job is not None),
             "reason": (
+                "Runs the exact PLE mmap AR route with explicit reasoning and requires both reasoning and final-answer output."
+                if job is not None and job.get("routeQualification") is True else
                 (
                     "Uses model-default reasoning so every included engine shares the same "
                     "benchmark setting."
@@ -13958,9 +15273,18 @@ def calibration_plan(
             "runtimeVersion": str(job.get("runtimeVersion") or "") if job else "",
         })
 
+    route_qualification = bool(
+        route_qualification_candidate
+        and len(jobs) == 1
+        and jobs[0].get("backend") == "omlx"
+        and jobs[0].get("modes") == ["ar"]
+        and reasoning_contract.get("reasoningEnabled") is True
+    )
     blockers: list[str] = []
     fingerprints = {str(job.get("modelFingerprint") or "") for job in jobs}
-    if len(jobs) < 2:
+    if route_qualification_candidate and reasoning_contract.get("reasoningEnabled") is not True:
+        blockers.append(str(reasoning_contract.get("detail") or "Choose a reasoning level first."))
+    elif len(jobs) < 2 and not route_qualification:
         blockers.append(
             "Whallm's full-expert checkpoint has no equivalent second engine to compare; use its measured route directly."
             if model.get("sharedServer") is True else
@@ -13976,10 +15300,28 @@ def calibration_plan(
         blockers.append(
             "The SSD artifacts do not prove one matching pinned source revision, so their speeds cannot be compared safely."
         )
-    elif not ssd_lane and jobs and ("" in fingerprints or len(fingerprints) != 1):
+    elif (
+        not route_qualification and not ssd_lane and jobs
+        and ("" in fingerprints or len(fingerprints) != 1)
+    ):
         blockers.append(
             "Compatible engines do not expose one matching model-artifact fingerprint, so their speeds cannot be compared safely."
         )
+    memory_admission: dict[str, Any] | None = None
+    if route_qualification:
+        try:
+            memory_admission = route_qualification_memory_admission(request, models)
+        except (KeyError, StopIteration, ValueError) as error:
+            blockers.append(
+                "Current Qwen route capacity could not be verified: "
+                + (str(error) or "refresh model and memory status before qualifying it.")
+            )
+        else:
+            if not route_qualification_admission_ready(memory_admission):
+                blockers.append(
+                    f"{memory_admission.get('label') or 'Qwen route is not loadable'}: "
+                    f"{memory_admission.get('detail') or 'refresh capacity before qualification.'}"
+                )
     ready = not blockers
     route_count = sum(
         benchmark_job_maximum_route_count(job) for job in jobs
@@ -14017,10 +15359,12 @@ def calibration_plan(
     measured_request["enginePreference"] = preference
     decision = best_engine_request(measured_request, models)
     evidence_tier = str(decision.get("engineEvidenceTier") or decision.get("evidenceTier") or "")
-    trusted = evidence_tier == "cross-engine-local-benchmark"
+    trusted = evidence_tier in {
+        "cross-engine-local-benchmark", "local-route-qualification",
+    }
     decision_ready = evidence_tier in {
         "cross-engine-local-benchmark", "cross-engine-leading-band",
-        "cross-engine-noise-floor",
+        "cross-engine-noise-floor", "local-route-qualification",
     }
     resolved_backend = str(decision.get("backend") or request["backend"])
     rationale = list(decision.get("engineRationale") or decision.get("rationale") or [])
@@ -14047,7 +15391,9 @@ def calibration_plan(
         "contractId": contract_id,
         "action": action,
         "ready": ready,
+        "routeQualification": route_qualification,
         "blockers": blockers,
+        "memoryAdmission": copy.deepcopy(memory_admission),
         "request": request,
         "reasoningContract": reasoning_contract,
         "model": {"id": request["modelId"], "name": str(model.get("name") or request["modelId"])},
@@ -14058,6 +15404,14 @@ def calibration_plan(
             "kind": str(suite.get("kind") or "throughput"),
             "promptSchedule": prompt_schedule,
         },
+        "suiteAdjustment": (
+            {
+                "requested": requested_suite_name,
+                "measured": "agentic",
+                "reason": "Qwen PLE route qualification uses the bounded four-turn reasoning workload.",
+            }
+            if route_qualification_candidate and requested_suite_name != "agentic" else None
+        ),
         "preference": preference,
         "preferenceLabel": ENGINE_PREFERENCE_LABELS[preference],
         "ssdStreaming": ssd_lane,
@@ -14088,6 +15442,7 @@ def calibration_plan(
             "engineChanged": bool(decision.get("engineChanged")),
             "leadingBackends": copy.deepcopy(decision.get("leadingBackends") or []),
             "currentInLeadingBand": decision.get("currentInLeadingBand") is True,
+            "qualified": evidence_tier == "local-route-qualification",
             "detail": str(rationale[0]) if rationale else "No matching cross-engine winner is available yet.",
             "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
             "outputWarning": str(
@@ -14095,6 +15450,7 @@ def calibration_plan(
                 or workload_comparison.get("warning") or ""
             ),
             "comparedEngines": copy.deepcopy(decision.get("comparedEngines") or []),
+            "qualifiedRoutes": copy.deepcopy(decision.get("qualifiedRoutes") or []),
         },
         "suggestedProfileName": suggested_name,
         "privacy": {
@@ -14125,6 +15481,7 @@ def public_session_resource(snapshot: dict[str, Any]) -> dict[str, Any]:
         "thermalState": str(condition.get("thermalState") or "unavailable"),
         "thermalStateValue": condition.get("thermalStateValue"),
         "lowPowerMode": condition.get("lowPowerMode"),
+        "metalWiredLimitBytes": max(0, int(snapshot.get("metalWiredLimitBytes") or 0)),
         "capturedAt": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -14228,6 +15585,73 @@ def launch_memory_estimate(
             },
             "nativeFreeToken": True,
             "basis": "Native FreeToken schema v1 weight and per-token KV sizing at the full selected context, plus a conservative launcher runtime and macOS reserve.",
+        }
+    qwen4_ple = model.get("qwen4Ple") if isinstance(model.get("qwen4Ple"), dict) else {}
+    if backend == "omlx" and qwen4_ple.get("supported") is True:
+        geometry = model.get("memoryGeometry") if isinstance(model.get("memoryGeometry"), dict) else {}
+        bytes_per_token = geometry.get("fullBytesPerToken")
+        geometry_ready = bool(
+            geometry.get("ready") is True
+            and geometry.get("qwen4Qsa") is True
+            and isinstance(bytes_per_token, int) and not isinstance(bytes_per_token, bool)
+            and bytes_per_token > 0
+        )
+        kv_bytes = int(bytes_per_token) * context if geometry_ready and context > 0 else 0
+        model_bytes = max(0, int(qwen4_ple.get("residentBytes") or 0))
+        checkpoint_bytes = max(0, int(qwen4_ple.get("checkpointBytes") or 0))
+        ple_bytes = max(0, int(qwen4_ple.get("pleBytes") or 0))
+        runtime_reserve = SESSION_RUNTIME_BASE_RESERVE_BYTES
+        working_set = model_bytes + kv_bytes + runtime_reserve
+        total = int(resource.get("totalMemoryBytes") or 0)
+        os_reserve = max(
+            SESSION_OS_RESERVE_MIN_BYTES,
+            round(total * SESSION_OS_RESERVE_FRACTION) if total > 0 else 0,
+        )
+        metal_estimate = model_bytes + kv_bytes + OMLX_QWEN4_METAL_WORKSPACE_BYTES
+        gib = 1024**3
+        required_metal_limit = max(
+            OMLX_QWEN4_METAL_FLOOR_BYTES,
+            ((metal_estimate + gib - 1) // gib) * gib,
+        )
+        memory_guard = str(options.get("memoryGuard") or "balanced")
+        return {
+            "version": SESSION_MEMORY_ESTIMATE_VERSION,
+            "modelBytes": model_bytes,
+            "checkpointBytes": checkpoint_bytes,
+            "pleBytes": ple_bytes,
+            "ssdPleBytes": ple_bytes,
+            "pleMmap": True,
+            "pleStorage": "mmap",
+            "memoryGuard": memory_guard,
+            "memoryGuardCeilingBytes": (
+                OMLX_QWEN4_HIGH_MEMORY_CEILING_BYTES
+                if memory_guard == "high" else 0
+            ),
+            "memoryGuardHardWatermarkBytes": (
+                OMLX_QWEN4_HIGH_MEMORY_HARD_BYTES
+                if memory_guard == "high" else 0
+            ),
+            "requiredMetalWiredLimitBytes": required_metal_limit,
+            "companionBytes": 0,
+            "companionLabels": [],
+            "kvCacheBytes": kv_bytes,
+            "kvPrecision": "full",
+            "kvScalarBytes": 2.0,
+            "contextTokens": context,
+            "parallelLanes": 1,
+            "runtimeReserveBytes": runtime_reserve,
+            "estimatedWorkingSetBytes": working_set,
+            "osReserveBytes": os_reserve,
+            "requiredHeadroomBytes": working_set + os_reserve,
+            "geometryReady": geometry_ready,
+            "geometry": copy.deepcopy(geometry),
+            "estimateIsConservative": True,
+            "basis": (
+                "Qwen4 PLE capacity: the indexed N-gram table is read-only SSD mmap, the remaining checkpoint "
+                "uses oMLX's 1.05 resident estimate, QSA index keys and MRoPE positions stay full precision, "
+                "and runtime plus macOS reserves remain separate. The context-derived Metal limit is checked "
+                "independently from the oMLX process guard. This is not swap or expert streaming."
+            ),
         }
     if backend in SSD_STREAMING_BACKENDS:
         capability = model.get("backends", {}).get(backend, {})
@@ -14367,6 +15791,23 @@ def session_memory_admission(
     estimate = launch_memory_estimate(request, model, resource)
     phase = str(hub.get("phase") or "idle")
     operation_active = bool(operation.get("active"))
+    qwen4_ple_route = bool(
+        request.get("backend") == "omlx" and estimate.get("pleMmap") is True
+    )
+    memory_guard = str(request.get("options", {}).get("memoryGuard") or "balanced")
+    headroom = int(resource.get("headroomBytes") or 0)
+    high_memory_route = qwen4_ple_route and memory_guard == "high"
+    high_hard_watermark = int(
+        estimate.get("memoryGuardHardWatermarkBytes")
+        or OMLX_QWEN4_HIGH_MEMORY_HARD_BYTES
+    )
+    high_minimum_headroom = int(
+        estimate.get("osReserveBytes") or SESSION_OS_RESERVE_MIN_BYTES
+    )
+    required_metal_limit = int(
+        estimate.get("requiredMetalWiredLimitBytes")
+        or OMLX_QWEN4_METAL_FLOOR_BYTES
+    )
     if phase in {"preflight", "starting", "running", "stopping"} or operation_active:
         decision = "busy"
         requires_acknowledgement = False
@@ -14385,6 +15826,78 @@ def session_memory_admission(
         launchable = True
         label = "Whallm route is already loaded"
         detail = "Whallm already owns the model and SSD cache; this launch adds only a private loopback bridge and the selected work surface. The 48 GB host remains an experimental upstream configuration."
+    elif qwen4_ple_route and not high_memory_route:
+        decision = "configuration"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Choose Qwen high-memory mode"
+        detail = (
+            "Every verified Qwen PLE mmap route requires the dedicated High memory guard. "
+            "Choose High memory in Runtime controls before loading or qualifying this checkpoint."
+        )
+    elif (
+        high_memory_route
+        and int(estimate.get("estimatedWorkingSetBytes") or 0) > high_hard_watermark
+    ):
+        decision = "configuration"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Reduce Qwen context"
+        detail = (
+            f"This context needs an estimated {int(estimate.get('estimatedWorkingSetBytes') or 0) / 1024**3:.1f} GiB "
+            f"working set, above the actual {high_hard_watermark / 1024**3:.1f} GiB oMLX hard watermark. "
+            "Reduce context before starting; approval cannot override the process guard."
+        )
+    elif high_memory_route and not estimate.get("geometryReady"):
+        decision = "unknown"
+        requires_acknowledgement = False
+        launchable = False
+        label = "KV capacity unavailable"
+        detail = (
+            "Qwen high-memory mode is blocked because the checkpoint does not expose the exact QSA "
+            "geometry needed to prove its full-context KV allocation."
+        )
+    elif high_memory_route and resource.get("memoryAvailable") is not True:
+        decision = "unknown"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Memory headroom unavailable"
+        detail = (
+            "Qwen high-memory mode is blocked because macOS did not provide current unified-memory "
+            "headroom. Refresh capacity before starting this exceptional route."
+        )
+    elif high_memory_route and headroom < high_minimum_headroom:
+        decision = "pressure"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Free memory before launch"
+        detail = (
+            f"Qwen high-memory mode requires at least {high_minimum_headroom / 1024**3:.1f} GiB of measured "
+            f"headroom before loading; only {headroom / 1024**3:.1f} GiB is available. Close memory-heavy "
+            "apps and refresh capacity."
+        )
+    elif (
+        high_memory_route
+        and int(resource.get("metalWiredLimitBytes") or 0) < required_metal_limit
+    ):
+        decision = "system-setting"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Raise the temporary Metal limit"
+        detail = (
+            f"The selected context needs a temporary {required_metal_limit / 1024**3:.0f} GiB Apple GPU "
+            f"wired-memory limit. This is separate from the {OMLX_QWEN4_HIGH_MEMORY_CEILING_GIB:.0f} GiB "
+            "oMLX process guard; the Metal setting resets at reboot and should return to 0 after qualification."
+        )
+    elif high_memory_route:
+        decision = "ready"
+        requires_acknowledgement = False
+        launchable = True
+        label = "Qwen high-memory route ready"
+        detail = (
+            "The verified PLE geometry, oMLX hard watermark, measured headroom, and temporary "
+            "Metal wired-memory limit all satisfy the dedicated High memory route gate."
+        )
     elif resource.get("memoryAvailable") is not True:
         decision = "unknown"
         requires_acknowledgement = True
@@ -14398,7 +15911,6 @@ def session_memory_admission(
         label = "KV capacity needs review"
         detail = "The checkpoint does not expose enough attention geometry for a full-context KV estimate."
     else:
-        headroom = int(resource.get("headroomBytes") or 0)
         working_set = int(estimate["estimatedWorkingSetBytes"])
         required = int(estimate["requiredHeadroomBytes"])
         if headroom >= required:
@@ -14451,6 +15963,43 @@ def session_memory_admission(
     }
 
 
+def route_qualification_memory_admission(
+    request: dict[str, Any], models: list[dict[str, Any]], *,
+    resource_snapshot: dict[str, Any] | None = None,
+    hub: dict[str, Any] | None = None,
+    operation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Re-use Sessions' fail-closed capacity gate for a Qwen PLE test.
+
+    This is read-only: it samples current capacity and never changes the Metal
+    limit.  Callers running inside Benchmark Lab may pass the current benchmark
+    as an inactive operation so the gate evaluates the model load rather than
+    blocking on its own worker state.
+    """
+    current_hub = copy.deepcopy(hub) if isinstance(hub, dict) else MANAGER.hub_snapshot()
+    current_operation = (
+        copy.deepcopy(operation)
+        if isinstance(operation, dict) else active_launcher_operation(current_hub)
+    )
+    snapshot = (
+        copy.deepcopy(resource_snapshot)
+        if isinstance(resource_snapshot, dict) else apple_resource_snapshot()
+    )
+    return session_memory_admission(
+        request, models, public_session_resource(snapshot),
+        current_hub, current_operation,
+    )
+
+
+def route_qualification_admission_ready(admission: dict[str, Any]) -> bool:
+    """Require the fail-closed, no-approval outcome before a Qwen qualification load."""
+    return bool(
+        admission.get("launchable") is True
+        and admission.get("requiresAcknowledgement") is False
+        and admission.get("decision") == "ready"
+    )
+
+
 def build_benchmark_completion_request(
     plan: LaunchPlan, prompt: str | list[dict[str, str]], max_tokens: int,
     sampling: dict[str, Any],
@@ -14483,6 +16032,7 @@ def build_benchmark_completion_request(
         value = sampling.get(key)
         if value is not None:
             body[key] = value
+    apply_chat_reasoning_contract(body, plan.backend, plan.reasoning)
     return urllib.request.Request(
         f"http://127.0.0.1:{plan.port}/v1/chat/completions",
         data=json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
@@ -14539,6 +16089,17 @@ def run_benchmark_completion(
     content: list[str] = []
     reasoning: list[str] = []
     usage: dict[str, Any] = {}
+    finish_reasons: set[str] = set()
+
+    def observe_finish_reason(value: Any) -> None:
+        if value is None:
+            return
+        if not isinstance(value, str):
+            finish_reasons.add("invalid")
+            return
+        normalized = value.strip().casefold()
+        if normalized:
+            finish_reasons.add(normalized[:80])
     try:
         response = urllib.request.urlopen(request, timeout=900)
     except urllib.error.HTTPError as error:
@@ -14553,6 +16114,8 @@ def run_benchmark_completion(
             total = time.monotonic() - started
             choice = (data.get("choices") or [{}])[0]
             message = choice.get("message") if isinstance(choice, dict) else {}
+            if isinstance(choice, dict):
+                observe_finish_reason(choice.get("finish_reason"))
             if isinstance(message, dict):
                 content.append(_benchmark_text_part(message.get("content")))
                 reasoning.append(_benchmark_text_part(message.get("reasoning_content") or message.get("reasoning")))
@@ -14577,6 +16140,7 @@ def run_benchmark_completion(
                 choices = event.get("choices")
                 if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
                     continue
+                observe_finish_reason(choices[0].get("finish_reason"))
                 delta = choices[0].get("delta")
                 if not isinstance(delta, dict):
                     delta = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
@@ -14607,6 +16171,22 @@ def run_benchmark_completion(
         {"reasoning": "".join(reasoning), "content": "".join(content)},
         ensure_ascii=False, separators=(",", ":"),
     ).encode("utf-8")
+    reasoning_text = "".join(reasoning)
+    answer_text = "".join(content)
+    finish_reason = next(iter(finish_reasons)) if len(finish_reasons) == 1 else None
+    response_limit_reached = finish_reason in {
+        "length", "max_tokens", "max_output_tokens", "token_limit",
+    }
+    if len(finish_reasons) > 1:
+        terminal_state = "unknown"
+    elif response_limit_reached:
+        terminal_state = "truncated"
+    elif finish_reason == "stop":
+        terminal_state = "complete"
+    elif finish_reason is None:
+        terminal_state = "unknown"
+    else:
+        terminal_state = "incomplete"
     return {
         "promptTokens": prompt_tokens,
         "cachedPromptTokens": cached_prompt_tokens,
@@ -14622,6 +16202,12 @@ def run_benchmark_completion(
         "totalSeconds": round(total, 6),
         "decodeTokensPerSecond": round(decode_tokens / decode_seconds, 4),
         "endToEndTokensPerSecond": round(completion_tokens / max(total, 0.000_001), 4),
+        "reasoningObserved": bool(reasoning_text.strip()),
+        "answerObserved": bool(answer_text.strip()),
+        "finishReason": finish_reason,
+        "terminalState": terminal_state,
+        "terminalComplete": terminal_state == "complete",
+        "responseLimitReached": response_limit_reached,
         "outputHash": hashlib.sha256(output_identity).hexdigest(),
     }
 
@@ -14706,6 +16292,7 @@ def build_route_check_request(
                 }],
                 "tool_choice": "auto",
             })
+        apply_chat_reasoning_contract(body, plan.backend, plan.reasoning)
         api_key = str(plan.secrets.get("apiKey") or "local")
         url = f"http://127.0.0.1:{plan.port}/v1/chat/completions"
     else:
@@ -14881,16 +16468,18 @@ def session_cache_policy(plan: LaunchPlan | None) -> dict[str, Any]:
                 "The launcher reports only cache telemetry returned through the connected API."
             ),
         }
+    backend = plan.backend
+    engine_label = BACKEND_LABELS.get(backend, backend)
     return {
         "version": CACHE_OBSERVATORY_VERSION,
-        "engine": "lmstudio",
-        "engineLabel": BACKEND_LABELS["lmstudio"],
+        "engine": backend,
+        "engineLabel": engine_label,
         "configuration": "engine-managed",
         "memoryCache": "engine-managed",
         "diskCache": "engine-managed",
         "diskLimit": None,
         "detail": (
-            "LM Studio owns this route's cache lifecycle. The launcher reports only "
+            f"{engine_label} owns this route's cache lifecycle. The launcher reports only "
             "cache telemetry returned by the engine and does not invent its settings."
         ),
     }
@@ -17460,11 +19049,19 @@ class RunManager:
             )
             return
         with console.lock:
+            settle_revision = console.rpc_settle_revision
             rendered = pi_rpc_event_output(console, event)
+            turn_settled = console.rpc_settle_revision != settle_revision
         console.append(rendered)
-        if event.get("type") != "agent_settled":
+        if not turn_settled:
             return
         with console.lock:
+            if console.rpc_queue_paused:
+                console.rpc_pending_messages = (
+                    len(console.rpc_follow_up_queue)
+                    + console.rpc_external_pending_messages
+                )
+                return
             next_message = (
                 console.rpc_follow_up_queue.pop(0)
                 if console.rpc_follow_up_queue else None
@@ -17479,6 +19076,8 @@ class RunManager:
                 console.rpc_streaming = True
                 console.rpc_prompt_id = prompt_id
                 console.rpc_prompt_acknowledged = False
+                console.rpc_queue_paused = False
+                console.rpc_queue_advance_allowed = False
         if next_message is None:
             return
         console.append(pi_rpc_heading("STARTING QUEUED MESSAGE", "38;5;214"))
@@ -17681,6 +19280,8 @@ class RunManager:
                     console.rpc_streaming = True
                     console.rpc_prompt_id = prompt_id
                     console.rpc_prompt_acknowledged = False
+                    console.rpc_queue_paused = False
+                    console.rpc_queue_advance_allowed = False
                     pending = 0
             if is_busy:
                 console.append(
@@ -17742,6 +19343,7 @@ class RunManager:
                 cleared = len(console.rpc_follow_up_queue)
                 console.rpc_follow_up_queue.clear()
                 console.rpc_pending_messages = console.rpc_external_pending_messages
+                console.rpc_queue_paused = False
             console.append(
                 pi_rpc_heading("QUEUE CLEARED", "38;5;109")
                 + f"Removed {cleared} launcher-queued follow-up message{'s' if cleared != 1 else ''}.".encode("utf-8")
@@ -18627,17 +20229,33 @@ class BenchmarkManager:
 
     def start(self, payload: dict[str, Any], models: list[dict[str, Any]]) -> dict[str, Any]:
         scope = str(payload.get("scope") or "current")
-        if scope not in {"current", "engines", "mtp-tune", "dflash-tune"}:
+        if scope not in {"current", "engines", "qualification", "mtp-tune", "dflash-tune"}:
             raise ValueError("Unknown Benchmark Lab scope.")
         shootout = validated_engine_shootout_request(payload, models) if scope == "engines" else None
+        qualification = (
+            validated_route_qualification_request(payload, models)
+            if scope == "qualification" else None
+        )
         tuning_job = None
         if scope == "mtp-tune":
             tuning_job = validated_lmstudio_mtp_tuning_request(payload, models)
         elif scope == "dflash-tune":
             tuning_job = validated_dflash2_tuning_request(payload, models)
-        job = None if shootout or tuning_job else validated_benchmark_request(payload, models)
+        job = None if shootout or qualification or tuning_job else validated_benchmark_request(payload, models)
         if self.run_manager.snapshot().get("phase") != "idle":
             raise ValueError("Stop the active launcher run before starting Benchmark Lab.")
+        if qualification:
+            hub = self.run_manager.snapshot()
+            admission = route_qualification_memory_admission(
+                qualification["request"], models, hub=hub,
+                operation=active_launcher_operation(hub),
+            )
+            if not route_qualification_admission_ready(admission):
+                raise ValueError(
+                    f"{admission.get('label') or 'Qwen route is not loadable'}: "
+                    f"{admission.get('detail') or 'refresh capacity before qualification.'}"
+                )
+            qualification["memoryAdmission"] = admission
         with self.lock:
             if self.is_active():
                 raise ValueError("A benchmark is already running.")
@@ -18692,6 +20310,57 @@ class BenchmarkManager:
                 }
                 thread = threading.Thread(
                     target=self._shootout_worker, args=(shootout, models), daemon=True,
+                )
+                self.thread = thread
+                thread.start()
+                return copy.deepcopy(public_job)
+            if qualification:
+                qualification_job = qualification["job"]
+                public_job = {
+                    "id": qualification["id"], "kind": qualification["kind"],
+                    "client": qualification["client"], "modelId": qualification["modelId"],
+                    "model": qualification["model"], "suite": qualification["suite"],
+                    "suiteLabel": qualification["suiteLabel"],
+                    "workloadKind": qualification["workloadKind"],
+                    "enginePreference": qualification["enginePreference"],
+                    "enginePreferenceLabel": ENGINE_PREFERENCE_LABELS[qualification["enginePreference"]],
+                    "reasoningContract": copy.deepcopy(qualification["reasoningContract"]),
+                    "reasoningBudget": {
+                        "sampleMaxTokens": int(qualification_job["suite"]["maxTokens"]),
+                        "thinkingMaxTokens": int(qualification_job["qualificationThinkingBudgetTokens"]),
+                        "answerReserveTokens": int(qualification_job["qualificationAnswerReserveTokens"]),
+                        "visibleResponseLimit": int(qualification_job["output"]),
+                    },
+                    "memoryAdmission": copy.deepcopy(qualification.get("memoryAdmission")),
+                    "executionOrder": ["omlx"],
+                    "engines": [{
+                        "backend": "omlx", "label": BACKEND_LABELS["omlx"],
+                        "modes": benchmark_job_public_modes(qualification_job),
+                        "measurementRouteCount": 1,
+                    }],
+                    "excludedEngines": copy.deepcopy(qualification["excludedEngines"]),
+                    "resourceCooldown": {
+                        "version": 1,
+                        "maxWaitSeconds": BENCHMARK_COOLDOWN_MAX_SECONDS,
+                        "stableSamplesRequired": BENCHMARK_COOLDOWN_STABLE_SAMPLES,
+                        "memoryToleranceBytes": BENCHMARK_MEMORY_MEANINGFUL_BYTES,
+                    },
+                }
+                self.state = {
+                    "phase": "queued",
+                    "message": "Route qualification accepted. Preparing the exact oMLX AR + PLE mmap route…",
+                    "progress": 0.0, "job": public_job, "modes": {},
+                    "engines": {
+                        "omlx": {
+                            "backend": "omlx", "label": BACKEND_LABELS["omlx"],
+                            "phase": "queued", "modes": {}, "record": None,
+                        },
+                    },
+                    "result": None, "events": [],
+                }
+                thread = threading.Thread(
+                    target=self._qualification_worker,
+                    args=(qualification, models), daemon=True,
                 )
                 self.thread = thread
                 thread.start()
@@ -18972,12 +20641,20 @@ class BenchmarkManager:
                     requested_depth, int(capability.get("depth") or 1),
                     1, int(capability.get("depthMax") or 1),
                 )
-        return {
+        payload = {
             "backend": job["backend"], "client": "chat", "modelId": job["modelId"],
             "project": job["project"], "context": job["context"], "output": job["output"],
             "reasoning": job["reasoning"], "mode": "custom", "options": options,
             "chat": job["chat"],
         }
+        if job.get("routeQualification") is True:
+            options["_qualificationThinkingBudgetTokens"] = int(
+                job["qualificationThinkingBudgetTokens"]
+            )
+            options["_qualificationAnswerReserveTokens"] = int(
+                job["qualificationAnswerReserveTokens"]
+            )
+        return payload
 
     def _update_progress(
         self, completed: int, total: int, message: str,
@@ -18996,21 +20673,40 @@ class BenchmarkManager:
     ) -> tuple[dict[str, Any], int]:
         label = display_label or self._mode_label(mode)
         shootout = bool(job.get("shootoutId"))
+        grouped = shootout or job.get("routeQualification") is True
         route_label = (
-            f"{BACKEND_LABELS[job['backend']]} · {label}" if shootout else label
+            f"{BACKEND_LABELS[job['backend']]} · {label}" if grouped else label
         )
         with self.lock:
             self.state["phase"] = "starting"
             self.state["liveMetric"] = None
-            if shootout and job["backend"] in self.state.get("engines", {}):
+            if grouped and job["backend"] in self.state.get("engines", {}):
                 self.state["engines"][job["backend"]]["phase"] = "starting"
         self._event(f"Loading {route_label} for a cache-isolated benchmark pass…")
         promotion = bool(job.get("runtimePromotionId"))
+        mode_payload = self._mode_payload(job, mode)
         plan = normalized_request(
-            self._mode_payload(job, mode), models,
+            mode_payload, models,
             purpose="runtime-promotion" if promotion else "benchmark",
             runtime_binary=str(job.get("_runtimeBinary")) if promotion else None,
         )
+        if job.get("routeQualification") is True:
+            admission = route_qualification_memory_admission(
+                mode_payload, models, hub=self.run_manager.snapshot(),
+                operation={
+                    "active": False, "kind": "benchmark", "phase": "starting",
+                    "detail": "This route qualification owns the next model load.",
+                },
+            )
+            if not route_qualification_admission_ready(admission):
+                raise RuntimeError(
+                    "Capacity changed immediately before the Qwen model load. "
+                    f"{admission.get('label') or 'The route is blocked'}: "
+                    f"{admission.get('detail') or 'refresh capacity and try again.'}"
+                )
+            with self.lock:
+                if isinstance(self.state.get("job"), dict):
+                    self.state["job"]["memoryAdmission"] = copy.deepcopy(admission)
         telemetry = BenchmarkTelemetrySampler()
         gate = copy.deepcopy(resource_gate) if isinstance(resource_gate, dict) else None
         initial_sample = gate.pop("_initialSnapshot", None) if gate else None
@@ -19022,7 +20718,7 @@ class BenchmarkManager:
             self._wait_for_engine(plan)
             with self.lock:
                 self.state["phase"] = "running"
-                if shootout and job["backend"] in self.state.get("engines", {}):
+                if grouped and job["backend"] in self.state.get("engines", {}):
                     self.state["engines"][job["backend"]]["phase"] = "running"
             run_benchmark_completion(
                 plan, benchmark_prompt(128, 11_000 + job["modes"].index(mode)), 32,
@@ -19040,7 +20736,10 @@ class BenchmarkManager:
             self._update_progress(completed, total, f"{route_label} greedy correctness probe complete.")
             samples: list[dict[str, Any]] = []
             if job["workloadKind"] == "agentic":
-                for case in benchmark_agentic_cases(job["suite"]):
+                for case in benchmark_agentic_cases(
+                    job["suite"],
+                    require_complete_answer=job.get("routeQualification") is True,
+                ):
                     sample = run_benchmark_completion(
                         plan, case["messages"],
                         int(job["suite"]["maxTokens"]), job["speedSampling"], self.cancel_event,
@@ -19109,7 +20808,7 @@ class BenchmarkManager:
             if job["workloadKind"] == "agentic":
                 result["agenticMetrics"] = summarize_agentic_samples(samples)
             with self.lock:
-                if shootout and job["backend"] in self.state.get("engines", {}):
+                if grouped and job["backend"] in self.state.get("engines", {}):
                     self.state["engines"][job["backend"]]["modes"][state_key or mode] = copy.deepcopy(result)
                 else:
                     self.state["modes"][state_key or mode] = copy.deepcopy(result)
@@ -19224,6 +20923,38 @@ class BenchmarkManager:
                 )
             ),
         }
+        if job.get("routeQualification") is True:
+            record.update({
+                "kind": "route-qualification",
+                "qualificationVersion": ROUTE_QUALIFICATION_VERSION,
+            })
+            metrics = route_qualification_metrics(record)
+            if metrics is None:
+                raise RuntimeError(
+                    "Route qualification did not return complete authoritative usage, TPS, and TTFT telemetry."
+                )
+            reasoning_enabled = str(job.get("reasoning") or "auto") not in {"auto", "off"}
+            reasoning_observed = metrics["reasoningTurns"] == metrics["sampleCount"]
+            answer_observed = metrics["answerTurns"] == metrics["sampleCount"]
+            if not reasoning_enabled or not reasoning_observed or not answer_observed:
+                raise RuntimeError(
+                    "Route qualification requires every measured turn to expose separate reasoning and a final answer; nothing was saved."
+                )
+            record["qualification"] = {
+                "reasoningEnabled": True,
+                "reasoningObserved": True,
+                "answerObserved": True,
+                "terminalCompletionObserved": True,
+                "authoritativeUsage": True,
+                "metrics": metrics,
+            }
+            record["recommendation"] = (
+                f"oMLX AR + PLE mmap qualified at "
+                f"{float(metrics['medianDecodeTokensPerSecond']):.1f} generation tok/s "
+                f"with {float(metrics['medianTTFTSeconds']):.2f}s median time to first output. "
+                f"All {int(metrics['sampleCount'])} bounded agentic turns exposed separate "
+                "reasoning and a final answer."
+            )
         return record
 
     @staticmethod
@@ -20299,6 +22030,130 @@ class BenchmarkManager:
         if not _local_benchmark_record_verified(capability, record, job["evidence"]):
             raise RuntimeError("The completed DFlash Calibration sweep failed its evidence contract.")
         return record, completed, resource_reference
+
+    def _build_qualification_result(
+        self, qualification: dict[str, Any], record: dict[str, Any],
+        models: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        model = next(
+            item for item in models if item.get("id") == qualification["modelId"]
+        )
+        preference = str(qualification.get("enginePreference") or "throughput")
+        route = public_route_qualification_result(model, record, preference)
+        metrics = record["qualification"]["metrics"]
+        rationale = str(record["recommendation"])
+        decision = {
+            "preference": preference,
+            "preferenceLabel": ENGINE_PREFERENCE_LABELS[preference],
+            "backend": "omlx", "label": BACKEND_LABELS["omlx"],
+            "backendLabel": BACKEND_LABELS["omlx"],
+            "engineChanged": False,
+            "evidenceTier": "local-route-qualification",
+            "evidenceLabel": "Qualified oMLX route",
+            "qualified": True, "trusted": True, "trustedWinner": False,
+            "comparedEngines": [], "qualifiedRoutes": [route],
+            "missingEngines": [], "rationale": [rationale],
+            "recommendation": rationale,
+            "leadingBackends": [], "currentInLeadingBand": True,
+        }
+        return {
+            "id": qualification["id"], "kind": "route-qualification",
+            "qualificationVersion": ROUTE_QUALIFICATION_VERSION,
+            "modelId": qualification["modelId"], "model": qualification["model"],
+            "suite": qualification["suite"],
+            "workloadKind": qualification["workloadKind"],
+            "reasoningContract": copy.deepcopy(qualification["reasoningContract"]),
+            "qualified": True, "qualifiedBackend": "omlx",
+            "qualifiedRoutes": [route], "engines": [route],
+            "authoritativeUsage": {
+                "promptTokens": metrics["promptTokens"],
+                "completionTokens": metrics["completionTokens"],
+            },
+            "decision": decision, "recommendation": rationale,
+        }
+
+    def _qualification_worker(
+        self, qualification: dict[str, Any], models: list[dict[str, Any]],
+    ) -> None:
+        job = qualification["job"]
+        total = 2 + benchmark_measurement_count(job["suite"])
+        try:
+            gate = self._wait_for_resource_baseline(
+                "oMLX AR + PLE mmap route qualification", "omlx",
+            )
+            admission = route_qualification_memory_admission(
+                qualification["request"], models,
+                hub=self.run_manager.snapshot(),
+                operation={
+                    "active": False, "kind": "benchmark", "phase": "running",
+                    "detail": "This route qualification owns the next model load.",
+                },
+            )
+            if not route_qualification_admission_ready(admission):
+                raise RuntimeError(
+                    "Capacity changed before the Qwen model load. "
+                    f"{admission.get('label') or 'The route is blocked'}: "
+                    f"{admission.get('detail') or 'refresh capacity and try again.'}"
+                )
+            with self.lock:
+                if isinstance(self.state.get("job"), dict):
+                    self.state["job"]["memoryAdmission"] = copy.deepcopy(admission)
+            result, _completed = self._measure_mode(
+                job, models, "ar", 0, total, gate,
+                display_label="AR + PLE mmap", state_key="ar",
+            )
+            if self.cancel_event.is_set():
+                raise LaunchCancelled("Route qualification cancelled before its result was saved.")
+            record = self._build_record(job, {"ar": result})
+            save_benchmark_record(record)
+            public_result = self._build_qualification_result(
+                qualification, record, models,
+            )
+            public_result["persistence"] = {
+                "saved": True, "scope": "local", "recordCount": 1,
+                "savedAt": datetime.now(timezone.utc).isoformat(),
+            }
+            with self.lock:
+                self.state["phase"] = "completed"
+                self.state["progress"] = 1.0
+                self.state["result"] = copy.deepcopy(public_result)
+                engine = self.state.get("engines", {}).get("omlx")
+                if isinstance(engine, dict):
+                    engine["phase"] = "completed"
+                    engine["record"] = {
+                        "winner": "ar", "winnerLabel": "AR + PLE mmap",
+                        "recommendation": record["recommendation"],
+                    }
+            self._event(record["recommendation"])
+        except LaunchCancelled:
+            with self.lock:
+                self.state["phase"] = "cancelled"
+            self._event(
+                "Route qualification cancelled. No partial result was trusted or saved.",
+                "warning",
+            )
+        except Exception as error:  # noqa: BLE001
+            if self.cancel_event.is_set():
+                with self.lock:
+                    self.state["phase"] = "cancelled"
+                self._event(
+                    "Route qualification cancelled. No partial result was trusted or saved.",
+                    "warning",
+                )
+            else:
+                with self.lock:
+                    self.state["phase"] = "failed"
+                self._event(
+                    f"Route qualification stopped before saving its result: {error}",
+                    "error",
+                )
+        finally:
+            if self.active_plan is not None:
+                self.run_manager.stop()
+            with self.lock:
+                self.active_plan = None
+                if self.thread is threading.current_thread():
+                    self.thread = None
 
     def _shootout_worker(
         self, shootout: dict[str, Any], models: list[dict[str, Any]],

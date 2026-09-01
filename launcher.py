@@ -158,6 +158,65 @@ def controller_source_is_current() -> bool:
 RUNTIME_PREFERENCES_VERSION = 1
 RUNTIME_PREFERENCES_FILE = STATE_DIR / "runtime-preferences.json"
 MANAGED_RUNTIMES_DIR = STATE_DIR / "runtimes"
+LLAMACPP_RUNTIME_TAG = "b10740"
+LLAMACPP_RUNTIME_COMMIT = "fe2120bc9db242c4349a6f71810af1cd52ee8580"
+LLAMACPP_RUNTIME_DIR = MANAGED_RUNTIMES_DIR / f"llama.cpp-{LLAMACPP_RUNTIME_TAG}"
+LLAMACPP_SERVER_PATH = LLAMACPP_RUNTIME_DIR / "llama-server"
+LLAMACPP_RUNTIME_ARCHIVE_SHA256 = "1adfad815e1e8ceddd3e9e4f20de0d5fe4aa3b227366b11391ca14fd53508d06"
+# The server uses @loader_path and these ten bundled dylib load names.  Each
+# alias target and its bytes are pinned to the verified official b10740 macOS
+# arm64 archive; version/help output is only a secondary capability check.
+LLAMACPP_RUNTIME_FILE_MANIFEST = (
+    (
+        "llama-server", "llama-server",
+        "c32a2010dec561243448447599b7c13789022052ed59a336005758fbacf03639",
+    ),
+    (
+        "libllama-server-impl.dylib", "libllama-server-impl.dylib",
+        "3ee0ff0cff25170154a3b3b80abb7354700ebb50d95400a0185912455d261297",
+    ),
+    (
+        "libllama-common.0.dylib", "libllama-common.0.3.0.dylib",
+        "568deaf812b855ef73643f09063db6fbad8ec6c2f74748258874e2effd43d3b1",
+    ),
+    (
+        "libmtmd.0.dylib", "libmtmd.0.3.0.dylib",
+        "cb2279e79f05fc08d2ef4795d8903fc2a520e0bd3ec6f50cf71f16272e03f690",
+    ),
+    (
+        "libllama.0.dylib", "libllama.0.3.0.dylib",
+        "9b1b50cae202a2533c600387ee053e68093bda4d038adde013a0165495c4873c",
+    ),
+    (
+        "libggml.0.dylib", "libggml.0.22.0.dylib",
+        "516b66377e2ad7b4c89095a8c04394f3182f2957c976a9f2c478525b12c8bba0",
+    ),
+    (
+        "libggml-cpu.0.dylib", "libggml-cpu.0.22.0.dylib",
+        "b28b45517b5eb7163f689335438970d41e8f4cb66281e4293b0c6fb973a83aa8",
+    ),
+    (
+        "libggml-blas.0.dylib", "libggml-blas.0.22.0.dylib",
+        "48927629b7e15fe9661599ffe290058ff3d7b36b2eff7d05c002a8b37232254f",
+    ),
+    (
+        "libggml-metal.0.dylib", "libggml-metal.0.22.0.dylib",
+        "8058fe6971d263beed5c3bbe4cd06ab85168df51cf648c725c1f2ee3490e7e3f",
+    ),
+    (
+        "libggml-rpc.0.dylib", "libggml-rpc.0.22.0.dylib",
+        "2474d0a173841882e4be993776af9689946b01067fb2f2ba4af268a053a52624",
+    ),
+    (
+        "libggml-base.0.dylib", "libggml-base.0.22.0.dylib",
+        "ee5c1e1f3430f8c581b658da943a43f6f34211f58d6c0ae1d45a4a4f2e2ece21",
+    ),
+)
+# Successful file checks are cached only for an exact current filesystem
+# identity. A controller restart intentionally empties this bounded cache.
+VERIFIED_FILE_SHA256_CACHE_MAX_ENTRIES = 96
+_VERIFIED_FILE_SHA256_CACHE: dict[tuple[Any, ...], bool] = {}
+_VERIFIED_FILE_SHA256_CACHE_LOCK = threading.Lock()
 RUNTIME_UPDATE_SCHEMA_VERSION = 2
 RUNTIME_UPDATE_PLAN_TTL_SECONDS = 30 * 60
 RUNTIME_UPDATE_DIR = STATE_DIR / "runtime-updates"
@@ -368,6 +427,129 @@ SSD_STREAMING_MIN_WEIGHT_RATIO = 0.85
 SSD_STREAMING_PREFILL_SIZES = (128, 256, 512, 1_024, 2_048)
 SSD_STREAMING_BACKENDS = ("swiftlm", "mference", "whallm")
 SSD_ARTIFACT_BACKENDS = ("swiftlm", "mference")
+LLAMACPP_ATOMIC_REPO = "AtomicChat/Qwen3.8-Flash-Next-GGUF"
+LLAMACPP_ATOMIC_REVISION = "97d5aea2811eda4a58246da777b9a0fa9df22574"
+LLAMACPP_ATOMIC_VARIANT = "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64"
+LLAMACPP_ATOMIC_VARIANT_ID = "llamacpp-atomicchat-ad-3.84bpw-iq4-xs-m64"
+LLAMACPP_ATOMIC_FILE_MANIFEST = (
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00001-of-00028.gguf",
+        693_380_288, "7286697d1ede4318a5b40b5ef6965c4c93cb3eb8b8d5f5d415f0dd500b4677db",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00002-of-00028.gguf",
+        38_400_184_512, "274cd6cca57afd7e70526667f7f1b82b474af420e63ca71a41c2ef2c2b0f0215",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00003-of-00028.gguf",
+        1_789_309_632, "4d6bc919d69da86b63020883c4f0d049ef326d63fd0f70c70cc82507df71bf08",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00004-of-00028.gguf",
+        1_827_413_280, "7aca08665eea51dec224c57df8c126b0f10d83f5dbea6d0a6c3cf8b59c3d1259",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00005-of-00028.gguf",
+        1_857_435_520, "991d10bd5500286cd5d2ced52d9b62c3139b89f2a950ce39f96b12bc8424cf50",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00006-of-00028.gguf",
+        1_691_243_296, "bf3021a73adb309f88cd680db2cd36e9f24ea0e32c406c5320ae53f6dd902009",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00007-of-00028.gguf",
+        1_792_340_096, "e028b4b3eedf67fd70faa5cbb947739859de04d22d90abfa48fe9b8fe5373d9a",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00008-of-00028.gguf",
+        1_797_841_824, "9a0d6930a023581b021ea06d01a1cea8e44c7fa0cd14020e471dbf2e424b35a4",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00009-of-00028.gguf",
+        1_792_340_160, "ed250eeb318d45cb33b68cb89013836a71204923c984d986051dba7b5fbaa51f",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00010-of-00028.gguf",
+        1_797_841_888, "65f651c0e8c14e7b99ee72a6c550c924db90c3422e782024f645384b44c9f0bc",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00011-of-00028.gguf",
+        1_792_340_160, "4a1badfa4c6d8c5d12cf99111e7f5f3cbc09bff1aca1cc3eda6b0a275932a464",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00012-of-00028.gguf",
+        1_797_841_888, "8a23bedfc701e09cac6ca8152f4bbf38bbc14c5558bb46b7e68532fb0af29c18",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00013-of-00028.gguf",
+        1_792_340_160, "14352dec027dcee4690abe9048d83723284b497b5f8f71f5f99a95bd74359ce5",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00014-of-00028.gguf",
+        1_797_841_888, "ec7ea8e9530877c42f58c8bbe211007aa4588b3d723aafed6c191b999fc0c567",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00015-of-00028.gguf",
+        1_792_340_160, "561bb56e108313053d3bfcb2df8f77eef38c1aa528be4ce5e250e64b77a68bcc",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00016-of-00028.gguf",
+        1_797_841_888, "6684b7bdb3d6335f27fb2039abb4dda916352f42459ff478d95e0ee218da04fd",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00017-of-00028.gguf",
+        1_792_340_160, "6f5048378ef7c72b2d5d2c548859d4c8478280f7708af1158c05b43ef462aae5",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00018-of-00028.gguf",
+        1_797_841_888, "2778fd9344d577ab7b18c61321af39f63615d88967b5fca64be05afa6541f1fb",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00019-of-00028.gguf",
+        1_792_340_160, "5aef1bec6fdde6974fcbeffe90c347e1bdbce4ca14ebbf2172f3299a6fb0274a",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00020-of-00028.gguf",
+        1_797_841_888, "a1c27c434fed2c267639ff702882e1e6fe9bdffa4278dbb3afa40141aaf41ad0",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00021-of-00028.gguf",
+        1_792_340_160, "e11548204267c697eeab804d37c8f199dec1fc38409f71577a4d4b0df4d0e898",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00022-of-00028.gguf",
+        1_797_841_888, "d133a2ad98ac6ba3028a141b5eb982d29f0b44e8313a73442356709ce14b91ee",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00023-of-00028.gguf",
+        1_792_340_160, "c686dc13781aee7aa26a24edbd2c95a34edd8f6ca8acd1dfc6aa95a884febbfd",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00024-of-00028.gguf",
+        1_797_841_888, "c19ccf4960140ece9a0340de2960f1b9b15640704cce0c417beae2e48a74b55b",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00025-of-00028.gguf",
+        1_800_750_272, "ef779140eff7b9ea76066518c3ac391b37cf419a0dd718dcf30b6d8b66be985d",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00026-of-00028.gguf",
+        1_849_077_440, "c0bf8662c413f1929b1649b1fb79fb7effb9024a0102e221b1346829252ff7fc",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00027-of-00028.gguf",
+        1_699_601_472, "6f92b6a12706d645e8facd2879a30db89758c597b0ebc6e3d947116a8568eb4d",
+    ),
+    (
+        "Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64-00028-of-00028.gguf",
+        1_010_890_144, "d2775f8a64a4db1a6b5b3bf151bea713a21b3bf89068b5c30fa67658364b1cd0",
+    ),
+)
+LLAMACPP_ATOMIC_SHARDS = len(LLAMACPP_ATOMIC_FILE_MANIFEST)
+LLAMACPP_ATOMIC_TOTAL_BYTES = sum(item[1] for item in LLAMACPP_ATOMIC_FILE_MANIFEST)
+LLAMACPP_PLE_CONTEXT = 8_192
+LLAMACPP_PLE_MEMORY_CEILING_GIB = 44.0
+LLAMACPP_PLE_MEMORY_CEILING_BYTES = int(LLAMACPP_PLE_MEMORY_CEILING_GIB * 1024**3)
 MFERENCE_CONTEXT_WINDOWS = (4_096, 8_192, 16_384, 32_768, 65_536, 128_000)
 SSD_STREAMING_RUNTIME_URLS = {
     "swiftlm": "https://github.com/SharpAI/SwiftLM",
@@ -572,6 +754,7 @@ OPTIMIZER_KEYS = {
     "swiftlm": ("prefillSize", "nativeExpertTopK"),
     "mference": ("promptCacheMode", "queueLimit"),
     "whallm": (),
+    "llamacpp": (),
 }
 BENCHMARK_ENGINE_SETTING_KEYS = {
     "omlx": ("burst", "anePrefill", "memoryGuard"),
@@ -581,6 +764,7 @@ BENCHMARK_ENGINE_SETTING_KEYS = {
     "swiftlm": ("prefillSize", "nativeExpertTopK", "ssdCacheState"),
     "mference": ("promptCacheMode", "queueLimit", "ssdCacheState"),
     "whallm": ("ssdCacheState",),
+    "llamacpp": (),
 }
 
 
@@ -1113,6 +1297,9 @@ RUNTIME_CANDIDATE_SPECS: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("system-app", "/Applications/Whallm.app/Contents/MacOS/dsv4-app", "Whallm app"),
         ("user-app", "~/Applications/Whallm.app/Contents/MacOS/dsv4-app", "User Whallm app"),
     ),
+    # This route deliberately accepts one launcher-owned, audited build. Do
+    # not fall back to Homebrew, LM Studio's embedded server, or shell PATH.
+    "llamacpp": (),
 }
 
 RUNTIME_APP_SPECS: dict[str, dict[str, Any]] = {
@@ -1137,6 +1324,11 @@ MACOS_APP_OPENER = Path("/usr/bin/open")
 
 def launcher_managed_runtime_specs(runtime: str) -> tuple[tuple[str, str, str], ...]:
     """Discover isolated, versioned runtimes installed for this launcher."""
+    if runtime == "llamacpp":
+        return ((
+            "launcher-managed", str(LLAMACPP_SERVER_PATH),
+            f"Launcher-managed llama.cpp {LLAMACPP_RUNTIME_TAG}",
+        ),)
     if runtime != "omlx":
         return ()
     try:
@@ -1277,6 +1469,7 @@ BINARIES = {
     "swiftlm": preferred_runtime_binary("swiftlm"),
     "mference": preferred_runtime_binary("mference"),
     "whallm": preferred_runtime_binary("whallm"),
+    "llamacpp": preferred_runtime_binary("llamacpp"),
     "freetoken_native": _SELECTED_FREETOKEN_NATIVE_BINARY,
     "freetoken": (
         _SELECTED_FREETOKEN_NATIVE_BINARY
@@ -1349,6 +1542,10 @@ ENGINE_ADAPTERS: dict[str, AdapterDescriptor] = {
     ),
     "whallm": AdapterDescriptor(
         "whallm", "Whallm", "engine", "whallm", "shared-openai-compatible-ssd-expert-streaming",
+    ),
+    "llamacpp": AdapterDescriptor(
+        "llamacpp", "llama.cpp · SSD PLE", "engine", "llamacpp",
+        "openai-compatible-ssd-ple",
     ),
 }
 
@@ -1426,6 +1623,12 @@ CLIENT_SUPPORT: dict[str, dict[str, dict[str, Any]]] = {
         "codex": {"supported": True, "reason": "Whallm native Responses API with Codex function tools"},
         "chat": {"supported": True, "reason": "Built-in streaming Chat through Whallm"},
     },
+    "llamacpp": {
+        "pi": {"supported": True, "reason": "Pinned llama.cpp Chat Completions with the model's Jinja tool template"},
+        "opencode": {"supported": True, "reason": "Pinned llama.cpp Chat Completions with the model's Jinja tool template"},
+        "codex": {"supported": False, "reason": "This initial llama.cpp qualification exposes Chat Completions, not the Responses contract required by Codex"},
+        "chat": {"supported": True, "reason": "Built-in streaming Chat through the pinned llama.cpp server"},
+    },
 }
 
 
@@ -1448,9 +1651,37 @@ def resolved_client_support(
     }
 
 
+def _environment_without_dyld(source: dict[str, str] | None = None) -> dict[str, str]:
+    """Return a child environment with every dyld control variable removed."""
+    environment = dict(os.environ if source is None else source)
+    return {
+        key: value for key, value in environment.items()
+        if not key.startswith("DYLD_")
+    }
+
+
+def _is_managed_llamacpp_path(path: str | None) -> bool:
+    if not path:
+        return False
+    try:
+        return (
+            Path(path).expanduser().resolve(strict=False)
+            == LLAMACPP_SERVER_PATH.expanduser().resolve(strict=False)
+        )
+    except OSError:
+        return False
+
+
 def command_version(path: str | None) -> str:
     if not path:
         return "Not installed"
+    if _is_managed_llamacpp_path(path):
+        contract = llamacpp_runtime_contract(path)
+        return (
+            str(contract["version"])
+            if contract.get("ready") is True else
+            "Installed (unverified managed runtime)"
+        )
     candidate = Path(path).expanduser()
     if (
         candidate.name == "dsv4-app"
@@ -1463,6 +1694,7 @@ def command_version(path: str | None) -> str:
         result = subprocess.run(
             [path, "--version"], text=True, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, timeout=4, check=False,
+            env=_environment_without_dyld(),
         )
         if result.returncode != 0:
             return "Installed (version unavailable)"
@@ -1486,10 +1718,290 @@ def command_help(path: str | None, *arguments: str) -> str:
         result = subprocess.run(
             [path, *arguments], text=True, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, timeout=4, check=False,
+            env=_environment_without_dyld(),
         )
         return str(result.stdout or "")[:200_000]
     except (OSError, subprocess.TimeoutExpired):
         return ""
+
+
+def _regular_file_sha256_identity(
+    path: Path, expected_digest: str,
+) -> tuple[tuple[Any, ...], os.stat_result] | None:
+    """Return the strong cache key for one current, non-symlink regular file."""
+    expected = str(expected_digest).casefold()
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        return None
+    try:
+        requested = path.expanduser()
+        details = requested.lstat()
+        resolved = requested.resolve(strict=True)
+    except OSError:
+        return None
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+        return None
+    key = (
+        str(resolved), int(details.st_dev), int(details.st_ino),
+        int(details.st_size), int(details.st_mtime_ns), int(details.st_ctime_ns),
+        expected,
+    )
+    return key, details
+
+
+def _stream_file_sha256(path: Path) -> str:
+    """Stream one regular file without following a final-component symlink."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    digest = hashlib.sha256()
+    with os.fdopen(descriptor, "rb", closefd=True) as handle:
+        while chunk := handle.read(4 * 1024**2):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _remember_file_sha256_result(key: tuple[Any, ...], matches: bool) -> None:
+    with _VERIFIED_FILE_SHA256_CACHE_LOCK:
+        _VERIFIED_FILE_SHA256_CACHE.pop(key, None)
+        _VERIFIED_FILE_SHA256_CACHE[key] = bool(matches)
+        while len(_VERIFIED_FILE_SHA256_CACHE) > VERIFIED_FILE_SHA256_CACHE_MAX_ENTRIES:
+            del _VERIFIED_FILE_SHA256_CACHE[next(iter(_VERIFIED_FILE_SHA256_CACHE))]
+
+
+def _cached_regular_file_sha256_matches(path: Path, expected_digest: str) -> bool:
+    """Hash once per strong filesystem identity, including cached mismatches."""
+    initial = _regular_file_sha256_identity(path, expected_digest)
+    if initial is None:
+        return False
+    initial_key, _details = initial
+    # Serialize cache misses so concurrent rescans do not stream the same 79 GiB
+    # split more than once. Hits take only lstat/resolve and this short lookup.
+    with _VERIFIED_FILE_SHA256_CACHE_LOCK:
+        cached = _VERIFIED_FILE_SHA256_CACHE.get(initial_key)
+        if cached is not None:
+            _VERIFIED_FILE_SHA256_CACHE.pop(initial_key, None)
+            _VERIFIED_FILE_SHA256_CACHE[initial_key] = cached
+            return cached
+        try:
+            actual = _stream_file_sha256(path)
+        except OSError:
+            return False
+        final = _regular_file_sha256_identity(path, expected_digest)
+        if final is None or final[0] != initial_key:
+            return False
+        matches = secrets.compare_digest(actual.casefold(), str(expected_digest).casefold())
+        _VERIFIED_FILE_SHA256_CACHE[initial_key] = matches
+        while len(_VERIFIED_FILE_SHA256_CACHE) > VERIFIED_FILE_SHA256_CACHE_MAX_ENTRIES:
+            del _VERIFIED_FILE_SHA256_CACHE[next(iter(_VERIFIED_FILE_SHA256_CACHE))]
+        return matches
+
+
+def _prime_regular_file_sha256_cache(
+    path: Path, expected_digest: str, verified_details: os.stat_result,
+) -> bool:
+    """Reuse a just-completed acquisition hash only if the file stayed identical."""
+    current = _regular_file_sha256_identity(path, expected_digest)
+    if current is None:
+        return False
+    key, details = current
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(details, field) != getattr(verified_details, field) for field in fields):
+        return False
+    _remember_file_sha256_result(key, True)
+    return True
+
+
+def _command_help_has_flag(help_text: str, flag: str) -> bool:
+    return re.search(
+        rf"(?<![A-Za-z0-9-]){re.escape(flag)}(?=[\s,=<]|$)", help_text,
+    ) is not None
+
+
+def _llamacpp_strong_path_identity(path: Path) -> tuple[Any, ...]:
+    """Capture one runtime/model path strongly enough to detect replacement."""
+    requested = path.expanduser()
+    details = requested.lstat()
+    resolved = requested.resolve(strict=True)
+    return (
+        str(requested), str(resolved), details.st_dev, details.st_ino,
+        details.st_mode, details.st_size, details.st_mtime_ns,
+        details.st_ctime_ns, os.readlink(requested) if requested.is_symlink() else None,
+    )
+
+
+def _llamacpp_runtime_closure_identities(root: Path) -> tuple[tuple[Any, ...], ...]:
+    """Snapshot every executable, dylib load name, and dylib target."""
+    paths = [root]
+    for load_name, target_name, _expected_digest in LLAMACPP_RUNTIME_FILE_MANIFEST:
+        paths.extend((root / load_name, root / target_name))
+    unique = sorted({str(item.expanduser()) for item in paths})
+    return tuple(_llamacpp_strong_path_identity(Path(item)) for item in unique)
+
+
+def _llamacpp_runtime_payload_contract(root: Path) -> tuple[bool, str | None]:
+    """Verify each @loader_path file and exact archive symlink target."""
+    try:
+        root_details = root.lstat()
+        resolved_root = root.resolve(strict=True)
+    except OSError:
+        return False, "runtime directory"
+    if stat.S_ISLNK(root_details.st_mode) or not stat.S_ISDIR(root_details.st_mode):
+        return False, "runtime directory"
+    for load_name, target_name, expected_digest in LLAMACPP_RUNTIME_FILE_MANIFEST:
+        load_path = resolved_root / load_name
+        target_path = resolved_root / target_name
+        try:
+            load_details = load_path.lstat()
+            resolved_load = load_path.resolve(strict=True)
+            resolved_target = target_path.resolve(strict=True)
+        except OSError:
+            return False, load_name
+        if resolved_load != resolved_target or resolved_target.parent != resolved_root:
+            return False, load_name
+        if load_name == target_name:
+            if stat.S_ISLNK(load_details.st_mode) or not stat.S_ISREG(load_details.st_mode):
+                return False, load_name
+        else:
+            try:
+                linked_target = os.readlink(load_path)
+            except OSError:
+                return False, load_name
+            if not stat.S_ISLNK(load_details.st_mode) or linked_target != target_name:
+                return False, load_name
+        if not _cached_regular_file_sha256_matches(resolved_target, expected_digest):
+            return False, load_name
+    return True, None
+
+
+def llamacpp_runtime_contract(path: str | None) -> dict[str, Any]:
+    """Accept only the launcher-owned b10740 server with the fixed PLE flags."""
+    base = {
+        "ready": False,
+        "tag": LLAMACPP_RUNTIME_TAG,
+        "commit": LLAMACPP_RUNTIME_COMMIT,
+        "archiveSha256": LLAMACPP_RUNTIME_ARCHIVE_SHA256,
+        "version": f"llama.cpp {LLAMACPP_RUNTIME_TAG} · {LLAMACPP_RUNTIME_COMMIT[:12]}",
+        "path": None,
+        "missingFlags": [],
+        "verifiedFiles": [item[0] for item in LLAMACPP_RUNTIME_FILE_MANIFEST],
+    }
+    if not path:
+        return {**base, "reason": f"Install the audited llama.cpp {LLAMACPP_RUNTIME_TAG} runtime."}
+    try:
+        requested = Path(path).expanduser()
+        requested.lstat()
+        resolved = requested.resolve(strict=True)
+        expected = LLAMACPP_SERVER_PATH.expanduser().resolve(strict=False)
+    except OSError:
+        return {**base, "reason": "The audited llama.cpp server is missing or unreadable."}
+    base["path"] = str(resolved)
+    if (
+        requested.is_symlink() or resolved != expected
+        or not resolved.is_file() or not os.access(resolved, os.X_OK)
+    ):
+        return {
+            **base,
+            "reason": (
+                f"This route accepts only the launcher-managed {LLAMACPP_RUNTIME_TAG} "
+                "llama-server; embedded and PATH copies fail closed."
+            ),
+        }
+    try:
+        before_payload = _llamacpp_runtime_closure_identities(LLAMACPP_RUNTIME_DIR)
+    except OSError:
+        return {
+            **base,
+            "reason": "The managed llama.cpp runtime closure is missing or unsafe.",
+        }
+    payload_ready, failed_file = _llamacpp_runtime_payload_contract(LLAMACPP_RUNTIME_DIR)
+    if not payload_ready:
+        return {
+            **base,
+            "failedFile": failed_file,
+            "reason": (
+                "The managed llama.cpp executable or one of its bundled libraries "
+                "does not match the verified official b10740 archive."
+            ),
+        }
+    try:
+        verified_closure = _llamacpp_runtime_closure_identities(LLAMACPP_RUNTIME_DIR)
+    except OSError:
+        return {
+            **base,
+            "reason": "The managed llama.cpp runtime changed after byte verification.",
+        }
+    if verified_closure != before_payload:
+        return {
+            **base,
+            "reason": "The managed llama.cpp runtime changed during byte verification.",
+        }
+    try:
+        before_version = _llamacpp_runtime_closure_identities(LLAMACPP_RUNTIME_DIR)
+    except OSError:
+        before_version = ()
+    if before_version != verified_closure:
+        return {
+            **base,
+            "reason": "The managed llama.cpp runtime changed before its version probe.",
+        }
+    version_text = command_help(str(resolved), "--version")
+    try:
+        after_version = _llamacpp_runtime_closure_identities(LLAMACPP_RUNTIME_DIR)
+    except OSError:
+        after_version = ()
+    if after_version != verified_closure:
+        return {
+            **base,
+            "reason": "The managed llama.cpp runtime changed during its version probe.",
+        }
+    if LLAMACPP_RUNTIME_COMMIT[:8].casefold() not in version_text.casefold():
+        return {
+            **base,
+            "reason": (
+                f"The managed server does not report the audited {LLAMACPP_RUNTIME_TAG} "
+                f"commit {LLAMACPP_RUNTIME_COMMIT[:12]}."
+            ),
+        }
+    try:
+        before_help = _llamacpp_runtime_closure_identities(LLAMACPP_RUNTIME_DIR)
+    except OSError:
+        before_help = ()
+    if before_help != verified_closure:
+        return {
+            **base,
+            "reason": "The managed llama.cpp runtime changed before its help probe.",
+        }
+    help_text = command_help(str(resolved), "--help")
+    try:
+        after_help = _llamacpp_runtime_closure_identities(LLAMACPP_RUNTIME_DIR)
+    except OSError:
+        after_help = ()
+    if after_help != verified_closure:
+        return {
+            **base,
+            "reason": "The managed llama.cpp runtime changed during its help probe.",
+        }
+    required_flags = (
+        "--model", "-ngl", "-c", "--parallel", "--load-mode",
+        "--lazy-mode", "-fit", "--jinja", "-fa", "--reasoning",
+        "--reasoning-format", "--reasoning-preserve", "--spec-type",
+        "--cache-type-k", "--cache-type-v", "--host", "--port",
+        "--alias", "--api-key",
+    )
+    missing = [flag for flag in required_flags if not _command_help_has_flag(help_text, flag)]
+    if missing:
+        return {
+            **base,
+            "missingFlags": missing,
+            "reason": "The managed llama.cpp server is missing the audited SSD-PLE flag contract.",
+        }
+    return {
+        **base,
+        "ready": True,
+        "reason": (
+            f"Audited llama.cpp {LLAMACPP_RUNTIME_TAG} commit "
+            f"{LLAMACPP_RUNTIME_COMMIT[:12]} exposes the fixed SSD-PLE route."
+        ),
+    }
 
 
 def lmstudio_mtp_load_supported(path: str | None) -> bool:
@@ -2226,7 +2738,17 @@ def runtime_candidate_details(runtime: str) -> list[dict[str, Any]]:
         selected_resolved = ""
     result: list[dict[str, Any]] = []
     for candidate in runtime_candidates(runtime):
-        version = command_version(candidate["path"])
+        llamacpp_contract = (
+            llamacpp_runtime_contract(candidate["path"])
+            if runtime == "llamacpp" else None
+        )
+        version = (
+            str(llamacpp_contract["version"])
+            if isinstance(llamacpp_contract, dict) and llamacpp_contract.get("ready") is True else
+            "Installed (unverified managed runtime)"
+            if runtime == "llamacpp" else
+            command_version(candidate["path"])
+        )
         detail: dict[str, Any] = {
             **candidate,
             "version": version,
@@ -2244,6 +2766,8 @@ def runtime_candidate_details(runtime: str) -> list[dict[str, Any]]:
             )
         elif runtime == "lms":
             detail["mtpLoadReady"] = lmstudio_mtp_load_supported(candidate["path"])
+        elif runtime == "llamacpp":
+            detail["pleContract"] = llamacpp_contract
         result.append(detail)
     return result
 
@@ -2589,7 +3113,16 @@ def select_runtime_candidate(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("That installed runtime candidate changed. Refresh Runtime Manager.")
     if confirmation != f"select:{candidate_id}":
         raise ValueError("Confirm the exact installed runtime before switching new sessions to it.")
-    version = command_version(candidate["path"])
+    if runtime == "llamacpp":
+        contract = llamacpp_runtime_contract(candidate["path"])
+        if contract.get("ready") is not True:
+            raise ValueError(str(
+                contract.get("reason") or
+                "The managed llama.cpp runtime failed byte provenance validation."
+            ))
+        version = str(contract["version"])
+    else:
+        version = command_version(candidate["path"])
     if version in {"Not installed", "Installed (version unavailable)"}:
         raise ValueError("The selected executable did not provide a verifiable version.")
     preferences = read_json(RUNTIME_PREFERENCES_FILE)
@@ -2832,6 +3365,123 @@ def mference_bundle_validation(path: Path) -> tuple[bool, str, int]:
 
     total = payload_total + len(manifest_data) + len(receipt_data)
     return True, f"Verified Mference {family} receipt and SSD-streaming payload layout.", total
+
+
+def llamacpp_atomic_artifact_contract(path: Path) -> dict[str, Any]:
+    """Bind the nested 28-shard quant to its exact verified parent acquisition."""
+    base = {
+        "ready": False,
+        "repoId": LLAMACPP_ATOMIC_REPO,
+        "pinnedRevision": LLAMACPP_ATOMIC_REVISION,
+        "variantId": LLAMACPP_ATOMIC_VARIANT_ID,
+        "variant": LLAMACPP_ATOMIC_VARIANT,
+        "shardCount": LLAMACPP_ATOMIC_SHARDS,
+        "weightBytes": LLAMACPP_ATOMIC_TOTAL_BYTES,
+        "context": LLAMACPP_PLE_CONTEXT,
+        "firstShard": None,
+        "receiptFingerprint": None,
+    }
+    try:
+        root = path.expanduser().resolve(strict=True)
+    except OSError:
+        return {**base, "reason": "The AtomicChat GGUF folder is missing or unreadable."}
+    if not root.is_dir() or root.name != LLAMACPP_ATOMIC_VARIANT:
+        return {**base, "reason": "This is not the exact allowlisted AtomicChat AD-3.84 folder."}
+    marker_path = root.parent / MODEL_ACQUISITION_MARKER
+    marker, _marker_data, marker_error = _bounded_regular_json(marker_path)
+    if marker_error:
+        return {
+            **base,
+            "reason": "The exact AtomicChat route requires its verified launcher acquisition receipt.",
+        }
+    verification = marker.get("verification") if isinstance(marker.get("verification"), dict) else {}
+    if (
+        marker.get("schemaVersion") != MODEL_ACQUISITION_SCHEMA_VERSION
+        or marker.get("repoId") != LLAMACPP_ATOMIC_REPO
+        or marker.get("pinnedRevision") != LLAMACPP_ATOMIC_REVISION
+        or marker.get("variantId") != LLAMACPP_ATOMIC_VARIANT_ID
+        or marker.get("format") != "gguf"
+        or marker.get("status") != "verified"
+        or verification.get("verified") is not True
+        or verification.get("format") != "gguf"
+        or verification.get("checkedFiles") != LLAMACPP_ATOMIC_SHARDS
+        or verification.get("weightBytes") != LLAMACPP_ATOMIC_TOTAL_BYTES
+    ):
+        return {**base, "reason": "The AtomicChat acquisition receipt is stale or does not match the pinned route."}
+    declared = marker.get("files") if isinstance(marker.get("files"), list) else []
+    if len(declared) != LLAMACPP_ATOMIC_SHARDS:
+        return {**base, "reason": "The AtomicChat receipt must cover all 28 GGUF shards and nothing else."}
+    by_path: dict[str, dict[str, Any]] = {}
+    for item in declared:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            return {**base, "reason": "The AtomicChat receipt contains an invalid shard record."}
+        relative = item["path"]
+        if relative in by_path:
+            return {**base, "reason": "The AtomicChat receipt contains a duplicate shard record."}
+        by_path[relative] = item
+
+    normalized: list[dict[str, Any]] = []
+    actual_names: set[str] = set()
+    for index, (relative, expected_size, expected_checksum) in enumerate(
+        LLAMACPP_ATOMIC_FILE_MANIFEST, 1,
+    ):
+        item = by_path.get(relative)
+        size = item.get("size") if isinstance(item, dict) else None
+        checksum = str(item.get("sha256") or "") if isinstance(item, dict) else ""
+        if size != expected_size or checksum != expected_checksum:
+            return {
+                **base,
+                "reason": (
+                    f"The acquisition receipt for shard {index} does not match the "
+                    "launcher's immutable pinned source manifest."
+                ),
+            }
+        candidate = root / Path(relative).name
+        try:
+            details = candidate.lstat()
+            candidate.resolve(strict=True).relative_to(root)
+            with open(candidate, "rb") as handle:
+                magic = handle.read(4)
+        except (OSError, ValueError):
+            return {**base, "reason": f"AtomicChat shard {index} is missing or unsafe."}
+        if (
+            candidate.is_symlink() or not stat.S_ISREG(details.st_mode)
+            or details.st_size != expected_size or magic != b"GGUF"
+        ):
+            return {**base, "reason": f"AtomicChat shard {index} changed after verification."}
+        if not _cached_regular_file_sha256_matches(candidate, expected_checksum):
+            return {
+                **base,
+                "reason": f"AtomicChat shard {index} no longer matches its verified SHA-256 checksum.",
+            }
+        actual_names.add(candidate.name)
+        normalized.append({
+            "path": relative, "size": expected_size, "sha256": expected_checksum,
+        })
+    try:
+        gguf_names = {item.name for item in root.iterdir() if item.is_file() and item.suffix.lower() == ".gguf"}
+    except OSError:
+        return {**base, "reason": "The AtomicChat GGUF folder became unreadable."}
+    if gguf_names != actual_names or sum(int(item["size"]) for item in normalized) != LLAMACPP_ATOMIC_TOTAL_BYTES:
+        return {**base, "reason": "The AtomicChat folder does not contain the exact pinned 28-shard set."}
+    identity = {
+        "schemaVersion": MODEL_ACQUISITION_SCHEMA_VERSION,
+        "repoId": LLAMACPP_ATOMIC_REPO,
+        "pinnedRevision": LLAMACPP_ATOMIC_REVISION,
+        "variantId": LLAMACPP_ATOMIC_VARIANT_ID,
+        "files": normalized,
+    }
+    fingerprint = hashlib.sha256(json.dumps(
+        identity, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    return {
+        **base,
+        "ready": True,
+        "reason": "Exact pinned AtomicChat 28-shard receipt verified for SSD-only PLE mmap.",
+        "firstShard": str(root / Path(llamacpp_atomic_shard_relative(1)).name),
+        "receiptFingerprint": fingerprint,
+        "files": normalized,
+    }
 
 
 def weight_completeness(
@@ -6587,12 +7237,59 @@ def _acquisition_metadata_files(files: list[dict[str, Any]]) -> list[dict[str, A
     ]
 
 
+def llamacpp_atomic_shard_relative(index: int) -> str:
+    if not 1 <= index <= len(LLAMACPP_ATOMIC_FILE_MANIFEST):
+        raise ValueError("AtomicChat shard index is outside the immutable manifest.")
+    return LLAMACPP_ATOMIC_FILE_MANIFEST[index - 1][0]
+
+
+def _llamacpp_atomic_acquisition_variant(
+    snapshot: dict[str, Any], files: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Select only the pinned AtomicChat AD-3.84 split; no sibling quant is eligible."""
+    if (
+        snapshot.get("repoId") != LLAMACPP_ATOMIC_REPO
+        or snapshot.get("pinnedRevision") != LLAMACPP_ATOMIC_REVISION
+    ):
+        return None
+    by_path = {
+        str(item.get("path") or ""): item
+        for item in files if isinstance(item, dict)
+    }
+    selected: list[dict[str, Any]] = []
+    for relative, expected_size, expected_checksum in LLAMACPP_ATOMIC_FILE_MANIFEST:
+        item = by_path.get(relative)
+        if (
+            not isinstance(item, dict)
+            or item.get("size") != expected_size
+            or item.get("sha256") != expected_checksum
+        ):
+            return None
+        selected.append({**item, "role": "weight"})
+    total = sum(int(item["size"]) for item in selected)
+    if total != LLAMACPP_ATOMIC_TOTAL_BYTES:
+        return None
+    return {
+        "id": LLAMACPP_ATOMIC_VARIANT_ID,
+        "label": f"{LLAMACPP_ATOMIC_VARIANT} · SSD-only PLE",
+        "format": "gguf",
+        "route": "llamacpp-atomic-ssd-ple",
+        "files": selected,
+        "fileCount": len(selected),
+        "weightBytes": total,
+        "sizeBytes": total,
+    }
+
+
 def model_acquisition_variants(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     """Return exact safe file sets; never download every GGUF quantisation at once."""
     files = [item for item in snapshot.get("files", []) if isinstance(item, dict)]
     metadata = _acquisition_metadata_files(files)
     tags = snapshot.get("tags") if isinstance(snapshot.get("tags"), list) else []
     variants: list[dict[str, Any]] = []
+    atomic_variant = _llamacpp_atomic_acquisition_variant(snapshot, files)
+    if atomic_variant is not None:
+        variants.append(atomic_variant)
     if "mlx" in tags:
         weights = [
             {**item, "role": "weight"}
@@ -6769,9 +7466,22 @@ def build_model_acquisition_plan(
 
     expected_engines: list[dict[str, Any]] = []
     selected_format = str(variant.get("format") or "") if variant else ""
+    dedicated_llamacpp_ple = bool(
+        variant
+        and repo_id == LLAMACPP_ATOMIC_REPO
+        and pinned == LLAMACPP_ATOMIC_REVISION
+        and variant.get("id") == LLAMACPP_ATOMIC_VARIANT_ID
+    )
     for engine_id, descriptor in ENGINE_ADAPTERS.items():
         installed = descriptor.public()["installed"] is True
-        if selected_format == "mlx":
+        if dedicated_llamacpp_ple:
+            compatible = engine_id == "llamacpp"
+            detail = (
+                "Exact pinned AtomicChat AD-3.84 split for the launcher-owned llama.cpp SSD-PLE route."
+                if compatible else
+                "This exact low-memory PLE acquisition is qualified only through the dedicated llama.cpp route."
+            )
+        elif selected_format == "mlx":
             compatible = engine_id in {"omlx", "mtplx"} or (engine_id == "lmstudio" and kind == "lmstudio")
             detail = (
                 "Expected MLX candidate; the post-download scanner still validates this checkpoint."
@@ -6931,6 +7641,7 @@ def verify_model_acquisition(
     checked = 0
     total_hash_bytes = sum(int(item.get("size") or 0) for item in weights if item.get("sha256"))
     hashed = 0
+    verified_hashes: list[tuple[Path, str, os.stat_result]] = []
     for item in files:
         if cancel_event and cancel_event.is_set():
             raise LaunchCancelled("Model acquisition verification cancelled.")
@@ -6957,6 +7668,16 @@ def verify_model_acquisition(
                         progress(min(1.0, hashed / total_hash_bytes))
             if not secrets.compare_digest(digest.hexdigest(), checksum):
                 raise ValueError(f"The SHA-256 checksum for {item.get('path')} does not match the pinned Hub manifest.")
+            current = _regular_file_sha256_identity(path, checksum)
+            fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if current is None or any(
+                getattr(current[1], field) != getattr(stat_result, field)
+                for field in fields
+            ):
+                raise ValueError(
+                    f"The pinned file {item.get('path')} changed while its checksum was being verified."
+                )
+            verified_hashes.append((path, checksum, current[1]))
         checked += 1
     selected_format = str(selection.get("format") or "")
     if selected_format == "mlx":
@@ -6981,6 +7702,11 @@ def verify_model_acquisition(
         detail = f"Verified {len(weights)} GGUF weight file{'s' if len(weights) != 1 else ''}."
     else:
         raise ValueError("The acquisition format is not supported.")
+    for path, checksum, verified_details in verified_hashes:
+        if not _prime_regular_file_sha256_cache(path, checksum, verified_details):
+            raise ValueError(
+                f"The pinned file {path.name} changed after its checksum was verified."
+            )
     return {
         "verified": True, "format": selected_format,
         "checkedFiles": checked, "weightBytes": weight_bytes,
@@ -7538,6 +8264,8 @@ def scan_models() -> list[dict[str, Any]]:
     swiftlm_version = command_version(BINARIES.get("swiftlm"))
     mference_version = command_version(BINARIES.get("mference"))
     whallm_version = command_version(BINARIES.get("whallm"))
+    llamacpp_runtime = llamacpp_runtime_contract(BINARIES.get("llamacpp"))
+    llamacpp_version = str(llamacpp_runtime.get("version") or "Not installed")
     freetoken_native_binary = BINARIES.get("freetoken_native")
     freetoken_native_version = command_version(freetoken_native_binary)
     dflash2_runtime = omlx_supports_dflash2(omlx_version)
@@ -7590,6 +8318,26 @@ def scan_models() -> list[dict[str, Any]]:
         if is_dflash2_draft(real, config):
             continue
         ready, status, weight_bytes = weight_completeness(real, config)
+        atomic_named_variant = real.name == LLAMACPP_ATOMIC_VARIANT
+        atomic_ple = (
+            llamacpp_atomic_artifact_contract(real)
+            if atomic_named_variant else {
+                "ready": False,
+                "reason": "The dedicated llama.cpp route requires the exact pinned AtomicChat GGUF split.",
+            }
+        )
+        if atomic_named_variant:
+            # A single >1 MB GGUF is normally a complete standalone model, but
+            # this allowlisted variant is an exact 28-shard split.  Bind its
+            # library readiness to the parent acquisition receipt so an
+            # interrupted nested download is never advertised as Ready.
+            ready = atomic_ple.get("ready") is True
+            status = (
+                "Ready" if ready else
+                str(atomic_ple.get("reason") or "The pinned 28-shard split is incomplete.")
+            )
+            if ready:
+                weight_bytes = int(atomic_ple["weightBytes"])
         ggufs = sorted(real.glob("*.gguf"))
         model_tensors = [
             tensor for tensor in real.glob("*.safetensors")
@@ -7620,6 +8368,14 @@ def scan_models() -> list[dict[str, Any]]:
         architecture = str(architectures[0]) if isinstance(architectures, list) and architectures else model_type
         quant = deep_get(config, ("quantization", "bits"), ("quantization_config", "bits"))
         quantization = f"{quant}-bit" if isinstance(quant, (int, float)) else "From artifact"
+        atomic_ple_ready = atomic_ple.get("ready") is True
+        if atomic_ple_ready:
+            context = LLAMACPP_PLE_CONTEXT
+            root_model_type = "qwen4exp"
+            text_model_type = "qwen4exp"
+            model_type = "qwen4exp"
+            architecture = "Qwen3.8-Flash-Next · Qwen4Exp"
+            quantization = "AD-3.84bpw · IQ4_XS-M64 · SSD-only PLE"
         qwen4_ple = qwen4_ple_profile(real, config, ready and fmt == "mlx", omlx_version)
         ssd_profile = ssd_streaming_model_profile(
             real, config, weight_bytes, installed_memory,
@@ -7716,6 +8472,12 @@ def scan_models() -> list[dict[str, Any]]:
         runtime = read_json(real / "mtplx_runtime.json")
         reasoning_efforts = template_reasoning_efforts(real)
         default_sampling = model_default_sampling(real)
+        if atomic_ple_ready:
+            # These are the publisher's thinking-mode defaults embedded in the
+            # pinned GGUF chat template. Keep the first qualification on model
+            # defaults instead of inventing an engine-side sampler.
+            reasoning_efforts = ["low", "medium", "xhigh"]
+            default_sampling = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
         lm_reasoning_efforts = [level for level in reasoning_efforts if level in {"low", "medium", "high"}]
         mtplx_verified = verified_mtplx_runtime(real, runtime, config)
         mtp_depth = runtime.get("mtp_depth_default") if isinstance(runtime.get("mtp_depth_default"), int) else 3
@@ -7859,8 +8621,10 @@ def scan_models() -> list[dict[str, Any]]:
                 "codexReasoning": ["auto", *reasoning_efforts],
             },
             "lmstudio": {
-                    "runnable": ready and lm_catalogued and not qwen4_architecture,
+                    "runnable": ready and lm_catalogued and not qwen4_architecture and not atomic_ple_ready,
                     "reason": (
+                        "This exact AtomicChat split is admitted only through the pinned llama.cpp SSD-PLE route."
+                        if atomic_ple_ready else
                         "LM Studio has no verified external Qwen4 PLE mmap route."
                         if qwen4_architecture else
                         "LM Studio catalog model" if lm_catalogued else
@@ -8014,6 +8778,33 @@ def scan_models() -> list[dict[str, Any]]:
                     "ssdProfile": copy.deepcopy(ssd_profile),
                     "exactExpertRouting": True,
             },
+            "llamacpp": {
+                    "runnable": bool(atomic_ple_ready and llamacpp_runtime.get("ready") is True),
+                    "reason": (
+                        str(llamacpp_runtime.get("reason") or "The pinned llama.cpp runtime is not ready.")
+                        if atomic_ple_ready else str(atomic_ple.get("reason") or "This GGUF is not allowlisted.")
+                    ),
+                    "mtp": False,
+                    "mtpReason": "MTP and draft-model speculation are disabled for the initial SSD-PLE qualification.",
+                    "dflash": False,
+                    "dflashVersion": None,
+                    "dflashReason": "DFlash is a different serving route and is not mixed into this qualification.",
+                    "kv": False,
+                    "preferredAcceleration": "off",
+                    "depth": 1,
+                    "depthMax": 1,
+                    "agentReasoning": ["auto"],
+                    "codexReasoning": ["auto"],
+                    "contextWindows": [LLAMACPP_PLE_CONTEXT],
+                    "contextMaximum": LLAMACPP_PLE_CONTEXT,
+                    "atomicPle": copy.deepcopy(atomic_ple),
+                    "llamacppPle": atomic_ple_ready,
+                    "receiptFingerprint": atomic_ple.get("receiptFingerprint"),
+                    "modelPath": str(real),
+                    "firstShard": atomic_ple.get("firstShard"),
+                    "memoryCeilingBytes": LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+                    "exactExpertRouting": True,
+            },
         }
         model_fingerprint = model_artifact_fingerprint(real, config) if ready else ""
         freetoken_capability = backend["freetoken"]
@@ -8142,6 +8933,7 @@ def scan_models() -> list[dict[str, Any]]:
             "swiftlm": swiftlm_version,
             "mference": mference_version,
             "whallm": whallm_version,
+            "llamacpp": llamacpp_version,
         }
         for backend_name, capability in backend.items():
             runtime_version = runtime_versions[backend_name]
@@ -8210,6 +9002,7 @@ def scan_models() -> list[dict[str, Any]]:
             "lmKey": lm_key,
             "nativeFreetoken": freetoken_capability.get("native") is True,
             "ssdStreaming": ssd_profile,
+            "atomicPle": copy.deepcopy(atomic_ple),
             "backends": backend,
         }
     # A verified Mference repack and its ordinary MLX source are separate
@@ -8465,11 +9258,26 @@ def scan_models() -> list[dict[str, Any]]:
 
 
 def public_binary_status() -> dict[str, dict[str, Any]]:
-    result = {
-        name: {"installed": bool(path), "path": path, "version": command_version(path)}
-        for name, path in BINARIES.items()
-        if name not in {"freetoken", "freetoken_native"}
-    }
+    result: dict[str, dict[str, Any]] = {}
+    for name, path in BINARIES.items():
+        if name in {"freetoken", "freetoken_native"}:
+            continue
+        if name == "llamacpp":
+            contract = llamacpp_runtime_contract(path)
+            result[name] = {
+                "installed": contract.get("ready") is True,
+                "path": path,
+                "version": (
+                    str(contract["version"])
+                    if contract.get("ready") is True else
+                    "Installed (unverified managed runtime)"
+                ),
+                "pleContract": contract,
+            }
+        else:
+            result[name] = {
+                "installed": bool(path), "path": path, "version": command_version(path),
+            }
     connection = load_freetoken_connection()
     native = native_freetoken_public_status()
     modes = [
@@ -9045,6 +9853,14 @@ def fastest_safe_options(
             "Keep Whallm's pinned full 512-expert MXFP4 execution contract unchanged.",
             "Use the running shared server directly; this launcher does not invent an accelerator or compare it with a pruned checkpoint.",
         ])
+    elif backend == "llamacpp":
+        options.update({"acceleration": "off", "depth": 1, "kv": "off"})
+        evidence_tier = "pinned-ssd-ple-route"
+        evidence_label = "Pinned llama.cpp SSD-PLE route"
+        rationale.extend([
+            "Keep the isolated PLE tensor in read-only SSD mmap through the exact audited runtime.",
+            "Keep MTP, CPU-MoE, tensor overrides, and quantized KV disabled for the initial qualification.",
+        ])
 
     changed = [
         key for key in OPTIMIZER_KEYS[backend]
@@ -9143,6 +9959,7 @@ def validate_runtime_context(backend: str, context: int) -> None:
     choices_for_backend = (
         MFERENCE_CONTEXT_WINDOWS if backend == "mference" else
         WHALLM_CONTEXT_WINDOWS if backend == "whallm" else
+        (LLAMACPP_PLE_CONTEXT,) if backend == "llamacpp" else
         None
     )
     if choices_for_backend is None:
@@ -12469,6 +13286,21 @@ def validated_profile_options(
                 {"natural-cold-to-warm"}, "SSD cache state",
             ),
         }
+    if backend == "llamacpp":
+        acceleration = _profile_choice(
+            raw, "acceleration", "off", {"off"}, "llama.cpp acceleration",
+        )
+        depth = _profile_integer(raw.get("depth"), 1, 1, 1, "llama.cpp draft depth")
+        kv = _profile_choice(raw, "kv", "off", {"off"}, "llama.cpp KV precision")
+        forbidden = {
+            "cpuMoe", "cpu-moe", "tensorOverride", "tensor-override",
+            "draftModel", "modelNgram", "ngramLoadMode", "mtp",
+        }
+        if any(key in raw and raw.get(key) not in (None, False, "", "off") for key in forbidden):
+            raise ValueError(
+                "The initial llama.cpp SSD-PLE route does not permit MTP, CPU-MoE, tensor overrides, or a separate N-gram model."
+            )
+        return {"acceleration": acceleration, "depth": depth, "kv": kv}
     raise ValueError("Choose a supported runtime.")
 
 
@@ -14421,7 +15253,7 @@ def normalized_request(
     client = str(payload.get("client", ""))
     mode = str(payload.get("mode", "custom"))
     if backend not in ENGINE_ADAPTERS:
-        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, or Whallm.")
+        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, Whallm, or llama.cpp SSD PLE.")
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose Pi, OpenCode, Codex, or Chat.")
     if client == "chat":
@@ -15057,6 +15889,150 @@ def build_whallm(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     ])
 
 
+def _llamacpp_launch_file_identities(model_path: Path) -> tuple[tuple[Any, ...], ...]:
+    """Snapshot every receipt, runtime, and model path used by this route."""
+    paths = [
+        LLAMACPP_RUNTIME_DIR,
+        LLAMACPP_SERVER_PATH,
+        model_path.parent / MODEL_ACQUISITION_MARKER,
+    ]
+    for load_name, target_name, _expected_digest in LLAMACPP_RUNTIME_FILE_MANIFEST:
+        paths.extend((LLAMACPP_RUNTIME_DIR / load_name, LLAMACPP_RUNTIME_DIR / target_name))
+    paths.extend(
+        model_path / Path(relative).name
+        for relative, _size, _checksum in LLAMACPP_ATOMIC_FILE_MANIFEST
+    )
+    unique = sorted({str(item.expanduser()) for item in paths})
+    return tuple(_llamacpp_strong_path_identity(Path(item)) for item in unique)
+
+
+def _validated_llamacpp_route(
+    plan: LaunchPlan, cap: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any], tuple[tuple[Any, ...], ...]]:
+    """Revalidate the exact managed runtime and immutable AtomicChat artifact."""
+    binary = BINARIES.get("llamacpp")
+    if plan.context != LLAMACPP_PLE_CONTEXT:
+        raise ValueError(
+            f"The initial llama.cpp SSD-PLE qualification is fixed at {LLAMACPP_PLE_CONTEXT:,} context tokens."
+        )
+    options = validated_profile_options("llamacpp", plan.model, cap, plan.options)
+    try:
+        model_path = Path(str(plan.model.get("path") or "")).expanduser().resolve(strict=True)
+        before = _llamacpp_launch_file_identities(model_path)
+    except OSError as error:
+        raise ValueError("The audited llama.cpp runtime or AtomicChat GGUF folder moved after the model scan.") from error
+    runtime = llamacpp_runtime_contract(binary)
+    if runtime.get("ready") is not True:
+        raise ValueError(str(runtime.get("reason") or "The audited llama.cpp runtime is not ready."))
+    if str(cap.get("runtimeVersion") or "") != str(runtime.get("version") or ""):
+        raise ValueError("The llama.cpp runtime changed after the model scan. Rescan models before launch.")
+    artifact = llamacpp_atomic_artifact_contract(model_path)
+    if artifact.get("ready") is not True:
+        raise ValueError(str(artifact.get("reason") or "The AtomicChat receipt is no longer valid."))
+    if (
+        cap.get("llamacppPle") is not True
+        or cap.get("receiptFingerprint") != artifact.get("receiptFingerprint")
+        or cap.get("firstShard") != artifact.get("firstShard")
+        or cap.get("modelPath") != str(model_path)
+        or cap.get("benchmarkModelFingerprint")
+        != model_artifact_fingerprint(model_path, read_json(model_path / "config.json"))
+    ):
+        raise ValueError("The AtomicChat GGUF or acquisition receipt changed after the scan. Rescan models.")
+    wired_limit = apple_iogpu_wired_limit_bytes()
+    if wired_limit != LLAMACPP_PLE_MEMORY_CEILING_BYTES:
+        raise ValueError(
+            f"This qualification requires the temporary Metal wired-memory limit to be exactly "
+            f"{LLAMACPP_PLE_MEMORY_CEILING_GIB:.0f} GiB; it cannot be bypassed or raised."
+        )
+    try:
+        after = _llamacpp_launch_file_identities(model_path)
+    except OSError as error:
+        raise ValueError("The audited llama.cpp runtime or AtomicChat GGUF changed during validation.") from error
+    if before != after:
+        raise ValueError("The audited llama.cpp runtime or AtomicChat GGUF changed during validation.")
+    return str(binary), runtime, artifact, options, after
+
+
+def _llamacpp_engine_argv(
+    plan: LaunchPlan, binary: str, artifact: dict[str, Any], served: str, api_key: str,
+) -> list[str]:
+    return [
+        binary,
+        "--model", str(artifact["firstShard"]),
+        "-ngl", "99",
+        "-c", str(LLAMACPP_PLE_CONTEXT),
+        "--parallel", "1",
+        "--load-mode", "mmap",
+        "--lazy-mode", "on",
+        "-fit", "off",
+        "--jinja",
+        "-fa", "on",
+        "--reasoning", "on",
+        "--reasoning-format", "deepseek",
+        "--reasoning-preserve",
+        "--spec-type", "none",
+        "--cache-type-k", "f16",
+        "--cache-type-v", "f16",
+        "--host", "127.0.0.1",
+        "--port", str(plan.port),
+        "--alias", served,
+        "--api-key", api_key,
+    ]
+
+
+def validate_llamacpp_launch_boundary(
+    plan: LaunchPlan,
+) -> tuple[tuple[Any, ...], ...]:
+    """Fail closed at exec if the planned runtime, artifact, or argv changed."""
+    capabilities = plan.model.get("backends")
+    cap = capabilities.get("llamacpp") if isinstance(capabilities, dict) else None
+    if not isinstance(cap, dict):
+        raise ValueError("The llama.cpp launch capability is missing. Rescan models.")
+    binary, _runtime, artifact, options, identities = _validated_llamacpp_route(plan, cap)
+    served = str(plan.model.get("servedId") or "")
+    api_key = str(plan.secrets.get("apiKey") or "")
+    if not served or not api_key:
+        raise ValueError("The private llama.cpp route credentials are missing.")
+    expected_argv = _llamacpp_engine_argv(plan, binary, artifact, served, api_key)
+    if plan.engine_argv != expected_argv:
+        raise ValueError("The fixed llama.cpp launch command changed after validation.")
+    if plan.engine_env or any(key.startswith("DYLD_") for key in plan.engine_env):
+        raise ValueError("The fixed llama.cpp launch environment changed after validation.")
+    if any(plan.options.get(key) != value for key, value in options.items()):
+        raise ValueError("The fixed llama.cpp launch options changed after validation.")
+    return identities
+
+
+def confirm_llamacpp_launch_identities(
+    plan: LaunchPlan, expected: tuple[tuple[Any, ...], ...],
+) -> None:
+    """Close the validation-to-exec window with one final strong stat snapshot."""
+    try:
+        model_path = Path(str(plan.model.get("path") or "")).expanduser().resolve(strict=True)
+        current = _llamacpp_launch_file_identities(model_path)
+    except OSError as error:
+        raise ValueError("The audited llama.cpp runtime or AtomicChat GGUF changed before launch.") from error
+    if current != expected:
+        raise ValueError("The audited llama.cpp runtime or AtomicChat GGUF changed before launch.")
+
+
+def build_llamacpp(plan: LaunchPlan, cap: dict[str, Any]) -> None:
+    """Build the one receipt-bound, no-MTP AtomicChat SSD-PLE route."""
+    binary, _runtime, artifact, options, _identities = _validated_llamacpp_route(plan, cap)
+    plan.options.update(options)
+    served = f"llm-launcher-atomic-ple-{plan.run_id[:8]}"
+    api_key = secrets.token_urlsafe(32)
+    plan.model["servedId"] = served
+    plan.secrets["apiKey"] = api_key
+    plan.engine_argv = _llamacpp_engine_argv(plan, binary, artifact, served, api_key)
+    plan.engine_env = {}
+    plan.warnings.extend([
+        "This exact AD-3.84 quant keeps only its isolated PLE table in read-only SSD mmap; ordinary model weights are not SSD streamed.",
+        "The route is fixed to 8K context, full-precision KV, one request lane, no MTP, and an exact 44 GiB Metal ceiling for initial qualification.",
+        "AD-3.84 is an aggressive low-bit quality tradeoff. Do not treat the publisher's M5 Max speed as a measurement for this Mac.",
+    ])
+
+
 def build_remote_freetoken(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     """Own only a private bridge; the configured FreeToken server owns model memory."""
     connection = load_freetoken_connection()
@@ -15229,6 +16205,7 @@ ENGINE_BUILDERS = {
     "swiftlm": build_swiftlm,
     "mference": build_mference,
     "whallm": build_whallm,
+    "llamacpp": build_llamacpp,
 }
 
 
@@ -15674,7 +16651,7 @@ def validated_benchmark_request(
     client = str(payload.get("client") or "")
     if backend not in ENGINE_ADAPTERS:
         raise ValueError(
-            "Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, or Whallm before benchmarking."
+            "Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, Whallm, or llama.cpp SSD PLE before benchmarking."
         )
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose the work surface whose contract should own this benchmark.")
@@ -20548,6 +21525,8 @@ class RunManager:
             log_path = plan.run_dir / "engine.log"
             env = os.environ.copy()
             env.update(plan.engine_env)
+            if plan.backend == "llamacpp":
+                env = _environment_without_dyld(env)
             # Reserve the agent-facing route before an expensive model load.
             # No client can reach it until its selected work surface opens
             # after the upstream API passes verification.
@@ -20558,12 +21537,23 @@ class RunManager:
                 self._start_session_proxy(plan, log_path, cancel_event)
             elif plan.client == "codex":
                 self._start_codex_proxy(plan, log_path, cancel_event)
+            llamacpp_identities: tuple[tuple[Any, ...], ...] | None = None
+            if plan.backend == "llamacpp":
+                # This is deliberately after any proxy setup and immediately
+                # before the process boundary: never rely only on scan/build
+                # time provenance for an executable or an 80 GB artifact.
+                llamacpp_identities = validate_llamacpp_launch_boundary(plan)
+                env = _environment_without_dyld(env)
             if plan.backend == "lmstudio":
                 self._start_lmstudio(plan, log_path, env, cancel_event)
             else:
                 # Popen duplicates this descriptor for the child. Closing the
                 # controller's copy prevents one descriptor leaking per run.
                 with open(log_path, "a", encoding="utf-8") as log_handle:
+                    if plan.backend == "llamacpp":
+                        assert llamacpp_identities is not None
+                        confirm_llamacpp_launch_identities(plan, llamacpp_identities)
+                        env = _environment_without_dyld(env)
                     process = subprocess.Popen(
                         plan.engine_argv, cwd=plan.project, env=env, text=True,
                         stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True,

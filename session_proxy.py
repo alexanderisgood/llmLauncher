@@ -44,6 +44,7 @@ CLIENTS = {"chat", "pi", "opencode", "codex"}
 CLIENT_LABELS = {"chat": "Chat", "pi": "Pi", "opencode": "OpenCode", "codex": "Codex"}
 SUPPORTED_BACKENDS = {
     "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
+    "llamacpp",
 }
 CHAT_REASONING_LEVELS = frozenset({
     "auto", "off", "minimal", "low", "medium", "high", "xhigh", "max",

@@ -84,15 +84,16 @@
                 <button type="button" class="choice" data-backend="freetoken" data-ui-feature="freetoken" aria-pressed="false" hidden disabled><span class="choice-icon freetoken" aria-hidden="true">FT</span><span><strong>FreeToken</strong><small>Native or remote MoE</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
               </div>
               <details id="ssdRuntimeDisclosure" class="ssd-runtime-disclosure">
-                <summary><span><strong>Huge models on SSD</strong><small>Optional MoE streaming</small></span><i aria-hidden="true">⌄</i></summary>
+                <summary><span><strong>Huge models on SSD</strong><small>Model-specific routes</small></span><i aria-hidden="true">⌄</i></summary>
                 <div class="ssd-runtime-body">
                   <p>For models whose expert weights do not fit safely in memory. Normal models keep using the runtimes above.</p>
                   <div class="ssd-runtime-choices" role="group" aria-label="SSD-streaming runtime">
                     <button type="button" class="choice" data-backend="swiftlm" aria-pressed="false"><span class="choice-icon swiftlm" aria-hidden="true">S</span><span><strong>SwiftLM</strong><small>Streams MLX experts</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                     <button type="button" class="choice" data-backend="mference" aria-pressed="false"><span class="choice-icon mference" aria-hidden="true">MF</span><span><strong>Mference</strong><small>Verified .gturbo models</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                     <button type="button" class="choice" data-backend="whallm" aria-pressed="false"><span class="choice-icon whallm" aria-hidden="true">W</span><span><strong>Whallm</strong><small>Full Qwen experts</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                    <button type="button" class="choice ssd-ple-choice" data-backend="llamacpp" aria-pressed="false" hidden disabled><span class="choice-icon llamacpp" aria-hidden="true">LC</span><span><strong>llama.cpp · SSD PLE</strong><small>Pinned Flash-Next · 8K</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                   </div>
-                  <small id="ssdRuntimeStatus">SwiftLM and Mference compare only equivalent artifacts. Whallm is a separate full-expert Qwen route.</small>
+                  <small id="ssdRuntimeStatus">Only model-specific routes reported by the local controller are shown.</small>
                 </div>
               </details>
             </section>
@@ -257,6 +258,9 @@
               <div id="whallmControls" class="backend-controls hidden">
                 <div class="ssd-control-intro"><span aria-hidden="true">SSD</span><div><strong>Full 512-expert Qwen route</strong><small>Whallm owns its pinned MXFP4 model and streams routed experts from SSD. This 48 GB Mac is experimental because upstream publishes a 64 GB support floor.</small></div></div>
                 <div class="freetoken-control-facts"><span><small>Model process</small><b>Whallm owned</b></span><span><small>Measured M5 Pro decode</small><b>7.8–9.3 tok/s</b></span><span><small>Measured input</small><b>Up to 16K</b></span></div>
+              </div>
+              <div id="llamacppControls" class="backend-controls hidden">
+                <div class="ssd-control-intro ssd-ple-intro"><span aria-hidden="true">PLE</span><div><strong>Qualified Qwen3.8 Flash-Next route</strong><small>Its pinned llama.cpp build keeps PLE tensors on SSD under a fixed 8K contract. This is not a generic SSD-streaming mode.</small></div></div>
               </div>
             </div>
           </details>

@@ -22,6 +22,7 @@ MAX_BODY = 128 * 1024 * 1024
 MAX_RESPONSE_GUARD_BUFFER = 16 * 1024 * 1024
 SUPPORTED_BACKENDS = {
     "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
+    "llamacpp",
 }
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",

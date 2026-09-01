@@ -13,6 +13,9 @@ assert.equal(routes.normaliseRoute({backend:"omlx", modelId:"x".repeat(routes.MA
 assert.deepEqual(routes.normaliseRoute({backend:"whallm", modelId:"qwen-full", client:"chat"}), {
   backend:"whallm", modelId:"qwen-full", client:"chat",
 });
+assert.deepEqual(routes.normaliseRoute({backend:"llamacpp", modelId:"qwen-flash-next-ple", client:"chat"}), {
+  backend:"llamacpp", modelId:"qwen-flash-next-ple", client:"chat",
+});
 
 const values = new Map();
 const storage = {

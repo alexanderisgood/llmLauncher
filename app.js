@@ -98,7 +98,12 @@ const $ = (id) => document.getElementById(id);
 const UI_FEATURES = Object.freeze({freetoken:false});
 function uiFeatureEnabled(feature) { return UI_FEATURES[feature] === true; }
 function uiEngineVisible(backend) {
-  return String(backend || "") !== "freetoken" || uiFeatureEnabled("freetoken");
+  const id = String(backend || "");
+  if (id === "freetoken") return uiFeatureEnabled("freetoken");
+  if (id === "llamacpp") {
+    return (state.adapters?.engines || []).some(adapter => adapter.id === "llamacpp");
+  }
+  return true;
 }
 function uiRequestVisible(request = {}) { return uiEngineVisible(request?.backend); }
 function uiProfileVisible(profile = {}) {
@@ -120,6 +125,11 @@ function applyUiFeatureVisibility() {
       if ("disabled" in element) element.disabled = !enabled;
     });
   }
+  const llamaCppVisible = uiEngineVisible("llamacpp");
+  document.querySelectorAll('[data-backend="llamacpp"]').forEach(element => {
+    element.hidden = !llamaCppVisible;
+    if (!llamaCppVisible && "disabled" in element) element.disabled = true;
+  });
   if (!uiEngineVisible(state.backend)) state.backend = "mtplx";
   if (!uiFeatureEnabled("freetoken") && $("modelLibraryEngineFilter")?.value === "freetoken") {
     $("modelLibraryEngineFilter").value = "all";
@@ -246,6 +256,7 @@ const optimizerKeys = {
   swiftlm: ["prefillSize", "nativeExpertTopK"],
   mference: ["promptCacheMode", "queueLimit"],
   whallm: [],
+  llamacpp: [],
 };
 const enginePreferenceLabels = {
   throughput:"Highest generation TPS",
@@ -345,7 +356,7 @@ function orderedRouteIds(collection, fallback) {
 }
 
 function visibleRouteCatalog() {
-  const backends = orderedRouteIds("engines", ["omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm"])
+  const backends = orderedRouteIds("engines", ["omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"])
     .filter(uiEngineVisible);
   const clients = orderedRouteIds("workSurfaces", ["pi", "opencode", "codex", "chat"]);
   const routes = [];
@@ -354,6 +365,7 @@ function visibleRouteCatalog() {
     for (const model of state.models) {
       const capability = model?.backends?.[backend];
       if (!model?.ready || !capability?.runnable) continue;
+      if (backend === "llamacpp" && !llamaCppPleQualified(model)) continue;
       for (const client of clients) {
         const support = resolvedClientSupport(backend, client, model);
         if (clientInstalled(client) && support?.supported) {
@@ -473,7 +485,7 @@ function runtimeKvValue(backend = state.backend) {
 }
 
 function setRuntimeKvValue(backend, value) {
-  if (["lmstudio", "freetoken", "swiftlm", "mference", "whallm"].includes(backend)) return value === "off";
+  if (["lmstudio", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"].includes(backend)) return value === "off";
   const control = backend === "omlx" ? $("omlxKv") : $("mtplxKv");
   const option = [...control.options].find(item => item.value === String(value));
   if (!option) return false;
@@ -506,7 +518,7 @@ function gatherOptions() {
       queueLimit:Number($("mferenceQueueLimit").value),
     };
   }
-  if (state.backend === "whallm") {
+  if (["whallm", "llamacpp"].includes(state.backend)) {
     return {acceleration:"off", depth:1, kv:"off"};
   }
   return {
@@ -865,6 +877,25 @@ function adapterDescriptor(collection, id) {
   return (state.adapters?.[collection] || []).find(adapter => adapter.id === id);
 }
 
+function llamaCppPleCapabilityQualified(capability) {
+  const contextWindows = Array.isArray(capability?.contextWindows)
+    ? capability.contextWindows.map(Number) : [];
+  return capability?.runnable === true
+    && capability?.llamacppPle === true
+    && capability?.atomicPle?.ready === true
+    && typeof capability?.receiptFingerprint === "string"
+    && /^[0-9a-f]{64}$/.test(capability.receiptFingerprint)
+    && contextWindows.length === 1 && contextWindows[0] === 8192;
+}
+
+function llamaCppPleQualified(model) {
+  return model?.ready === true && llamaCppPleCapabilityQualified(model?.backends?.llamacpp);
+}
+
+function llamaCppPleModel() {
+  return state.models.find(llamaCppPleQualified) || null;
+}
+
 function clientName(client) {
   return adapterDescriptor("workSurfaces", client)?.label
     || ({pi:"Pi", opencode:"OpenCode", codex:"Codex", chat:"Chat"})[client]
@@ -1035,12 +1066,12 @@ function renderAneReadiness(cap = {}) {
 
 function backendName(backend) {
   return adapterDescriptor("engines", backend)?.label
-    || ({omlx:"oMLX", lmstudio:"LM Studio", mtplx:"MTPLX", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm"})[backend]
+    || ({omlx:"oMLX", lmstudio:"LM Studio", mtplx:"MTPLX", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm", llamacpp:"llama.cpp · SSD PLE"})[backend]
     || backend;
 }
 
 function backendMark(backend) {
-  return ({omlx:"O", lmstudio:"LM", mtplx:"M", freetoken:"FT", swiftlm:"S", mference:"MF", whallm:"W", lms:"LM"})[backend] || "?";
+  return ({omlx:"O", lmstudio:"LM", mtplx:"M", freetoken:"FT", swiftlm:"S", mference:"MF", whallm:"W", llamacpp:"LC", lms:"LM"})[backend] || "?";
 }
 
 function routeCapabilityPresentation(capability = {}, {backend = "", modelName = "", modelReady = true} = {}) {
@@ -1050,15 +1081,20 @@ function routeCapabilityPresentation(capability = {}, {backend = "", modelName =
     ? capability.performanceEvidence : {};
   const hostState = String(hostSupport.state || hostSupport.tier || "").trim().toLowerCase();
   const evidenceTier = String(performanceEvidence.tier || "").trim().toLowerCase();
-  const specialRoute = backend === "whallm" || /flash[\s-]*next/i.test(String(modelName || ""));
+  const specialRoute = ["whallm", "llamacpp"].includes(backend) || /flash[\s-]*next/i.test(String(modelName || ""));
+  const pleContractReady = backend !== "llamacpp"
+    || llamaCppPleCapabilityQualified(capability);
   const unavailable = modelReady !== true || capability.runnable !== true
-    || hostState === "unavailable" || hostState === "unsupported";
+    || hostState === "unavailable" || hostState === "unsupported" || !pleContractReady;
   const experimental = capability.experimental === true || hostState === "experimental";
   const verifiedHere = evidenceTier === "verified-this-mac"
     && performanceEvidence.automaticEligible === true;
   const hostDetail = String(hostSupport.detail || "").trim();
   const evidenceDetail = String(performanceEvidence.detail || "").trim();
-  const routeDetail = String(capability.reason || "").trim();
+  const routeDetail = String(capability.reason || (
+    backend === "llamacpp" && !pleContractReady
+      ? "The controller did not report a receipt-bound pinned 8K SSD-PLE contract." : ""
+  )).trim();
 
   if (unavailable) return {
     available:false, attention:false, tone:"bad",
@@ -1092,6 +1128,9 @@ function benchmarkCandidates(cap = {}, backend = state.backend) {
     label:cap.native === true ? "Native greedy" : "Server managed",
     available:Boolean(cap.runnable),
   }];
+  if (backend === "llamacpp") return [{
+    id:"ar", label:"SSD PLE", available:llamaCppPleCapabilityQualified(cap),
+  }];
   if (["swiftlm", "mference", "whallm"].includes(backend)) return [{
     id:"ar", label:"Exact SSD stream", available:Boolean(cap.runnable),
   }];
@@ -1108,10 +1147,11 @@ function engineShootoutRoutes(model = selectedModel()) {
   const binaryKeys = Object.fromEntries(
     visibleEngineAdapters().map(adapter => [adapter.id, adapter.binaryKey]),
   );
-  const kvChoices = {omlx:["off","q8","q6","q4"], lmstudio:["off"], mtplx:["off","q8","q4"], freetoken:["off"], swiftlm:["off"], mference:["off"], whallm:["off"]};
+  const kvChoices = {omlx:["off","q8","q6","q4"], lmstudio:["off"], mtplx:["off","q8","q4"], freetoken:["off"], swiftlm:["off"], mference:["off"], whallm:["off"], llamacpp:["off"]};
   const ssdLane = model.ssdStreaming?.recommended === true;
   const ssdBackends = model.ssdStreaming?.calibration?.engines || ["swiftlm", "mference"];
   const backends = visibleEngineAdapters().map(adapter => adapter.id)
+    .filter(backend => backend !== "llamacpp")
     .filter(backend => !ssdLane || ssdBackends.includes(backend));
   return backends.map(backend => {
     const cap = model.backends?.[backend] || {};
@@ -1119,7 +1159,7 @@ function engineShootoutRoutes(model = selectedModel()) {
     const routeReasoning = cap[state.client === "codex" ? "codexReasoning" : "agentReasoning"] || ["auto"];
     const benchmarkReasoning = cap.agentReasoning || ["auto"];
     let reason = "";
-    const binaryKey = binaryKeys[backend] || ({omlx:"omlx", lmstudio:"lms", mtplx:"mtplx", freetoken:"freetoken", swiftlm:"swiftlm", mference:"mference", whallm:"whallm"})[backend];
+    const binaryKey = binaryKeys[backend] || ({omlx:"omlx", lmstudio:"lms", mtplx:"mtplx", freetoken:"freetoken", swiftlm:"swiftlm", mference:"mference", whallm:"whallm", llamacpp:"llamacpp"})[backend];
     if (!state.binaries?.[binaryKey]?.installed) reason = "Runtime not installed";
     else if (!model.ready || !cap.runnable) reason = cap.reason || "Model is not runnable";
     else if (!support?.supported) reason = support?.reason || "Work surface unsupported";
@@ -1466,15 +1506,20 @@ function refreshLaunchability() {
       button.setAttribute("aria-pressed", "false");
       return;
     }
+    button.hidden = false;
     const key = button.dataset.backend === "lmstudio" ? "lms" : button.dataset.backend;
     const installed = Boolean(state.binaries?.[key]?.installed);
     const connectable = button.dataset.backend === "freetoken";
-    const unavailable = (!installed && !connectable) || state.applyingOptimal;
+    const qualifiedPle = button.dataset.backend !== "llamacpp" || Boolean(llamaCppPleModel());
+    const unavailable = (!installed && !connectable) || !qualifiedPle || state.applyingOptimal;
     button.disabled = unavailable;
     button.setAttribute("aria-disabled", String(unavailable));
     button.setAttribute("aria-pressed", String(button.dataset.backend === state.backend));
     button.classList.toggle("disabled", unavailable);
     button.classList.toggle("disconnected", connectable && !installed);
+    if (button.dataset.backend === "llamacpp") button.title = qualifiedPle
+      ? "Qualified pinned Qwen3.8 Flash-Next route · fixed 8K context"
+      : "No controller-qualified 8K Flash-Next route is available";
     if (connectable) button.title = installed
       ? state.freeToken?.connected && state.freeToken?.native?.installed
         ? "Native FreeToken and a connected server are available"
@@ -1509,7 +1554,10 @@ function refreshLaunchability() {
   const runtimeControlError = state.backend === "omlx" && $("accelerationSelect").value === "dflash" && $("anePrefillSelect").value === "tuned"
     ? "DFlash 2 and tuned ANE prefill cannot run in the same oMLX engine. Choose one."
     : "";
-  const modelReady = Boolean(model?.backends[state.backend].runnable && model?.ready);
+  const modelReady = Boolean(
+    model?.backends?.[state.backend]?.runnable && model?.ready
+    && (state.backend !== "llamacpp" || llamaCppPleQualified(model))
+  );
   const warm = currentWarmRoutePlan();
   const controlsReady = Boolean(runtimeReady && modelReady && client.available && !limits && !chatError && !freeTokenError && !runtimeControlError && !state.applyingOptimal && !state.verifiedLaunchBusy && !state.profileBusy && !state.calibrationStarting && !state.calibrationApplying && !routeCheckActive && !benchmarkActive && !setupActive && !acquisitionActive && !aneActive);
   const coldLaunchable = Boolean(controlsReady && !runActive);
@@ -1586,22 +1634,32 @@ function updateBackend(preserveOptimization = false) {
   $("swiftlmControls").classList.toggle("hidden", state.backend !== "swiftlm");
   $("mferenceControls").classList.toggle("hidden", state.backend !== "mference");
   $("whallmControls").classList.toggle("hidden", state.backend !== "whallm");
-  $("sharedRuntimeControls").classList.toggle("hidden", ["freetoken", "swiftlm", "mference", "whallm"].includes(state.backend));
+  $("llamacppControls").classList.toggle("hidden", state.backend !== "llamacpp");
+  $("sharedRuntimeControls").classList.toggle("hidden", ["freetoken", "swiftlm", "mference", "whallm", "llamacpp"].includes(state.backend));
   $("advancedSummary").textContent = ({
     mtplx:"MTPLX controls", omlx:"oMLX controls", lmstudio:"LM Studio controls",
     freetoken:"FreeToken route controls", swiftlm:"SwiftLM SSD controls",
     mference:"Mference SSD controls", whallm:"Whallm SSD route",
+    llamacpp:"llama.cpp · SSD PLE route",
   })[state.backend];
-  if (["swiftlm", "mference", "whallm"].includes(state.backend)) $("ssdRuntimeDisclosure").open = true;
+  if (["swiftlm", "mference", "whallm", "llamacpp"].includes(state.backend)) $("ssdRuntimeDisclosure").open = true;
   const swiftReady = Boolean(state.binaries?.swiftlm?.installed);
   const mferenceReady = Boolean(state.binaries?.mference?.installed);
   const whallmReady = Boolean(state.binaries?.whallm?.installed);
+  const llamaCppReady = Boolean(state.binaries?.llamacpp?.installed);
+  const llamaCppModel = llamaCppPleModel();
   const whallmModel = state.models.find(model => model.sharedServer === true && model.backends?.whallm?.runnable);
   const whallmRoute = whallmModel ? routeCapabilityPresentation(whallmModel.backends.whallm, {
     backend:"whallm", modelName:whallmModel.name, modelReady:whallmModel.ready,
   }) : null;
   const whallmModelReady = whallmRoute?.tone === "good";
-  $("ssdRuntimeStatus").textContent = whallmRoute?.attention
+  $("ssdRuntimeStatus").textContent = state.backend === "llamacpp"
+    ? llamaCppModel
+      ? "Qualified pinned Flash-Next route · fixed 8K context."
+      : llamaCppReady
+        ? "Runtime found; waiting for the controller's qualified 8K Flash-Next model route."
+        : "The qualified route is advertised, but its pinned runtime is not installed."
+    : whallmRoute?.attention
     ? `${whallmRoute.label}. ${whallmRoute.detail || "Whallm can be selected explicitly, but it is not automatically preferred on this Mac."}`
     : whallmModelReady
     ? "Whallm's full-expert Qwen route is live. It stays separate from pruned or repacked checkpoint comparisons."
@@ -10650,12 +10708,13 @@ function applyBootstrapData(boot, setProject = false) {
   }
   if (boot.binaries) state.binaries = boot.binaries;
   if (boot.adapters) state.adapters = boot.adapters;
+  applyUiFeatureVisibility();
   if (boot.clientSupport) state.clientSupport = boot.clientSupport;
   if (boot.freeToken) state.freeToken = boot.freeToken;
   const binaries = Object.entries(state.binaries).filter(([name]) => (
     uiFeatureEnabled("freetoken") || !String(name).startsWith("freetoken")
   ));
-  const binaryLabels = {lms:"LM Studio", hf:"Model downloader", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm"};
+  const binaryLabels = {lms:"LM Studio", hf:"Model downloader", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm", llamacpp:"llama.cpp · SSD PLE"};
   $("toolCount").textContent = `${binaries.filter(([,value]) => value.installed).length}/${binaries.length} ready`;
   $("binaryList").innerHTML = binaries.map(([name, value]) => `<div class="binary ${value.installed ? "" : "missing"}"><div><strong>${esc(binaryLabels[name] || name)}</strong><span title="${esc(value.path || "")}">${esc(value.version)}</span></div><em>${value.installed ? "Ready" : "Missing"}</em><i aria-hidden="true"></i></div>`).join("");
   if (setProject && !$("projectPath").value) {

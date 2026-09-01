@@ -381,6 +381,129 @@ class LauncherTests(unittest.TestCase):
         )
         return bundle
 
+    def atomicchat_llamacpp_fixture(self) -> tuple[Path, Path, dict]:
+        library = Path(self.temp.name) / "atomic-models"
+        repo = library / "AtomicChat" / "Qwen3.8-Flash-Next-GGUF"
+        model = repo / launcher.LLAMACPP_ATOMIC_VARIANT
+        model.mkdir(parents=True)
+        files = []
+        for relative, size, checksum in launcher.LLAMACPP_ATOMIC_FILE_MANIFEST:
+            shard = model / Path(relative).name
+            with open(shard, "wb") as handle:
+                handle.write(b"GGUF")
+                handle.truncate(size)
+            files.append({
+                "path": relative,
+                "size": size,
+                "sha256": checksum,
+            })
+        verification = {
+            "verified": True,
+            "format": "gguf",
+            "checkedFiles": launcher.LLAMACPP_ATOMIC_SHARDS,
+            "weightBytes": launcher.LLAMACPP_ATOMIC_TOTAL_BYTES,
+            "detail": "Verified test split.",
+        }
+        marker = {
+            "schemaVersion": launcher.MODEL_ACQUISITION_SCHEMA_VERSION,
+            "repoId": launcher.LLAMACPP_ATOMIC_REPO,
+            "pinnedRevision": launcher.LLAMACPP_ATOMIC_REVISION,
+            "variantId": launcher.LLAMACPP_ATOMIC_VARIANT_ID,
+            "format": "gguf",
+            "files": files,
+            "status": "verified",
+            "verification": verification,
+        }
+        (repo / launcher.MODEL_ACQUISITION_MARKER).write_text(
+            json.dumps(marker), encoding="utf-8",
+        )
+        return library, model, marker
+
+    @staticmethod
+    def atomicchat_fixture_hash_patch() -> mock._patch:
+        """Trust only this sparse fixture's synthetic receipt hashes."""
+        return mock.patch.object(
+            launcher, "_cached_regular_file_sha256_matches", return_value=True,
+        )
+
+    def small_atomicchat_llamacpp_fixture(self) -> tuple[Path, Path, dict, int]:
+        """Build a real, cheaply hashable 28-shard contract for digest tests."""
+        library = Path(self.temp.name) / "small-atomic-models"
+        repo = library / "AtomicChat" / "Qwen3.8-Flash-Next-GGUF"
+        model = repo / launcher.LLAMACPP_ATOMIC_VARIANT
+        model.mkdir(parents=True)
+        payload = b"GGUF" + b"x" * 1_000_000
+        checksum = hashlib.sha256(payload).hexdigest()
+        files = []
+        for index in range(1, launcher.LLAMACPP_ATOMIC_SHARDS + 1):
+            relative = launcher.llamacpp_atomic_shard_relative(index)
+            (model / Path(relative).name).write_bytes(payload)
+            files.append({"path": relative, "size": len(payload), "sha256": checksum})
+        total = len(payload) * launcher.LLAMACPP_ATOMIC_SHARDS
+        verification = {
+            "verified": True,
+            "format": "gguf",
+            "checkedFiles": launcher.LLAMACPP_ATOMIC_SHARDS,
+            "weightBytes": total,
+            "detail": "Verified small test split.",
+        }
+        marker = {
+            "schemaVersion": launcher.MODEL_ACQUISITION_SCHEMA_VERSION,
+            "repoId": launcher.LLAMACPP_ATOMIC_REPO,
+            "pinnedRevision": launcher.LLAMACPP_ATOMIC_REVISION,
+            "variantId": launcher.LLAMACPP_ATOMIC_VARIANT_ID,
+            "format": "gguf",
+            "files": files,
+            "status": "verified",
+            "verification": verification,
+        }
+        (repo / launcher.MODEL_ACQUISITION_MARKER).write_text(
+            json.dumps(marker), encoding="utf-8",
+        )
+        return library, model, marker, total
+
+    @staticmethod
+    def small_atomicchat_manifest(marker: dict) -> tuple[tuple[str, int, str], ...]:
+        return tuple(
+            (str(item["path"]), int(item["size"]), str(item["sha256"]))
+            for item in marker["files"]
+        )
+
+    def llamacpp_runtime_fixture(self) -> tuple[Path, Path, tuple]:
+        root = Path(self.temp.name).resolve() / "runtimes" / "llama.cpp-b10740"
+        root.mkdir(parents=True)
+        aliases = (
+            ("libllama-common.0.dylib", "libllama-common.0.3.0.dylib"),
+            ("libmtmd.0.dylib", "libmtmd.0.3.0.dylib"),
+            ("libllama.0.dylib", "libllama.0.3.0.dylib"),
+            ("libggml.0.dylib", "libggml.0.22.0.dylib"),
+            ("libggml-cpu.0.dylib", "libggml-cpu.0.22.0.dylib"),
+            ("libggml-blas.0.dylib", "libggml-blas.0.22.0.dylib"),
+            ("libggml-metal.0.dylib", "libggml-metal.0.22.0.dylib"),
+            ("libggml-rpc.0.dylib", "libggml-rpc.0.22.0.dylib"),
+            ("libggml-base.0.dylib", "libggml-base.0.22.0.dylib"),
+        )
+        targets = ("llama-server", "libllama-server-impl.dylib", *(item[1] for item in aliases))
+        payloads = {name: f"official fixture bytes: {name}".encode() for name in targets}
+        for name, payload in payloads.items():
+            (root / name).write_bytes(payload)
+        server = root / "llama-server"
+        server.chmod(0o755)
+        for alias, target in aliases:
+            (root / alias).symlink_to(target)
+        manifest = (
+            ("llama-server", "llama-server", hashlib.sha256(payloads["llama-server"]).hexdigest()),
+            (
+                "libllama-server-impl.dylib", "libllama-server-impl.dylib",
+                hashlib.sha256(payloads["libllama-server-impl.dylib"]).hexdigest(),
+            ),
+            *(
+                (alias, target, hashlib.sha256(payloads[target]).hexdigest())
+                for alias, target in aliases
+            ),
+        )
+        return root, server, manifest
+
     def test_controller_source_freshness_blocks_new_work_but_not_stop(self) -> None:
         source = Path(self.temp.name) / "launcher-copy.py"
         source.write_text("old", encoding="utf-8")
@@ -2053,6 +2176,12 @@ class LauncherTests(unittest.TestCase):
             engines["freetoken"]["protocol"],
             "native-or-remote-openai-compatible",
         )
+        self.assertEqual(engines["llamacpp"]["binaryKey"], "llamacpp")
+        self.assertEqual(engines["llamacpp"]["protocol"], "openai-compatible-ssd-ple")
+        self.assertTrue(launcher.CLIENT_SUPPORT["llamacpp"]["chat"]["supported"])
+        self.assertTrue(launcher.CLIENT_SUPPORT["llamacpp"]["pi"]["supported"])
+        self.assertTrue(launcher.CLIENT_SUPPORT["llamacpp"]["opencode"]["supported"])
+        self.assertFalse(launcher.CLIENT_SUPPORT["llamacpp"]["codex"]["supported"])
         self.assertFalse(engines["freetoken"]["installed"])
         self.assertEqual(surfaces["codex"]["protocol"], "responses")
         self.assertTrue(surfaces["chat"]["builtIn"])
@@ -2624,7 +2753,10 @@ class LauncherTests(unittest.TestCase):
         engines = {item["id"]: item for item in report["engines"]}
         self.assertEqual(
             set(engines),
-            {"omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm"},
+            {
+                "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm",
+                "mference", "whallm", "llamacpp",
+            },
         )
         for engine in (engines[item] for item in {"omlx", "lmstudio", "mtplx"}):
             self.assertEqual(
@@ -7879,6 +8011,748 @@ for line in sys.stdin:
             collision = launcher.build_model_acquisition_plan(snapshot, "lmstudio", variant_id)
         self.assertTrue(collision["destination"]["collision"])
         self.assertFalse(collision["canStart"])
+
+    def test_atomicchat_nested_gguf_variant_is_exact_and_allowlisted(self) -> None:
+        _library, _model, marker = self.atomicchat_llamacpp_fixture()
+        files = [
+            {**item, "securitySafe": True, "securityStatus": "safe"}
+            for item in marker["files"]
+        ]
+        files.extend([
+            {
+                "path": "Qwen3.8-Flash-Next-AD-4.27bpw-IQ4_K_M/sibling-00001-of-00001.gguf",
+                "size": 9_000_000,
+                "sha256": "f" * 64,
+                "securitySafe": True,
+                "securityStatus": "safe",
+            },
+            {
+                "path": "imatrix/imatrix.gguf", "size": 2_000_000,
+                "sha256": "e" * 64, "securitySafe": True,
+                "securityStatus": "safe",
+            },
+        ])
+        snapshot = {
+            "repoId": launcher.LLAMACPP_ATOMIC_REPO,
+            "url": f"https://huggingface.co/{launcher.LLAMACPP_ATOMIC_REPO}",
+            "requestedRevision": "main",
+            "pinnedRevision": launcher.LLAMACPP_ATOMIC_REVISION,
+            "gated": False, "private": False, "disabled": False,
+            "license": "other", "tags": ["gguf"],
+            "draftOnly": False, "customCode": False, "files": files,
+        }
+        variants = launcher.model_acquisition_variants(snapshot)
+        self.assertEqual([item["id"] for item in variants], [launcher.LLAMACPP_ATOMIC_VARIANT_ID])
+        variant = variants[0]
+        self.assertEqual(variant["fileCount"], 28)
+        self.assertEqual(variant["sizeBytes"], launcher.LLAMACPP_ATOMIC_TOTAL_BYTES)
+        self.assertEqual(
+            [item["path"] for item in variant["files"]],
+            [launcher.llamacpp_atomic_shard_relative(index) for index in range(1, 29)],
+        )
+        self.assertNotIn("imatrix/imatrix.gguf", [item["path"] for item in variant["files"]])
+
+        wrong_revision = copy.deepcopy(snapshot)
+        wrong_revision["pinnedRevision"] = "0" * 40
+        self.assertEqual(launcher.model_acquisition_variants(wrong_revision), [])
+        missing = copy.deepcopy(snapshot)
+        missing["files"] = missing["files"][1:]
+        self.assertEqual(launcher.model_acquisition_variants(missing), [])
+        unhashed = copy.deepcopy(snapshot)
+        unhashed["files"][0]["sha256"] = ""
+        self.assertEqual(launcher.model_acquisition_variants(unhashed), [])
+        forged_hash = copy.deepcopy(snapshot)
+        forged_hash["files"][0]["sha256"] = "a" * 64
+        self.assertEqual(launcher.model_acquisition_variants(forged_hash), [])
+        forged_sizes = copy.deepcopy(snapshot)
+        forged_sizes["files"][0]["size"] += 1
+        forged_sizes["files"][1]["size"] -= 1
+        self.assertEqual(
+            sum(item["size"] for item in forged_sizes["files"][:28]),
+            launcher.LLAMACPP_ATOMIC_TOTAL_BYTES,
+        )
+        self.assertEqual(launcher.model_acquisition_variants(forged_sizes), [])
+
+        destination = Path(self.temp.name) / "acquisition-root"
+        roots = [{"id": "documents", "label": "Test", "path": str(destination)}]
+        with (
+            mock.patch.object(launcher, "model_acquisition_roots", return_value=roots),
+            mock.patch.object(launcher, "disk_free_for", return_value=100 * 1024**3),
+            mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
+            mock.patch.dict(launcher.BINARIES, {"llamacpp": "/usr/bin/true"}),
+        ):
+            plan = launcher.build_model_acquisition_plan(snapshot, "documents")
+            argv = launcher.build_model_acquisition_download_argv(plan)
+        expected = {item["id"]: item for item in plan["expectedEngines"]}
+        self.assertTrue(expected["llamacpp"]["expectedCompatible"])
+        self.assertFalse(expected["lmstudio"]["expectedCompatible"])
+        self.assertEqual(argv[argv.index("--revision") + 1], launcher.LLAMACPP_ATOMIC_REVISION)
+        self.assertIn(launcher.llamacpp_atomic_shard_relative(28), argv)
+        self.assertFalse((destination / "AtomicChat" / "Qwen3.8-Flash-Next-GGUF").exists())
+
+    def test_atomicchat_parent_receipt_is_required_and_bound(self) -> None:
+        _library, model, marker = self.atomicchat_llamacpp_fixture()
+        with self.atomicchat_fixture_hash_patch():
+            contract = launcher.llamacpp_atomic_artifact_contract(model)
+            self.assertTrue(contract["ready"])
+            self.assertEqual(contract["shardCount"], 28)
+            self.assertEqual(contract["weightBytes"], launcher.LLAMACPP_ATOMIC_TOTAL_BYTES)
+            self.assertRegex(contract["receiptFingerprint"], r"^[0-9a-f]{64}$")
+            self.assertTrue(str(contract["firstShard"]).endswith("-00001-of-00028.gguf"))
+
+            marker_path = model.parent / launcher.MODEL_ACQUISITION_MARKER
+            wrong = copy.deepcopy(marker)
+            wrong["pinnedRevision"] = "0" * 40
+            marker_path.write_text(json.dumps(wrong), encoding="utf-8")
+            self.assertFalse(launcher.llamacpp_atomic_artifact_contract(model)["ready"])
+            marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+            shard = model / Path(launcher.llamacpp_atomic_shard_relative(7)).name
+            shard.unlink()
+            missing = launcher.llamacpp_atomic_artifact_contract(model)
+            self.assertFalse(missing["ready"])
+            self.assertIn("shard 7", missing["reason"])
+
+            arbitrary = Path(self.temp.name) / "arbitrary-qwen4"
+            arbitrary.mkdir()
+            (arbitrary / "model.gguf").write_bytes(b"GGUF" + b"x" * 2_000_000)
+            self.assertFalse(launcher.llamacpp_atomic_artifact_contract(arbitrary)["ready"])
+
+    def test_atomicchat_synthetic_receipt_hashes_are_not_trusted(self) -> None:
+        _library, model, _marker = self.atomicchat_llamacpp_fixture()
+        with launcher._VERIFIED_FILE_SHA256_CACHE_LOCK:
+            launcher._VERIFIED_FILE_SHA256_CACHE.clear()
+        with mock.patch.object(
+            launcher, "_stream_file_sha256", return_value="0" * 64,
+        ) as stream_hash:
+            contract = launcher.llamacpp_atomic_artifact_contract(model)
+        self.assertFalse(contract["ready"])
+        self.assertIn("SHA-256", contract["reason"])
+        stream_hash.assert_called_once()
+
+    def test_atomicchat_forged_exact_size_receipt_cannot_replace_source_manifest(self) -> None:
+        _library, model, marker = self.atomicchat_llamacpp_fixture()
+        marker_path = model.parent / launcher.MODEL_ACQUISITION_MARKER
+        forged = copy.deepcopy(marker)
+        forged["files"][0]["sha256"] = "a" * 64
+        marker_path.write_text(json.dumps(forged), encoding="utf-8")
+        with self.atomicchat_fixture_hash_patch() as stream_hash:
+            rejected_hash = launcher.llamacpp_atomic_artifact_contract(model)
+        self.assertFalse(rejected_hash["ready"])
+        self.assertIn("immutable pinned source manifest", rejected_hash["reason"])
+        stream_hash.assert_not_called()
+
+        forged = copy.deepcopy(marker)
+        forged["files"][0]["size"] += 1
+        forged["files"][1]["size"] -= 1
+        marker_path.write_text(json.dumps(forged), encoding="utf-8")
+        with self.atomicchat_fixture_hash_patch() as stream_hash:
+            rejected_size = launcher.llamacpp_atomic_artifact_contract(model)
+        self.assertFalse(rejected_size["ready"])
+        self.assertIn("immutable pinned source manifest", rejected_size["reason"])
+        stream_hash.assert_not_called()
+
+    def test_atomicchat_hash_cache_rejects_same_size_interior_mutation(self) -> None:
+        _library, model, marker, total = self.small_atomicchat_llamacpp_fixture()
+        manifest = self.small_atomicchat_manifest(marker)
+        with launcher._VERIFIED_FILE_SHA256_CACHE_LOCK:
+            launcher._VERIFIED_FILE_SHA256_CACHE.clear()
+        real_stream = launcher._stream_file_sha256
+        with (
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_FILE_MANIFEST", manifest),
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_TOTAL_BYTES", total),
+            mock.patch.object(
+                launcher, "_stream_file_sha256", wraps=real_stream,
+            ) as stream_hash,
+        ):
+            first = launcher.llamacpp_atomic_artifact_contract(model)
+            self.assertTrue(first["ready"])
+            self.assertEqual(stream_hash.call_count, launcher.LLAMACPP_ATOMIC_SHARDS)
+
+            second = launcher.llamacpp_atomic_artifact_contract(model)
+            self.assertTrue(second["ready"])
+            self.assertEqual(stream_hash.call_count, launcher.LLAMACPP_ATOMIC_SHARDS)
+
+            shard = model / Path(launcher.llamacpp_atomic_shard_relative(13)).name
+            original = shard.stat()
+            with open(shard, "r+b") as handle:
+                handle.seek(4_096)
+                handle.write(b"y")
+            changed = shard.stat()
+            if (
+                changed.st_mtime_ns == original.st_mtime_ns
+                and changed.st_ctime_ns == original.st_ctime_ns
+            ):
+                os.utime(shard, ns=(original.st_atime_ns, original.st_mtime_ns + 1_000_000))
+            self.assertEqual(shard.stat().st_size, original.st_size)
+            self.assertEqual(shard.read_bytes()[:4], b"GGUF")
+
+            rejected = launcher.llamacpp_atomic_artifact_contract(model)
+            self.assertFalse(rejected["ready"])
+            self.assertIn("SHA-256", rejected["reason"])
+            self.assertEqual(stream_hash.call_count, launcher.LLAMACPP_ATOMIC_SHARDS + 1)
+
+            cached_rejection = launcher.llamacpp_atomic_artifact_contract(model)
+            self.assertFalse(cached_rejection["ready"])
+            self.assertEqual(stream_hash.call_count, launcher.LLAMACPP_ATOMIC_SHARDS + 1)
+
+    def test_atomicchat_scan_exposes_only_receipt_bound_llamacpp_route(self) -> None:
+        library, model_path, _marker = self.atomicchat_llamacpp_fixture()
+        arbitrary = library / "other" / "arbitrary-qwen4"
+        arbitrary.mkdir(parents=True)
+        (arbitrary / "model.gguf").write_bytes(b"GGUF" + b"x" * 2_000_000)
+        runtime = {
+            "ready": True,
+            "version": f"llama.cpp {launcher.LLAMACPP_RUNTIME_TAG} · {launcher.LLAMACPP_RUNTIME_COMMIT[:12]}",
+            "reason": "runtime ready",
+        }
+        with (
+            mock.patch.object(launcher, "model_roots", return_value=[("Test", library)]),
+            mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+            mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
+            mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
+            mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
+            mock.patch.object(launcher, "probe_whallm_endpoint", return_value=None),
+            mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
+            mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
+            self.atomicchat_fixture_hash_patch(),
+        ):
+            models = launcher.scan_models()
+        atomic = next(item for item in models if item["path"] == str(model_path.resolve()))
+        other = next(item for item in models if item["path"] == str(arbitrary.resolve()))
+        capability = atomic["backends"]["llamacpp"]
+        self.assertTrue(atomic["ready"])
+        self.assertEqual(atomic["format"], "gguf")
+        self.assertEqual(atomic["modelType"], "qwen4exp")
+        self.assertEqual(atomic["nativeContext"], launcher.LLAMACPP_PLE_CONTEXT)
+        self.assertEqual(atomic["defaultSampling"], {
+            "temperature": 1.0, "top_p": 0.95, "top_k": 20,
+        })
+        self.assertTrue(capability["runnable"])
+        self.assertTrue(capability["llamacppPle"])
+        self.assertTrue(capability["atomicPle"]["ready"])
+        self.assertEqual(capability["contextWindows"], [8_192])
+        self.assertFalse(atomic["backends"]["lmstudio"]["runnable"])
+        self.assertFalse(other["backends"]["llamacpp"]["runnable"])
+        self.assertFalse(other["backends"]["llamacpp"]["llamacppPle"])
+
+        (model_path.parent / launcher.MODEL_ACQUISITION_MARKER).unlink()
+        with (
+            mock.patch.object(launcher, "model_roots", return_value=[("Test", library)]),
+            mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+            mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
+            mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
+            mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
+            mock.patch.object(launcher, "probe_whallm_endpoint", return_value=None),
+            mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
+            mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
+            self.atomicchat_fixture_hash_patch(),
+        ):
+            stale = launcher.scan_models()
+        stale_atomic = next(item for item in stale if item["path"] == str(model_path.resolve()))
+        self.assertFalse(stale_atomic["backends"]["llamacpp"]["runnable"])
+
+    def test_atomicchat_partial_nested_download_is_not_model_ready(self) -> None:
+        library = Path(self.temp.name) / "partial-atomic-models"
+        repo = library / "AtomicChat" / "Qwen3.8-Flash-Next-GGUF"
+        model = repo / launcher.LLAMACPP_ATOMIC_VARIANT
+        model.mkdir(parents=True)
+        first_shard = model / Path(launcher.llamacpp_atomic_shard_relative(1)).name
+        first_shard.write_bytes(b"GGUF" + b"x" * 2_000_000)
+        (repo / launcher.MODEL_ACQUISITION_MARKER).write_text(json.dumps({
+            "schemaVersion": launcher.MODEL_ACQUISITION_SCHEMA_VERSION,
+            "repoId": launcher.LLAMACPP_ATOMIC_REPO,
+            "pinnedRevision": launcher.LLAMACPP_ATOMIC_REVISION,
+            "variantId": launcher.LLAMACPP_ATOMIC_VARIANT_ID,
+            "format": "gguf",
+            "files": [],
+            "status": "downloading",
+            "verification": {"verified": False},
+        }), encoding="utf-8")
+        runtime = {
+            "ready": True,
+            "version": f"llama.cpp {launcher.LLAMACPP_RUNTIME_TAG}",
+            "reason": "runtime ready",
+        }
+        with (
+            mock.patch.object(launcher, "model_roots", return_value=[("Test", library)]),
+            mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+            mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
+            mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
+            mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
+            mock.patch.object(launcher, "probe_whallm_endpoint", return_value=None),
+            mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
+            mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
+        ):
+            records = launcher.scan_models()
+        partial = next(item for item in records if item["path"] == str(model.resolve()))
+        self.assertFalse(partial["ready"])
+        self.assertIn("receipt", partial["status"].casefold())
+        self.assertEqual(partial["size"], first_shard.stat().st_size)
+        self.assertFalse(partial["backends"]["llamacpp"]["runnable"])
+
+    def test_llamacpp_runtime_contract_requires_exact_managed_build_and_flags(self) -> None:
+        runtime_root, server, manifest = self.llamacpp_runtime_fixture()
+        flags = (
+            "--model", "-ngl", "-c", "--parallel", "--load-mode", "--lazy-mode",
+            "-fit", "--jinja", "-fa", "--reasoning", "--reasoning-format",
+            "--reasoning-preserve", "--spec-type", "--cache-type-k", "--cache-type-v",
+            "--host", "--port", "--alias", "--api-key",
+        )
+        help_text = "\n".join(flags)
+
+        def command(_path: str, *arguments: str) -> str:
+            return (
+                f"llama.cpp version 10740 ({launcher.LLAMACPP_RUNTIME_COMMIT[:12]})"
+                if arguments == ("--version",) else help_text
+            )
+
+        with (
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
+            mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
+            mock.patch.object(launcher, "command_help", side_effect=command),
+        ):
+            contract = launcher.llamacpp_runtime_contract(str(server))
+            candidates = launcher.runtime_candidates("llamacpp")
+        self.assertTrue(contract["ready"])
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["resolvedPath"], str(server.resolve()))
+
+        for omitted in flags:
+            reduced = "\n".join(flag for flag in flags if flag != omitted)
+            with (
+                mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
+                mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
+                mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
+                mock.patch.object(
+                    launcher, "command_help",
+                    side_effect=lambda _path, *args, text=reduced: (
+                        f"{launcher.LLAMACPP_RUNTIME_COMMIT[:12]}"
+                        if args == ("--version",) else text
+                    ),
+                ),
+            ):
+                rejected = launcher.llamacpp_runtime_contract(str(server))
+            self.assertFalse(rejected["ready"], omitted)
+            self.assertIn(omitted, rejected["missingFlags"])
+
+        with (
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
+            mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
+            mock.patch.object(launcher, "command_help", return_value="llama.cpp stable v0.3.0"),
+        ):
+            self.assertFalse(launcher.llamacpp_runtime_contract(str(server))["ready"])
+
+    def test_llamacpp_runtime_rejects_spoof_before_executing_it(self) -> None:
+        runtime_root, server, manifest = self.llamacpp_runtime_fixture()
+        original = server.read_bytes()
+        spoof = bytearray(original)
+        spoof[len(spoof) // 2] ^= 1
+        server.write_bytes(spoof)
+        server.chmod(0o755)
+        with (
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
+            mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
+            mock.patch.object(launcher, "command_help", return_value=(
+                f"{launcher.LLAMACPP_RUNTIME_COMMIT}\n--model -ngl -c --parallel "
+                "--load-mode --lazy-mode -fit --jinja -fa --reasoning "
+                "--reasoning-format --reasoning-preserve --spec-type "
+                "--cache-type-k --cache-type-v --host --port --alias --api-key"
+            )) as command,
+        ):
+            contract = launcher.llamacpp_runtime_contract(str(server))
+        self.assertFalse(contract["ready"])
+        self.assertEqual(contract["failedFile"], "llama-server")
+        command.assert_not_called()
+
+    def test_llamacpp_spoof_is_never_executed_by_status_or_candidate_paths(self) -> None:
+        runtime_root, server, manifest = self.llamacpp_runtime_fixture()
+        changed = bytearray(server.read_bytes())
+        changed[len(changed) // 2] ^= 1
+        server.write_bytes(changed)
+        server.chmod(0o755)
+        candidate = {
+            "id": "spoofed-llamacpp", "runtime": "llamacpp",
+            "path": str(server), "resolvedPath": str(server.resolve()),
+            "channel": "launcher-managed", "channelLabel": "Spoof fixture",
+        }
+        native_status = {
+            "installed": False, "detected": False, "supportedHost": True,
+            "path": None, "version": "Not installed",
+        }
+        patches = (
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
+            mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
+        )
+        with (
+            patches[0], patches[1], patches[2],
+            mock.patch.dict(launcher.BINARIES, {"llamacpp": str(server)}, clear=True),
+            mock.patch.object(launcher, "runtime_candidates", return_value=[candidate]),
+            mock.patch.object(launcher, "native_freetoken_public_status", return_value=native_status),
+            mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
+            mock.patch.object(
+                launcher.subprocess, "run",
+                side_effect=AssertionError("an unverified llama-server was executed"),
+            ) as run,
+        ):
+            status = launcher.public_binary_status()["llamacpp"]
+            details = launcher.runtime_candidate_details("llamacpp")
+            version = launcher.command_version(str(server))
+            with self.assertRaisesRegex(ValueError, "verified official b10740 archive"):
+                launcher.select_runtime_candidate({
+                    "runtime": "llamacpp", "candidateId": candidate["id"],
+                    "confirmation": f"select:{candidate['id']}",
+                })
+        self.assertFalse(status["installed"])
+        self.assertEqual(status["version"], "Installed (unverified managed runtime)")
+        self.assertEqual(details[0]["version"], "Installed (unverified managed runtime)")
+        self.assertEqual(version, "Installed (unverified managed runtime)")
+        run.assert_not_called()
+
+    def test_llamacpp_runtime_checks_strip_every_dyld_override(self) -> None:
+        runtime_root, server, manifest = self.llamacpp_runtime_fixture()
+        flags = " ".join((
+            "--model", "-ngl", "-c", "--parallel", "--load-mode", "--lazy-mode",
+            "-fit", "--jinja", "-fa", "--reasoning", "--reasoning-format",
+            "--reasoning-preserve", "--spec-type", "--cache-type-k", "--cache-type-v",
+            "--host", "--port", "--alias", "--api-key",
+        ))
+        observed: list[dict[str, str]] = []
+
+        def run(argv, **kwargs):
+            environment = dict(kwargs.get("env") or {})
+            observed.append(environment)
+            output = (
+                f"llama.cpp {launcher.LLAMACPP_RUNTIME_COMMIT}"
+                if argv[-1] == "--version" else flags
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout=output)
+
+        inherited = {
+            "DYLD_VERSIONED_LIBRARY_PATH": "/tmp/versioned",
+            "DYLD_IMAGE_SUFFIX": "_spoof",
+            "DYLD_ROOT_PATH": "/tmp/root",
+            "DYLD_FUTURE_OVERRIDE": "/tmp/future",
+            "LLM_LAUNCHER_SAFE_SENTINEL": "preserved",
+        }
+        with launcher._VERIFIED_FILE_SHA256_CACHE_LOCK:
+            launcher._VERIFIED_FILE_SHA256_CACHE.clear()
+        with (
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
+            mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
+            mock.patch.dict(os.environ, inherited),
+            mock.patch.object(launcher.subprocess, "run", side_effect=run),
+        ):
+            contract = launcher.llamacpp_runtime_contract(str(server))
+        self.assertTrue(contract["ready"], contract)
+        self.assertEqual(len(observed), 2)
+        for environment in observed:
+            self.assertFalse(any(key.startswith("DYLD_") for key in environment))
+            self.assertEqual(environment["LLM_LAUNCHER_SAFE_SENTINEL"], "preserved")
+
+    def test_llamacpp_runtime_rejects_changed_loaded_dylib_before_execution(self) -> None:
+        runtime_root, server, manifest = self.llamacpp_runtime_fixture()
+        flags = " ".join((
+            "--model", "-ngl", "-c", "--parallel", "--load-mode", "--lazy-mode",
+            "-fit", "--jinja", "-fa", "--reasoning", "--reasoning-format",
+            "--reasoning-preserve", "--spec-type", "--cache-type-k", "--cache-type-v",
+            "--host", "--port", "--alias", "--api-key",
+        ))
+
+        def command_output(_path: str, *args: str) -> str:
+            return launcher.LLAMACPP_RUNTIME_COMMIT if args == ("--version",) else flags
+
+        patches = (
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
+            mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
+        )
+        with patches[0], patches[1], patches[2], mock.patch.object(
+            launcher, "command_help", side_effect=command_output,
+        ):
+            self.assertTrue(launcher.llamacpp_runtime_contract(str(server))["ready"])
+
+        dylib = runtime_root / "libggml-metal.0.22.0.dylib"
+        changed = bytearray(dylib.read_bytes())
+        changed[len(changed) // 2] ^= 1
+        dylib.write_bytes(changed)
+        with (
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
+            mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
+            mock.patch.object(launcher, "command_help", side_effect=command_output) as command,
+        ):
+            contract = launcher.llamacpp_runtime_contract(str(server))
+        self.assertFalse(contract["ready"])
+        self.assertEqual(contract["failedFile"], "libggml-metal.0.dylib")
+        command.assert_not_called()
+
+    def test_llamacpp_runtime_rejects_post_hash_mutation_during_version_probe(self) -> None:
+        runtime_root, server, manifest = self.llamacpp_runtime_fixture()
+        metal = runtime_root / "libggml-metal.0.22.0.dylib"
+        probes: list[tuple[str, ...]] = []
+
+        def command_output(_path: str, *args: str) -> str:
+            probes.append(args)
+            if args != ("--version",):
+                raise AssertionError("help probe must not run after the closure changes")
+            changed = bytearray(metal.read_bytes())
+            changed[len(changed) // 2] ^= 1
+            metal.write_bytes(changed)
+            return f"llama.cpp {launcher.LLAMACPP_RUNTIME_COMMIT}"
+
+        with launcher._VERIFIED_FILE_SHA256_CACHE_LOCK:
+            launcher._VERIFIED_FILE_SHA256_CACHE.clear()
+        with (
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
+            mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", manifest),
+            mock.patch.object(launcher, "command_help", side_effect=command_output),
+        ):
+            contract = launcher.llamacpp_runtime_contract(str(server))
+        self.assertFalse(contract["ready"])
+        self.assertIn("during its version probe", contract["reason"])
+        self.assertEqual(probes, [("--version",)])
+
+    def test_acquisition_verification_primes_strong_sha256_cache(self) -> None:
+        destination = Path(self.temp.name) / "cache-prime"
+        destination.mkdir()
+        payload = b"GGUF" + b"p" * 2_000_000
+        artifact = destination / "model.gguf"
+        artifact.write_bytes(payload)
+        expected = hashlib.sha256(payload).hexdigest()
+        plan = {
+            "selection": {
+                "format": "gguf",
+                "files": [{
+                    "path": "model.gguf", "size": len(payload),
+                    "sha256": expected, "role": "weight",
+                }],
+            },
+            "destination": {"path": str(destination)},
+        }
+        with launcher._VERIFIED_FILE_SHA256_CACHE_LOCK:
+            launcher._VERIFIED_FILE_SHA256_CACHE.clear()
+        verification = launcher.verify_model_acquisition(plan)
+        self.assertTrue(verification["verified"])
+        with mock.patch.object(
+            launcher, "_stream_file_sha256", wraps=launcher._stream_file_sha256,
+        ) as stream_hash:
+            self.assertTrue(launcher._cached_regular_file_sha256_matches(artifact, expected))
+        stream_hash.assert_not_called()
+
+    def test_llamacpp_atomic_builder_pins_flags_and_revalidates_cap(self) -> None:
+        _library, model_path, _marker = self.atomicchat_llamacpp_fixture()
+        with self.atomicchat_fixture_hash_patch():
+            artifact = launcher.llamacpp_atomic_artifact_contract(model_path)
+        runtime = {
+            "ready": True,
+            "version": f"llama.cpp {launcher.LLAMACPP_RUNTIME_TAG} · {launcher.LLAMACPP_RUNTIME_COMMIT[:12]}",
+            "reason": "ready",
+        }
+        fingerprint = launcher.model_artifact_fingerprint(model_path, {})
+        capability = {
+            "runnable": True,
+            "runtimeVersion": runtime["version"],
+            "llamacppPle": True,
+            "atomicPle": artifact,
+            "receiptFingerprint": artifact["receiptFingerprint"],
+            "firstShard": artifact["firstShard"],
+            "modelPath": str(model_path.resolve()),
+            "benchmarkModelFingerprint": fingerprint,
+        }
+        model = {
+            "id": "atomic", "name": launcher.LLAMACPP_ATOMIC_VARIANT,
+            "path": str(model_path), "backends": {"llamacpp": capability},
+        }
+        plan = launcher.LaunchPlan(
+            "atomic-builder", "llamacpp", "chat", model, self.temp.name,
+            launcher.LLAMACPP_PLE_CONTEXT, 4_096, "auto", 18_123, "custom",
+            {"acceleration": "off", "depth": 1, "kv": "off"},
+            run_dir=self.state / "atomic-builder",
+        )
+        with (
+            mock.patch.dict(launcher.BINARIES, {"llamacpp": "/test/llama-server"}),
+            mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
+            mock.patch.object(launcher, "_llamacpp_launch_file_identities", return_value=(("stable",),)),
+            mock.patch.object(
+                launcher, "apple_iogpu_wired_limit_bytes",
+                return_value=launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+            ),
+            self.atomicchat_fixture_hash_patch(),
+        ):
+            launcher.build_llamacpp(plan, capability)
+        argv = plan.engine_argv
+        self.assertEqual(argv[0], "/test/llama-server")
+        self.assertEqual(argv[argv.index("--model") + 1], artifact["firstShard"])
+        for flag, value in (
+            ("-ngl", "99"), ("-c", "8192"), ("--parallel", "1"),
+            ("--load-mode", "mmap"), ("--lazy-mode", "on"), ("-fit", "off"),
+            ("-fa", "on"), ("--reasoning", "on"),
+            ("--reasoning-format", "deepseek"), ("--spec-type", "none"),
+            ("--cache-type-k", "f16"), ("--cache-type-v", "f16"),
+            ("--host", "127.0.0.1"), ("--port", "18123"),
+        ):
+            self.assertEqual(argv[argv.index(flag) + 1], value)
+        for flag in ("--jinja", "--reasoning-preserve"):
+            self.assertIn(flag, argv)
+        for forbidden in (
+            "--ngram-load-mode", "--model-ngram", "--cpu-moe", "-ot",
+            "--model-draft", "--mmproj", "--cache-type-k-q4", "--cache-type-v-q4",
+        ):
+            self.assertNotIn(forbidden, argv)
+        self.assertNotIn(plan.secrets["apiKey"], launcher.shell_join_redacted(argv))
+        self.assertEqual(plan.model["servedId"], argv[argv.index("--alias") + 1])
+        self.assertEqual(plan.engine_env, {})
+
+        with (
+            mock.patch.dict(launcher.BINARIES, {"llamacpp": "/test/llama-server"}),
+            mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
+            mock.patch.object(launcher, "_llamacpp_launch_file_identities", return_value=(("stable",),)),
+            mock.patch.object(
+                launcher, "apple_iogpu_wired_limit_bytes",
+                return_value=launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES + 1024**2,
+            ),
+            self.atomicchat_fixture_hash_patch(),
+            self.assertRaisesRegex(ValueError, "exactly 44 GiB"),
+        ):
+            launcher.build_llamacpp(plan, capability)
+
+        first = Path(str(artifact["firstShard"]))
+        with open(first, "r+b") as handle:
+            handle.write(b"BAD!")
+        with (
+            mock.patch.dict(launcher.BINARIES, {"llamacpp": "/test/llama-server"}),
+            mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
+            mock.patch.object(launcher, "_llamacpp_launch_file_identities", return_value=(("stable",),)),
+            self.atomicchat_fixture_hash_patch(),
+            self.assertRaisesRegex(ValueError, "changed after verification"),
+        ):
+            launcher.build_llamacpp(plan, capability)
+
+    def test_llamacpp_worker_revalidates_mutation_before_popen(self) -> None:
+        _library, model_path, marker, total = self.small_atomicchat_llamacpp_fixture()
+        atomic_manifest = self.small_atomicchat_manifest(marker)
+        runtime_root, server, runtime_manifest = self.llamacpp_runtime_fixture()
+        flags = " ".join((
+            "--model", "-ngl", "-c", "--parallel", "--load-mode", "--lazy-mode",
+            "-fit", "--jinja", "-fa", "--reasoning", "--reasoning-format",
+            "--reasoning-preserve", "--spec-type", "--cache-type-k", "--cache-type-v",
+            "--host", "--port", "--alias", "--api-key",
+        ))
+
+        def command_output(_path: str, *args: str) -> str:
+            return (
+                f"llama.cpp {launcher.LLAMACPP_RUNTIME_COMMIT}"
+                if args == ("--version",) else flags
+            )
+
+        with launcher._VERIFIED_FILE_SHA256_CACHE_LOCK:
+            launcher._VERIFIED_FILE_SHA256_CACHE.clear()
+        with (
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_FILE_MANIFEST", atomic_manifest),
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_TOTAL_BYTES", total),
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_DIR", runtime_root),
+            mock.patch.object(launcher, "LLAMACPP_SERVER_PATH", server),
+            mock.patch.object(launcher, "LLAMACPP_RUNTIME_FILE_MANIFEST", runtime_manifest),
+            mock.patch.dict(launcher.BINARIES, {"llamacpp": str(server)}),
+            mock.patch.object(launcher, "command_help", side_effect=command_output),
+            mock.patch.object(
+                launcher, "apple_iogpu_wired_limit_bytes",
+                return_value=launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+            ),
+        ):
+            runtime = launcher.llamacpp_runtime_contract(str(server))
+            artifact = launcher.llamacpp_atomic_artifact_contract(model_path)
+            self.assertTrue(runtime["ready"], runtime)
+            self.assertTrue(artifact["ready"], artifact)
+            capability = {
+                "runnable": True,
+                "runtimeVersion": runtime["version"],
+                "llamacppPle": True,
+                "atomicPle": artifact,
+                "receiptFingerprint": artifact["receiptFingerprint"],
+                "firstShard": artifact["firstShard"],
+                "modelPath": str(model_path.resolve()),
+                "benchmarkModelFingerprint": launcher.model_artifact_fingerprint(model_path, {}),
+            }
+            model = {
+                "id": "atomic-boundary", "name": launcher.LLAMACPP_ATOMIC_VARIANT,
+                "path": str(model_path), "backends": {"llamacpp": capability},
+            }
+            run_dir = self.state / "atomic-boundary"
+            run_dir.mkdir(parents=True)
+            plan = launcher.LaunchPlan(
+                "atomic-boundary", "llamacpp", "chat", model, self.temp.name,
+                launcher.LLAMACPP_PLE_CONTEXT, 4_096, "auto", 18_124, "custom",
+                {"acceleration": "off", "depth": 1, "kv": "off"},
+                purpose="benchmark", run_dir=run_dir,
+            )
+            launcher.build_llamacpp(plan, capability)
+
+            shard = model_path / Path(launcher.llamacpp_atomic_shard_relative(17)).name
+            original = shard.stat()
+            with open(shard, "r+b") as handle:
+                handle.seek(16_384)
+                handle.write(b"z")
+            if (
+                shard.stat().st_mtime_ns == original.st_mtime_ns
+                and shard.stat().st_ctime_ns == original.st_ctime_ns
+            ):
+                os.utime(shard, ns=(original.st_atime_ns, original.st_mtime_ns + 1_000_000))
+
+            manager = launcher.RunManager()
+            cancel_event = threading.Event()
+            manager.plan = plan
+            manager.cancel_event = cancel_event
+            with mock.patch.object(launcher.subprocess, "Popen") as popen:
+                manager._worker(plan, cancel_event)
+        popen.assert_not_called()
+        self.assertEqual(manager.state["phase"], "failed")
+        self.assertIn("SHA-256", manager.state["message"])
+
+    def test_llamacpp_final_popen_environment_strips_every_dyld_override(self) -> None:
+        run_dir = self.state / "llamacpp-env"
+        run_dir.mkdir(parents=True)
+        plan = launcher.LaunchPlan(
+            "llamacpp-env", "llamacpp", "chat",
+            {"id": "atomic-env", "name": "Atomic fixture", "path": self.temp.name},
+            self.temp.name, launcher.LLAMACPP_PLE_CONTEXT, 4_096, "auto",
+            18_125, "custom", {"acceleration": "off", "depth": 1, "kv": "off"},
+            purpose="benchmark", run_dir=run_dir,
+        )
+        plan.engine_argv = ["/verified/llama-server"]
+        inherited = {
+            "DYLD_VERSIONED_LIBRARY_PATH": "/tmp/versioned",
+            "DYLD_IMAGE_SUFFIX": "_spoof",
+            "DYLD_ROOT_PATH": "/tmp/root",
+            "DYLD_FUTURE_OVERRIDE": "/tmp/future",
+            "LLM_LAUNCHER_SAFE_SENTINEL": "preserved",
+        }
+        observed: dict[str, str] = {}
+
+        def popen(_argv, **kwargs):
+            observed.update(kwargs["env"])
+            raise RuntimeError("synthetic stop after environment capture")
+
+        manager = launcher.RunManager()
+        cancel_event = threading.Event()
+        manager.plan = plan
+        manager.cancel_event = cancel_event
+        with (
+            mock.patch.dict(os.environ, inherited),
+            mock.patch.object(launcher, "validate_llamacpp_launch_boundary", return_value=()),
+            mock.patch.object(launcher, "confirm_llamacpp_launch_identities"),
+            mock.patch.object(launcher.subprocess, "Popen", side_effect=popen),
+        ):
+            manager._worker(plan, cancel_event)
+        self.assertFalse(any(key.startswith("DYLD_") for key in observed))
+        self.assertEqual(observed["LLM_LAUNCHER_SAFE_SENTINEL"], "preserved")
 
     def test_model_acquisition_verifies_mlx_structure_and_pinned_checksum(self) -> None:
         root = Path(self.temp.name) / "verify-root"

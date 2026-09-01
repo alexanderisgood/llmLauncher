@@ -9,7 +9,7 @@
   const VERSION = 1;
   const MAX_MODEL_ID = 2048;
   const BACKENDS = new Set([
-    "mtplx", "omlx", "lmstudio", "freetoken", "swiftlm", "mference", "whallm",
+    "mtplx", "omlx", "lmstudio", "freetoken", "swiftlm", "mference", "whallm", "llamacpp",
   ]);
   const CLIENTS = new Set(["pi", "opencode", "codex", "chat"]);
   const MIN_CONTEXT = 1024;

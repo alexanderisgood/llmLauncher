@@ -18062,6 +18062,9 @@ class RunManager:
                     and target_plan.model.get("remote") is True else
                     "Stopped. Launcher-owned native FreeToken was unloaded."
                     if target_plan is not None and target_plan.backend == "freetoken" else
+                    "Stopped. Private Whallm routes closed; Whallm's server and loaded model were left untouched."
+                    if target_plan is not None and target_plan.backend == "whallm"
+                    and target_plan.model.get("sharedServer") is True else
                     "Stopped. Shared LM Studio service was left alone."
                     if target_plan is not None and target_plan.backend == "lmstudio" else
                     "Stopped. The launcher-owned model route was closed."

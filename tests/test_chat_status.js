@@ -86,6 +86,19 @@ assert.deepEqual(summary.lane, {value:"Idle", state:"idle"});
 
 summary = core.activitySummary({
   engineResident:true, active:[], queued:[],
+  recent:[{
+    surfaceId:"chat-1", usageReported:true, completionTokens:3,
+    tpsSampleQualified:false, tpsSampleMinimumTokens:16,
+    decodeTokensPerSecond:null, endToEndTokensPerSecond:null,
+  }],
+}, "chat-1");
+assert.deepEqual(summary.speed, {
+  value:"Too short", state:"unknown",
+  title:"The last reply had 3 output tokens; at least 16 are required for stable TPS.",
+});
+
+summary = core.activitySummary({
+  engineResident:true, active:[], queued:[],
   recent:[
     {surfaceId:"other-1", decodeTokensPerSecond:80},
     {surfaceId:"other-2", decodeTokensPerSecond:79},

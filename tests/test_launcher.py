@@ -480,6 +480,15 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(estimate["observedEnginePeakBytes"], launcher.WHALLM_MEASURED_PEAK_BYTES)
         self.assertLess(estimate["estimatedWorkingSetBytes"], 1024**3)
 
+        manager = launcher.RunManager()
+        manager.plan = plan
+        manager.state = {
+            "phase": "running", "message": "running", "run": plan.public(), "events": [],
+        }
+        manager.stop()
+        self.assertEqual(manager.state["phase"], "idle")
+        self.assertIn("Whallm's server and loaded model were left untouched", manager.state["message"])
+
     def test_swiftlm_accepts_upstream_qwen3_next_family_without_flash_next(self) -> None:
         model_path = Path(self.temp.name) / "Qwen3-Next-80B-A3B-4bit"
         model_path.mkdir()
@@ -3022,6 +3031,11 @@ class LauncherTests(unittest.TestCase):
             proxy_thread.join(timeout=2)
             upstream_thread.join(timeout=2)
 
+    def test_private_relays_accept_every_launcher_engine(self) -> None:
+        expected = set(launcher.ENGINE_ADAPTERS)
+        self.assertEqual(session_proxy.SUPPORTED_BACKENDS, expected)
+        self.assertEqual(codex_proxy.SUPPORTED_BACKENDS, expected)
+
     def test_session_relay_scheduler_is_fcfs_cancellable_and_content_free(self) -> None:
         chat = {
             "id": str(uuid.uuid4()), "client": "chat", "key": "chat-" + "a" * 32,
@@ -3124,8 +3138,24 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(public["completionTokens"], 21)
         self.assertEqual(public["endToEndTokensPerSecond"], 2.1)
         self.assertEqual(public["decodeTokensPerSecond"], 2.5)
+        self.assertTrue(public["tpsSampleQualified"])
         self.assertNotIn(private_text, json.dumps(public))
         self.assertFalse(scheduler.snapshot([])["privacy"]["estimatesTokens"])
+
+        short_id = scheduler.begin(surface, "chat-completions")
+        self.assertTrue(scheduler.await_turn(short_id))
+        with scheduler.condition:
+            short = scheduler.records[short_id]
+            short["startedMonotonic"] = 30.0
+            short["firstOutputMonotonic"] = 30.9
+        scheduler.set_usage(short_id, 21, 3)
+        with mock.patch.object(session_proxy.time, "monotonic", return_value=31.0):
+            scheduler.finish(short_id, "completed", 200)
+        short_public = scheduler.snapshot([])["recent"][0]
+        self.assertFalse(short_public["tpsSampleQualified"])
+        self.assertEqual(short_public["tpsSampleMinimumTokens"], 16)
+        self.assertIsNone(short_public["decodeTokensPerSecond"])
+        self.assertIsNone(short_public["endToEndTokensPerSecond"])
 
     def test_session_relay_corrects_false_stop_at_exact_output_limit(self) -> None:
         guard = session_proxy.ChatCompletionLimitGuard(16_384)

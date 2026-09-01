@@ -8,8 +8,13 @@
   const STORAGE_KEY = "llm-launcher-route-v1";
   const VERSION = 1;
   const MAX_MODEL_ID = 2048;
-  const BACKENDS = new Set(["mtplx", "omlx", "lmstudio", "freetoken"]);
+  const BACKENDS = new Set([
+    "mtplx", "omlx", "lmstudio", "freetoken", "swiftlm", "mference", "whallm",
+  ]);
   const CLIENTS = new Set(["pi", "opencode", "codex", "chat"]);
+  const MIN_CONTEXT = 1024;
+  const MIN_OUTPUT = 256;
+  const MIN_PROMPT_BUDGET = 1024;
 
   function normaliseRoute(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -86,9 +91,44 @@
     return Object.freeze({...available[0], source:"available"});
   }
 
+  function reconcileRuntimeLimits({context, output, contextWindows = []} = {}) {
+    const requestedContext = Number(context);
+    const requestedOutput = Number(output);
+    const windows = [...new Set((Array.isArray(contextWindows) ? contextWindows : [])
+      .map(Number)
+      .filter(value => Number.isInteger(value) && value >= MIN_CONTEXT))]
+      .sort((left, right) => left - right);
+    let nextContext = requestedContext;
+    if (
+      windows.length
+      && Number.isInteger(requestedContext)
+      && !windows.includes(requestedContext)
+    ) {
+      nextContext = windows.filter(value => value <= requestedContext).at(-1) || windows[0];
+    }
+    let nextOutput = requestedOutput;
+    const maximumOutput = Number.isInteger(nextContext)
+      ? nextContext - MIN_PROMPT_BUDGET : Number.NaN;
+    if (
+      Number.isInteger(requestedOutput)
+      && requestedOutput >= MIN_OUTPUT
+      && Number.isInteger(maximumOutput)
+      && maximumOutput >= MIN_OUTPUT
+      && requestedOutput > maximumOutput
+    ) nextOutput = maximumOutput;
+    return Object.freeze({
+      context:nextContext,
+      output:nextOutput,
+      contextChanged:nextContext !== requestedContext,
+      outputChanged:nextOutput !== requestedOutput,
+      promptBudget:Number.isInteger(nextContext) && Number.isInteger(nextOutput)
+        ? nextContext - nextOutput : null,
+    });
+  }
+
   return Object.freeze({
-    STORAGE_KEY, VERSION, MAX_MODEL_ID,
+    STORAGE_KEY, VERSION, MAX_MODEL_ID, MIN_CONTEXT, MIN_OUTPUT, MIN_PROMPT_BUDGET,
     normaliseRoute, readRoute, writeRoute, routeKey,
-    availableRoutes, isRouteAvailable, selectInitialRoute,
+    availableRoutes, isRouteAvailable, selectInitialRoute, reconcileRuntimeLimits,
   });
 });

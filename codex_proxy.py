@@ -20,6 +20,9 @@ from responses_bridge import BridgeRequest, ChatStreamBridge, translate_response
 
 MAX_BODY = 128 * 1024 * 1024
 MAX_RESPONSE_GUARD_BUFFER = 16 * 1024 * 1024
+SUPPORTED_BACKENDS = {
+    "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
+}
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade",
@@ -56,7 +59,7 @@ def load_config(path: Path) -> dict[str, Any]:
         fail("invalid port")
     if not 1_024 <= value["outputLimit"] <= 2_000_000:
         fail("invalid response limit")
-    if value.get("backend") not in {"omlx", "lmstudio", "mtplx", "freetoken"}:
+    if value.get("backend") not in SUPPORTED_BACKENDS:
         fail("unsupported Responses backend")
     if value.get("reasoning") not in EFFORT_ORDER:
         fail("invalid reasoning effort")

@@ -1648,12 +1648,21 @@ function modelChanged() {
   if (model.nativeContext) $("contextInput").max = model.nativeContext;
   else $("contextInput").removeAttribute("max");
   const runtimeWindows = Array.isArray(cap.contextWindows) ? cap.contextWindows.map(Number).filter(Number.isInteger) : [];
+  const reconciledLimits = LLMRoutePreferenceCore.reconcileRuntimeLimits({
+    context:Number($("contextInput").value),
+    output:Number($("outputInput").value),
+    contextWindows:runtimeWindows,
+  });
+  if (reconciledLimits.contextChanged) {
+    $("contextInput").value = String(reconciledLimits.context);
+  }
+  if (reconciledLimits.outputChanged) {
+    $("outputInput").value = String(reconciledLimits.output);
+    cancelOptimization(
+      `${backendName(state.backend)} uses a ${formatNumber(reconciledLimits.context)}-token window, so max response was reduced to ${formatNumber(reconciledLimits.output)} to preserve ${formatNumber(reconciledLimits.promptBudget)} tokens for instructions and history.`,
+    );
+  }
   if (runtimeWindows.length) {
-    const currentContext = Number($("contextInput").value);
-    if (!runtimeWindows.includes(currentContext)) {
-      const compatible = runtimeWindows.filter(value => value <= currentContext).at(-1) || runtimeWindows[0];
-      $("contextInput").value = String(compatible);
-    }
     $("contextInput").title = `${backendName(state.backend)} context choices: ${runtimeWindows.map(formatNumber).join(", ")}`;
   } else $("contextInput").removeAttribute("title");
   const acceleration = $("accelerationSelect");

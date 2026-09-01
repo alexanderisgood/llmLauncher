@@ -38,8 +38,13 @@ MAX_RECENT = 32
 MAX_QUEUE = 64
 MAX_METRICS_BUFFER = 1024 * 1024
 MAX_LIMIT_GUARD_BUFFER = 256 * 1024
+MIN_TPS_COMPLETION_TOKENS = 16
+MIN_TPS_SECONDS = 0.25
 CLIENTS = {"chat", "pi", "opencode", "codex"}
 CLIENT_LABELS = {"chat": "Chat", "pi": "Pi", "opencode": "OpenCode", "codex": "Codex"}
+SUPPORTED_BACKENDS = {
+    "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
+}
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade",
@@ -101,7 +106,7 @@ def load_config(path: Path) -> dict[str, Any]:
         fail("relay and engine ports must differ")
     if not 1 <= value["lanes"] <= 16 or not 1_024 <= value["outputLimit"] <= 2_000_000:
         fail("invalid scheduler or output limit")
-    if value.get("backend") not in {"omlx", "lmstudio", "mtplx", "freetoken"}:
+    if value.get("backend") not in SUPPORTED_BACKENDS:
         fail("unsupported backend")
     if not all(_valid_secret(value.get(key)) for key in ("controlKey", "upstreamKey")):
         fail("invalid relay secret")
@@ -383,14 +388,24 @@ class RequestScheduler:
         prompt_tokens = record.get("promptTokens")
         completion_tokens = record.get("completionTokens")
         usage_reported = isinstance(prompt_tokens, int) and isinstance(completion_tokens, int)
+        enough_output_for_tps = bool(
+            usage_reported and completion_tokens >= MIN_TPS_COMPLETION_TOKENS
+        )
+        end_to_end_sample_qualified = bool(
+            enough_output_for_tps and run_seconds is not None
+            and run_seconds >= MIN_TPS_SECONDS
+        )
+        decode_sample_qualified = bool(
+            enough_output_for_tps and generation_seconds is not None
+            and generation_seconds >= MIN_TPS_SECONDS
+        )
         end_to_end_tps = (
             completion_tokens / run_seconds
-            if usage_reported and run_seconds is not None and run_seconds > 0 else None
+            if end_to_end_sample_qualified else None
         )
         decode_tps = (
             (completion_tokens - 1) / generation_seconds
-            if usage_reported and completion_tokens > 1
-            and generation_seconds is not None and generation_seconds > 0 else None
+            if decode_sample_qualified else None
         )
         runtime_fields = {
             key: record.get(key) for key in (
@@ -422,6 +437,8 @@ class RequestScheduler:
             "usageReported": usage_reported,
             "promptTokens": prompt_tokens if usage_reported else None,
             "completionTokens": completion_tokens if usage_reported else None,
+            "tpsSampleQualified": end_to_end_sample_qualified or decode_sample_qualified,
+            "tpsSampleMinimumTokens": MIN_TPS_COMPLETION_TOKENS,
             "endToEndTokensPerSecond": round(end_to_end_tps, 2) if end_to_end_tps is not None else None,
             "decodeTokensPerSecond": round(decode_tps, 2) if decode_tps is not None else None,
             "runtimeStatsSource": "lmstudio-response-stats" if runtime_stats_reported else None,

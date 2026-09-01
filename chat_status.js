@@ -64,7 +64,8 @@
     const queued = Array.isArray(report.queued) ? report.queued : [];
     const recent = Array.isArray(report.recent) ? report.recent.slice(0, 32) : [];
     const current = [...active, ...queued].find(item => item?.surfaceId === surfaceId) || null;
-    const latest = recent.find(item => item?.surfaceId === surfaceId && requestTps(item)) || null;
+    const latestRequest = recent.find(item => item?.surfaceId === surfaceId) || null;
+    const latest = latestRequest && requestTps(latestRequest) ? latestRequest : null;
     const currentSpeed = requestTps(current);
     const lastSpeed = requestTps(latest);
     const displayedSpeed = currentSpeed || (!current ? lastSpeed : null);
@@ -75,6 +76,10 @@
     } : current?.state === "running" ? {
       value:"Measuring…", state:"measuring",
       title:"TPS is waiting for authoritative runtime usage.",
+    } : !current && latestRequest?.usageReported === true
+      && latestRequest?.tpsSampleQualified === false ? {
+      value:"Too short", state:"unknown",
+      title:`The last reply had ${Math.max(0, Number(latestRequest.completionTokens) || 0)} output tokens; at least ${Math.max(1, Number(latestRequest.tpsSampleMinimumTokens) || 16)} are required for stable TPS.`,
     } : report.engineResident ? {
       value:"Not reported", state:"unknown",
       title:"TPS appears only when the runtime reports authoritative token usage.",

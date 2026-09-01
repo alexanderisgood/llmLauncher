@@ -2233,6 +2233,7 @@ function routeCheckReceiptReady(status = state.routeCheckStatus || {}) {
     && status.result?.temporaryRouteStopped === true
     && ["pass","advisory"].includes(status.result?.verdict)
     && receipt?.ready === true
+    && receipt?.toolContractVerified === true
     && Number.isFinite(expires) && expires > Date.now()
     && routeCheckVisibleMatches()
   );

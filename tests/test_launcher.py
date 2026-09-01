@@ -5622,6 +5622,7 @@ for line in sys.stdin:
         self.assertEqual(chat_body["temperature"], .2)
         chat_response = Response([
             b'data: {"choices":[{"delta":{"reasoning_content":"brief","content":"READY"}}]}\n',
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n',
             b'data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":2}}\n',
             b'data: [DONE]\n',
         ])
@@ -5632,7 +5633,22 @@ for line in sys.stdin:
         self.assertEqual(evidence["contentCharacters"], 5)
         self.assertEqual(evidence["reasoningCharacters"], 5)
         self.assertEqual(evidence["usage"]["promptTokens"], 12)
+        self.assertTrue(evidence["terminalComplete"])
         self.assertNotIn("content", evidence)
+
+        cross_choice_basic = Response([
+            b'data: {"choices":[{"index":0,"delta":{"content":"READY"}}]}\n',
+            b'data: {"choices":[{"index":1,"delta":{},"finish_reason":"stop"}]}\n',
+            b'data: [DONE]\n',
+        ])
+        with mock.patch.object(
+            launcher.urllib.request, "urlopen", return_value=cross_choice_basic,
+        ):
+            cross_choice_basic_evidence = launcher.run_route_check_request(
+                chat_plan, threading.Event(),
+            )
+        self.assertEqual(cross_choice_basic_evidence["contentCharacters"], 5)
+        self.assertFalse(cross_choice_basic_evidence["terminalComplete"])
 
         codex_model = self.model_for("omlx")
         codex_plan = launcher.normalized_request(
@@ -5648,16 +5664,387 @@ for line in sys.stdin:
             f"Bearer {codex_plan.client_env['LLM_LAUNCHER_CODEX_API_KEY']}",
         )
         responses_stream = Response([
-            b'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"launcher_route_check"}}\n',
-            b'data: {"type":"response.completed","response":{"usage":{"input_tokens":9,"output_tokens":3},"output":[]}}\n',
+            b'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","call_id":"call_1","type":"function_call","name":"launcher_route_check","arguments":""}}\n',
+            b'data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{\\"status\\":"}\n',
+            b'data: {"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_1","arguments":"{\\"status\\":\\"ready\\"}"}\n',
+            b'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","call_id":"call_1","type":"function_call","name":"launcher_route_check","arguments":"{\\"status\\":\\"ready\\"}"}}\n',
+            b'data: {"type":"response.completed","response":{"usage":{"input_tokens":9,"output_tokens":3},"output":[{"id":"fc_1","call_id":"call_1","type":"function_call","name":"launcher_route_check","arguments":"{\\"status\\":\\"ready\\"}"}]}}\n',
         ])
         with mock.patch.object(launcher.urllib.request, "urlopen", return_value=responses_stream):
             tool_evidence = launcher.run_route_check_request(
                 codex_plan, threading.Event(), tool_probe=True,
             )
         self.assertTrue(tool_evidence["toolCall"])
+        self.assertTrue(tool_evidence["toolContractValid"])
+        self.assertEqual(tool_evidence["toolCallCount"], 1)
         self.assertTrue(tool_evidence["usage"]["available"])
         self.assertEqual(tool_evidence["protocol"], "responses")
+
+    def test_route_check_tool_contract_rejects_wrong_malformed_duplicate_and_missing_calls(self) -> None:
+        class Response:
+            headers = {"Content-Type": "text/event-stream"}
+
+            def __init__(self, events: list[dict[str, object]]) -> None:
+                self.lines = [
+                    f"data: {json.dumps(event, separators=(',', ':'))}\n".encode("utf-8")
+                    for event in events
+                ] + [b"data: [DONE]\n"]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                return iter(self.lines)
+
+        chat_plan = launcher.normalized_request(
+            self.payload("mtplx", "pi", self.model_for("mtplx")), self.models,
+            purpose="route-check",
+        )
+        responses_plan = launcher.normalized_request(
+            self.payload("omlx", "codex", self.model_for("omlx")), self.models,
+            purpose="route-check",
+        )
+
+        def probe(plan, events, *, add_chat_terminal=True):
+            wire_events = list(events)
+            if (
+                launcher.CLIENT_ADAPTERS[plan.client].protocol == "chat-completions"
+                and add_chat_terminal
+            ):
+                wire_events.append({
+                    "choices": [{
+                        "index": 0, "delta": {}, "finish_reason": "tool_calls",
+                    }],
+                })
+            with mock.patch.object(
+                launcher.urllib.request, "urlopen", return_value=Response(wire_events),
+            ):
+                return launcher.run_route_check_request(
+                    plan, threading.Event(), tool_probe=True,
+                )
+
+        valid_chat = probe(chat_plan, [
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": '{"status":',
+                },
+            }]}}]},
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "function": {"arguments": '"ready"}'},
+            }]}}]},
+        ])
+        self.assertTrue(valid_chat["toolContractValid"])
+        self.assertEqual(valid_chat["toolCallCount"], 1)
+        self.assertNotIn("toolArguments", valid_chat)
+
+        cumulative_name_chat = probe(chat_plan, [
+            {"choices": [{"index": 0, "delta": {"tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {"name": "launcher_", "arguments": '{"status":'},
+            }]}}]},
+            {"choices": [{"index": 0, "delta": {"tool_calls": [{
+                "index": 0,
+                "function": {
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": '"ready"}',
+                },
+            }]}}]},
+        ])
+        self.assertFalse(cumulative_name_chat["toolContractValid"])
+
+        malformed_tool_calls_container = probe(chat_plan, [
+            {"choices": [{"index": 0, "delta": {"tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": '{"status":"ready"}',
+                },
+            }]}}]},
+            {"choices": [{"index": 0, "delta": {"tool_calls": {}}}]},
+        ])
+        self.assertFalse(malformed_tool_calls_container["toolContractValid"])
+
+        chat_arguments = {
+            "wrong": '{"status":"wrong"}',
+            "extra": '{"status":"ready","extra":true}',
+            "malformed": '{"status":"ready"',
+            "duplicate-key": '{"status":"wrong","status":"ready"}',
+        }
+        for label, arguments in chat_arguments.items():
+            with self.subTest(protocol="chat-completions", case=label):
+                evidence = probe(chat_plan, [{
+                    "choices": [{"delta": {"tool_calls": [{
+                        "index": 0, "id": "call_1", "type": "function",
+                        "function": {
+                            "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                            "arguments": arguments,
+                        },
+                    }]}}],
+                }])
+                self.assertFalse(evidence["toolContractValid"])
+                self.assertFalse(evidence["toolCall"])
+
+        duplicate_chat = probe(chat_plan, [{
+            "choices": [{"delta": {"tool_calls": [
+                {
+                    "index": 0, "id": "call_1", "type": "function",
+                    "function": {
+                        "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                        "arguments": '{"status":"ready"}',
+                    },
+                },
+                {
+                    "index": 1, "id": "call_2", "type": "function",
+                    "function": {
+                        "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                        "arguments": '{"status":"ready"}',
+                    },
+                },
+            ]}}],
+        }])
+        self.assertFalse(duplicate_chat["toolContractValid"])
+        self.assertEqual(duplicate_chat["toolCallCount"], 2)
+
+        conflicting_identity_chat = probe(chat_plan, [
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": '{"status":"ready"}',
+                },
+            }]}}]},
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call_2", "type": "function",
+                "function": {},
+            }]}}]},
+        ])
+        self.assertFalse(conflicting_identity_chat["toolContractValid"])
+        self.assertIn("conflicting call identifiers", conflicting_identity_chat["toolContractDetail"])
+
+        reused_id_chat = probe(chat_plan, [
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call_shared", "type": "function",
+                "function": {
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": '{"status":',
+                },
+            }]}}]},
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 1, "id": "call_shared", "type": "function",
+                "function": {"arguments": '"ready"}'},
+            }]}}]},
+        ])
+        self.assertFalse(reused_id_chat["toolContractValid"])
+        self.assertIn("different output positions", reused_id_chat["toolContractDetail"])
+
+        malformed_chat_calls = {
+            "missing-id": {
+                "index": 0, "type": "function",
+                "function": {
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": '{"status":"ready"}',
+                },
+            },
+            "missing-type": {
+                "index": 0, "id": "call_1",
+                "function": {
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": '{"status":"ready"}',
+                },
+            },
+            "missing-wrapper": {
+                "index": 0, "id": "call_1", "type": "function",
+                "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                "arguments": '{"status":"ready"}',
+            },
+            "object-arguments": {
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": {"status": "ready"},
+                },
+            },
+        }
+        for label, call in malformed_chat_calls.items():
+            with self.subTest(protocol="chat-completions-shape", case=label):
+                evidence = probe(chat_plan, [{
+                    "choices": [{"delta": {"tool_calls": [call]}}],
+                }])
+                self.assertFalse(evidence["toolContractValid"])
+
+        text_only_chat = probe(chat_plan, [{
+            "choices": [{"delta": {"content": "ready"}}],
+        }])
+        self.assertFalse(text_only_chat["toolContractValid"])
+        self.assertEqual(text_only_chat["toolCallCount"], 0)
+
+        cross_choice_terminal = probe(chat_plan, [{
+            "choices": [{"index": 1, "delta": {"tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": '{"status":"ready"}',
+                },
+            }]}}],
+        }])
+        self.assertFalse(cross_choice_terminal["toolContractValid"])
+
+        def response_call(identifier: str, arguments: str) -> dict[str, object]:
+            return {
+                "id": f"item_{identifier}", "call_id": f"call_{identifier}",
+                "type": "function_call", "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                "arguments": arguments,
+            }
+
+        response_cases = {
+            "wrong": [response_call("1", '{"status":"wrong"}')],
+            "extra": [response_call("1", '{"status":"ready","extra":true}')],
+            "malformed": [response_call("1", '{"status":"ready"')],
+            "duplicate": [
+                response_call("1", '{"status":"ready"}'),
+                response_call("2", '{"status":"ready"}'),
+            ],
+            "missing": [],
+        }
+        missing_call_id = response_call("1", '{"status":"ready"}')
+        missing_call_id.pop("call_id")
+        response_cases["missing-call-id"] = [missing_call_id]
+        object_arguments = response_call("1", '{"status":"ready"}')
+        object_arguments["arguments"] = {"status": "ready"}
+        response_cases["object-arguments"] = [object_arguments]
+        for label, output in response_cases.items():
+            with self.subTest(protocol="responses", case=label):
+                evidence = probe(responses_plan, [{
+                    "type": "response.completed",
+                    "response": {"output": output},
+                }])
+                self.assertFalse(evidence["toolContractValid"])
+                self.assertFalse(evidence["toolCall"])
+
+        reused_responses_id = response_call("1", '{"status":"ready"}')
+        second_reused_responses_id = response_call("2", '{"status":"ready"}')
+        second_reused_responses_id["call_id"] = reused_responses_id["call_id"]
+        reused_responses = probe(responses_plan, [{
+            "type": "response.completed",
+            "response": {
+                "output": [reused_responses_id, second_reused_responses_id],
+            },
+        }])
+        self.assertFalse(reused_responses["toolContractValid"])
+        self.assertIn("conflicting call identifiers", reused_responses["toolContractDetail"])
+
+        conflicting_item_id = probe(responses_plan, [
+            {
+                "type": "response.output_item.added", "output_index": 0,
+                "item": {
+                    "id": "fc_1", "call_id": "call_1", "type": "function_call",
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME, "arguments": "",
+                },
+            },
+            {
+                "type": "response.function_call_arguments.done", "output_index": 0,
+                "item_id": "fc_2", "arguments": '{"status":"ready"}',
+            },
+            {"type": "response.completed", "response": {"output": []}},
+        ])
+        self.assertFalse(conflicting_item_id["toolContractValid"])
+        self.assertIn("conflicting call identifiers", conflicting_item_id["toolContractDetail"])
+
+        unfinished_responses_item = probe(responses_plan, [
+            {
+                "type": "response.output_item.added", "output_index": 0,
+                "item": {
+                    "id": "fc_1", "call_id": "call_1", "type": "function_call",
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": '{"status":"ready"}',
+                },
+            },
+            {"type": "response.completed", "response": {"output": []}},
+        ])
+        self.assertFalse(unfinished_responses_item["toolContractValid"])
+        self.assertIn("never reached a final argument", unfinished_responses_item["toolContractDetail"])
+
+        arguments_after_final = probe(responses_plan, [
+            {
+                "type": "response.output_item.added", "output_index": 0,
+                "item": {
+                    "id": "fc_1", "call_id": "call_1", "type": "function_call",
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME, "arguments": "",
+                },
+            },
+            {
+                "type": "response.function_call_arguments.done", "output_index": 0,
+                "item_id": "fc_1", "arguments": '{"status":"ready"}',
+            },
+            {
+                "type": "response.function_call_arguments.delta", "output_index": 0,
+                "item_id": "fc_1", "delta": " ",
+            },
+            {
+                "type": "response.completed",
+                "response": {"output": [{
+                    "id": "fc_1", "call_id": "call_1", "type": "function_call",
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": '{"status":"ready"}',
+                }]},
+            },
+        ])
+        self.assertFalse(arguments_after_final["toolContractValid"])
+        self.assertIn("conflicting argument", arguments_after_final["toolContractDetail"])
+
+        with self.assertRaisesRegex(RuntimeError, "after its terminal event"):
+            probe(responses_plan, [
+                {"type": "response.completed", "response": {"output": []}},
+                {
+                    "type": "response.output_item.done", "output_index": 0,
+                    "item": response_call("1", '{"status":"ready"}'),
+                },
+            ])
+
+        exact_call_event = {
+            "choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {
+                    "name": launcher.ROUTE_CHECK_TOOL_NAME,
+                    "arguments": '{"status":"ready"}',
+                },
+            }]}}],
+        }
+        no_terminal = probe(
+            chat_plan, [exact_call_event], add_chat_terminal=False,
+        )
+        self.assertFalse(no_terminal["toolContractValid"])
+        self.assertFalse(no_terminal["terminalComplete"])
+        self.assertEqual(no_terminal["terminalState"], "unexpected-eof")
+
+        incomplete_chat = probe(
+            chat_plan,
+            [exact_call_event, {
+                "choices": [{"delta": {}, "finish_reason": "length"}],
+            }],
+            add_chat_terminal=False,
+        )
+        self.assertFalse(incomplete_chat["toolContractValid"])
+        self.assertEqual(incomplete_chat["terminalState"], "incomplete")
+
+        incomplete_responses = probe(responses_plan, [
+            {
+                "type": "response.output_item.done", "output_index": 0,
+                "item": response_call("1", '{"status":"ready"}'),
+            },
+            {
+                "type": "response.incomplete",
+                "response": {"status": "incomplete"},
+            },
+        ])
+        self.assertFalse(incomplete_responses["toolContractValid"])
+        self.assertFalse(incomplete_responses["terminalComplete"])
+        self.assertEqual(incomplete_responses["terminalState"], "incomplete")
 
     def test_route_check_manager_passes_or_fails_closed_and_always_stops(self) -> None:
         class FakeRunManager:
@@ -5686,12 +6073,14 @@ for line in sys.stdin:
             "protocol": "chat-completions", "accepted": True, "streamed": True,
             "eventCount": 3, "contentCharacters": 5, "reasoningCharacters": 2,
             "toolCall": False,
+            "terminalState": "complete", "terminalComplete": True,
             "usage": {"available": True, "promptTokens": 12, "completionTokens": 2},
             "firstOutputSeconds": .1, "totalSeconds": .2,
         }
         tool = {
             **basic, "reasoningCharacters": 0, "contentCharacters": 0,
-            "toolCall": True,
+            "toolCall": True, "toolContractValid": True, "toolCallCount": 1,
+            "toolContractDetail": "The exact synthetic tool contract passed.",
         }
         fake = FakeRunManager()
         manager = launcher.RouteCheckManager(fake)
@@ -5720,6 +6109,13 @@ for line in sys.stdin:
         }
         receipt = manager.validated_launch_receipt(verified_payload, self.models)
         self.assertTrue(receipt["ready"])
+        self.assertTrue(receipt["toolContractVerified"])
+        with manager.lock:
+            manager.state["result"]["tool"]["toolContractValid"] = False
+        with self.assertRaisesRegex(ValueError, "tool-call contract"):
+            manager.validated_launch_receipt(verified_payload, self.models)
+        with manager.lock:
+            manager.state["result"]["tool"]["toolContractValid"] = True
         changed_payload = copy.deepcopy(verified_payload)
         changed_payload["context"] -= 1024
         with self.assertRaisesRegex(ValueError, "Visible settings changed"):
@@ -5729,6 +6125,32 @@ for line in sys.stdin:
             manager.state["result"]["receipt"]["expiresAt"] = "2020-01-01T00:00:00+00:00"
         with self.assertRaisesRegex(ValueError, "expired"):
             manager.validated_launch_receipt(verified_payload, self.models)
+
+        chat_payload = self.payload("mtplx", "chat", model)
+        chat_report = launcher.route_check_plan(chat_payload, self.models)
+        chat_payload["confirmation"] = chat_report["contractId"]
+        chat_fake = FakeRunManager()
+        chat_manager = launcher.RouteCheckManager(chat_fake)
+        with mock.patch.object(
+            launcher, "run_route_check_request", side_effect=[basic],
+        ):
+            chat_job = chat_manager.start(chat_payload, self.models)
+            chat_thread = chat_manager.thread
+            if chat_thread is not None:
+                chat_thread.join(timeout=5)
+        chat_result = chat_manager.snapshot()
+        self.assertTrue(chat_result["result"]["receipt"]["ready"])
+        self.assertFalse(chat_result["result"]["receipt"]["toolContractRequired"])
+        self.assertTrue(chat_result["result"]["receipt"]["toolContractVerified"])
+        chat_verified_payload = copy.deepcopy(chat_payload)
+        chat_verified_payload["routeVerification"] = {
+            "jobId": chat_job["id"], "contractId": chat_report["contractId"],
+        }
+        self.assertTrue(
+            chat_manager.validated_launch_receipt(
+                chat_verified_payload, self.models,
+            )["ready"]
+        )
 
         failed_fake = FakeRunManager()
         failed_manager = launcher.RouteCheckManager(failed_fake)
@@ -5753,7 +6175,9 @@ for line in sys.stdin:
         empty_manager = launcher.RouteCheckManager(empty_fake)
         empty_tool = {
             **tool, "toolCall": False, "contentCharacters": 0,
-            "reasoningCharacters": 0,
+            "reasoningCharacters": 0, "toolContractValid": False,
+            "toolCallCount": 0,
+            "toolContractDetail": "The route did not emit the required tool call.",
         }
         with mock.patch.object(
             launcher, "run_route_check_request", side_effect=[basic, empty_tool],
@@ -5769,7 +6193,25 @@ for line in sys.stdin:
             {item["id"]: item for item in empty["checks"]}["tools"]["status"],
             "fail",
         )
+        self.assertFalse(empty["result"]["receipt"]["ready"])
         self.assertTrue(empty_fake.stopped)
+
+        text_fake = FakeRunManager()
+        text_tool = {
+            **empty_tool, "contentCharacters": 5,
+            "toolContractDetail": "The route answered in text but did not emit the required tool call.",
+        }
+        with mock.patch.object(
+            launcher, "run_route_check_request", side_effect=[basic, text_tool],
+        ):
+            text_fake_manager = launcher.RouteCheckManager(text_fake)
+            text_fake_manager.start(payload, self.models)
+            text_thread = text_fake_manager.thread
+            if text_thread is not None:
+                text_thread.join(timeout=5)
+        text_result = text_fake_manager.snapshot()
+        self.assertEqual(text_result["result"]["verdict"], "fail")
+        self.assertFalse(text_result["result"]["receipt"]["ready"])
 
     def test_benchmark_resource_sampler_reports_memory_headroom_and_public_thermal_state(self) -> None:
         total = 50 * 1024**3
@@ -12916,6 +13358,7 @@ for line in sys.stdin:
             "aneConsentPanel", "runtimePromotionConsentPanel",
         ):
             self.assertIn(f'id="{hidden_panel}" class="setup-consent hidden"', index)
+        self.assertIn("receipt?.toolContractVerified === true", script)
         self.assertIn(
             "plan.requiresExperimentalApproval || plan.admission?.requiresAcknowledgement",
             script,

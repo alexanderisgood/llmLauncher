@@ -18467,19 +18467,425 @@ def omlx_activity_activity(
     return merge_omlx_activity(plan, result, snapshot)
 
 
-def _route_check_response_parts(value: dict[str, Any]) -> tuple[str, str, list[str], dict[str, Any]]:
+class _RouteCheckToolCallAssembler:
+    """Assemble one OpenAI tool call without retaining its arguments in public evidence."""
+
+    def __init__(self, protocol: str) -> None:
+        self._protocol = protocol
+        self._calls: dict[str, dict[str, Any]] = {}
+        self._aliases: dict[str, str] = {}
+        self._shape_errors: list[str] = []
+        self._next = 0
+
+    def _shape_error(self, detail: str) -> None:
+        if detail not in self._shape_errors:
+            self._shape_errors.append(detail)
+
+    @staticmethod
+    def _aliases_for(
+        value: dict[str, Any], *, index: Any = None, item_id: Any = None,
+    ) -> list[str]:
+        aliases: list[str] = []
+        for prefix, candidate in (
+            ("id", value.get("id")),
+            ("call", value.get("call_id")),
+            ("item", item_id),
+            ("index", index),
+        ):
+            if candidate is not None and str(candidate):
+                aliases.append(f"{prefix}:{candidate}")
+        return aliases
+
+    @staticmethod
+    def _merge_fragment(current: str, incoming: str) -> str:
+        if not incoming:
+            return current
+        if not current or incoming.startswith(current):
+            return incoming
+        if current.startswith(incoming) or incoming == current:
+            return current
+        return current + incoming
+
+    def _merge_calls(self, keep: str, discard: str) -> None:
+        if keep == discard:
+            return
+        keep_aliases = {
+            alias for alias, target in self._aliases.items() if target == keep
+        }
+        discard_aliases = {
+            alias for alias, target in self._aliases.items() if target == discard
+        }
+        first = self._calls[keep]
+        second = self._calls.pop(discard)
+        first["name"] = self._merge_fragment(first["name"], second["name"])
+        if first["argumentsFinal"] and second["argumentsFinal"]:
+            if first["arguments"] != second["arguments"]:
+                first["conflict"] = True
+        elif second["argumentsFinal"]:
+            first["arguments"] = second["arguments"]
+            first["argumentsFinal"] = True
+        elif not first["argumentsFinal"]:
+            first["arguments"] += second["arguments"]
+        first["conflict"] = first["conflict"] or second["conflict"]
+        first["identityConflict"] = (
+            first["identityConflict"] or second["identityConflict"]
+            or any(
+                len({
+                    alias for alias in keep_aliases | discard_aliases
+                    if alias.startswith(f"{prefix}:")
+                }) > 1
+                for prefix in ("id", "call", "item")
+            )
+        )
+        first["positionConflict"] = (
+            first["positionConflict"] or second["positionConflict"]
+            or len({
+                alias for alias in keep_aliases | discard_aliases
+                if alias.startswith("index:")
+            }) > 1
+        )
+        for field in (
+            "chatIdSeen", "chatTypeSeen", "functionWrapperSeen",
+            "responsesCallIdSeen", "responsesItemIdSeen",
+        ):
+            first[field] = first[field] or second[field]
+        first["chatChoiceIndexes"].update(second["chatChoiceIndexes"])
+        for alias, canonical in list(self._aliases.items()):
+            if canonical == discard:
+                self._aliases[alias] = keep
+
+    def _call(self, aliases: list[str]) -> dict[str, Any]:
+        known = list(dict.fromkeys(
+            self._aliases[alias] for alias in aliases if alias in self._aliases
+        ))
+        if known:
+            canonical = known[0]
+            for duplicate in known[1:]:
+                self._merge_calls(canonical, duplicate)
+        else:
+            canonical = f"tool:{self._next}"
+            self._next += 1
+            self._calls[canonical] = {
+                "name": "", "arguments": "", "argumentsFinal": False,
+                "conflict": False, "identityConflict": False,
+                "positionConflict": False,
+                "chatIdSeen": False, "chatTypeSeen": False,
+                "functionWrapperSeen": False,
+                "responsesCallIdSeen": False, "responsesItemIdSeen": False,
+                "chatChoiceIndexes": set(),
+            }
+        call = self._calls[canonical]
+        bound_aliases = {
+            alias for alias, target in self._aliases.items() if target == canonical
+        }
+        for alias in aliases:
+            prefix = alias.split(":", 1)[0]
+            if prefix in {"id", "call", "item", "index"} and any(
+                existing != alias and existing.startswith(f"{prefix}:")
+                for existing in bound_aliases
+            ):
+                if prefix == "index":
+                    call["positionConflict"] = True
+                else:
+                    call["identityConflict"] = True
+        for alias in aliases:
+            self._aliases[alias] = canonical
+        return call
+
+    def add(
+        self, value: Any, *, index: Any = None, item_id: Any = None,
+        arguments_final: bool = False, name_delta: bool = False,
+    ) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            self._shape_error("A tool-call entry was not a JSON object.")
+            return None
+        function = value.get("function") if isinstance(value.get("function"), dict) else value
+        aliases = self._aliases_for(value, index=index, item_id=item_id)
+        if not aliases:
+            aliases = self._aliases_for(function, index=index, item_id=item_id)
+        call = self._call(aliases)
+        name = function.get("name")
+        if name is not None:
+            if name_delta:
+                # Chat Completions emits name fragments, not cumulative snapshots.
+                call["name"] += str(name)
+            else:
+                call["name"] = self._merge_fragment(call["name"], str(name))
+        arguments = function.get("arguments")
+        if arguments is None:
+            return call
+        if not isinstance(arguments, str):
+            self._shape_error("Tool-call arguments must be a JSON string on the wire.")
+            return call
+        incoming = arguments
+        if arguments_final:
+            if call["argumentsFinal"] and call["arguments"] != incoming:
+                call["conflict"] = True
+            elif incoming or not call["arguments"]:
+                call["arguments"] = incoming
+            call["argumentsFinal"] = True
+        elif call["argumentsFinal"]:
+            call["conflict"] = True
+        else:
+            call["arguments"] += incoming
+        return call
+
+    def add_chat_payload(self, value: dict[str, Any], *, streamed: bool) -> None:
+        choices = value.get("choices")
+        if not isinstance(choices, list):
+            return
+        for fallback_choice_index, choice in enumerate(choices):
+            if not isinstance(choice, dict):
+                continue
+            choice_index = choice.get("index", fallback_choice_index)
+            message = choice.get("delta") if streamed else choice.get("message")
+            if not isinstance(message, dict):
+                message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+            calls = message.get("tool_calls")
+            if not isinstance(calls, list):
+                if "tool_calls" in message:
+                    self._shape_error(
+                        "A Chat Completions tool_calls field was not an array."
+                    )
+                continue
+            for fallback_index, call in enumerate(calls):
+                if not isinstance(call, dict):
+                    self._shape_error("A Chat Completions tool-call entry was not an object.")
+                    continue
+                raw_index = call.get("index")
+                if streamed and (
+                    isinstance(raw_index, bool) or not isinstance(raw_index, int)
+                    or raw_index < 0
+                ):
+                    self._shape_error(
+                        "A streamed Chat Completions tool-call chunk had no valid index."
+                    )
+                call_index = raw_index if isinstance(raw_index, int) else fallback_index
+                call_id = call.get("id")
+                id_seen = isinstance(call_id, str) and bool(call_id)
+                if "id" in call and not id_seen:
+                    self._shape_error("A Chat Completions tool-call ID was malformed.")
+                call_type = call.get("type")
+                type_seen = call_type == "function"
+                if "type" in call and not type_seen:
+                    self._shape_error(
+                        "A Chat Completions tool call did not use type function."
+                    )
+                function = call.get("function")
+                wrapper_seen = isinstance(function, dict)
+                if not wrapper_seen:
+                    self._shape_error(
+                        "A Chat Completions tool-call chunk had no function wrapper."
+                    )
+                    function = {}
+                if "name" in function and not isinstance(function.get("name"), str):
+                    self._shape_error("A Chat Completions function name was malformed.")
+                if "arguments" in function and not isinstance(function.get("arguments"), str):
+                    self._shape_error(
+                        "Chat Completions function arguments were not a JSON string."
+                    )
+                normalized = {**call, "function": function}
+                record = self.add(
+                    normalized, index=f"{choice_index}:{call_index}",
+                    arguments_final=not streamed, name_delta=streamed,
+                )
+                if record is not None:
+                    record["chatIdSeen"] = record["chatIdSeen"] or id_seen
+                    record["chatTypeSeen"] = record["chatTypeSeen"] or type_seen
+                    record["functionWrapperSeen"] = (
+                        record["functionWrapperSeen"] or wrapper_seen
+                    )
+                    record["chatChoiceIndexes"].add(str(choice_index))
+
+    def add_responses_payload(self, value: dict[str, Any]) -> None:
+        event_type = str(value.get("type") or "")
+        if event_type in {
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+        }:
+            output_index = value.get("output_index")
+            if (
+                isinstance(output_index, bool) or not isinstance(output_index, int)
+                or output_index < 0
+            ):
+                self._shape_error(
+                    "A Responses function-argument event had no valid output index."
+                )
+            if not isinstance(value.get("item_id"), str) or not value.get("item_id"):
+                self._shape_error(
+                    "A Responses function-argument event had no valid item ID."
+                )
+            arguments = value.get("arguments") if event_type.endswith(".done") else value.get("delta")
+            if not isinstance(arguments, str):
+                self._shape_error(
+                    "A Responses function-argument event did not contain a string fragment."
+                )
+            synthetic = {
+                "call_id": value.get("call_id"),
+                "arguments": arguments if isinstance(arguments, str) else "",
+            }
+            record = self.add(
+                synthetic, index=value.get("output_index"), item_id=value.get("item_id"),
+                arguments_final=event_type.endswith(".done"),
+            )
+            if record is not None and isinstance(value.get("call_id"), str) and value.get("call_id"):
+                record["responsesCallIdSeen"] = True
+
+        item = value.get("item")
+        if isinstance(item, dict) and str(item.get("type") or "") in {"function_call", "tool_call"}:
+            output_index = value.get("output_index")
+            if event_type in {"response.output_item.added", "response.output_item.done"} and (
+                isinstance(output_index, bool) or not isinstance(output_index, int)
+                or output_index < 0
+            ):
+                self._shape_error("A Responses function item had no valid output index.")
+            if item.get("type") != "function_call":
+                self._shape_error("A Responses tool item did not use type function_call.")
+            if not isinstance(item.get("id"), str) or not item.get("id"):
+                self._shape_error("A Responses function item had no valid item ID.")
+            if not isinstance(item.get("call_id"), str) or not item.get("call_id"):
+                self._shape_error("A Responses function item had no valid call ID.")
+            if "name" in item and not isinstance(item.get("name"), str):
+                self._shape_error("A Responses function name was malformed.")
+            if "arguments" in item and not isinstance(item.get("arguments"), str):
+                self._shape_error("Responses function arguments were not a JSON string.")
+            record = self.add(
+                item, index=value.get("output_index"), item_id=item.get("id"),
+                arguments_final=event_type == "response.output_item.done",
+            )
+            if record is not None:
+                record["responsesCallIdSeen"] = (
+                    record["responsesCallIdSeen"]
+                    or isinstance(item.get("call_id"), str) and bool(item.get("call_id"))
+                )
+                record["responsesItemIdSeen"] = (
+                    record["responsesItemIdSeen"]
+                    or isinstance(item.get("id"), str) and bool(item.get("id"))
+                )
+
+        response = value.get("response") if isinstance(value.get("response"), dict) else value
+        output = response.get("output") if isinstance(response, dict) else None
+        if isinstance(output, list):
+            for output_index, output_item in enumerate(output):
+                if (
+                    isinstance(output_item, dict)
+                    and str(output_item.get("type") or "") in {"function_call", "tool_call"}
+                ):
+                    if output_item.get("type") != "function_call":
+                        self._shape_error(
+                            "A Responses output item did not use type function_call."
+                        )
+                    if not isinstance(output_item.get("id"), str) or not output_item.get("id"):
+                        self._shape_error("A Responses output item had no valid item ID.")
+                    if (
+                        not isinstance(output_item.get("call_id"), str)
+                        or not output_item.get("call_id")
+                    ):
+                        self._shape_error("A Responses output item had no valid call ID.")
+                    if "name" in output_item and not isinstance(output_item.get("name"), str):
+                        self._shape_error("A Responses function name was malformed.")
+                    if "arguments" in output_item and not isinstance(output_item.get("arguments"), str):
+                        self._shape_error("Responses function arguments were not a JSON string.")
+                    record = self.add(
+                        output_item, index=output_index, item_id=output_item.get("id"),
+                        arguments_final=True,
+                    )
+                    if record is not None:
+                        record["responsesCallIdSeen"] = (
+                            record["responsesCallIdSeen"]
+                            or isinstance(output_item.get("call_id"), str)
+                            and bool(output_item.get("call_id"))
+                        )
+                        record["responsesItemIdSeen"] = (
+                            record["responsesItemIdSeen"]
+                            or isinstance(output_item.get("id"), str)
+                            and bool(output_item.get("id"))
+                        )
+
+    def evidence(self) -> dict[str, Any]:
+        calls = list(self._calls.values())
+        count = len(calls)
+        name_seen = any(call["name"] == ROUTE_CHECK_TOOL_NAME for call in calls)
+        valid = False
+        if count != 1:
+            detail = (
+                "The route did not emit the required tool call."
+                if count == 0 else
+                f"The route emitted {count} tool calls; exactly one is required."
+            )
+        else:
+            call = calls[0]
+            if self._shape_errors:
+                detail = self._shape_errors[0]
+            elif self._protocol == "chat-completions" and not (
+                call["chatIdSeen"] and call["chatTypeSeen"]
+                and call["functionWrapperSeen"]
+            ):
+                detail = (
+                    "The Chat Completions tool call was missing its required ID, "
+                    "function type, or function wrapper."
+                )
+            elif self._protocol == "responses" and not (
+                call["responsesCallIdSeen"] and call["responsesItemIdSeen"]
+            ):
+                detail = (
+                    "The Responses function call was missing its required item ID or call ID."
+                )
+            elif self._protocol == "responses" and not call["argumentsFinal"]:
+                detail = (
+                    "The Responses function call never reached a final argument event or output item."
+                )
+            elif call["name"] != ROUTE_CHECK_TOOL_NAME:
+                detail = "The route selected a different tool than the synthetic route-check tool."
+            elif call["identityConflict"]:
+                detail = "The route reused one tool position with conflicting call identifiers."
+            elif call["positionConflict"]:
+                detail = "The route reused one tool-call ID across different output positions."
+            elif call["conflict"]:
+                detail = "The route returned conflicting argument payloads for the tool call."
+            else:
+                try:
+                    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                        value: dict[str, Any] = {}
+                        for key, item in pairs:
+                            if key in value:
+                                raise ValueError("duplicate JSON object key")
+                            value[key] = item
+                        return value
+
+                    arguments = json.loads(
+                        call["arguments"], object_pairs_hook=unique_object,
+                    )
+                except (TypeError, ValueError):
+                    detail = "The route-check tool arguments were not valid JSON."
+                else:
+                    if arguments != {"status": "ready"}:
+                        detail = "The route-check tool arguments did not exactly match the required status contract."
+                    else:
+                        valid = True
+                        detail = "The route emitted exactly one route-check tool call with the required arguments."
+        return {
+            "toolCall": valid,
+            "toolContractValid": valid,
+            "toolCallCount": count,
+            "toolNameSeen": name_seen,
+            "toolContractDetail": detail,
+        }
+
+    def chat_choice_indexes(self) -> set[str]:
+        calls = list(self._calls.values())
+        return set(calls[0]["chatChoiceIndexes"]) if len(calls) == 1 else set()
+
+
+def _route_check_response_parts(value: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     """Extract bounded public facts from one Responses payload without retaining text."""
     content: list[str] = []
     reasoning: list[str] = []
-    tool_names: list[str] = []
     usage: dict[str, Any] = {}
 
     def item_parts(item: Any) -> None:
         if not isinstance(item, dict):
             return
-        item_type = str(item.get("type") or "")
-        if item_type in {"function_call", "tool_call"} and item.get("name"):
-            tool_names.append(str(item["name"]))
         for part in item.get("content", []) if isinstance(item.get("content"), list) else []:
             if not isinstance(part, dict):
                 continue
@@ -18511,7 +18917,79 @@ def _route_check_response_parts(value: dict[str, Any]) -> tuple[str, str, list[s
     output_text = response.get("output_text")
     if isinstance(output_text, str):
         content.append(output_text)
-    return "".join(content), "".join(reasoning), tool_names, usage
+    return "".join(content), "".join(reasoning), usage
+
+
+_ROUTE_CHECK_TERMINAL_PRIORITY = {
+    "": 0, "complete": 1, "incomplete": 2, "failed": 3,
+}
+
+
+def _merge_route_check_terminal(current: str, incoming: str) -> str:
+    return (
+        incoming
+        if _ROUTE_CHECK_TERMINAL_PRIORITY.get(incoming, 0)
+        >= _ROUTE_CHECK_TERMINAL_PRIORITY.get(current, 0)
+        else current
+    )
+
+
+def _route_check_terminal_event(
+    protocol: str, value: dict[str, Any], *, tool_probe: bool,
+) -> str:
+    """Classify explicit protocol completion; clean EOF alone is never proof."""
+    if protocol == "responses":
+        event_type = str(value.get("type") or "").strip().casefold()
+        response = value.get("response") if isinstance(value.get("response"), dict) else value
+        status = str(response.get("status") or value.get("status") or "").strip().casefold()
+        if event_type in {"error", "response.failed"} or status in {"failed", "error"}:
+            return "failed"
+        if event_type in {"response.incomplete", "response.cancelled", "response.canceled"}:
+            return "incomplete"
+        if status in {"incomplete", "cancelled", "canceled"}:
+            return "incomplete"
+        if event_type == "response.completed" or status == "completed":
+            return "complete"
+        return ""
+
+    state = ""
+    for choice_state in _route_check_chat_terminal_events(
+        value, tool_probe=tool_probe,
+    ).values():
+        state = _merge_route_check_terminal(state, choice_state)
+    return state
+
+
+def _route_check_chat_terminal_events(
+    value: dict[str, Any], *, tool_probe: bool,
+) -> dict[str, str]:
+    states: dict[str, str] = {}
+    choices = value.get("choices")
+    if not isinstance(choices, list):
+        choices = []
+    for fallback_index, choice in enumerate(choices):
+        if not isinstance(choice, dict):
+            continue
+        choice_index = str(choice.get("index", fallback_index))
+        reason = _chat_terminal_reason(
+            choice.get("finish_reason", choice.get("finishReason"))
+        )
+        state = ""
+        if reason in _CHAT_LIMIT_TERMINAL_REASONS:
+            state = _merge_route_check_terminal(state, "incomplete")
+        elif reason in {"tool_calls", "function_call"}:
+            state = _merge_route_check_terminal(
+                state, "complete" if tool_probe else "failed",
+            )
+        elif reason in _CHAT_CLEAN_TERMINAL_REASONS:
+            state = _merge_route_check_terminal(state, "complete")
+        elif reason:
+            state = _merge_route_check_terminal(state, "failed")
+        if state:
+            states[choice_index] = _merge_route_check_terminal(
+                states.get(choice_index, ""), state,
+            )
+    return states
 
 
 def run_route_check_request(
@@ -18524,9 +19002,13 @@ def run_route_check_request(
     first_output: float | None = None
     content_characters = 0
     reasoning_characters = 0
-    tool_names: list[str] = []
+    tool_calls = _RouteCheckToolCallAssembler(protocol)
     usage: dict[str, Any] = {}
     event_count = 0
+    terminal_state = ""
+    done_seen = False
+    chat_terminal_states: dict[str, str] = {}
+    responses_terminal_seen = False
     try:
         response = urllib.request.urlopen(request, timeout=900)
     except urllib.error.HTTPError as error:
@@ -18545,13 +19027,25 @@ def run_route_check_request(
             runtime_error = _openai_error_detail(data)
             if runtime_error:
                 raise RuntimeError(f"The {protocol} probe was rejected: {runtime_error}")
+            terminal_state = _merge_route_check_terminal(
+                terminal_state,
+                _route_check_terminal_event(protocol, data, tool_probe=tool_probe),
+            )
+            if protocol == "chat-completions":
+                for choice_index, choice_state in _route_check_chat_terminal_events(
+                    data, tool_probe=tool_probe,
+                ).items():
+                    chat_terminal_states[choice_index] = _merge_route_check_terminal(
+                        chat_terminal_states.get(choice_index, ""), choice_state,
+                    )
             if protocol == "responses":
-                content, reasoning, names, found_usage = _route_check_response_parts(data)
+                tool_calls.add_responses_payload(data)
+                content, reasoning, found_usage = _route_check_response_parts(data)
                 content_characters += len(content)
                 reasoning_characters += len(reasoning)
-                tool_names.extend(names)
                 usage = found_usage or usage
             else:
+                tool_calls.add_chat_payload(data, streamed=False)
                 choice = (data.get("choices") or [{}])[0]
                 message = choice.get("message") if isinstance(choice, dict) else {}
                 if isinstance(message, dict):
@@ -18559,12 +19053,8 @@ def run_route_check_request(
                     reasoning_characters += len(_benchmark_text_part(
                         message.get("reasoning_content") or message.get("reasoning")
                     ))
-                    for call in message.get("tool_calls", []) if isinstance(message.get("tool_calls"), list) else []:
-                        function = call.get("function") if isinstance(call, dict) else None
-                        if isinstance(function, dict) and function.get("name"):
-                            tool_names.append(str(function["name"]))
                 usage = data.get("usage") if isinstance(data.get("usage"), dict) else usage
-            if content_characters or reasoning_characters or tool_names:
+            if content_characters or reasoning_characters or tool_calls.evidence()["toolCallCount"]:
                 first_output = time.monotonic() - started
         else:
             for raw_line in response:
@@ -18574,26 +19064,64 @@ def run_route_check_request(
                 if not line.startswith("data:"):
                     continue
                 payload = line[5:].strip()
-                if not payload or payload == "[DONE]":
+                if not payload:
                     continue
+                if payload == "[DONE]":
+                    done_seen = True
+                    continue
+                if done_seen:
+                    raise RuntimeError(
+                        f"The {protocol} stream emitted data after its terminal marker."
+                    )
                 try:
                     event = json.loads(payload)
                 except ValueError:
-                    continue
+                    raise RuntimeError(
+                        f"The {protocol} stream emitted a malformed JSON event."
+                    )
+                if responses_terminal_seen:
+                    raise RuntimeError(
+                        "The Responses stream emitted data after its terminal event."
+                    )
+                if (
+                    protocol == "chat-completions" and chat_terminal_states
+                    and _chat_cache_value_has_output(event)
+                ):
+                    raise RuntimeError(
+                        "The Chat Completions stream emitted output after its terminal event."
+                    )
                 event_count += 1
                 runtime_error = _openai_error_detail(event)
                 if runtime_error:
                     raise RuntimeError(f"The {protocol} stream reported an error: {runtime_error}")
-                before = content_characters + reasoning_characters + len(tool_names)
+                terminal_state = _merge_route_check_terminal(
+                    terminal_state,
+                    _route_check_terminal_event(protocol, event, tool_probe=tool_probe),
+                )
+                event_terminal = _route_check_terminal_event(
+                    protocol, event, tool_probe=tool_probe,
+                )
+                if protocol == "chat-completions":
+                    for choice_index, choice_state in _route_check_chat_terminal_events(
+                        event, tool_probe=tool_probe,
+                    ).items():
+                        chat_terminal_states[choice_index] = _merge_route_check_terminal(
+                            chat_terminal_states.get(choice_index, ""), choice_state,
+                        )
+                before = (
+                    content_characters + reasoning_characters
+                    + int(tool_calls.evidence()["toolCallCount"])
+                )
                 if protocol == "responses":
                     if event.get("type") in {"error", "response.failed"}:
                         raise RuntimeError("The Responses stream reported a failed event.")
-                    content, reasoning, names, found_usage = _route_check_response_parts(event)
+                    tool_calls.add_responses_payload(event)
+                    content, reasoning, found_usage = _route_check_response_parts(event)
                     content_characters += len(content)
                     reasoning_characters += len(reasoning)
-                    tool_names.extend(names)
                     usage = found_usage or usage
                 else:
+                    tool_calls.add_chat_payload(event, streamed=True)
                     if isinstance(event.get("usage"), dict):
                         usage = event["usage"]
                     choices = event.get("choices")
@@ -18605,13 +19133,41 @@ def run_route_check_request(
                         reasoning_characters += len(_benchmark_text_part(
                             delta.get("reasoning_content") or delta.get("reasoning")
                         ))
-                        for call in delta.get("tool_calls", []) if isinstance(delta.get("tool_calls"), list) else []:
-                            function = call.get("function") if isinstance(call, dict) else None
-                            if isinstance(function, dict) and function.get("name"):
-                                tool_names.append(str(function["name"]))
-                after = content_characters + reasoning_characters + len(tool_names)
+                after = (
+                    content_characters + reasoning_characters
+                    + int(tool_calls.evidence()["toolCallCount"])
+                )
                 if after > before and first_output is None:
                     first_output = time.monotonic() - started
+                if protocol == "responses" and event_terminal:
+                    responses_terminal_seen = True
+    terminal_complete = terminal_state == "complete" and (
+        not streamed or protocol == "responses" or done_seen
+    )
+    if protocol == "chat-completions":
+        terminal_complete = (
+            terminal_complete and chat_terminal_states.get("0") == "complete"
+        )
+    if not terminal_complete and terminal_state == "complete":
+        terminal_state = "unexpected-eof"
+    elif not terminal_state:
+        terminal_state = "unexpected-eof"
+    tool_evidence = tool_calls.evidence()
+    tool_terminal_complete = terminal_complete
+    if tool_probe and protocol == "chat-completions":
+        tool_terminal_complete = (
+            terminal_complete
+            and tool_calls.chat_choice_indexes() == {"0"}
+            and chat_terminal_states.get("0") == "complete"
+        )
+    if tool_probe and not tool_terminal_complete:
+        tool_evidence.update({
+            "toolCall": False,
+            "toolContractValid": False,
+            "toolContractDetail": (
+                "The tool-call stream did not reach an explicit complete terminal state."
+            ),
+        })
     elapsed = time.monotonic() - started
     return {
         "protocol": protocol,
@@ -18620,8 +19176,9 @@ def run_route_check_request(
         "eventCount": event_count,
         "contentCharacters": content_characters,
         "reasoningCharacters": reasoning_characters,
-        "toolCall": ROUTE_CHECK_TOOL_NAME in tool_names,
-        "toolNameSeen": ROUTE_CHECK_TOOL_NAME in tool_names,
+        **tool_evidence,
+        "terminalState": terminal_state,
+        "terminalComplete": terminal_complete,
         "usage": _route_check_usage(usage),
         "firstOutputSeconds": round(first_output, 4) if first_output is not None else None,
         "totalSeconds": round(elapsed, 4),
@@ -24343,6 +24900,15 @@ class RouteCheckManager:
             raise ValueError("The temporary Route Check model has not stopped yet.")
         if result.get("verdict") not in {"pass", "advisory"}:
             raise ValueError("The route failed its live check and cannot be launched as verified.")
+        tool_required = str(job.get("client") or "") != "chat"
+        tool_evidence = result.get("tool") if isinstance(result.get("tool"), dict) else {}
+        if tool_required and not (
+            receipt.get("toolContractVerified") is True
+            and tool_evidence.get("toolContractValid") is True
+        ):
+            raise ValueError(
+                "The agent tool-call contract was not verified. Run Route Check again."
+            )
         if job.get("id") != job_id or receipt.get("jobId") != job_id:
             raise ValueError("The checked-launch receipt belongs to an older Route Check run.")
         if (
@@ -24463,6 +25029,10 @@ class RouteCheckManager:
             self._set_check("protocol", "running", "Sending a bounded synthetic request through the selected protocol…")
             self._event(f"The model is ready. Probing {CLIENT_ADAPTERS[plan.client].protocol} with generated text only.")
             basic = run_route_check_request(plan, self.cancel_event)
+            if basic.get("terminalComplete") is not True:
+                raise RuntimeError(
+                    "The synthetic response ended without an explicit complete terminal state."
+                )
             if not (
                 int(basic.get("contentCharacters") or 0)
                 or int(basic.get("reasoningCharacters") or 0)
@@ -24518,23 +25088,19 @@ class RouteCheckManager:
                 self._set_check("tools", "running", "Submitting one harmless synthetic function schema…")
                 try:
                     tool = run_route_check_request(plan, self.cancel_event, tool_probe=True)
-                    if tool.get("toolCall"):
+                    if tool.get("toolContractValid") is True:
                         self._set_check(
                             "tools", "pass",
-                            f"The route emitted a valid {ROUTE_CHECK_TOOL_NAME} tool call.",
-                        )
-                    elif (
-                        int(tool.get("contentCharacters") or 0)
-                        or int(tool.get("reasoningCharacters") or 0)
-                    ):
-                        self._set_check(
-                            "tools", "advisory",
-                            "The route accepted the tool schema but the model answered in text instead of selecting it.",
+                            str(tool.get("toolContractDetail") or (
+                                f"The route emitted a valid {ROUTE_CHECK_TOOL_NAME} tool call."
+                            )),
                         )
                     else:
                         self._set_check(
                             "tools", "fail",
-                            "The route accepted the tool schema but returned neither a tool call nor a usable response.",
+                            str(tool.get("toolContractDetail") or (
+                                "The route did not satisfy the exact agent tool-call contract."
+                            )),
                         )
                 except Exception as error:  # noqa: BLE001 - preserved as a visible route failure
                     if isinstance(error, LaunchCancelled):
@@ -24576,6 +25142,11 @@ class RouteCheckManager:
                         "contractId": str(job.get("contractId") or ""),
                         "identityId": str(job.get("identityId") or ""),
                         "verdict": verdict,
+                        "toolContractRequired": plan.client != "chat",
+                        "toolContractVerified": (
+                            plan.client == "chat"
+                            or bool(tool and tool.get("toolContractValid") is True)
+                        ),
                         "verifiedAt": checked_at.isoformat(),
                         "expiresAt": expires_at.isoformat(),
                     },
@@ -24630,7 +25201,10 @@ class RouteCheckManager:
                     else:
                         receipt = result.get("receipt")
                         if isinstance(receipt, dict):
-                            receipt["ready"] = result.get("verdict") in {"pass", "advisory"}
+                            receipt["ready"] = (
+                                result.get("verdict") in {"pass", "advisory"}
+                                and receipt.get("toolContractVerified") is True
+                            )
                         self.state["phase"] = "completed"
                         self.state["progress"] = 1.0
                         completion_message = str(result.get("summary") or "Route Check completed.")

@@ -1043,6 +1043,49 @@ function backendMark(backend) {
   return ({omlx:"O", lmstudio:"LM", mtplx:"M", freetoken:"FT", swiftlm:"S", mference:"MF", whallm:"W", lms:"LM"})[backend] || "?";
 }
 
+function routeCapabilityPresentation(capability = {}, {backend = "", modelName = "", modelReady = true} = {}) {
+  const hostSupport = capability?.hostSupport && typeof capability.hostSupport === "object"
+    ? capability.hostSupport : {};
+  const performanceEvidence = capability?.performanceEvidence && typeof capability.performanceEvidence === "object"
+    ? capability.performanceEvidence : {};
+  const hostState = String(hostSupport.state || hostSupport.tier || "").trim().toLowerCase();
+  const evidenceTier = String(performanceEvidence.tier || "").trim().toLowerCase();
+  const specialRoute = backend === "whallm" || /flash[\s-]*next/i.test(String(modelName || ""));
+  const unavailable = modelReady !== true || capability.runnable !== true
+    || hostState === "unavailable" || hostState === "unsupported";
+  const experimental = capability.experimental === true || hostState === "experimental";
+  const verifiedHere = evidenceTier === "verified-this-mac"
+    && performanceEvidence.automaticEligible === true;
+  const hostDetail = String(hostSupport.detail || "").trim();
+  const evidenceDetail = String(performanceEvidence.detail || "").trim();
+  const routeDetail = String(capability.reason || "").trim();
+
+  if (unavailable) return {
+    available:false, attention:false, tone:"bad",
+    label:"Unavailable", detail:hostDetail || routeDetail || evidenceDetail,
+    hostSupport, performanceEvidence,
+  };
+  if (experimental) return {
+    available:true, attention:true, tone:"warning",
+    label:"Experimental", detail:hostDetail || evidenceDetail || routeDetail,
+    hostSupport, performanceEvidence,
+  };
+  if (specialRoute && !verifiedHere) {
+    return {
+      available:true, attention:false, tone:"good",
+      label:hostState === "supported" ? "Supported" : "Available",
+      detail:hostDetail || routeDetail || "This route is available; exact local performance appears only in its saved performance receipt.",
+      hostSupport, performanceEvidence,
+    };
+  }
+  return {
+    available:true, attention:false, tone:"good",
+    label:verifiedHere ? "Verified here" : "Ready",
+    detail:evidenceDetail || routeDetail || hostDetail,
+    hostSupport, performanceEvidence,
+  };
+}
+
 function benchmarkCandidates(cap = {}, backend = state.backend) {
   if (backend === "freetoken") return [{
     id:cap.native === true ? "native" : "remote",
@@ -1553,8 +1596,14 @@ function updateBackend(preserveOptimization = false) {
   const swiftReady = Boolean(state.binaries?.swiftlm?.installed);
   const mferenceReady = Boolean(state.binaries?.mference?.installed);
   const whallmReady = Boolean(state.binaries?.whallm?.installed);
-  const whallmModelReady = state.models.some(model => model.sharedServer === true && model.backends?.whallm?.runnable);
-  $("ssdRuntimeStatus").textContent = whallmModelReady
+  const whallmModel = state.models.find(model => model.sharedServer === true && model.backends?.whallm?.runnable);
+  const whallmRoute = whallmModel ? routeCapabilityPresentation(whallmModel.backends.whallm, {
+    backend:"whallm", modelName:whallmModel.name, modelReady:whallmModel.ready,
+  }) : null;
+  const whallmModelReady = whallmRoute?.tone === "good";
+  $("ssdRuntimeStatus").textContent = whallmRoute?.attention
+    ? `${whallmRoute.label}. ${whallmRoute.detail || "Whallm can be selected explicitly, but it is not automatically preferred on this Mac."}`
+    : whallmModelReady
     ? "Whallm's full-expert Qwen route is live. It stays separate from pruned or repacked checkpoint comparisons."
     : whallmReady
       ? "Whallm is installed; start its pinned Qwen server, then rescan. SwiftLM/Mference compare only matching artifacts."
@@ -1570,9 +1619,12 @@ function renderModelOptions() {
   const previous = select.value;
   if (!uiEngineVisible(state.backend)) state.backend = "mtplx";
   const visibleModels = state.models.filter(uiModelVisible);
-  const compatible = visibleModels.filter(model => model.backends[state.backend].runnable);
-  const unavailable = visibleModels.filter(model => !model.backends[state.backend].runnable);
-  const option = (model, disabled = false) => `<option value="${esc(model.id)}" ${disabled ? "disabled" : ""}>${esc(model.name)}${disabled ? ` — ${esc(model.backends[state.backend].reason || model.status)}` : ""}</option>`;
+  const routePresentation = model => routeCapabilityPresentation(model.backends?.[state.backend] || {}, {
+    backend:state.backend, modelName:model.name, modelReady:model.ready,
+  });
+  const compatible = visibleModels.filter(model => routePresentation(model).available);
+  const unavailable = visibleModels.filter(model => !routePresentation(model).available);
+  const option = (model, disabled = false) => `<option value="${esc(model.id)}" ${disabled ? "disabled" : ""}>${esc(model.name)}${disabled ? ` — ${esc(model.backends?.[state.backend]?.reason || model.status)}` : ""}</option>`;
   if (state.backend === "freetoken") {
     const native = compatible.filter(model => freeTokenRoute(model) === "native");
     const remote = compatible.filter(model => freeTokenRoute(model) === "remote");
@@ -1582,13 +1634,9 @@ function renderModelOptions() {
     ].join("");
     select.innerHTML = groups || `<option value="">${state.freeToken?.native?.installed ? "Native port detected — no compatible local Qwen3-MoE checkpoint" : "Install the native port or connect a FreeToken server"}</option>`;
   } else select.innerHTML = compatible.length
-    ? `<optgroup label="Ready for ${state.backend}">${compatible.map(model => option(model)).join("")}</optgroup>${unavailable.length ? `<optgroup label="Detected but unavailable">${unavailable.map(model => option(model, true)).join("")}</optgroup>` : ""}`
-    : `<option value="">No ready models for this runtime</option>${unavailable.map(model => option(model, true)).join("")}`;
+    ? `<optgroup label="Available for ${backendName(state.backend)}">${compatible.map(model => option(model)).join("")}</optgroup>${unavailable.length ? `<optgroup label="Detected but unavailable">${unavailable.map(model => option(model, true)).join("")}</optgroup>` : ""}`
+    : `<option value="">No available models for this runtime</option>${unavailable.map(model => option(model, true)).join("")}`;
   if (compatible.some(model => model.id === previous)) select.value = previous;
-  else if (state.backend === "mtplx") {
-    const qwen = compatible.find(model => /qwen3\.8.*optimized-speed/i.test(model.name));
-    if (qwen) select.value = qwen.id;
-  }
   modelChanged();
 }
 
@@ -1634,7 +1682,7 @@ function modelChanged() {
     persistVisibleRoute();
     return;
   }
-  const cap = model.backends[state.backend];
+  const cap = model.backends?.[state.backend] || {};
   const qwenPleRoute = state.backend === "omlx" && model.qwen4Ple?.supported === true;
   $("qwenPleMemoryControls").classList.toggle("hidden", !qwenPleRoute);
   if (!qwenPleRoute) $("memoryGuardSelect").value = "balanced";
@@ -1643,15 +1691,21 @@ function modelChanged() {
   card.classList.remove("loading");
   const experimentalFreeToken = state.backend === "freetoken"
     && freeTokenRoute(model) === "native" && freeTokenQualification(model).experimental;
-  const statusClass = experimentalFreeToken ? "warning" : model.ready ? "good" : "bad";
-  const statusLabel = experimentalFreeToken ? "Experimental" : model.status;
+  const routePresentation = routeCapabilityPresentation({
+    ...cap,
+    experimental:experimentalFreeToken || cap.experimental === true,
+  }, {backend:state.backend, modelName:model.name, modelReady:model.ready});
+  const statusClass = routePresentation.tone;
+  const statusLabel = routePresentation.label || model.status;
+  const statusTitle = routePresentation.detail
+    ? ` title="${esc(routePresentation.detail)}"` : "";
   const pleChip = model.qwen4Ple?.supported === true
     ? `<span>N-gram PLE on SSD</span><span>${esc(formatBytes(model.qwen4Ple.residentBytes || 0))} estimated resident</span>`
     : "";
   const ssdChip = model.ssdStreaming?.recommended === true
     ? `<span>SSD streaming recommended</span>`
     : model.ssdStreaming?.candidate === true ? `<span>SSD streaming optional</span>` : "";
-  card.innerHTML = `<div class="model-title"><strong>${esc(model.name)}</strong><span class="badge ${statusClass}">${esc(statusLabel)}</span></div><div class="model-meta"><span>${esc(model.format.toUpperCase())}</span><span>${esc(model.quantization)}</span><span>${esc(model.sizeLabel)}</span><span>${formatNumber(model.nativeContext || 0)} context</span>${pleChip}${ssdChip}<span>${esc(model.origins.join(" + "))}</span><span>${esc(cap.reason)}</span></div>`;
+  card.innerHTML = `<div class="model-title"><strong>${esc(model.name)}</strong><span class="badge ${statusClass}"${statusTitle}>${esc(statusLabel)}</span></div><div class="model-meta"><span>${esc(model.format.toUpperCase())}</span><span>${esc(model.quantization)}</span><span>${esc(model.sizeLabel)}</span><span>${formatNumber(model.nativeContext || 0)} context</span>${pleChip}${ssdChip}<span>${esc(model.origins.join(" + "))}</span><span>${esc(cap.reason)}</span></div>`;
   const nativeTopK = Number(cap.nativeExpertTopK || 0);
   $("swiftlmTopK").value = String(Number.isInteger(nativeTopK) && nativeTopK > 0 ? nativeTopK : 0);
   $("swiftlmTopKHelp").textContent = nativeTopK > 0
@@ -2021,7 +2075,7 @@ async function animateOptimalControl(key, value, generation) {
   setTimeout(() => field.classList.remove("optimized"), 600);
 }
 
-async function applyOptimal(scope = "current", enginePreference = "throughput", openCalibrationOnMissing = true) {
+async function applyOptimal(scope = "current", enginePreference = "throughput", openCalibrationOnMissing = true, evidenceBinding = null) {
   const model = selectedModel();
   if (!model || state.applyingOptimal) return false;
   closeOptimizerMenu();
@@ -2053,6 +2107,9 @@ async function applyOptimal(scope = "current", enginePreference = "throughput", 
       options:gatherOptions(),
     };
     if (engineSelection) request.enginePreference = enginePreference;
+    if (evidenceBinding && typeof evidenceBinding === "object") {
+      request.evidenceBinding = JSON.parse(JSON.stringify(evidenceBinding));
+    }
     if (state.client === "chat") request.chat = gatherChatSettings();
     const endpoint = engineSelection ? "/api/optimal-engine" : "/api/optimal";
     const data = await api(endpoint, {method:"POST", body:JSON.stringify(request)});
@@ -7149,6 +7206,34 @@ function performanceReceiptSuite() {
   );
 }
 
+function performanceReceiptSuiteOrder(request = {}, routeQualification = false) {
+  const preferred = String(request.suite || "").trim();
+  if (!preferred) return [];
+  if (routeQualification) return [preferred];
+  const clientOrder = request.client === "chat"
+    ? ["standard", "agentic", "thorough", "quick"]
+    : ["agentic", "standard", "thorough", "quick"];
+  return [preferred, ...clientOrder].filter((suite, index, suites) => (
+    suite && suites.indexOf(suite) === index
+  ));
+}
+
+function performanceReceiptNeedsFallback(receipt) {
+  return !receipt || ["missing", "incomplete"].includes(receipt.state);
+}
+
+function performanceReceiptSuiteLabel(receipt = {}) {
+  const explicit = String(receipt.suiteLabel || "").trim();
+  if (explicit) return explicit;
+  const labels = {
+    agentic:"Agentic Route Lab",
+    standard:"Standard",
+    thorough:"Thorough",
+    quick:"Quick",
+  };
+  return labels[receipt.suite] || labels[performanceReceiptSuite()] || "Measured workload";
+}
+
 function performanceReceiptRequest() {
   const request = gather("custom");
   request.suite = performanceReceiptSuite();
@@ -7188,7 +7273,7 @@ function performanceReceiptView(receipt) {
   const focused = activeDetail() === "focused";
   const qwenPleQualification = state.backend === "omlx"
     && selectedModel()?.qwen4Ple?.supported === true;
-  const suite = receipt?.suiteLabel || (performanceReceiptSuite() === "agentic" ? "Agentic Route Lab" : "Standard");
+  const suite = performanceReceiptSuiteLabel(receipt);
   const eligible = Array.isArray(receipt?.eligibleBackends)
     ? receipt.eligibleBackends.filter(uiEngineVisible) : [];
   const reasoningNormalized = receipt?.reasoningContract?.normalized === true;
@@ -7202,6 +7287,7 @@ function performanceReceiptView(receipt) {
   const age = performanceReceiptAge(receipt);
   const firstOutput = finiteMetric(receipt?.firstTokenSeconds);
   const measured = [
+    suite,
     receipt?.workloadDisplay,
     firstOutput === null ? "" : `${firstOutput.toFixed(2)}s first output`,
     age,
@@ -7215,7 +7301,7 @@ function performanceReceiptView(receipt) {
         ? (receipt.state === "trusted-engine" ? `Best measured · ${receipt.backendLabel || "engine"}` : `Best setting · ${receipt.modeLabel || "verified route"}`)
         : `Measured · ${measuredTitle || "verified route"}`,
       detail:focused
-        ? [receipt.state === "trusted-engine" ? receipt.modeLabel : receipt.backendLabel, receipt.workloadDisplay, reasoningLabel, contextLabel, age].filter(Boolean).join(" · ")
+        ? [receipt.state === "trusted-engine" ? receipt.modeLabel : receipt.backendLabel, suite, receipt.workloadDisplay, reasoningLabel, contextLabel, age].filter(Boolean).join(" · ")
         : [measured, reasoningLabel, contextLabel, "review before applying"].filter(Boolean).join(" · "),
       action:"Review", actionId:"review-normalized", titleText:fullSummary,
     };
@@ -7225,7 +7311,7 @@ function performanceReceiptView(receipt) {
         ? (receipt.state === "trusted-engine" ? `Best measured · ${receipt.backendLabel || "engine"}` : `Best setting · ${receipt.modeLabel || "verified route"}`)
         : `Measured · ${measuredTitle || "verified route"}`,
       detail:focused
-        ? [receipt.state === "trusted-engine" ? receipt.modeLabel : receipt.backendLabel, receipt.workloadDisplay, age].filter(Boolean).join(" · ")
+        ? [receipt.state === "trusted-engine" ? receipt.modeLabel : receipt.backendLabel, suite, receipt.workloadDisplay, age].filter(Boolean).join(" · ")
         : measured || `${suite} exact-contract evidence`,
       action:"Apply", actionId:receipt.state === "trusted-engine" ? "apply-engine" : "apply-route",
       titleText:fullSummary,
@@ -7233,7 +7319,7 @@ function performanceReceiptView(receipt) {
     return {
       state:"stale", icon:"◇",
       title:focused ? "Saved result needs rechecking" : `Saved · ${measuredTitle || "verified route"}`,
-      detail:focused ? [measuredTitle, age].filter(Boolean).join(" · ") : `${age} · rerun before relying on current conditions`,
+      detail:focused ? [measuredTitle, suite, age].filter(Boolean).join(" · ") : `${suite} · ${age} · rerun before relying on current conditions`,
       action:"Rerun", actionId:qwenPleQualification ? "measure-qualification" : "rerun-lab", titleText:fullSummary,
     };
   }
@@ -7249,26 +7335,26 @@ function performanceReceiptView(receipt) {
       : "The leading engines are within 3%";
     if (!receipt.fresh) return {
       state:"stale", icon:"◇", title:focused ? "Saved tie needs rechecking" : "Saved leading group · recheck",
-      detail:focused ? `${leadingText} · ${age}` : `${suite} · ${age}`,
+      detail:focused ? `${leadingText} · ${suite} · ${age}` : `${suite} · ${age}`,
       action:"Rerun", actionId:"rerun-lab", titleText:fullSummary,
     };
     if (currentOutside && receipt.recommendedBackend) return {
       state:"tie", icon:"◆",
       title:focused ? `Apply leading engine · ${recommendedName}` : `Measured leader · ${recommendedName}`,
-      detail:focused ? `${leadingText} · ${currentName} is outside` : `${currentName} is outside the measured leading group`,
+      detail:focused ? `${leadingText} · ${suite} · ${currentName} is outside` : `${suite} · ${currentName} is outside the measured leading group`,
       action:"Apply", actionId:"apply-engine", titleText:fullSummary,
     };
     return {
       state:"tie", icon:"≈", title:focused ? "Leading engines tied" : "Measured leading group · current kept",
-      detail:focused ? `${leadingText} · current route is competitive` : `${suite} · ${age}`,
+      detail:focused ? `${leadingText} · ${suite} · current route is competitive` : `${suite} · ${age}`,
       action:"Review", actionId:"review-lab", titleText:fullSummary,
     };
   }
   if (receipt?.state === "incomplete") return {
     state:"incomplete", icon:"!", title:focused ? "Finish the engine comparison" : "Measurement incomplete",
     detail:focused
-      ? `${eligible.length} compatible engine${eligible.length === 1 ? "" : "s"} still need a complete run`
-      : `${eligible.length} compatible engine${eligible.length === 1 ? "" : "s"} · no winner promoted`,
+      ? `${suite} · ${eligible.length} compatible engine${eligible.length === 1 ? "" : "s"} still need a complete run`
+      : `${suite} · ${eligible.length} compatible engine${eligible.length === 1 ? "" : "s"} · no winner promoted`,
     action:"Measure", actionId:qwenPleQualification
       ? "measure-qualification" : eligible.length >= 2 ? "measure-engine" : "measure-route",
     titleText:fullSummary,
@@ -7276,7 +7362,7 @@ function performanceReceiptView(receipt) {
   const routeModes = benchmarkCandidates(selectedModel()?.backends?.[state.backend] || {}).length;
   if (receipt?.scope === "engine" && eligible.length >= 2) return {
     state:"missing", icon:"◇", title:focused ? "Compare compatible engines" : "No exact engine result",
-    detail:focused ? `${eligible.length} engines can run this model and work surface` : `${eligible.length} compatible engines · ${suite}`,
+    detail:focused ? `${suite} · ${eligible.length} engines can run this model and work surface` : `${eligible.length} compatible engines · ${suite}`,
     action:"Measure", actionId:"measure-engine", titleText:fullSummary,
   };
   if (routeModes > 1) return {
@@ -7375,9 +7461,30 @@ async function loadPerformanceReceipt(force = false, prepared = null) {
   state.performanceReceipt = null;
   renderPerformanceReceipt();
   try {
-    const data = await api("/api/benchmark/history", {method:"POST", body:JSON.stringify(request)});
-    if (generation !== state.performanceReceiptGeneration) return;
-    state.performanceReceipt = data.history?.receipt || null;
+    const routeQualification = request.backend === "omlx"
+      && selectedModel()?.qwen4Ple?.supported === true;
+    const suites = performanceReceiptSuiteOrder(request, routeQualification);
+    let preferredReceipt = null;
+    let firstIncomplete = null;
+    let completeReceipt = null;
+    for (const suite of suites) {
+      const suiteRequest = {...request, suite};
+      const data = await api("/api/benchmark/history", {
+        method:"POST", body:JSON.stringify(suiteRequest),
+      });
+      if (generation !== state.performanceReceiptGeneration) return;
+      const receipt = data.history?.receipt || null;
+      if (!receipt || receipt.suite !== suite) {
+        throw new Error("The controller returned no exact-contract receipt for the requested workload suite.");
+      }
+      if (!preferredReceipt) preferredReceipt = receipt;
+      if (receipt.state === "incomplete" && !firstIncomplete) firstIncomplete = receipt;
+      if (!performanceReceiptNeedsFallback(receipt)) {
+        completeReceipt = receipt;
+        break;
+      }
+    }
+    state.performanceReceipt = completeReceipt || firstIncomplete || preferredReceipt;
     if (!state.performanceReceipt) throw new Error("The controller returned no exact-contract receipt.");
   } catch (error) {
     if (generation !== state.performanceReceiptGeneration) return;
@@ -7434,8 +7541,16 @@ async function activatePerformanceReceipt() {
   if (button.disabled) return;
   const action = button.dataset.action;
   if (action === "retry") return loadPerformanceReceipt(true);
-  if (action === "apply-engine") return applyOptimal("engine", "throughput");
-  if (action === "apply-route") return applyOptimal("current");
+  if (["apply-engine", "apply-route"].includes(action) && !state.performanceReceipt?.evidenceBinding) {
+    showNotice("That saved result has no exact apply reference. Refresh performance evidence before applying it.", true);
+    return loadPerformanceReceipt(true);
+  }
+  if (action === "apply-engine") return applyOptimal(
+    "engine", "throughput", false, state.performanceReceipt.evidenceBinding,
+  );
+  if (action === "apply-route") return applyOptimal(
+    "current", "throughput", false, state.performanceReceipt.evidenceBinding,
+  );
   if (action === "measure-engine") return openCalibrationAssistant({source:"performance-receipt", preference:"throughput"});
   if (action === "measure-qualification") return openCalibrationAssistant({source:"performance-receipt", preference:"throughput"});
   if (action === "review-normalized") return openCalibrationAssistant({source:"performance-receipt", preference:"throughput"});
@@ -7824,6 +7939,23 @@ function promoteCompletedCalibrationResult(status = state.benchmarkStatus || {})
   return true;
 }
 
+function calibrationParityRejectionNote(engine = {}) {
+  const candidates = [
+    ...(Array.isArray(engine.tuningSweep?.candidates) ? engine.tuningSweep.candidates : []),
+    ...(Array.isArray(engine.mtpDepthSweep?.candidates) ? engine.mtpDepthSweep.candidates : []),
+  ];
+  const rejectedFaster = candidates.filter(candidate => {
+    const rawSpeedup = Number(candidate?.medianSpeedupVsAR);
+    return candidate?.qualityMatchesAR === false
+      && Number.isFinite(rawSpeedup) && rawSpeedup > 1;
+  });
+  if (!rejectedFaster.length) return "";
+  const accelerator = engine.backend === "omlx"
+    ? "DFlash 2" : ["lmstudio", "mtplx"].includes(engine.backend) ? "MTP" : "accelerator";
+  const plural = rejectedFaster.length > 1;
+  return `${plural ? `${rejectedFaster.length} faster raw ${accelerator} candidates were` : `A faster raw ${accelerator} candidate was`} excluded after failing greedy output parity with AR; ${plural ? "their" : "its"} TPS is not trusted or used here.`;
+}
+
 function calibrationRoutePreview(plan) {
   return (plan?.engines || [])
     .filter(engine => engine.eligible && uiEngineVisible(engine.backend || engine.id))
@@ -7838,13 +7970,38 @@ function calibrationRoutePreview(plan) {
     .join(" · ");
 }
 
-function calibrationAlternativeMarkup(plan, engine, controlsLocked) {
-  if (engine.backend !== plan?.request?.backend) return "";
-  const alternative = (engine.acceleratedAlternatives || [])[0];
+function calibrationAlternativeMarkup(plan, controlsLocked) {
+  const alternative = (plan?.modelAlternatives || []).find(item => (
+    item?.differentModel === true
+    && item?.intelligenceContractChanged === true
+    && item?.requiresExplicitSelection === true
+  ));
   if (!alternative) return "";
-  const modes = (alternative.modes || []).join(" + ") || "acceleration";
-  const details = [alternative.quantization, alternative.sizeLabel].filter(Boolean).join(" · ");
-  return `<div class="calibration-engine-alternative"><small>${esc(modes)} is installed on <b>${esc(alternative.name)}</b>${details ? ` (${esc(details)})` : ""}. It is a different model artifact, so calibration will never substitute it silently.</small><button type="button" class="text-button" data-calibration-model="${esc(alternative.id)}" ${controlsLocked ? "disabled" : ""}>Switch to ${esc(modes)} model</button></div>`;
+  const modelId = alternative.modelId || alternative.id;
+  if (!modelId) return "";
+  const modelName = alternative.modelName || alternative.name || "27B DFlash model";
+  const backend = alternative.backend || "omlx";
+  const hostState = String(alternative.hostSupport?.state || alternative.hostSupport?.tier || "supported").toLowerCase();
+  const evidenceTier = String(alternative.performanceEvidence?.tier || "").toLowerCase();
+  const verifiedHere = evidenceTier === "verified-this-mac";
+  const capacity = alternative.capacity || {};
+  const unavailable = hostState === "unavailable" || hostState === "unsupported"
+    || capacity.launchable === false;
+  const modes = (alternative.modes || ["DFlash 2"])
+    .map(mode => typeof mode === "object" ? mode.label : mode)
+    .filter(Boolean);
+  const facts = [
+    alternative.backendLabel || backendName(backend),
+    ...modes,
+    capacity.sizeLabel,
+    capacity.quantization,
+    alternative.hostSupport?.label,
+    alternative.performanceEvidence?.label,
+  ].filter((value, index, values) => value && values.indexOf(value) === index);
+  const evidenceCopy = verifiedHere
+    ? "A matching DFlash result is verified on this Mac, but this route changes the model and intelligence contract and is never selected automatically."
+    : "This smaller/different 27B DFlash route changes the model and intelligence contract. It is not verified here or selected automatically.";
+  return `<article class="calibration-engine excluded"><header><strong>Different 27B DFlash model</strong><em>${unavailable ? "Unavailable" : "Explicit choice"}</em></header><p>${esc(evidenceCopy)}</p><div class="calibration-engine-modes">${facts.slice(0, 4).map(item => `<span>${esc(item)}</span>`).join("")}</div><div class="calibration-engine-alternative"><small><b>${esc(modelName)}</b>${facts.length > 4 ? ` · ${esc(facts.slice(4).join(" · "))}` : ""}</small><button type="button" class="text-button" data-calibration-model="${esc(modelId)}" ${controlsLocked || unavailable ? "disabled" : ""}>Select different 27B model</button></div></article>`;
 }
 
 function renderCalibrationPlan() {
@@ -7925,9 +8082,10 @@ function renderCalibrationPlan() {
       : `${plan.eligibleEngineCount} eligible`,
     plan.ready ? "ready" : "blocked",
   );
-  $("calibrationEngineCards").innerHTML = (plan.engines || [])
+  const calibrationEngineMarkup = (plan.engines || [])
     .filter(engine => uiEngineVisible(engine.backend || engine.id))
-    .map(engine => `<article class="calibration-engine ${engine.eligible ? "eligible" : "excluded"}"><header><strong>${esc(engine.label)}</strong><em>${engine.eligible ? routeQualification ? "Exact route" : "Comparable" : "Excluded"}</em></header><p>${esc(engine.modeDetail || engine.reason)}</p>${engine.settingsLabel ? `<small class="calibration-engine-settings">Test setup · ${esc(engine.settingsLabel)}</small>` : ""}<div class="calibration-engine-modes">${(engine.modes || []).map(mode => `<span>${esc(mode.label)}</span>`).join("") || ""}</div>${calibrationAlternativeMarkup(plan, engine, controlsLocked)}</article>`).join("");
+    .map(engine => `<article class="calibration-engine ${engine.eligible ? "eligible" : "excluded"}"><header><strong>${esc(engine.label)}</strong><em>${engine.eligible ? routeQualification ? "Exact route" : "Comparable" : "Excluded"}</em></header><p>${esc(engine.modeDetail || engine.reason)}</p>${engine.settingsLabel ? `<small class="calibration-engine-settings">Test setup · ${esc(engine.settingsLabel)}</small>` : ""}<div class="calibration-engine-modes">${(engine.modes || []).map(mode => `<span>${esc(mode.label)}</span>`).join("") || ""}</div></article>`).join("");
+  $("calibrationEngineCards").innerHTML = `${calibrationEngineMarkup}${calibrationAlternativeMarkup(plan, controlsLocked)}`;
   const evidence = plan.evidence || {};
   const evidenceReady = plan.action === "apply-existing";
   const completedResult = calibrationOwnsBenchmark()
@@ -8039,8 +8197,9 @@ function renderCalibrationPlan() {
     const exactRoute = engine.routeSettingsLabel || mode;
     const modeLabel = routeQualification ? exactRoute : plan.ssdStreaming ? exactRoute : testedModes.length > 1 ? `Winner: ${exactRoute}` : "AR only";
     const decodeTps = finiteMetric(engine.decodeTokensPerSecond);
+    const parityRejectionNote = calibrationParityRejectionNote(engine);
     const badge = CalibrationDecision.resultBadge(routeQualification ? {...measuredDecision, qualified:true} : measuredDecision, engine, index);
-    return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${engine.settingsLabel ? `<small class="calibration-result-settings">Setup · ${esc(engine.settingsLabel)}</small>` : ""}${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${esc(badge)}</em></article>`;
+    return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${engine.settingsLabel ? `<small class="calibration-result-settings">Setup · ${esc(engine.settingsLabel)}</small>` : ""}${parityRejectionNote ? `<small class="calibration-result-settings">${esc(parityRejectionNote)}</small>` : ""}${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${esc(badge)}</em></article>`;
   }).join("")}</div>` : "";
   if (state.calibrationProfileContractId !== plan.contractId) {
     state.calibrationProfileContractId = plan.contractId;
@@ -8262,10 +8421,25 @@ async function openCalibrationAssistant(options = {}) {
 
 async function selectCalibrationAlternative(modelId) {
   if (calibrationOperationBlocked()) return;
+  const alternative = (state.calibrationPlan?.modelAlternatives || [])
+    .find(item => String(item?.modelId || item?.id || "") === String(modelId || ""));
+  if (!alternative || alternative.requiresExplicitSelection !== true) {
+    showNotice("That different-model route does not expose an explicit selection contract.", true);
+    return;
+  }
+  const alternativeBackend = String(alternative.backend || state.backend);
+  if (!uiEngineVisible(alternativeBackend)) {
+    showNotice("That different-model runtime is not available in this launcher view.", true);
+    return;
+  }
+  if (alternativeBackend !== state.backend) {
+    state.backend = alternativeBackend;
+    updateBackend(true);
+  }
   const option = [...$("modelSelect").options]
     .find(item => item.value === String(modelId || "") && !item.disabled);
   if (!option) {
-    showNotice("That accelerated model is no longer available. Rescan models and try again.", true);
+    showNotice("That different 27B model is no longer available. Rescan models and try again.", true);
     return;
   }
   $("modelSelect").value = option.value;
@@ -8273,7 +8447,7 @@ async function selectCalibrationAlternative(modelId) {
   scheduleBenchmarkHistory();
   state.calibrationEntry = null;
   await loadCalibrationPlan(true);
-  showNotice(`Selected ${selectedModel()?.name || "the accelerated model"}. Review its quantisation and measured routes before testing.`);
+  showNotice(`Selected ${selectedModel()?.name || "the different 27B model"}. This explicit choice changes the model; review its own qualification before testing.`);
 }
 
 async function prepareQwenRouteQualification() {
@@ -8421,7 +8595,14 @@ async function applyCalibrationResult(saveProfile = false) {
     if (!coolingOption) throw new Error("The calibrated cooling setting is no longer available.");
     $("fanSelect").value = measuredCooling;
     coolingChanged = measuredCooling !== previousCooling;
-    const applied = await applyOptimal("engine", plan.preference, false);
+    const applyScope = plan.routeQualification ? "current" : "engine";
+    const evidenceBinding = plan.evidence?.evidenceBinding;
+    if (!evidenceBinding) {
+      throw new Error("The saved result has no exact apply reference. Refresh Calibration before applying it.");
+    }
+    const applied = await applyOptimal(
+      applyScope, plan.preference, false, evidenceBinding,
+    );
     if (!applied) throw new Error("The measured decision no longer matches the visible contract, so nothing was saved.");
     routeApplied = true;
     if (saveProfile) {
@@ -10491,11 +10672,19 @@ function visibleModelLibraryEngines(model = {}) {
   return (model.engines || []).filter(engine => uiEngineVisible(engine.id));
 }
 
+function modelLibraryEnginePresentation(model = {}, engine = {}) {
+  return routeCapabilityPresentation(engine, {
+    backend:engine.id,
+    modelName:model.name,
+    modelReady:model.ready,
+  });
+}
+
 function visibleModelLibraryOverview(model = {}) {
   const engines = visibleModelLibraryEngines(model);
   const runnable = engines.filter(engine => engine.runnable);
-  const ready = runnable.filter(engine => !engine.experimental);
-  const experimental = runnable.filter(engine => engine.experimental);
+  const ready = runnable.filter(engine => modelLibraryEnginePresentation(model, engine).tone === "good");
+  const experimental = runnable.filter(engine => modelLibraryEnginePresentation(model, engine).attention);
   const routes = engines.reduce((total, engine) => total + (engine.surfaces || [])
     .filter(surface => surface.supported).length, 0);
   const accelerators = engines.reduce((total, engine) => total + (engine.modes || [])
@@ -10512,22 +10701,26 @@ function visibleModelLibraryOverview(model = {}) {
 function modelLibraryEngineMarkup(model, engine) {
   const modes = (engine.modes || []).filter(mode => mode.available);
   const surfaces = (engine.surfaces || []).map(surface => `<span class="model-library-surface ${surface.supported ? "supported" : "unavailable"}" title="${esc(surface.reason)}">${esc(surface.label)}</span>`).join("");
+  const presentation = modelLibraryEnginePresentation(model, engine);
+  const performanceEvidence = presentation.performanceEvidence || {};
+  const hostSupport = presentation.hostSupport || {};
+  const evidenceTier = String(performanceEvidence.tier || "").toLowerCase();
   const latest = engine.evidence?.latest;
-  const evidence = engine.experimental
-    ? `<div class="model-library-evidence experimental"><strong>Synthetic path verified · real checkpoint not qualified</strong><span>An existing local checkpoint can be selected only for an explicit experimental run. This receipt does not recommend a large model download.</span><small>Runtime-owned qualification schema 1</small></div>`
+  const evidence = presentation.attention
+    ? `<div class="model-library-evidence experimental"><strong>${esc(String(hostSupport.state || hostSupport.tier || "").toLowerCase() === "experimental" ? (hostSupport.label || "Experimental on this Mac") : performanceEvidence.label || "Local qualification needed")}</strong><span>${esc(presentation.detail || "This route can be selected explicitly, but it is not used as an automatic speed recommendation.")}</span><small>${esc(evidenceTier === "upstream-measured" ? `Upstream evidence${performanceEvidence.sourceHardware ? ` · ${performanceEvidence.sourceHardware}` : ""} · not verified on this Mac` : "Not automatically preferred")}</small></div>`
     : latest
     ? `<div class="model-library-evidence"><strong>${esc(latest.winnerLabel || "Measured route")} won the last saved ${esc(latest.suite || "local")} run</strong><span>${esc(latest.recommendation || "Matching local benchmark evidence is saved for this model and runtime.")}</span><small>${esc(latest.createdAt ? new Date(latest.createdAt).toLocaleString([], {dateStyle:"medium", timeStyle:"short"}) : "Saved locally")} · ${formatNumber(engine.evidence.savedRuns)} matching run${Number(engine.evidence.savedRuns) === 1 ? "" : "s"}</small></div>`
     : `<div class="model-library-evidence empty"><strong>No matching saved route evidence</strong><span>Availability is not a speed claim. Use Benchmark Lab before automatically preferring an accelerator.</span></div>`;
-  const engineState = engine.experimental ? "Experimental" : engine.runnable ? "Ready" : engine.status === "runtime-missing" ? "Missing" : "Unavailable";
-  const actionLabel = engine.experimental ? "Select experimental route" : engine.runnable ? `Use with ${esc(engine.label)}` : "Route unavailable";
-  const actionDetail = engine.experimental
-    ? "Requires explicit approval; starts nothing here"
+  const engineState = engine.status === "runtime-missing" ? "Missing" : presentation.label;
+  const actionLabel = presentation.attention ? "Select route explicitly" : presentation.available ? `Use with ${esc(engine.label)}` : "Route unavailable";
+  const actionDetail = presentation.attention
+    ? "Not selected by automatic speed choices"
     : engine.evidence?.savedRuns ? `${formatNumber(engine.evidence.savedRuns)} saved evidence run${Number(engine.evidence.savedRuns) === 1 ? "" : "s"}` : "Selection changes no files and starts nothing";
-  return `<section class="model-library-engine ${esc(engine.status)}">
+  return `<section class="model-library-engine ${esc(presentation.attention ? "experimental" : engine.status)}">
     <header><div><span class="runtime-icon ${esc(engine.id === "lmstudio" ? "lms" : engine.id)}" aria-hidden="true">${esc(backendMark(engine.id))}</span><span><strong>${esc(engine.label)}</strong><small>${esc(engine.reason)}</small></span></div><em>${engineState}</em></header>
     <div class="model-library-engine-facts"><div><small>Decode modes</small><span class="model-library-pills">${modes.map(mode => `<b title="${esc(mode.detail)}">${esc(mode.label)}</b>`).join("") || "None"}</span></div><div><small>Work surfaces</small><span class="model-library-pills">${surfaces}</span></div></div>
     ${evidence}
-    <div class="model-library-engine-action"><span>${actionDetail}</span><button type="button" class="text-button" data-library-model="${esc(model.id)}" data-library-backend="${esc(engine.id)}" ${engine.runnable ? "" : "disabled"}>${actionLabel}</button></div>
+    <div class="model-library-engine-action"><span>${actionDetail}</span><button type="button" class="text-button" data-library-model="${esc(model.id)}" data-library-backend="${esc(engine.id)}" ${presentation.available ? "" : "disabled"}>${actionLabel}</button></div>
   </section>`;
 }
 
@@ -10540,6 +10733,7 @@ function modelLibraryCardMarkup(model) {
     ? overview.engines
     : overview.engines.filter(engine => engine.id === state.modelLibraryEngine);
   const scopedEngine = engineScoped ? visibleEngines[0] : null;
+  const scopedPresentation = scopedEngine ? modelLibraryEnginePresentation(model, scopedEngine) : null;
   const scopedRoutes = scopedEngine
     ? (scopedEngine.surfaces || []).filter(surface => surface.supported).length
     : overview.routes;
@@ -10547,15 +10741,15 @@ function modelLibraryCardMarkup(model) {
     ? (scopedEngine.modes || []).filter(mode => mode.available).length
     : overview.accelerators;
   const cardState = engineScoped
-    ? (scopedEngine?.experimental ? "attention" : scopedEngine?.runnable ? "ready" : "blocked")
+    ? (scopedPresentation?.attention ? "attention" : scopedPresentation?.available ? "ready" : "blocked")
     : overview.state;
   const stateLabel = engineScoped
-    ? (scopedEngine?.experimental ? "Experimental" : scopedEngine?.runnable ? "Ready" : "Unavailable")
+    ? (scopedPresentation?.label || "Unavailable")
     : overview.state === "ready" ? "Ready" : overview.state === "attention" ? "Review" : "Blocked";
   const diagnosisHeadline = engineScoped
-    ? scopedEngine?.experimental
-      ? `${scopedEngine.label} is available only as an experimental run.`
-      : scopedEngine?.runnable
+    ? scopedPresentation?.attention
+      ? `${scopedEngine.label} needs an explicit choice.`
+      : scopedPresentation?.available
       ? `Ready with ${scopedEngine.label}.`
       : `${scopedEngine?.label || backendName(state.modelLibraryEngine)} cannot use this checkpoint.`
     : overview.ready.length
@@ -10564,16 +10758,18 @@ function modelLibraryCardMarkup(model) {
         ? "A visible engine route needs review."
         : "No visible engine can use this checkpoint.";
   const diagnosisDetail = engineScoped
-    ? (scopedEngine?.reason || "This engine has no compatible route for the checkpoint.")
+    ? (scopedPresentation?.detail || scopedEngine?.reason || "This engine has no compatible route for the checkpoint.")
     : overview.ready.length
       ? `${formatNumber(overview.routes)} supported work-surface route${overview.routes === 1 ? "" : "s"} across the engines shown here.`
-      : (overview.experimental[0]?.reason || overview.engines[0]?.reason || "No visible compatibility report is available.");
+      : (overview.experimental[0]
+        ? modelLibraryEnginePresentation(model, overview.experimental[0]).detail || overview.experimental[0].reason
+        : overview.engines[0]?.reason || "No visible compatibility report is available.");
   const detailSummary = engineScoped
-    ? `${formatNumber(scopedRoutes)} ready surface${scopedRoutes === 1 ? "" : "s"} · ${formatNumber(scopedModes)} decode mode${scopedModes === 1 ? "" : "s"}`
+    ? `${formatNumber(scopedRoutes)} available surface${scopedRoutes === 1 ? "" : "s"} · ${formatNumber(scopedModes)} decode mode${scopedModes === 1 ? "" : "s"}`
     : `${formatNumber(overview.runnable.length)} engines · ${formatNumber(overview.accelerators)} accelerators · ${formatNumber(overview.evidenceRuns)} evidence runs`;
   return `<article class="model-library-card ${esc(cardState)}">
     <header><div><span class="model-library-format" aria-hidden="true">${esc(String(model.format || "?").slice(0, 4).toUpperCase())}</span><span><strong>${esc(model.name)}</strong><small>${esc(model.architecture)} · ${esc(model.origins?.join(" + ") || "Detected locally")}</small></span></div><em>${esc(stateLabel)}</em></header>
-    <div class="model-library-meta"><span>${esc(String(model.format || "unknown").toUpperCase())}</span><span>${esc(model.quantization)}</span><span>${esc(model.sizeLabel)}</span><span>${model.nativeContext ? `${formatNumber(model.nativeContext)} context` : "Context unknown"}</span><span>${formatNumber(scopedRoutes)} ${scopedEngine?.experimental ? "experimental" : "ready"} route${scopedRoutes === 1 ? "" : "s"}</span></div>
+    <div class="model-library-meta"><span>${esc(String(model.format || "unknown").toUpperCase())}</span><span>${esc(model.quantization)}</span><span>${esc(model.sizeLabel)}</span><span>${model.nativeContext ? `${formatNumber(model.nativeContext)} context` : "Context unknown"}</span><span>${formatNumber(scopedRoutes)} available route${scopedRoutes === 1 ? "" : "s"}</span></div>
     <code class="model-library-path" title="${esc(model.path)}">${esc(model.path)}</code>
     <div class="model-library-diagnosis"><i aria-hidden="true">${cardState === "ready" ? "✓" : cardState === "attention" ? "!" : "×"}</i><p><strong>${esc(diagnosisHeadline)}</strong><span>${esc(diagnosisDetail)}</span></p></div>
     <details class="model-library-details" ${isSelected ? "open" : ""}><summary><span>${engineScoped ? `${esc(scopedEngine?.label || backendName(state.modelLibraryEngine))} details` : "Compatibility details"}</span><small>${detailSummary}</small></summary><div>
@@ -10586,13 +10782,15 @@ function modelLibraryCardMarkup(model) {
 function modelLibraryMatches(model) {
   if (!uiModelVisible(model)) return false;
   const visibleEngines = visibleModelLibraryEngines(model);
+  const overview = visibleModelLibraryOverview(model);
   const scopedEngine = state.modelLibraryEngine === "all"
     ? null
     : visibleEngines.find(item => item.id === state.modelLibraryEngine);
-  const scopedState = scopedEngine?.experimental ? "attention" : scopedEngine?.runnable ? "ready" : "blocked";
+  const scopedPresentation = scopedEngine ? modelLibraryEnginePresentation(model, scopedEngine) : null;
+  const scopedState = scopedPresentation?.attention ? "attention" : scopedPresentation?.available ? "ready" : "blocked";
   if (
     state.modelLibraryState !== "all"
-    && (scopedEngine ? scopedState : model.doctor?.state) !== state.modelLibraryState
+    && (scopedEngine ? scopedState : overview.state) !== state.modelLibraryState
   ) return false;
   if (state.modelLibraryEngine !== "all") {
     const engine = visibleEngines.find(item => item.id === state.modelLibraryEngine);
@@ -10638,18 +10836,20 @@ function renderModelLibrary() {
   $("modelLibraryBadge").textContent = `${formatNumber(summary.models)} detected`;
   $("modelLibraryBadge").className = `setup-badge ${summary.blocked ? "warning" : "ready"}`;
   const scoped = state.modelLibraryEngine !== "all";
-  const scopedReports = scoped ? models.map(model =>
-    visibleModelLibraryEngines(model).find(engine => engine.id === state.modelLibraryEngine)
-  ).filter(Boolean) : [];
+  const scopedReports = scoped ? models.map(model => {
+    const engine = visibleModelLibraryEngines(model)
+      .find(item => item.id === state.modelLibraryEngine);
+    return engine ? {engine, presentation:modelLibraryEnginePresentation(model, engine)} : null;
+  }).filter(Boolean) : [];
   const summaryFacts = scoped ? [
     [models.length, "shown"],
-    [scopedReports.filter(engine => engine.runnable && !engine.experimental).length, "qualified / ready"],
-    [scopedReports.filter(engine => engine.experimental).length, "experimental"],
-    [scopedReports.filter(engine => !engine.runnable).length, "unavailable"],
+    [scopedReports.filter(item => item.presentation.tone === "good").length, "qualified / ready"],
+    [scopedReports.filter(item => item.presentation.attention).length, "review"],
+    [scopedReports.filter(item => !item.presentation.available).length, "unavailable"],
   ] : [
     [models.length, "shown"], [summary.ready || 0, "ready"],
     [summary.attention || 0, "review"], [summary.blocked || 0, "blocked"],
-    [summary.launchableRoutes || 0, "ready routes"],
+    [summary.launchableRoutes || 0, "available routes"],
   ];
   $("modelLibrarySummary").innerHTML = summaryFacts.map(([value, label]) => `<span><strong>${formatNumber(value)}</strong><small>${esc(label)}</small></span>`).join("");
   $("modelLibraryCards").innerHTML = models.length

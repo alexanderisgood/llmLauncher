@@ -426,6 +426,220 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("not yet", swift_reason)
         self.assertIn("not passed", mference_reason)
 
+    def test_upstream_route_evidence_never_auto_selects_and_whallm_48_gib_is_experimental(self) -> None:
+        dflash_model = copy.deepcopy(self.models[0])
+        dflash_capability = dflash_model["backends"]["omlx"]
+        dflash_capability.update({
+            "dflash": True,
+            "dflashVersion": "2",
+            "dflashDraftPath": "/test/Qwen3.8-27B-DFlash2",
+            "dflashPairFingerprint": "dflash-pair-fingerprint",
+            "dflashRuntimeVersion": "omlx 0.6.4",
+            "localBenchmark": None,
+            "localBenchmarks": [],
+        })
+
+        upstream = launcher.route_performance_evidence(
+            dflash_model, "omlx", dflash_capability,
+        )
+
+        self.assertEqual(upstream["tier"], "upstream-measured")
+        self.assertEqual(upstream["source"], "omlx-upstream")
+        self.assertFalse(upstream["automaticEligible"])
+        self.assertIsNone(upstream["recordId"])
+        self.assertIn("not a prediction", upstream["detail"])
+
+        whallm_model = {
+            "name": "Qwen3.8 Flash-Next · Whallm full experts",
+            "sharedServer": True,
+            "ssdStreaming": {"installedMemoryBytes": 48 * 1024**3},
+        }
+        whallm_capability = {
+            "runnable": True,
+            "sharedServer": True,
+            "reason": "Live Whallm loopback route.",
+        }
+        support = launcher.route_host_support(
+            whallm_model, "whallm", whallm_capability,
+            runtime_installed=True, artifact_compatible=True,
+        )
+        whallm_evidence = launcher.route_performance_evidence(
+            whallm_model, "whallm", whallm_capability,
+        )
+
+        self.assertEqual(support["state"], "experimental")
+        self.assertEqual(support["hostMemoryBytes"], 48 * 1024**3)
+        self.assertEqual(support["supportFloorBytes"], 64 * 1024**3)
+        self.assertIn("64 GB", support["detail"])
+        self.assertEqual(whallm_evidence["tier"], "upstream-measured")
+        self.assertFalse(whallm_evidence["automaticEligible"])
+
+    def test_flash_next_calibration_exposes_explicit_different_model_dflash_alternative(self) -> None:
+        selected, alternative, request = self.flash_next_dflash_alternative_fixture()
+        models = [selected, alternative]
+        original_request = copy.deepcopy(request)
+        original_models = copy.deepcopy(models)
+        total = 48 * 1024**3
+        snapshot = {
+            "memoryAvailable": True,
+            "totalBytes": total,
+            "freePercent": 90.0,
+            "thermalAvailable": True,
+            "thermalState": 0,
+            "lowPowerMode": False,
+            "metalWiredLimitBytes": 0,
+        }
+        ready_admission = {
+            "decision": "ready",
+            "label": "Fits current headroom",
+            "detail": "The unchanged visible contract passed admission.",
+            "launchable": True,
+            "requiresAcknowledgement": False,
+            "projectedHeadroomBytes": 10 * 1024**3,
+            "estimate": {
+                "requiredHeadroomBytes": 36 * 1024**3,
+                "estimatedWorkingSetBytes": 34 * 1024**3,
+            },
+        }
+
+        with mock.patch.object(
+            launcher, "apple_resource_snapshot", return_value=snapshot,
+        ), mock.patch.object(
+            launcher, "dflash2_capability_valid", return_value=True,
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission",
+            return_value=ready_admission,
+        ), mock.patch.object(
+            launcher, "session_memory_admission", return_value=ready_admission,
+        ) as admission:
+            plan = launcher.calibration_plan(request, models)
+
+        self.assertEqual(request, original_request)
+        self.assertEqual(models, original_models)
+        self.assertEqual(plan["request"]["modelId"], selected["id"])
+        self.assertEqual(plan["model"]["id"], selected["id"])
+        self.assertEqual(len(plan["modelAlternatives"]), 1)
+        candidate = plan["modelAlternatives"][0]
+        self.assertEqual(candidate["kind"], "explicit-different-model")
+        self.assertEqual(candidate["modelId"], alternative["id"])
+        self.assertEqual(candidate["modelName"], alternative["name"])
+        self.assertEqual(candidate["backend"], "omlx")
+        self.assertEqual(candidate["modes"], ["DFlash 2"])
+        self.assertTrue(candidate["differentModel"])
+        self.assertTrue(candidate["differentArchitecture"])
+        self.assertTrue(candidate["intelligenceContractChanged"])
+        self.assertTrue(candidate["requiresExplicitSelection"])
+        self.assertFalse(candidate["automaticEligible"])
+        self.assertEqual(candidate["performanceEvidence"]["tier"], "upstream-measured")
+        self.assertFalse(candidate["performanceEvidence"]["automaticEligible"])
+        self.assertEqual(candidate["hostSupport"]["state"], "supported")
+        self.assertTrue(candidate["capacity"]["launchable"])
+        self.assertEqual(
+            candidate["capacity"]["estimate"]["requiredHeadroomBytes"],
+            36 * 1024**3,
+        )
+        self.assertEqual(candidate["preservedContract"]["client"], request["client"])
+        self.assertEqual(candidate["preservedContract"]["context"], request["context"])
+        self.assertEqual(candidate["preservedContract"]["output"], request["output"])
+        self.assertEqual(candidate["preservedContract"]["reasoning"], request["reasoning"])
+        self.assertEqual(candidate["preservedContract"]["kv"], request["options"]["kv"])
+        admitted_request = admission.call_args.args[0]
+        self.assertEqual(admitted_request["modelId"], alternative["id"])
+        self.assertEqual(admitted_request["context"], request["context"])
+        self.assertEqual(admitted_request["output"], request["output"])
+        self.assertEqual(admitted_request["reasoning"], request["reasoning"])
+
+    def test_flash_next_dflash_alternative_fails_closed_for_stale_pair_or_admission(self) -> None:
+        selected, alternative, request = self.flash_next_dflash_alternative_fixture()
+        total = 48 * 1024**3
+        snapshot = {
+            "memoryAvailable": True,
+            "totalBytes": total,
+            "freePercent": 90.0,
+            "thermalAvailable": False,
+            "thermalState": None,
+            "lowPowerMode": False,
+            "metalWiredLimitBytes": 0,
+        }
+        ready_admission = {
+            "decision": "ready",
+            "launchable": True,
+            "requiresAcknowledgement": False,
+            "estimate": {"requiredHeadroomBytes": 36 * 1024**3},
+        }
+
+        stale_cases = {
+            "missing pair fingerprint": ("dflashPairFingerprint", ""),
+            "unrecommended runtime": ("dflashReadiness", {
+                "runtimeRecommended": False,
+                "targetCompatible": True,
+                "draftComplete": True,
+            }),
+        }
+        for label, (field, value) in stale_cases.items():
+            with self.subTest(label=label):
+                stale = copy.deepcopy(alternative)
+                stale["backends"]["omlx"][field] = value
+                with mock.patch.object(
+                    launcher, "dflash2_capability_valid", return_value=True,
+                ), mock.patch.object(
+                    launcher, "session_memory_admission", return_value=ready_admission,
+                ) as admission:
+                    alternatives = launcher.qwen_flash_next_model_alternatives(
+                        selected, request, [selected, stale],
+                        resource_snapshot=snapshot,
+                    )
+                self.assertEqual(alternatives, [])
+                admission.assert_not_called()
+
+        for decision in ("unknown", "review", "pressure"):
+            with self.subTest(admission=decision):
+                acknowledged_admission = {
+                    "decision": decision,
+                    "label": "Capacity needs review",
+                    "detail": "The unchanged contract is not proven to fit current headroom.",
+                    "launchable": True,
+                    "requiresAcknowledgement": True,
+                    "estimate": {"requiredHeadroomBytes": 36 * 1024**3},
+                }
+                with mock.patch.object(
+                    launcher, "dflash2_capability_valid", return_value=True,
+                ), mock.patch.object(
+                    launcher, "session_memory_admission",
+                    return_value=acknowledged_admission,
+                ) as admission:
+                    alternatives = launcher.qwen_flash_next_model_alternatives(
+                        selected, request, [selected, alternative],
+                        resource_snapshot=snapshot,
+                    )
+                self.assertEqual(alternatives, [])
+                admitted_request = admission.call_args.args[0]
+                self.assertEqual(admitted_request["modelId"], alternative["id"])
+                self.assertEqual(admitted_request["context"], request["context"])
+                self.assertEqual(admitted_request["output"], request["output"])
+                self.assertEqual(admitted_request["reasoning"], request["reasoning"])
+                self.assertEqual(admitted_request["options"]["kv"], request["options"]["kv"])
+
+        with mock.patch.object(
+            launcher, "dflash2_capability_valid", return_value=False,
+        ), mock.patch.object(
+            launcher, "session_memory_admission",
+        ) as admission:
+            alternatives = launcher.qwen_flash_next_model_alternatives(
+                selected, request, [selected, alternative],
+                resource_snapshot=snapshot,
+            )
+        self.assertEqual(alternatives, [])
+        admission.assert_not_called()
+
+    def test_calibration_ui_renders_model_alternatives_without_silent_model_selection(self) -> None:
+        script = (ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("plan?.modelAlternatives", script)
+        self.assertIn("requiresExplicitSelection", script)
+        self.assertIn("data-calibration-model", script)
+        self.assertNotIn("optimized-speed/i.test(model.name)", script)
+
     def test_whallm_live_qwen_route_is_shared_single_engine_and_never_cross_compared(self) -> None:
         live = {
             "connected": True,
@@ -451,6 +665,17 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(model["ssdStreaming"]["calibration"]["engines"], ["whallm"])
         self.assertTrue(model["backends"]["whallm"]["runnable"])
         self.assertFalse(model["backends"]["omlx"]["runnable"])
+        self.assertEqual(
+            model["backends"]["whallm"]["hostSupport"]["state"],
+            "experimental",
+        )
+        self.assertEqual(
+            model["backends"]["whallm"]["performanceEvidence"]["tier"],
+            "upstream-measured",
+        )
+        self.assertFalse(
+            model["backends"]["whallm"]["performanceEvidence"]["automaticEligible"],
+        )
 
         payload = {
             "backend": "whallm", "client": "pi", "modelId": model["id"],
@@ -669,6 +894,79 @@ class LauncherTests(unittest.TestCase):
                 "mtpMinContinueProbability": 0.0,
             },
         }
+
+    def flash_next_dflash_alternative_fixture(self) -> tuple[dict, dict, dict]:
+        selected = copy.deepcopy(self.models[0])
+        selected.update({
+            "id": "qwen38-flash-next-selected",
+            "name": "Qwen3.8 Flash-Next REAP PLE",
+            "architecture": "Qwen4ExpForConditionalGeneration",
+            "modelType": "qwen4_exp_text",
+            "qwen4Ple": {"supported": True, "storage": "mmap"},
+        })
+        selected_capability = selected["backends"]["omlx"]
+        selected_capability.update({
+            "runnable": True,
+            "mtp": False,
+            "mtpReason": "No integrated MTP tensors",
+            "dflash": False,
+            "dflashReason": "No exact DFlash pair for Flash-Next",
+            "kv": False,
+            "benchmarkModelFingerprint": "flash-next-selected-fingerprint",
+            "runtimeVersion": "omlx 0.6.4",
+            "agentReasoning": ["auto", "off", "low", "medium", "xhigh"],
+            "codexReasoning": ["auto", "low", "medium", "xhigh"],
+        })
+        for backend in ("lmstudio", "mtplx"):
+            selected["backends"][backend].update({
+                "runnable": False,
+                "reason": "No verified route for this Flash-Next PLE artifact.",
+                "mtp": False,
+            })
+
+        alternative = copy.deepcopy(self.models[0])
+        alternative.update({
+            "id": "qwen38-27b-dflash-alternative",
+            "name": "Qwen3.8-27B-MLX-4bit",
+            "architecture": "Qwen3_5ForConditionalGeneration",
+            "modelType": "qwen3_5",
+            "quantization": "4-bit",
+            "size": 19 * 1024**3,
+            "sizeLabel": "19.0 GB",
+        })
+        alternative_capability = alternative["backends"]["omlx"]
+        alternative_capability.update({
+            "runnable": True,
+            "mtp": False,
+            "dflash": True,
+            "dflashVersion": "2",
+            "dflashDraftPath": "/test/Qwen3.8-27B-DFlash2",
+            "dflashPairFingerprint": "qwen38-27b-dflash-pair",
+            "dflashRuntimeVersion": "omlx 0.6.4",
+            "dflashBlockSize": 8,
+            "dflashMaxBlockSize": 8,
+            "dflashReadiness": {
+                "runtimeRecommended": True,
+                "targetCompatible": True,
+                "draftComplete": True,
+            },
+            "benchmarkModelFingerprint": "qwen38-27b-dflash-model",
+            "runtimeVersion": "omlx 0.6.4",
+            "localBenchmark": None,
+            "localBenchmarks": [],
+        })
+        request = self.payload("omlx", "pi", selected)
+        request.update({
+            "suite": "agentic",
+            "enginePreference": "throughput",
+            "calibrationCooling": "smart",
+        })
+        request["options"].update({
+            "acceleration": "off",
+            "memoryGuard": "balanced",
+            "kv": "off",
+        })
+        return selected, alternative, request
 
     def qwen4_ple_fixture(self) -> tuple[Path, Path]:
         root = Path(self.temp.name) / "qwen4-models"
@@ -1111,6 +1409,10 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(plan["freshLoadPerCandidate"])
         self.assertTrue(plan["greedyParityPerCandidate"])
         self.assertTrue(plan["resourceGatePerCandidate"])
+        self.assertEqual(
+            plan["resourceCooldownMemoryToleranceBytes"],
+            launcher.BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
+        )
 
         unverified = copy.deepcopy(model)
         unverified["backends"]["lmstudio"]["mtpRuntimeVerified"] = False
@@ -1207,11 +1509,29 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(launcher._local_benchmark_record_verified(
             capability, record, job["evidence"],
         ))
+        compatible_v1 = copy.deepcopy(record)
+        compatible_v1["tuningSweep"]["version"] = 1
+        compatible_v1["tuningSweep"].pop("optionalSearchComplete")
+        compatible_v1["tuningSweep"].pop("optionalSearchStop")
+        self.assertTrue(launcher._local_benchmark_record_verified(
+            capability, compatible_v1, job["evidence"],
+        ))
+        transitional_v1 = copy.deepcopy(record)
+        transitional_v1["tuningSweep"]["version"] = 1
+        self.assertTrue(launcher._local_benchmark_record_verified(
+            capability, transitional_v1, job["evidence"],
+        ))
+        missing_v2_metadata = copy.deepcopy(record)
+        missing_v2_metadata["tuningSweep"].pop("optionalSearchComplete")
+        missing_v2_metadata["tuningSweep"].pop("optionalSearchStop")
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, missing_v2_metadata, job["evidence"],
+        ))
 
         capability.update({
             "preferredAccelerationSource": "local-benchmark",
             "preferredAcceleration": "mtp", "fallbackAcceleration": "off",
-            "localBenchmark": record, "localBenchmarks": [record],
+            "localBenchmark": compatible_v1, "localBenchmarks": [compatible_v1],
         })
         optimized = launcher.fastest_safe_options(
             "lmstudio", capability, payload["options"], job["evidence"],
@@ -1233,11 +1553,102 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(launcher._local_benchmark_record_verified(
             capability, duplicate_selected, job["evidence"],
         ))
+        redirected = copy.deepcopy(record)
+        slower = next(
+            candidate for candidate in record["tuningSweep"]["candidates"]
+            if candidate["selected"] is False
+        )
+        for candidate in redirected["tuningSweep"]["candidates"]:
+            candidate["selected"] = candidate["key"] == slower["key"]
+        redirected["tuningSweep"]["selectedCandidateKey"] = slower["key"]
+        redirected["tuningSweep"]["selectedSettings"] = copy.deepcopy(
+            slower["settings"],
+        )
+        redirected["modeSettings"]["mtp"] = copy.deepcopy(slower["settings"])
+        for metric in (
+            "qualityMatchesAR", "medianSpeedupVsAR", "worstCaseSpeedupVsAR",
+            "medianEndToEndTokensPerSecond",
+        ):
+            redirected["modes"]["mtp"][metric] = slower[metric]
+        self.assertFalse(launcher.lmstudio_mtp_tuning_sweep_verified(
+            capability, redirected, redirected["modeSettings"],
+        ))
+        mode_mismatch = copy.deepcopy(record)
+        mode_mismatch["modes"]["mtp"]["medianEndToEndTokensPerSecond"] += 0.001
+        self.assertFalse(launcher.lmstudio_mtp_tuning_sweep_verified(
+            capability, mode_mismatch, mode_mismatch["modeSettings"],
+        ))
         incomplete = copy.deepcopy(record)
         incomplete["tuningSweep"]["complete"] = False
         self.assertFalse(launcher._local_benchmark_record_verified(
             capability, incomplete, job["evidence"],
         ))
+        missing_required_depth = copy.deepcopy(record)
+        missing_required_depth["tuningSweep"]["version"] = 1
+        missing_required_depth["tuningSweep"].pop("optionalSearchComplete")
+        missing_required_depth["tuningSweep"].pop("optionalSearchStop")
+        removable_depth = next(
+            index for index, candidate in enumerate(
+                missing_required_depth["tuningSweep"]["candidates"]
+            )
+            if candidate["stage"] == "depth" and candidate["selected"] is False
+        )
+        missing_required_depth["tuningSweep"]["candidates"].pop(removable_depth)
+        missing_required_depth["tuningSweep"]["candidateCount"] -= 1
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, missing_required_depth, job["evidence"],
+        ))
+        truncated_optional_v2 = copy.deepcopy(record)
+        removable_cutoff = next(
+            index for index, candidate in enumerate(
+                truncated_optional_v2["tuningSweep"]["candidates"]
+            )
+            if candidate["stage"] == "cutoff" and candidate["selected"] is False
+        )
+        truncated_optional_v2["tuningSweep"]["candidates"].pop(removable_cutoff)
+        truncated_optional_v2["tuningSweep"]["candidateCount"] -= 1
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, truncated_optional_v2, job["evidence"],
+        ))
+        truncated_optional_v1 = copy.deepcopy(transitional_v1)
+        removable_cutoff = next(
+            index for index, candidate in enumerate(
+                truncated_optional_v1["tuningSweep"]["candidates"]
+            )
+            if candidate["stage"] == "cutoff" and candidate["selected"] is False
+        )
+        truncated_optional_v1["tuningSweep"]["candidates"].pop(removable_cutoff)
+        truncated_optional_v1["tuningSweep"]["candidateCount"] -= 1
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, truncated_optional_v1, job["evidence"],
+        ))
+        for label, mutate in (
+            ("missing completion flag", lambda sweep: sweep.pop("optionalSearchComplete")),
+            ("false without stop", lambda sweep: sweep.update({
+                "optionalSearchComplete": False, "optionalSearchStop": None,
+            })),
+            ("true with stop", lambda sweep: sweep.update({
+                "optionalSearchComplete": True,
+                "optionalSearchStop": {
+                    "reason": "resource-cooldown-timeout", "stage": "cutoff",
+                    "completedCandidateCount": sweep["candidateCount"],
+                },
+            })),
+        ):
+            with self.subTest(optional_metadata=label):
+                malformed = copy.deepcopy(record)
+                malformed["tuningSweep"]["version"] = 1
+                mutate(malformed["tuningSweep"])
+                self.assertFalse(launcher._local_benchmark_record_verified(
+                    capability, malformed, job["evidence"],
+                ))
+        for unsupported_version in (0, 3, True):
+            with self.subTest(unsupported_tuner_version=unsupported_version):
+                unsupported = copy.deepcopy(record)
+                unsupported["tuningSweep"]["version"] = unsupported_version
+                self.assertFalse(launcher._local_benchmark_record_verified(
+                    capability, unsupported, job["evidence"],
+                ))
 
     def test_lmstudio_mtp_tuner_never_saves_partial_or_resource_mismatched_runs(self) -> None:
         model = copy.deepcopy(self.models[0])
@@ -1335,6 +1746,10 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(plan["freshLoadPerCandidate"])
         self.assertTrue(plan["greedyParityPerCandidate"])
         self.assertTrue(plan["resourceGatePerCandidate"])
+        self.assertEqual(
+            plan["resourceCooldownMemoryToleranceBytes"],
+            launcher.BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
+        )
 
         with self.assertRaisesRegex(ValueError, "draft precision"):
             launcher.dflash2_tuning_controls(
@@ -1448,13 +1863,31 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(launcher._local_benchmark_record_verified(
             capability, record, job["evidence"],
         ))
+        compatible_v1 = copy.deepcopy(record)
+        compatible_v1["tuningSweep"]["version"] = 1
+        compatible_v1["tuningSweep"].pop("optionalSearchComplete")
+        compatible_v1["tuningSweep"].pop("optionalSearchStop")
+        self.assertTrue(launcher._local_benchmark_record_verified(
+            capability, compatible_v1, job["evidence"],
+        ))
+        transitional_v1 = copy.deepcopy(record)
+        transitional_v1["tuningSweep"]["version"] = 1
+        self.assertTrue(launcher._local_benchmark_record_verified(
+            capability, transitional_v1, job["evidence"],
+        ))
+        missing_v2_metadata = copy.deepcopy(record)
+        missing_v2_metadata["tuningSweep"].pop("optionalSearchComplete")
+        missing_v2_metadata["tuningSweep"].pop("optionalSearchStop")
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, missing_v2_metadata, job["evidence"],
+        ))
 
         capability.update({
             "preferredAccelerationSource": "local-benchmark",
             "preferredAcceleration": "dflash", "fallbackAcceleration": "mtp",
             "dflashPreferred": True, "dflashBenchmarkVerified": True,
-            "dflashBenchmark": record,
-            "localBenchmark": record, "localBenchmarks": [record],
+            "dflashBenchmark": compatible_v1,
+            "localBenchmark": compatible_v1, "localBenchmarks": [compatible_v1],
         })
         optimized = launcher.fastest_safe_options(
             "omlx", capability, payload["options"], job["evidence"],
@@ -1469,6 +1902,89 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(launcher._local_benchmark_record_verified(
             capability, tampered, job["evidence"],
         ))
+        redirected = copy.deepcopy(record)
+        slower = next(
+            candidate for candidate in record["tuningSweep"]["candidates"]
+            if candidate["selected"] is False
+        )
+        for candidate in redirected["tuningSweep"]["candidates"]:
+            candidate["selected"] = candidate["key"] == slower["key"]
+        redirected["tuningSweep"]["selectedCandidateKey"] = slower["key"]
+        redirected["tuningSweep"]["selectedSettings"] = copy.deepcopy(
+            slower["settings"],
+        )
+        redirected["modeSettings"]["dflash2"] = copy.deepcopy(slower["settings"])
+        for metric in (
+            "qualityMatchesAR", "medianSpeedupVsAR", "worstCaseSpeedupVsAR",
+            "medianEndToEndTokensPerSecond",
+        ):
+            redirected["modes"]["dflash2"][metric] = slower[metric]
+        self.assertFalse(launcher.dflash2_tuning_sweep_verified(
+            capability, redirected, redirected["modeSettings"],
+        ))
+        mode_mismatch = copy.deepcopy(record)
+        mode_mismatch["modes"]["dflash2"]["medianEndToEndTokensPerSecond"] += 0.001
+        self.assertFalse(launcher.dflash2_tuning_sweep_verified(
+            capability, mode_mismatch, mode_mismatch["modeSettings"],
+        ))
+        missing_required_block = copy.deepcopy(record)
+        missing_required_block["tuningSweep"]["version"] = 1
+        missing_required_block["tuningSweep"].pop("optionalSearchComplete")
+        missing_required_block["tuningSweep"].pop("optionalSearchStop")
+        removable_block = next(
+            index for index, candidate in enumerate(
+                missing_required_block["tuningSweep"]["candidates"]
+            )
+            if candidate["stage"] == "block" and candidate["selected"] is False
+        )
+        missing_required_block["tuningSweep"]["candidates"].pop(removable_block)
+        missing_required_block["tuningSweep"]["candidateCount"] -= 1
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, missing_required_block, job["evidence"],
+        ))
+        truncated_optional_v2 = copy.deepcopy(record)
+        removable_verifier = next(
+            index for index, candidate in enumerate(
+                truncated_optional_v2["tuningSweep"]["candidates"]
+            )
+            if candidate["stage"] == "verifier" and candidate["selected"] is False
+        )
+        truncated_optional_v2["tuningSweep"]["candidates"].pop(removable_verifier)
+        truncated_optional_v2["tuningSweep"]["candidateCount"] -= 1
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, truncated_optional_v2, job["evidence"],
+        ))
+        truncated_optional_v1 = copy.deepcopy(transitional_v1)
+        removable_verifier = next(
+            index for index, candidate in enumerate(
+                truncated_optional_v1["tuningSweep"]["candidates"]
+            )
+            if candidate["stage"] == "verifier" and candidate["selected"] is False
+        )
+        truncated_optional_v1["tuningSweep"]["candidates"].pop(removable_verifier)
+        truncated_optional_v1["tuningSweep"]["candidateCount"] -= 1
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, truncated_optional_v1, job["evidence"],
+        ))
+        malformed_stop = copy.deepcopy(record)
+        malformed_stop["tuningSweep"]["version"] = 1
+        malformed_stop["tuningSweep"].update({
+            "optionalSearchComplete": False,
+            "optionalSearchStop": {
+                "reason": "resource-cooldown-timeout", "stage": "verifier",
+                "completedCandidateCount": malformed_stop["tuningSweep"]["candidateCount"] - 1,
+            },
+        })
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, malformed_stop, job["evidence"],
+        ))
+        for unsupported_version in (0, 3, True):
+            with self.subTest(unsupported_tuner_version=unsupported_version):
+                unsupported = copy.deepcopy(record)
+                unsupported["tuningSweep"]["version"] = unsupported_version
+                self.assertFalse(launcher._local_benchmark_record_verified(
+                    capability, unsupported, job["evidence"],
+                ))
 
         failed = launcher.BenchmarkManager(mock.Mock())
         with mock.patch.object(
@@ -4738,6 +5254,7 @@ for line in sys.stdin:
             "dflashBlockSize": 5, "dflashMaxBlockSize": 8,
             "depth": 5, "depthMax": 8,
         })
+
         omlx["localBenchmark"] = json.loads(json.dumps(omlx["dflashBenchmark"]))
         benchmark_evidence = {
             "context": 16_384, "output": 16_384, "client": "pi",
@@ -4781,6 +5298,41 @@ for line in sys.stdin:
                 "context": 131_072, "output": 16_384, "reasoning": "medium",
                 "options": current,
             }, self.models)
+
+    def test_fastest_safe_replays_measured_omlx_ane_prefill(self) -> None:
+        capability = copy.deepcopy(self.models[0]["backends"]["omlx"])
+        capability.update({
+            "preferredAccelerationSource": "local-benchmark",
+            "preferredAcceleration": "mtp",
+            "depth": 3,
+            "depthMax": 3,
+        })
+        measured = {
+            "winner": "mtp",
+            "settings": {"depth": 2},
+            "engineSettings": {
+                "burst": "balanced",
+                "anePrefill": "tuned",
+                "memoryGuard": "balanced",
+            },
+        }
+
+        with mock.patch.object(
+            launcher, "verified_local_benchmark", return_value=measured,
+        ):
+            result = launcher.fastest_safe_options(
+                "omlx", capability,
+                {"acceleration": "off", "depth": 1, "anePrefill": "off"},
+                {},
+            )
+
+        self.assertEqual(result["options"]["acceleration"], "mtp")
+        self.assertEqual(result["options"]["depth"], 2)
+        self.assertEqual(result["options"]["anePrefill"], "tuned")
+        self.assertTrue(any(
+            "exact locally measured ANE prefill" in item
+            for item in result["rationale"]
+        ))
 
     def test_model_scoped_surface_capabilities_override_backend_defaults(self) -> None:
         model = copy.deepcopy(self.models[0])
@@ -5268,12 +5820,12 @@ for line in sys.stdin:
 
         total = 50 * 1024**3
 
-        def snapshot(free: float, thermal: int = 0) -> dict:
+        def snapshot(free: float, thermal: int = 0, low_power: bool = False) -> dict:
             return {
                 "memoryAvailable": True, "totalBytes": total, "freePercent": free,
                 "thermalAvailable": True, "thermalState": thermal,
                 "thermalLabel": launcher.THERMAL_STATE_LABELS[thermal],
-                "lowPowerMode": False, "capturedAt": time.monotonic(),
+                "lowPowerMode": low_power, "capturedAt": time.monotonic(),
             }
 
         manager = launcher.BenchmarkManager(launcher.RunManager())
@@ -5290,6 +5842,52 @@ for line in sys.stdin:
             )
         self.assertEqual(baseline["status"], "reference-ready")
         self.assertEqual(baseline["sampleCount"], 2)
+        self.assertEqual(
+            baseline["memoryToleranceBytes"],
+            launcher.BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
+        )
+
+        with mock.patch.object(
+            launcher, "apple_resource_snapshot",
+            side_effect=[snapshot(77.8), snapshot(77.8)],
+        ):
+            ordinary_drift = manager._wait_for_resource_baseline(
+                "oMLX · DFlash block 6", "omlx", baseline["reference"],
+                max_seconds=0.1, sample_seconds=0.001,
+            )
+        self.assertEqual(ordinary_drift["status"], "ready")
+        self.assertEqual(ordinary_drift["sampleCount"], 2)
+        self.assertAlmostEqual(
+            ordinary_drift["readiness"]["memoryDeltaBytes"] / 1024**3,
+            -1.0, places=2,
+        )
+        self.assertIn("1.00 GiB less", ordinary_drift["conditionDetail"])
+        self.assertIn("thermal nominal", ordinary_drift["conditionDetail"])
+        self.assertIn("Low Power Mode off", ordinary_drift["conditionDetail"])
+
+        with mock.patch.object(
+            launcher, "apple_resource_snapshot", return_value=snapshot(84.0),
+        ):
+            transient_improvement = manager._wait_for_resource_baseline(
+                "oMLX · transient cache recovery", "omlx", baseline["reference"],
+                max_seconds=0, sample_seconds=0.001,
+            )
+        self.assertEqual(transient_improvement["status"], "timeout")
+        self.assertEqual(transient_improvement["sampleCount"], 1)
+
+        with mock.patch.object(
+            launcher, "apple_resource_snapshot",
+            side_effect=[snapshot(84.0), snapshot(84.0)],
+        ):
+            stable_improvement = manager._wait_for_resource_baseline(
+                "oMLX · stable cache recovery", "omlx", baseline["reference"],
+                max_seconds=0.1, sample_seconds=0.001,
+            )
+        self.assertEqual(stable_improvement["status"], "condition-improved")
+        self.assertEqual(stable_improvement["sampleCount"], 2)
+        self.assertEqual(
+            stable_improvement["stableSamplesRequired"], 2,
+        )
 
         with mock.patch.object(
             launcher, "apple_resource_snapshot",
@@ -5301,6 +5899,79 @@ for line in sys.stdin:
             )
         self.assertEqual(ready["status"], "ready")
         self.assertEqual(ready["sampleCount"], 3)
+
+        fixed_reference = baseline["reference"]
+        near_condition = launcher.benchmark_resource_condition(snapshot(77.8))
+        far_condition = launcher.benchmark_resource_condition(snapshot(75.5))
+        self.assertTrue(launcher.compare_benchmark_resource_condition(
+            fixed_reference, near_condition,
+        )["ready"])
+        self.assertTrue(launcher.compare_benchmark_resource_condition(
+            near_condition, far_condition,
+        )["ready"], "a cumulative rebase would incorrectly accept the final drift")
+        fixed_far = launcher.compare_benchmark_resource_condition(
+            fixed_reference, far_condition,
+        )
+        self.assertFalse(fixed_far["ready"])
+        self.assertLess(
+            fixed_far["memoryDeltaBytes"],
+            -launcher.BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
+        )
+
+        with mock.patch.object(
+            launcher, "apple_resource_snapshot", return_value=snapshot(75.5),
+        ):
+            excessive_drift = manager._wait_for_resource_baseline(
+                "oMLX · DFlash block 6", "omlx", fixed_reference,
+                max_seconds=0, sample_seconds=0.001,
+            )
+        self.assertEqual(excessive_drift["status"], "timeout")
+        self.assertIn("2.15 GiB less", excessive_drift["conditionDetail"])
+
+        thermal_mismatch = launcher.compare_benchmark_resource_condition(
+            fixed_reference,
+            launcher.benchmark_resource_condition(snapshot(77.8, thermal=1)),
+        )
+        power_mismatch = launcher.compare_benchmark_resource_condition(
+            fixed_reference,
+            launcher.benchmark_resource_condition(snapshot(77.8, low_power=True)),
+        )
+        self.assertFalse(thermal_mismatch["ready"])
+        self.assertFalse(thermal_mismatch["thermalMatches"])
+        self.assertFalse(power_mismatch["ready"])
+        self.assertFalse(power_mismatch["lowPowerModeMatches"])
+
+        with mock.patch.object(
+            launcher, "apple_resource_snapshot",
+            return_value=snapshot(77.8, thermal=1),
+        ):
+            thermal_gate = manager._wait_for_resource_baseline(
+                "oMLX · DFlash block 6", "omlx", fixed_reference,
+                max_seconds=0, sample_seconds=0.001,
+            )
+        self.assertEqual(thermal_gate["status"], "timeout")
+        self.assertIn("thermal fair vs fixed reference nominal", thermal_gate["conditionDetail"])
+
+        with mock.patch.object(
+            launcher, "apple_resource_snapshot",
+            return_value=snapshot(77.8, low_power=True),
+        ):
+            power_gate = manager._wait_for_resource_baseline(
+                "oMLX · DFlash block 6", "omlx", fixed_reference,
+                max_seconds=0, sample_seconds=0.001,
+            )
+        self.assertEqual(power_gate["status"], "timeout")
+        self.assertIn("Low Power Mode on vs fixed reference off", power_gate["conditionDetail"])
+
+        with mock.patch.object(
+            manager, "_wait_for_resource_baseline", return_value=excessive_drift,
+        ), self.assertRaisesRegex(
+            launcher.BenchmarkResourceCooldownTimeout,
+            "2\\.15 GiB less.*thermal nominal.*Low Power Mode off",
+        ):
+            manager._shootout_tuning_gate(
+                "oMLX · DFlash block 6", "omlx", fixed_reference,
+            )
 
         with mock.patch.object(launcher, "apple_resource_snapshot", return_value=snapshot(70.0, 1)):
             timed_out = manager._wait_for_resource_baseline(
@@ -6491,7 +7162,7 @@ for line in sys.stdin:
         )
         self.assertFalse(prepared_42_gib_admission["launchable"])
         self.assertEqual(prepared_42_gib_admission["decision"], "system-setting")
-        prepared_ready_admission = launcher.session_memory_admission(
+        prepared_44_gib_admission = launcher.session_memory_admission(
             preparation["request"], capacity_models,
             {
                 "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
@@ -6500,11 +7171,22 @@ for line in sys.stdin:
             },
             idle_hub, idle_operation,
         )
+        self.assertFalse(prepared_44_gib_admission["launchable"])
+        self.assertEqual(prepared_44_gib_admission["decision"], "system-setting")
+        prepared_ready_admission = launcher.session_memory_admission(
+            preparation["request"], capacity_models,
+            {
+                "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
+                "headroomBytes": 45 * 1024**3,
+                "metalWiredLimitBytes": 45 * 1024**3,
+            },
+            idle_hub, idle_operation,
+        )
         self.assertTrue(prepared_ready_admission["launchable"])
         self.assertEqual(prepared_ready_admission["decision"], "ready")
         self.assertEqual(
             prepared_ready_admission["estimate"]["requiredMetalWiredLimitBytes"],
-            44 * 1024**3,
+            45 * 1024**3,
         )
         canonical_high_profile = launcher.validated_launch_profile_request(
             capacity_high_payload, capacity_models,
@@ -7570,6 +8252,8 @@ for line in sys.stdin:
         self.assertEqual(result["engineNextAction"]["backend"], "mtplx")
         self.assertFalse(result["engineNextAction"]["requiresCalibration"])
         self.assertEqual(result["options"]["fan"], "smart")
+        self.assertNotIn("engineEvidenceBinding", result)
+        self.assertNotIn("evidenceBinding", result["engineDecision"])
 
         separated_runs = json.loads(json.dumps(model))
         for backend in ("omlx", "lmstudio", "mtplx"):
@@ -7592,10 +8276,74 @@ for line in sys.stdin:
             separated = launcher.best_engine_request(fastest_payload, [separated_runs])
         self.assertEqual(separated["backend"], "mtplx")
         self.assertEqual(separated["engineEvidenceTier"], "cross-engine-local-benchmark")
+        self.assertEqual(separated["engineEvidenceBinding"]["suite"], "quick")
+        self.assertEqual(separated["engineEvidenceBinding"]["shootoutId"], "complete-run")
+        self.assertEqual(
+            set(separated["engineEvidenceBinding"]["recordIds"]),
+            {"omlx", "lmstudio", "mtplx"},
+        )
         self.assertEqual(
             {item["createdAt"] for item in separated["comparedEngines"]},
             {"2026-08-22T12:00:00Z"},
         )
+        bound_payload = {
+            **fastest_payload,
+            "evidenceBinding": separated["engineEvidenceBinding"],
+        }
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+            bound = launcher.best_engine_request(bound_payload, [separated_runs])
+        self.assertEqual(bound["backend"], separated["backend"])
+        self.assertEqual(bound["engineEvidenceBinding"], separated["engineEvidenceBinding"])
+        stale_payload = copy.deepcopy(bound_payload)
+        stale_payload["evidenceBinding"]["recordIds"]["omlx"] = "stale-record"
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value=machine,
+        ), self.assertRaisesRegex(ValueError, "stale|no longer matches"):
+            launcher.best_engine_request(stale_payload, [separated_runs])
+        suite_only_payload = copy.deepcopy(bound_payload)
+        suite_only_payload["evidenceBinding"].pop("shootoutId")
+        suite_only_payload["evidenceBinding"].pop("recordIds")
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value=machine,
+        ), self.assertRaisesRegex(ValueError, "exact shootout and record"):
+            launcher.best_engine_request(suite_only_payload, [separated_runs])
+
+        # If the current engine is kept inside a tied leading band, replay its
+        # route from that displayed complete matrix. A newer standalone route
+        # must not silently replace the settings the calibration just showed.
+        tied_current = json.loads(json.dumps(separated_runs))
+        complete_tps = {"omlx": 69.0, "lmstudio": 68.9, "mtplx": 60.5}
+        for backend, tps in complete_tps.items():
+            capability = tied_current["backends"][backend]
+            complete_record = next(
+                item for item in capability["localBenchmarks"]
+                if item.get("shootoutId") == "complete-run"
+            )
+            winning_mode = complete_record["winner"]
+            complete_record["modes"][winning_mode]["medianDecodeTokensPerSecond"] = tps
+            for sample in complete_record["modes"][winning_mode]["samples"]:
+                sample["decodeTokensPerSecond"] = tps
+        omlx_capability = tied_current["backends"]["omlx"]
+        latest_omlx_records = [
+            omlx_capability["localBenchmark"],
+            next(
+                item for item in omlx_capability["localBenchmarks"]
+                if item.get("shootoutId") == "partial-newer-run"
+            ),
+        ]
+        for latest_omlx in latest_omlx_records:
+            latest_omlx["settings"] = {"depth": 1}
+            latest_omlx["modeSettings"]["mtp"] = {"depth": 1}
+        current_tie_payload = json.loads(json.dumps(payload))
+        current_tie_payload["backend"] = "omlx"
+        current_tie_payload["enginePreference"] = "throughput"
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+            current_tie = launcher.best_engine_request(
+                current_tie_payload, [tied_current],
+            )
+        self.assertEqual(current_tie["engineEvidenceTier"], "cross-engine-noise-floor")
+        self.assertEqual(current_tie["backend"], "omlx")
+        self.assertEqual(current_tie["options"]["depth"], 3)
 
         with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
             defaulted = launcher.best_engine_request(payload, [model])
@@ -7723,6 +8471,15 @@ for line in sys.stdin:
         self.assertEqual(history["receipt"]["suite"], "quick")
         self.assertTrue(history["receipt"]["fresh"])
         self.assertGreater(history["receipt"]["firstTokenSeconds"], 0)
+        self.assertEqual(history["receipt"]["evidenceBinding"], {
+            "scope": "engine", "suite": "quick", "preference": "fastest",
+            "shootoutId": "shootout-2",
+            "recordIds": {
+                "omlx": "history-2-omlx",
+                "lmstudio": "history-2-lmstudio",
+                "mtplx": "history-2-mtplx",
+            },
+        })
         mtplx_series = next(item for item in history["series"] if item["backend"] == "mtplx")
         self.assertEqual(len(mtplx_series["points"]), 2)
         self.assertGreater(mtplx_series["improvementPercent"], 10)
@@ -7731,6 +8488,37 @@ for line in sys.stdin:
         self.assertEqual(throughput_history["preferenceLabel"], "Highest generation TPS")
         self.assertEqual(throughput_history["runs"][0]["winnerBackend"], "omlx")
         self.assertFalse(throughput_history["series"][0]["lowerIsBetter"])
+
+        latest_complete = [
+            copy.deepcopy(item) for item in history_records
+            if item.get("shootoutId") == "shootout-2"
+        ]
+        rejected_shootouts = []
+        failed_baseline = copy.deepcopy(latest_complete)
+        failed_baseline[0]["baselinePassed"] = False
+        rejected_shootouts.append(("failed baseline", failed_baseline))
+        failed_quality = copy.deepcopy(latest_complete)
+        failed_quality[0]["qualityPassed"] = False
+        rejected_shootouts.append(("failed accelerator quality", failed_quality))
+        tampered_settings = copy.deepcopy(latest_complete)
+        tampered_settings[0]["modeSettings"]["mtp"]["depth"] = 99
+        rejected_shootouts.append(("tampered winning settings", tampered_settings))
+        for label, rejected_records in rejected_shootouts:
+            with self.subTest(label=label), mock.patch.object(
+                launcher, "hardware_fingerprint", return_value=machine,
+            ):
+                rejected_history = launcher.benchmark_history_request(
+                    dict(payload, suite="quick", enginePreference="fastest"),
+                    [model], rejected_records,
+                    now=datetime(2026, 8, 23, tzinfo=timezone.utc),
+                )
+            self.assertNotIn(
+                rejected_history["receipt"]["state"], {"trusted-engine", "tie"},
+            )
+            self.assertNotIn("evidenceBinding", rejected_history["receipt"])
+            self.assertFalse(any(
+                run.get("trustedWinner") is True for run in rejected_history["runs"]
+            ))
 
         route_record = json.loads(json.dumps(history_records[-3]))
         route_record.pop("shootoutId")
@@ -7748,6 +8536,10 @@ for line in sys.stdin:
         self.assertEqual(route_history["receipt"]["state"], "trusted-route")
         self.assertEqual(route_history["receipt"]["backend"], "omlx")
         self.assertTrue(route_history["receipt"]["fresh"])
+        self.assertEqual(route_history["receipt"]["evidenceBinding"], {
+            "scope": "route", "suite": "quick", "preference": "fastest",
+            "recordId": "route-only",
+        })
         self.assertEqual(missing_history["receipt"]["state"], "missing")
         self.assertFalse(missing_history["receipt"]["fresh"])
 
@@ -8188,6 +8980,27 @@ for line in sys.stdin:
             failed._shootout_worker(shootout, [model])
         self.assertEqual(failed.snapshot()["phase"], "failed")
         partial_save.assert_not_called()
+
+        failed_finalization = launcher.BenchmarkManager(launcher.RunManager())
+        failed_finalization.state = json.loads(json.dumps(manager.state))
+        failed_finalization.state.update({
+            "phase": "queued", "result": None, "events": [],
+        })
+        with mock.patch.object(
+            failed_finalization, "_wait_for_resource_baseline",
+            return_value=ready_gate,
+        ), mock.patch.object(
+            failed_finalization, "_measure_mode", side_effect=measured,
+        ), mock.patch.object(
+            failed_finalization, "_build_shootout_result",
+            side_effect=RuntimeError("synthetic final result failure"),
+        ) as build_result, mock.patch.object(
+            launcher, "save_benchmark_records",
+        ) as invalid_save:
+            failed_finalization._shootout_worker(shootout, [model])
+        self.assertEqual(failed_finalization.snapshot()["phase"], "failed")
+        build_result.assert_called_once()
+        invalid_save.assert_not_called()
 
     def test_mtplx_shootout_depth_routes_load_the_exact_candidate(self) -> None:
         model = copy.deepcopy(self.models[0])
@@ -9429,6 +10242,16 @@ for line in sys.stdin:
         self.assertEqual(plan["request"]["options"]["fan"], "smart")
         self.assertEqual(plan["calibrationCooling"], "smart")
         self.assertEqual(plan["calibrationCoolingLabel"], "Automatic")
+        self.assertEqual(
+            plan["resourceCooldownMemoryToleranceBytes"], 2 * 1024**3,
+        )
+        self.assertEqual(
+            launcher.BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES, 2 * 1024**3,
+        )
+        self.assertEqual(
+            launcher.BENCHMARK_MEMORY_MEANINGFUL_BYTES, 512 * 1024**2,
+            "winner memory regression must retain the stricter threshold",
+        )
         self.assertEqual(plan["reasoningContract"]["requested"], "medium")
         self.assertEqual(plan["reasoningContract"]["measured"], "auto")
         self.assertTrue(plan["reasoningContract"]["normalized"])
@@ -9766,6 +10589,23 @@ for line in sys.stdin:
         self.assertEqual(fastest["engineNextAction"]["id"], "keep-current")
         self.assertFalse(fastest["engineNextAction"]["requiresCalibration"])
         self.assertEqual(fastest["options"]["memoryGuard"], "high")
+        self.assertEqual(reused["evidence"]["evidenceBinding"], {
+            "scope": "route", "suite": "agentic", "preference": "throughput",
+            "recordId": record["id"],
+        })
+        bound_route_payload = copy.deepcopy(reused["request"])
+        bound_route_payload["evidenceBinding"] = reused["evidence"]["evidenceBinding"]
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="qwen-ple-test-mac",
+        ):
+            bound_route = launcher.optimal_request(bound_route_payload, [model])
+        self.assertEqual(bound_route["evidenceBinding"], reused["evidence"]["evidenceBinding"])
+        stale_route_payload = copy.deepcopy(bound_route_payload)
+        stale_route_payload["evidenceBinding"]["recordId"] = "stale-route-record"
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="qwen-ple-test-mac",
+        ), self.assertRaisesRegex(ValueError, "stale|no longer matches"):
+            launcher.optimal_request(stale_route_payload, [model])
 
         broken = copy.deepcopy(record)
         broken["modes"]["ar"]["samples"][0]["answerObserved"] = False
@@ -9790,6 +10630,87 @@ for line in sys.stdin:
         self.assertFalse(
             no_longer_single_route["engineDecision"]["routeQualification"],
         )
+
+    def test_cross_engine_requests_do_not_inherit_the_applied_mtplx_mtp_route(self) -> None:
+        model = copy.deepcopy(self.models[0])
+        for backend, capability in model["backends"].items():
+            capability.update({
+                "benchmarkModelFingerprint": "shared-post-apply-fingerprint",
+                "runtimeVersion": f"{backend} post-apply runtime",
+            })
+        model["backends"]["omlx"].update({
+            "mtp": False,
+            "mtpReason": "No verified oMLX-native MTP tensors",
+            "aneTuningVerified": False,
+            "aneReason": "The saved ANE result is stale.",
+        })
+        request = self.payload("mtplx", "pi", model)
+        request.update({
+            "suite": "agentic", "enginePreference": "throughput",
+            "reasoning": "auto", "scope": "engines",
+        })
+        request["options"].update({
+            "acceleration": "mtp", "depth": 3,
+            "profile": "turbo", "fan": "max",
+            "burst": "aggressive", "anePrefill": "off",
+            "memoryGuard": "balanced", "gpu": "off", "parallel": 2,
+        })
+        original_options = copy.deepcopy(request["options"])
+
+        evidence = launcher.optimizer_evidence(
+            model, request["context"], request["output"], "pi", "auto", "off",
+        )
+        launcher.add_benchmark_engine_evidence(
+            evidence, model, request["options"], ["omlx", "lmstudio", "mtplx"],
+        )
+        self.assertEqual(request["options"], original_options)
+        self.assertEqual(evidence["engineSettingsByBackend"], {
+            "omlx": {
+                "burst": "aggressive", "anePrefill": "off",
+                "memoryGuard": "balanced",
+            },
+            "lmstudio": {"gpu": "off", "parallel": 2},
+            "mtplx": {"profile": "turbo", "fan": "max"},
+        })
+
+        shootout = launcher.validated_engine_shootout_request(request, [model])
+        jobs = {job["backend"]: job for job in shootout["jobs"]}
+        self.assertEqual(set(jobs), {"omlx", "lmstudio", "mtplx"})
+        self.assertEqual(jobs["omlx"]["modes"], ["ar"])
+        self.assertEqual({job["options"]["acceleration"] for job in jobs.values()}, {"auto"})
+        self.assertEqual(jobs["omlx"]["evidence"]["engineSettings"], {
+            "burst": "aggressive", "anePrefill": "off",
+            "memoryGuard": "balanced",
+        })
+        self.assertEqual(
+            jobs["mtplx"]["evidence"]["engineSettings"],
+            {"profile": "turbo", "fan": "max"},
+        )
+
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="post-apply-test-mac",
+        ):
+            history = launcher.benchmark_history_request(request, [model], [])
+            fastest = launcher.best_engine_request(request, [model])
+        self.assertEqual(
+            [item["backend"] for item in history["receipt"]["eligibleBackends"]],
+            ["omlx", "lmstudio", "mtplx"],
+        )
+        self.assertEqual(
+            [item["backend"] for item in fastest["engineDecision"]["eligibleBackends"]],
+            ["omlx", "lmstudio", "mtplx"],
+        )
+
+        invalid_fixed_controls = copy.deepcopy(request["options"])
+        invalid_fixed_controls["anePrefill"] = "tuned"
+        with self.assertRaisesRegex(ValueError, "saved ANE result is stale"):
+            launcher.add_benchmark_engine_evidence(
+                launcher.optimizer_evidence(
+                    model, request["context"], request["output"],
+                    "pi", "auto", "off",
+                ),
+                model, invalid_fixed_controls, ["omlx", "lmstudio", "mtplx"],
+            )
 
     def test_all_engine_reasoning_policy_normalizes_the_shootout_without_weakening_strict_mode(self) -> None:
         model = json.loads(json.dumps(self.models[0]))
@@ -9912,6 +10833,360 @@ for line in sys.stdin:
         self.assertEqual(omlx_payload["options"]["dflashVerify"], "dflash")
         self.assertEqual(omlx_payload["options"]["dflashDraftQuant"], "q4")
 
+    def test_lmstudio_calibration_keeps_required_depths_after_optional_cooldown_timeout(self) -> None:
+        model = copy.deepcopy(self.models[0])
+        capability = model["backends"]["lmstudio"]
+        capability.update({
+            "benchmarkModelFingerprint": "lmstudio-optional-cooldown-model",
+            "runtimeVersion": "LM Studio optional cooldown runtime",
+        })
+        job = launcher.validated_benchmark_request({
+            **self.payload("lmstudio", "chat", model),
+            "suite": "quick", "reasoning": "auto",
+        }, [model])
+        job["shootoutId"] = "lmstudio-optional-cooldown-shootout"
+        launcher.prepare_calibration_tuning_plan(job)
+        required_depths = list(job["calibrationTuningPlan"]["depthCandidates"])
+        reference = {"thermalAvailable": True, "thermalStateValue": 0}
+
+        def sample(speed: float, target: int, repetition: int) -> dict:
+            return {
+                "targetPromptTokens": target, "repetition": repetition,
+                "promptTokens": target, "completionTokens": 64,
+                "ttftSeconds": 0.2, "totalSeconds": 64 / speed,
+                "decodeTokensPerSecond": speed,
+                "endToEndTokensPerSecond": speed,
+                "outputHash": f"sample-{target}-{repetition}",
+            }
+
+        def measured(measured_job, _models, mode, completed, _total, gate, **_kwargs):
+            settings = (
+                {}
+                if mode == "ar" else
+                launcher.lmstudio_mtp_controls(
+                    measured_job["_benchmarkMtpSettings"], capability,
+                )
+            )
+            speed = (
+                10.0
+                if mode == "ar" else
+                13.0 - abs(settings["depth"] - 2)
+            )
+            samples = [
+                sample(speed, int(target), repetition + 1)
+                for target in job["suite"]["promptTokens"]
+                for repetition in range(int(job["suite"]["repetitions"]))
+            ]
+            result = {
+                "label": "AR" if mode == "ar" else "MTP candidate",
+                "settings": settings,
+                "qualityHash": "a" * 64, "qualityCompletionTokens": 64,
+                "medianTTFT": 0.2,
+                "medianDecodeTokensPerSecond": speed,
+                "medianEndToEndTokensPerSecond": speed,
+                "samples": samples,
+                "resourceCooldown": copy.deepcopy(gate),
+            }
+            return result, completed + job["calibrationTuningPlan"]["stepsPerRoute"]
+
+        ready = {"status": "ready", "reference": reference}
+        initial = {"status": "reference-ready", "reference": reference}
+        timeout = {"status": "timeout", "reference": reference}
+        manager = launcher.BenchmarkManager(mock.Mock())
+        with mock.patch.object(
+            manager, "_wait_for_resource_baseline",
+            side_effect=[initial, ready, ready, ready, timeout],
+        ), mock.patch.object(
+            manager, "_measure_mode", side_effect=measured,
+        ) as measure:
+            record, _completed, returned_reference = manager._shootout_lmstudio_tuning(
+                job, [model], 0, 66, None,
+            )
+
+        sweep = record["tuningSweep"]
+        self.assertEqual(returned_reference, reference)
+        self.assertTrue(sweep["complete"])
+        self.assertTrue(sweep["resourceComparable"])
+        self.assertFalse(sweep["optionalSearchComplete"])
+        self.assertEqual(sweep["optionalSearchStop"], {
+            "reason": "resource-cooldown-timeout",
+            "stage": "cutoff",
+            "completedCandidateCount": len(required_depths),
+        })
+        self.assertEqual(measure.call_count, 1 + len(required_depths))
+        self.assertEqual(sweep["candidateCount"], len(required_depths))
+        self.assertEqual(
+            {candidate["settings"]["depth"] for candidate in sweep["candidates"]},
+            set(required_depths),
+        )
+        self.assertTrue(all(
+            candidate["stage"] == "depth"
+            and candidate["resourceComparable"] is True
+            and candidate["resourceCooldownStatus"] == "ready"
+            for candidate in sweep["candidates"]
+        ))
+        self.assertNotIn(
+            0.25,
+            {candidate["settings"]["mtpMinContinueProbability"] for candidate in sweep["candidates"]},
+        )
+        self.assertIn("fastest completed comparable candidate", record["recommendation"])
+        self.assertTrue(launcher._local_benchmark_record_verified(
+            capability, record, job["evidence"],
+        ))
+        wrong_stop_stage = copy.deepcopy(record)
+        wrong_stop_stage["tuningSweep"]["optionalSearchStop"]["stage"] = "minimum"
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, wrong_stop_stage, job["evidence"],
+        ))
+        malformed_prefix = copy.deepcopy(record)
+        forged_cutoff = copy.deepcopy(next(
+            candidate for candidate in malformed_prefix["tuningSweep"]["candidates"]
+            if candidate["selected"] is True
+        ))
+        forged_cutoff["stage"] = "cutoff"
+        forged_cutoff["settings"]["mtpMinContinueProbability"] = 0.75
+        forged_cutoff["key"] = launcher.lmstudio_mtp_tuning_candidate_key(
+            forged_cutoff["settings"],
+        )
+        forged_cutoff["selected"] = False
+        malformed_prefix["tuningSweep"]["candidates"].append(forged_cutoff)
+        malformed_prefix["tuningSweep"]["candidateCount"] += 1
+        malformed_prefix["tuningSweep"]["optionalSearchStop"][
+            "completedCandidateCount"
+        ] += 1
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, malformed_prefix, job["evidence"],
+        ))
+        stopped_v1_with_metadata = copy.deepcopy(record)
+        stopped_v1_with_metadata["tuningSweep"]["version"] = 1
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, stopped_v1_with_metadata, job["evidence"],
+        ))
+        metadata_less_stopped_v1 = copy.deepcopy(stopped_v1_with_metadata)
+        metadata_less_stopped_v1["tuningSweep"].pop("optionalSearchComplete")
+        metadata_less_stopped_v1["tuningSweep"].pop("optionalSearchStop")
+        self.assertFalse(launcher._local_benchmark_record_verified(
+            capability, metadata_less_stopped_v1, job["evidence"],
+        ))
+
+        baseline_timeout = launcher.BenchmarkManager(mock.Mock())
+        with mock.patch.object(
+            baseline_timeout, "_wait_for_resource_baseline", return_value=timeout,
+        ), mock.patch.object(
+            baseline_timeout, "_measure_mode", side_effect=measured,
+        ) as baseline_measure, self.assertRaises(launcher.BenchmarkResourceCooldownTimeout):
+            baseline_timeout._shootout_lmstudio_tuning(job, [model], 0, 66, None)
+        baseline_measure.assert_not_called()
+
+        depth_timeout = launcher.BenchmarkManager(mock.Mock())
+        with mock.patch.object(
+            depth_timeout, "_wait_for_resource_baseline",
+            side_effect=[initial, ready, timeout],
+        ), mock.patch.object(
+            depth_timeout, "_measure_mode", side_effect=measured,
+        ) as depth_measure, self.assertRaises(launcher.BenchmarkResourceCooldownTimeout):
+            depth_timeout._shootout_lmstudio_tuning(job, [model], 0, 66, None)
+        self.assertEqual(depth_measure.call_count, 2)
+
+        unavailable = {"status": "unavailable", "reference": reference}
+        optional_mismatch = launcher.BenchmarkManager(mock.Mock())
+        with mock.patch.object(
+            optional_mismatch, "_wait_for_resource_baseline",
+            side_effect=[initial, ready, ready, ready, unavailable],
+        ), mock.patch.object(
+            optional_mismatch, "_measure_mode", side_effect=measured,
+        ) as mismatch_measure, self.assertRaisesRegex(RuntimeError, "non-comparable"):
+            optional_mismatch._shootout_lmstudio_tuning(job, [model], 0, 66, None)
+        self.assertEqual(mismatch_measure.call_count, 1 + len(required_depths))
+
+    def test_dflash_calibration_keeps_required_blocks_after_optional_cooldown_timeout(self) -> None:
+        model = copy.deepcopy(self.models[0])
+        capability = model["backends"]["omlx"]
+        capability.update({
+            "benchmarkModelFingerprint": "dflash-optional-cooldown-model",
+            "runtimeVersion": "omlx optional cooldown runtime",
+            "dflash": True, "dflashVersion": "2",
+            "dflashReason": "Verified DFlash pair",
+            "dflashDraftPath": "/test/Qwen3.8-27B-DFlash2",
+            "dflashPairFingerprint": "dflash-optional-cooldown-pair",
+            "dflashRuntimeVersion": "omlx optional cooldown runtime",
+            "dflashBlockSize": 8, "dflashMaxBlockSize": 8,
+            "dflashReadiness": {"runtimeRecommended": True},
+            "depth": 3, "depthMax": 3,
+        })
+        job = launcher.validated_benchmark_request({
+            **self.payload("omlx", "chat", model),
+            "suite": "quick", "reasoning": "auto",
+        }, [model])
+        job["shootoutId"] = "dflash-optional-cooldown-shootout"
+        launcher.prepare_calibration_tuning_plan(job)
+        plan = job["calibrationTuningPlan"]
+        required_blocks = list(plan["blockCandidates"])
+        reference = {"thermalAvailable": True, "thermalStateValue": 0}
+
+        def sample(speed: float, target: int, repetition: int) -> dict:
+            return {
+                "targetPromptTokens": target, "repetition": repetition,
+                "promptTokens": target, "completionTokens": 64,
+                "ttftSeconds": 0.2, "totalSeconds": 64 / speed,
+                "decodeTokensPerSecond": speed,
+                "endToEndTokensPerSecond": speed,
+                "outputHash": f"sample-{target}-{repetition}",
+            }
+
+        def measured(measured_job, _models, mode, completed, _total, gate, **_kwargs):
+            if mode == "ar":
+                settings, speed = {}, 10.0
+            elif mode == "mtp":
+                settings, speed = {"depth": 3}, 11.0
+            else:
+                settings = launcher.dflash2_tuning_controls(
+                    measured_job["_benchmarkDflashSettings"], capability,
+                )
+                speed = (
+                    15.0
+                    - abs(settings["blockSize"] - 4) * 0.2
+                    + (1.0 if settings["verifyMode"] == "dflash" else 0.0)
+                )
+            samples = [
+                sample(speed, int(target), repetition + 1)
+                for target in job["suite"]["promptTokens"]
+                for repetition in range(int(job["suite"]["repetitions"]))
+            ]
+            result = {
+                "label": mode, "settings": settings,
+                "qualityHash": "b" * 64, "qualityCompletionTokens": 64,
+                "medianTTFT": 0.2,
+                "medianDecodeTokensPerSecond": speed,
+                "medianEndToEndTokensPerSecond": speed,
+                "samples": samples,
+                "resourceCooldown": copy.deepcopy(gate),
+            }
+            return result, completed + plan["stepsPerRoute"]
+
+        ready = {"status": "ready", "reference": reference}
+        initial = {"status": "reference-ready", "reference": reference}
+        timeout = {"status": "timeout", "reference": reference}
+        total = int(plan["maximumModelLoads"]) * int(plan["stepsPerRoute"])
+
+        for stage, timeout_call, completed_candidates in (
+            ("verifier", 7, len(required_blocks)),
+            ("quantization", 9, len(required_blocks) + 2),
+        ):
+            manager = launcher.BenchmarkManager(mock.Mock())
+            gates = [initial, *([ready] * (timeout_call - 2)), timeout]
+            with self.subTest(stage=stage), mock.patch.object(
+                manager, "_wait_for_resource_baseline", side_effect=gates,
+            ), mock.patch.object(
+                manager, "_measure_mode", side_effect=measured,
+            ) as measure:
+                record, _completed, returned_reference = manager._shootout_dflash_tuning(
+                    job, [model], 0, total, None,
+                )
+
+            sweep = record["tuningSweep"]
+            self.assertEqual(returned_reference, reference)
+            self.assertTrue(sweep["complete"])
+            self.assertTrue(sweep["resourceComparable"])
+            self.assertFalse(sweep["optionalSearchComplete"])
+            self.assertEqual(sweep["optionalSearchStop"], {
+                "reason": "resource-cooldown-timeout",
+                "stage": stage,
+                "completedCandidateCount": completed_candidates,
+            })
+            self.assertEqual(measure.call_count, 2 + completed_candidates)
+            self.assertEqual(sweep["candidateCount"], completed_candidates)
+            self.assertTrue(set(required_blocks).issubset({
+                candidate["settings"]["blockSize"]
+                for candidate in sweep["candidates"]
+                if candidate["stage"] == "block"
+            }))
+            self.assertTrue(all(
+                candidate["resourceComparable"] is True
+                and candidate["resourceCooldownStatus"] == "ready"
+                for candidate in sweep["candidates"]
+            ))
+            self.assertIn("fastest completed comparable candidate", record["recommendation"])
+            self.assertTrue(launcher._local_benchmark_record_verified(
+                capability, record, job["evidence"],
+            ))
+            wrong_stop_stage = copy.deepcopy(record)
+            wrong_stop_stage["tuningSweep"]["optionalSearchStop"]["stage"] = (
+                "quantization" if stage == "verifier" else "verifier"
+            )
+            self.assertFalse(launcher._local_benchmark_record_verified(
+                capability, wrong_stop_stage, job["evidence"],
+            ))
+            if stage == "quantization":
+                malformed_prefix = copy.deepcopy(record)
+                removable_verifier = next(
+                    index for index, candidate in enumerate(
+                        malformed_prefix["tuningSweep"]["candidates"]
+                    )
+                    if candidate["stage"] == "verifier"
+                    and candidate["selected"] is False
+                )
+                malformed_prefix["tuningSweep"]["candidates"].pop(
+                    removable_verifier,
+                )
+                malformed_prefix["tuningSweep"]["candidateCount"] -= 1
+                malformed_prefix["tuningSweep"]["optionalSearchStop"][
+                    "completedCandidateCount"
+                ] -= 1
+                self.assertFalse(launcher._local_benchmark_record_verified(
+                    capability, malformed_prefix, job["evidence"],
+                ))
+            stopped_v1_with_metadata = copy.deepcopy(record)
+            stopped_v1_with_metadata["tuningSweep"]["version"] = 1
+            self.assertFalse(launcher._local_benchmark_record_verified(
+                capability, stopped_v1_with_metadata, job["evidence"],
+            ))
+            metadata_less_stopped_v1 = copy.deepcopy(stopped_v1_with_metadata)
+            metadata_less_stopped_v1["tuningSweep"].pop("optionalSearchComplete")
+            metadata_less_stopped_v1["tuningSweep"].pop("optionalSearchStop")
+            self.assertFalse(launcher._local_benchmark_record_verified(
+                capability, metadata_less_stopped_v1, job["evidence"],
+            ))
+
+        baseline_timeout = launcher.BenchmarkManager(mock.Mock())
+        with mock.patch.object(
+            baseline_timeout, "_wait_for_resource_baseline", return_value=timeout,
+        ), mock.patch.object(
+            baseline_timeout, "_measure_mode", side_effect=measured,
+        ) as baseline_measure, self.assertRaises(launcher.BenchmarkResourceCooldownTimeout):
+            baseline_timeout._shootout_dflash_tuning(job, [model], 0, total, None)
+        baseline_measure.assert_not_called()
+
+        mtp_timeout = launcher.BenchmarkManager(mock.Mock())
+        with mock.patch.object(
+            mtp_timeout, "_wait_for_resource_baseline", side_effect=[initial, timeout],
+        ), mock.patch.object(
+            mtp_timeout, "_measure_mode", side_effect=measured,
+        ) as mtp_measure, self.assertRaises(launcher.BenchmarkResourceCooldownTimeout):
+            mtp_timeout._shootout_dflash_tuning(job, [model], 0, total, None)
+        self.assertEqual(mtp_measure.call_count, 1)
+
+        block_timeout = launcher.BenchmarkManager(mock.Mock())
+        with mock.patch.object(
+            block_timeout, "_wait_for_resource_baseline",
+            side_effect=[initial, ready, ready, timeout],
+        ), mock.patch.object(
+            block_timeout, "_measure_mode", side_effect=measured,
+        ) as block_measure, self.assertRaises(launcher.BenchmarkResourceCooldownTimeout):
+            block_timeout._shootout_dflash_tuning(job, [model], 0, total, None)
+        self.assertEqual(block_measure.call_count, 3)
+
+        unavailable = {"status": "unavailable", "reference": reference}
+        optional_mismatch = launcher.BenchmarkManager(mock.Mock())
+        mismatch_gates = [initial, *([ready] * 5), unavailable]
+        with mock.patch.object(
+            optional_mismatch, "_wait_for_resource_baseline", side_effect=mismatch_gates,
+        ), mock.patch.object(
+            optional_mismatch, "_measure_mode", side_effect=measured,
+        ) as mismatch_measure, self.assertRaisesRegex(RuntimeError, "non-comparable"):
+            optional_mismatch._shootout_dflash_tuning(job, [model], 0, total, None)
+        self.assertEqual(mismatch_measure.call_count, 2 + len(required_blocks))
+
     def test_calibration_plan_uses_existing_trusted_evidence_or_blocks_incompatible_kv(self) -> None:
         model = json.loads(json.dumps(self.models[0]))
         for backend, capability in model["backends"].items():
@@ -9923,12 +11198,37 @@ for line in sys.stdin:
             "backend": "omlx", "engineEvidenceTier": "cross-engine-local-benchmark",
             "engineEvidenceLabel": "Fastest first response · locally measured",
             "engineRationale": ["oMLX reached first output fastest in the matching matrix."],
+            "engineEvidenceBinding": {
+                "scope": "engine", "suite": "agentic", "preference": "responsive",
+                "shootoutId": "trusted-calibration-run",
+                "recordIds": {
+                    "omlx": "trusted-omlx", "lmstudio": "trusted-lmstudio",
+                    "mtplx": "trusted-mtplx",
+                },
+            },
         }
         with mock.patch.object(launcher, "best_engine_request", return_value=trusted):
             plan = launcher.calibration_plan(request, [model])
         self.assertEqual(plan["action"], "apply-existing")
         self.assertTrue(plan["evidence"]["trusted"])
         self.assertEqual(plan["evidence"]["backend"], "omlx")
+        unbound_trusted = copy.deepcopy(trusted)
+        unbound_trusted.pop("engineEvidenceBinding")
+        with mock.patch.object(launcher, "best_engine_request", return_value=unbound_trusted):
+            unbound_plan = launcher.calibration_plan(request, [model])
+        self.assertEqual(unbound_plan["action"], "measure")
+        self.assertFalse(unbound_plan["evidence"]["decisionReady"])
+        self.assertNotIn("evidenceBinding", unbound_plan["evidence"])
+        suite_only_trusted = copy.deepcopy(trusted)
+        suite_only_trusted["engineEvidenceBinding"].pop("shootoutId")
+        suite_only_trusted["engineEvidenceBinding"].pop("recordIds")
+        with mock.patch.object(
+            launcher, "best_engine_request", return_value=suite_only_trusted,
+        ):
+            suite_only_plan = launcher.calibration_plan(request, [model])
+        self.assertEqual(suite_only_plan["action"], "measure")
+        self.assertFalse(suite_only_plan["evidence"]["decisionReady"])
+        self.assertNotIn("evidenceBinding", suite_only_plan["evidence"])
 
         tied_leader = {
             "backend": "omlx", "engineChanged": True,
@@ -9939,6 +11239,14 @@ for line in sys.stdin:
             ],
             "leadingBackends": ["omlx", "lmstudio"],
             "currentInLeadingBand": False,
+            "engineEvidenceBinding": {
+                "scope": "engine", "suite": "agentic", "preference": "responsive",
+                "shootoutId": "tied-calibration-run",
+                "recordIds": {
+                    "omlx": "tied-omlx", "lmstudio": "tied-lmstudio",
+                    "mtplx": "tied-mtplx",
+                },
+            },
         }
         with mock.patch.object(launcher, "best_engine_request", return_value=tied_leader):
             tied_plan = launcher.calibration_plan(request, [model])
@@ -9960,8 +11268,10 @@ for line in sys.stdin:
             "profile": "turbo", "fan": "default",
             "gpu": "max", "parallel": 1,
         })
+        reopened_tied_leader = copy.deepcopy(tied_leader)
+        reopened_tied_leader["engineEvidenceBinding"]["preference"] = "throughput"
         with mock.patch.object(
-            launcher, "best_engine_request", return_value=tied_leader,
+            launcher, "best_engine_request", return_value=reopened_tied_leader,
         ) as best_engine:
             reopened_plan = launcher.calibration_plan(winner_request, [model])
         comparison_options = best_engine.call_args.args[0]["options"]
@@ -11813,7 +13123,8 @@ for line in sys.stdin:
         self.assertIn('["measure", "apply-existing"].includes(plan.action)', script)
         self.assertIn('? "Retest engines"', script)
         self.assertIn('? "Replace this saved measurement"', script)
-        self.assertIn('applyOptimal("engine", plan.preference, false)', script)
+        self.assertIn('const applyScope = plan.routeQualification ? "current" : "engine"', script)
+        self.assertIn('applyScope, plan.preference, false, evidenceBinding', script)
         self.assertIn("Measured engine results", script)
         self.assertNotIn('$("calibrationCoolingSelect").value = "smart";', script)
         self.assertIn('data-engine-preference="throughput"', index)

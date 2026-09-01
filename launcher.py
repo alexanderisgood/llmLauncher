@@ -89,7 +89,8 @@ DEFAULT_CONTEXT = 131_072
 DEFAULT_OUTPUT = 16_384
 VERSION = "1.67.0-alpha.1"
 ADAPTER_SCHEMA_VERSION = 1
-MODEL_LIBRARY_SCHEMA_VERSION = 1
+MODEL_LIBRARY_SCHEMA_VERSION = 2
+ROUTE_EVIDENCE_SCHEMA_VERSION = 1
 MODEL_ACQUISITION_SCHEMA_VERSION = 1
 MODEL_ACQUISITION_SEARCH_LIMIT = 10
 MODEL_ACQUISITION_PLAN_TTL_SECONDS = 30 * 60
@@ -351,12 +352,14 @@ ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS = 128
 QWEN_PLE_QUALIFICATION_CONTEXT = 16_384
 QWEN_PLE_QUALIFICATION_OUTPUT = 8_192
 QWEN_PLE_QUALIFICATION_REASONING = "medium"
-BENCHMARK_MTP_TUNER_VERSION = 1
+BENCHMARK_MTP_TUNER_VERSION = 2
+BENCHMARK_MTP_TUNER_READ_VERSIONS = frozenset({1, 2})
 BENCHMARK_MTP_TUNER_MAX_CANDIDATES = 10
 BENCHMARK_MTP_TUNER_CUTOFFS = (0.0, 0.25, 0.50, 0.75)
 MTPLX_MTP_DEPTH_SWEEP_VERSION = 1
 MTPLX_MTP_DEPTH_SWEEP_MAX_CANDIDATES = 8
-BENCHMARK_DFLASH_TUNER_VERSION = 1
+BENCHMARK_DFLASH_TUNER_VERSION = 2
+BENCHMARK_DFLASH_TUNER_READ_VERSIONS = frozenset({1, 2})
 BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES = 10
 BENCHMARK_DFLASH_TUNER_VERIFY_MODES = ("adaptive", "dflash", "ddtree")
 BENCHMARK_DFLASH_TUNER_DRAFT_QUANTS = ("native", "q8", "q4", "q2")
@@ -396,6 +399,7 @@ MFERENCE_STREAMING_ARCH_SIGNATURES: dict[str, dict[str, int]] = {
 }
 BENCHMARK_TELEMETRY_INTERVAL_SECONDS = 1.0
 BENCHMARK_MEMORY_MEANINGFUL_BYTES = 512 * 1024**2
+BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES = 2 * 1024**3
 BENCHMARK_COOLDOWN_MAX_SECONDS = 60.0
 BENCHMARK_COOLDOWN_SAMPLE_SECONDS = 2.0
 BENCHMARK_COOLDOWN_STABLE_SAMPLES = 2
@@ -419,6 +423,16 @@ DFLASH2_RELEASE_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.4"
 DFLASH2_DRAFT_SIZE_LABEL = "3.85 GB"
 DFLASH2_DRAFT_REVISION = "ac04198556d7e8867853cbc356807b969f311b05"
 DFLASH2_DRAFT_BYTES = 3_850_000_000
+DFLASH2_UPSTREAM_PERFORMANCE_EVIDENCE = {
+    "source": "omlx-upstream",
+    "sourceUrl": DFLASH2_RELEASE_URL,
+    "sourceHardware": "Apple M3 Ultra",
+    "detail": (
+        "Upstream oMLX measurements reported a 1.33–1.43× decode speedup for "
+        "the tested Qwen3.8 DFlash target across 4K–32K context. This is useful "
+        "directional evidence, not a prediction for this Mac or this work contract."
+    ),
+}
 LMSTUDIO_MTP_MIN_TOKENS_DEFAULT = 0
 LMSTUDIO_MTP_MIN_CONTINUE_PROBABILITY_DEFAULT = 0.0
 SETUP_DOWNLOAD_RESERVE_BYTES = 2 * 1024**3
@@ -437,7 +451,7 @@ ANE_FP16_CLONE_SOURCE_URL = (
     "https://github.com/jundot/omlx/blob/v0.6.3rc2/tools/clone_mlx_model_fp16.py"
 )
 ANE_FP16_CLONE_HELPER = APP_DIR / "ane_fp16_clone.py"
-SESSION_MEMORY_ESTIMATE_VERSION = 3
+SESSION_MEMORY_ESTIMATE_VERSION = 4
 SESSION_DASHBOARD_VERSION = 5
 SURFACE_ATTACHMENT_VERSION = 2
 SURFACE_ATTACHMENT_MAX = 12
@@ -483,7 +497,11 @@ OMLX_QWEN4_HIGH_MEMORY_HARD_BYTES = round(
 # with model/context size without redefining the oMLX process guard above.
 OMLX_QWEN4_METAL_FLOOR_GIB = 42.0
 OMLX_QWEN4_METAL_FLOOR_BYTES = int(OMLX_QWEN4_METAL_FLOOR_GIB * 1024**3)
-OMLX_QWEN4_METAL_WORKSPACE_BYTES = 512 * 1024**2
+# A real 8,224-token Flash-Next prefill on this 48 GiB host reached 41.25 GiB
+# resident and then needed a 0.57 GiB minimum chunk transient. Round that
+# observed transient up to a full GiB so admission cannot call a 44 GiB Metal
+# ceiling ready when oMLX's own 95% external prefill guard will reject it.
+OMLX_QWEN4_METAL_WORKSPACE_BYTES = 1024**3
 # oMLX rejects prefill when the resident allocation plus its minimum transient
 # would cross 95% of the effective Metal ceiling. Admission must account for
 # that same fail-closed margin instead of treating the kernel limit as wholly
@@ -506,8 +524,10 @@ WHALLM_MODEL_ID = "qwen3.8-flash-next-fp8"
 WHALLM_CONTEXT_WINDOWS = (4_096, 8_192, 16_384)
 WHALLM_MODEL_BYTES = 125_291_490_955
 WHALLM_MEASURED_PEAK_BYTES = round(18.92 * 1024**3)
+WHALLM_SUPPORT_FLOOR_BYTES = 64 * 1024**3
 WHALLM_RELEASE_URL = "https://github.com/yanun0323/Whallm/releases/tag/v1.1.2"
 WHALLM_DOCS_URL = "https://github.com/yanun0323/Whallm"
+WHALLM_BENCHMARK_URL = "https://github.com/yanun0323/Whallm/blob/master/BENCHMARK.md"
 FREETOKEN_NATIVE_SCHEMA_NAME = "freetoken.native-macos-capabilities"
 FREETOKEN_NATIVE_SCHEMA_VERSION = 1
 FREETOKEN_NATIVE_API_VERSION = "1.0"
@@ -4332,7 +4352,7 @@ def benchmark_resource_condition(snapshot: dict[str, Any]) -> dict[str, Any]:
 def compare_benchmark_resource_condition(
     reference: dict[str, Any], observed: dict[str, Any], *, stability: bool = False,
 ) -> dict[str, Any]:
-    """Compare route-start conditions with a 512 MiB memory tolerance."""
+    """Compare route-start conditions with the cooldown-only memory tolerance."""
     memory_match: bool | None = None
     memory_delta_bytes: int | None = None
     memory_improved = False
@@ -4346,13 +4366,13 @@ def compare_benchmark_resource_condition(
                 (observed_headroom - reference_headroom) * reference_total / 100,
             )
             memory_match = (
-                abs(memory_delta_bytes) <= BENCHMARK_MEMORY_MEANINGFUL_BYTES
+                abs(memory_delta_bytes) <= BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES
                 if stability else
-                memory_delta_bytes >= -BENCHMARK_MEMORY_MEANINGFUL_BYTES
+                memory_delta_bytes >= -BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES
             )
             memory_improved = (
                 not stability
-                and memory_delta_bytes > BENCHMARK_MEMORY_MEANINGFUL_BYTES
+                and memory_delta_bytes > BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES
             )
         else:
             memory_match = False
@@ -5345,6 +5365,227 @@ def dflash2_benchmark_settings_verified(
         return False
 
 
+def optional_tuning_search_metadata_verified(
+    sweep: dict[str, Any], candidates: list[dict[str, Any]],
+    optional_stages: tuple[str, ...], *, replay_complete: bool,
+    replay_next_stage: str | None,
+) -> bool:
+    """Bind optional-search metadata to its exact deterministic replay."""
+    has_complete = "optionalSearchComplete" in sweep
+    has_stop = "optionalSearchStop" in sweep
+    if sweep.get("version") == 1 and not has_complete and not has_stop:
+        # Version 1 predated explicit optional-search receipts.  Its missing
+        # metadata is safe only when the candidate sequence itself proves that
+        # the complete historical search ran.
+        return replay_complete and replay_next_stage is None
+    complete = sweep.get("optionalSearchComplete")
+    stop = sweep.get("optionalSearchStop")
+    if complete is True:
+        return bool(
+            stop is None
+            and replay_complete
+            and replay_next_stage is None
+        )
+    if complete is not False or not isinstance(stop, dict):
+        return False
+    if not (
+        set(stop) == {"reason", "stage", "completedCandidateCount"}
+        and stop.get("reason") == "resource-cooldown-timeout"
+        and stop.get("stage") in optional_stages
+        and isinstance(stop.get("completedCandidateCount"), int)
+        and not isinstance(stop.get("completedCandidateCount"), bool)
+        and stop.get("completedCandidateCount") == len(candidates)
+    ):
+        return False
+    return bool(
+        not replay_complete
+        and replay_next_stage is not None
+        and stop.get("stage") == replay_next_stage
+    )
+
+
+def benchmark_tuner_read_version_supported(
+    value: Any, supported_versions: frozenset[int],
+) -> bool:
+    """Accept compatible stored schemas only; their full current structure is checked separately."""
+    return bool(
+        isinstance(value, int) and not isinstance(value, bool)
+        and value in supported_versions
+    )
+
+
+def deterministic_tuning_best_candidate(
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the candidate selected by the tuner's deterministic score policy."""
+    if not candidates:
+        return None
+
+    def score(candidate: dict[str, Any]) -> tuple[int, int, float, float]:
+        quality = candidate.get("qualityMatchesAR") is True
+        clears_floor = bool(
+            quality
+            and float(candidate["medianSpeedupVsAR"]) >= BENCHMARK_MINIMUM_SPEEDUP
+            and float(candidate["worstCaseSpeedupVsAR"]) >= BENCHMARK_MINIMUM_SPEEDUP
+        )
+        return (
+            int(quality), int(clears_floor),
+            float(candidate["medianSpeedupVsAR"]),
+            float(candidate["worstCaseSpeedupVsAR"]),
+        )
+
+    return max(candidates, key=score)
+
+
+def replay_lmstudio_optional_search(
+    capability: dict[str, Any], candidates: list[dict[str, Any]], required_count: int,
+) -> tuple[bool, bool, str | None]:
+    """Replay the LM optional coordinates and identify an exact stopped prefix."""
+    cursor = required_count
+    seen = {str(candidate["key"]) for candidate in candidates[:required_count]}
+
+    def consume(settings: dict[str, Any], stage: str) -> str:
+        nonlocal cursor
+        try:
+            normalized = lmstudio_mtp_controls(settings, capability)
+            key = lmstudio_mtp_tuning_candidate_key(normalized)
+        except (KeyError, TypeError, ValueError):
+            return "invalid"
+        if key in seen or len(seen) >= BENCHMARK_MTP_TUNER_MAX_CANDIDATES:
+            return "skipped"
+        if cursor >= len(candidates):
+            return "missing"
+        candidate = candidates[cursor]
+        if (
+            candidate.get("stage") != stage
+            or candidate.get("key") != key
+            or candidate.get("settings") != normalized
+        ):
+            return "invalid"
+        seen.add(key)
+        cursor += 1
+        return "consumed"
+
+    best = deterministic_tuning_best_candidate(candidates[:cursor])
+    if best is None:
+        return False, False, None
+    cutoff_anchor = copy.deepcopy(best["settings"])
+    for cutoff in _ordered_unique([
+        cutoff_anchor["mtpMinContinueProbability"],
+        *BENCHMARK_MTP_TUNER_CUTOFFS,
+    ]):
+        settings = copy.deepcopy(cutoff_anchor)
+        settings["mtpMinContinueProbability"] = cutoff
+        outcome = consume(settings, "cutoff")
+        if outcome == "invalid":
+            return False, False, None
+        if outcome == "missing":
+            return True, False, "cutoff"
+
+    best = deterministic_tuning_best_candidate(candidates[:cursor])
+    if best is None:
+        return False, False, None
+    minimum_anchor = copy.deepcopy(best["settings"])
+    for minimum in _ordered_unique([
+        minimum_anchor["mtpMinTokens"], 0, 1, minimum_anchor["depth"],
+    ]):
+        settings = copy.deepcopy(minimum_anchor)
+        settings["mtpMinTokens"] = max(
+            0, min(int(settings["depth"]), int(minimum)),
+        )
+        outcome = consume(settings, "minimum")
+        if outcome == "invalid":
+            return False, False, None
+        if outcome == "missing":
+            return True, False, "minimum"
+    if cursor != len(candidates):
+        return False, False, None
+    return True, True, None
+
+
+def replay_dflash_optional_search(
+    capability: dict[str, Any], candidates: list[dict[str, Any]], required_count: int,
+) -> tuple[bool, bool, str | None]:
+    """Replay the DFlash optional coordinates and identify an exact stopped prefix."""
+    cursor = required_count
+    seen = {str(candidate["key"]) for candidate in candidates[:required_count]}
+
+    def consume(settings: dict[str, Any], stage: str) -> str:
+        nonlocal cursor
+        try:
+            normalized = dflash2_tuning_controls(settings, capability)
+            key = dflash2_tuning_candidate_key(normalized)
+        except (KeyError, TypeError, ValueError):
+            return "invalid"
+        if key in seen or len(seen) >= BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES:
+            return "skipped"
+        if cursor >= len(candidates):
+            return "missing"
+        candidate = candidates[cursor]
+        if (
+            candidate.get("stage") != stage
+            or candidate.get("key") != key
+            or candidate.get("settings") != normalized
+        ):
+            return "invalid"
+        seen.add(key)
+        cursor += 1
+        return "consumed"
+
+    best = deterministic_tuning_best_candidate(candidates[:cursor])
+    if best is None:
+        return False, False, None
+    verifier_anchor = copy.deepcopy(best["settings"])
+    for verify_mode in _ordered_unique([
+        verifier_anchor["verifyMode"], *BENCHMARK_DFLASH_TUNER_VERIFY_MODES,
+    ]):
+        settings = copy.deepcopy(verifier_anchor)
+        settings["verifyMode"] = str(verify_mode)
+        outcome = consume(settings, "verifier")
+        if outcome == "invalid":
+            return False, False, None
+        if outcome == "missing":
+            return True, False, "verifier"
+
+    best = deterministic_tuning_best_candidate(candidates[:cursor])
+    if best is None:
+        return False, False, None
+    quant_anchor = copy.deepcopy(best["settings"])
+    for draft_quant in _ordered_unique([
+        quant_anchor["draftQuant"], *BENCHMARK_DFLASH_TUNER_DRAFT_QUANTS,
+    ]):
+        settings = copy.deepcopy(quant_anchor)
+        settings["draftQuant"] = str(draft_quant)
+        outcome = consume(settings, "quantization")
+        if outcome == "invalid":
+            return False, False, None
+        if outcome == "missing":
+            return True, False, "quantization"
+    if cursor != len(candidates):
+        return False, False, None
+    return True, True, None
+
+
+def tuning_selected_candidate_matches_mode(
+    benchmark: dict[str, Any], mode: str, candidate: dict[str, Any],
+) -> bool:
+    """Bind a tuning decision to the exact measured mode stored in the receipt."""
+    modes = benchmark.get("modes")
+    mode_settings = benchmark.get("modeSettings")
+    measured = modes.get(mode) if isinstance(modes, dict) else None
+    settings = mode_settings.get(mode) if isinstance(mode_settings, dict) else None
+    if not isinstance(measured, dict) or not isinstance(settings, dict):
+        return False
+    return bool(
+        candidate.get("settings") == settings
+        and candidate.get("qualityMatchesAR") == measured.get("qualityMatchesAR")
+        and candidate.get("medianSpeedupVsAR") == measured.get("medianSpeedupVsAR")
+        and candidate.get("worstCaseSpeedupVsAR") == measured.get("worstCaseSpeedupVsAR")
+        and candidate.get("medianEndToEndTokensPerSecond")
+        == measured.get("medianEndToEndTokensPerSecond")
+    )
+
+
 def lmstudio_mtp_tuning_sweep_verified(
     capability: dict[str, Any], benchmark: dict[str, Any], mode_settings: Any,
 ) -> bool:
@@ -5352,7 +5593,9 @@ def lmstudio_mtp_tuning_sweep_verified(
     if (
         benchmark.get("kind") != "lmstudio-mtp-tuning"
         or not isinstance(sweep, dict)
-        or sweep.get("version") != BENCHMARK_MTP_TUNER_VERSION
+        or not benchmark_tuner_read_version_supported(
+            sweep.get("version"), BENCHMARK_MTP_TUNER_READ_VERSIONS,
+        )
         or sweep.get("strategy") != "bounded-coordinate-search"
         or sweep.get("complete") is not True
         or sweep.get("resourceComparable") is not True
@@ -5376,6 +5619,7 @@ def lmstudio_mtp_tuning_sweep_verified(
     seen: set[str] = set()
     seen_settings: set[tuple[int, int, float]] = set()
     selected = 0
+    selected_candidate: dict[str, Any] | None = None
     for candidate in candidates:
         if not isinstance(candidate, dict):
             return False
@@ -5411,9 +5655,71 @@ def lmstudio_mtp_tuning_sweep_verified(
                 return False
         if candidate.get("selected") is True:
             selected += 1
+            selected_candidate = candidate
             if key != sweep.get("selectedCandidateKey") or settings != sweep.get("selectedSettings"):
                 return False
-    return selected == 1
+    best = deterministic_tuning_best_candidate(candidates)
+    if (
+        selected != 1 or selected_candidate is None or best is None
+        or best.get("key") != selected_candidate.get("key")
+        or best.get("settings") != selected_candidate.get("settings")
+        or not tuning_selected_candidate_matches_mode(
+            benchmark, "mtp", selected_candidate,
+        )
+        or candidates[0].get("stage") != "depth"
+    ):
+        return False
+    anchor = copy.deepcopy(candidates[0]["settings"])
+    try:
+        required_depths = lmstudio_mtp_tuning_depths(
+            capability, int(anchor["depth"]),
+        )
+        required_settings = []
+        for depth in required_depths:
+            settings = copy.deepcopy(anchor)
+            settings["depth"] = int(depth)
+            settings["mtpMinTokens"] = min(
+                int(settings["mtpMinTokens"]), int(depth),
+            )
+            required_settings.append(lmstudio_mtp_controls(settings, capability))
+    except (KeyError, TypeError, ValueError):
+        return False
+    if (
+        len(candidates) < len(required_settings)
+        or any(
+            candidate.get("stage") != "depth"
+            or candidate.get("settings") != expected
+            for candidate, expected in zip(candidates, required_settings)
+        )
+        or any(candidate.get("stage") == "depth" for candidate in candidates[len(required_settings):])
+    ):
+        return False
+    stage_order = {"depth": 0, "cutoff": 1, "minimum": 2}
+    if [stage_order[item["stage"]] for item in candidates] != sorted(
+        stage_order[item["stage"]] for item in candidates
+    ):
+        return False
+    replay_valid, replay_complete, replay_next_stage = (
+        replay_lmstudio_optional_search(
+            capability, candidates, len(required_settings),
+        )
+    )
+    if not replay_valid:
+        return False
+    if sweep.get("version") == 1 and not replay_complete:
+        return False
+    if not optional_tuning_search_metadata_verified(
+        sweep, candidates, ("cutoff", "minimum"),
+        replay_complete=replay_complete,
+        replay_next_stage=replay_next_stage,
+    ):
+        return False
+    stop = sweep.get("optionalSearchStop")
+    return not (
+        isinstance(stop, dict)
+        and stop.get("stage") == "cutoff"
+        and any(candidate.get("stage") == "minimum" for candidate in candidates)
+    )
 
 
 def dflash2_tuning_sweep_verified(
@@ -5425,7 +5731,9 @@ def dflash2_tuning_sweep_verified(
     if (
         benchmark.get("kind") != "omlx-dflash2-tuning"
         or not isinstance(sweep, dict)
-        or sweep.get("version") != BENCHMARK_DFLASH_TUNER_VERSION
+        or not benchmark_tuner_read_version_supported(
+            sweep.get("version"), BENCHMARK_DFLASH_TUNER_READ_VERSIONS,
+        )
         or sweep.get("strategy") != "bounded-coordinate-search"
         or sweep.get("searchedAxes") != ["blockSize", "verifyMode", "draftQuant"]
         or sweep.get("baselineModes") != baseline_modes
@@ -5451,6 +5759,7 @@ def dflash2_tuning_sweep_verified(
     seen: set[str] = set()
     seen_settings: set[tuple[int, str, str]] = set()
     selected = 0
+    selected_candidate: dict[str, Any] | None = None
     for candidate in candidates:
         if not isinstance(candidate, dict):
             return False
@@ -5485,12 +5794,71 @@ def dflash2_tuning_sweep_verified(
                 return False
         if candidate.get("selected") is True:
             selected += 1
+            selected_candidate = candidate
             if (
                 key != sweep.get("selectedCandidateKey")
                 or settings != sweep.get("selectedSettings")
             ):
                 return False
-    return selected == 1
+    best = deterministic_tuning_best_candidate(candidates)
+    if (
+        selected != 1 or selected_candidate is None or best is None
+        or best.get("key") != selected_candidate.get("key")
+        or best.get("settings") != selected_candidate.get("settings")
+        or not tuning_selected_candidate_matches_mode(
+            benchmark, "dflash2", selected_candidate,
+        )
+        or candidates[0].get("stage") != "block"
+    ):
+        return False
+    anchor = copy.deepcopy(candidates[0]["settings"])
+    try:
+        required_blocks = dflash2_tuning_block_sizes(
+            capability, int(anchor["blockSize"]),
+        )
+        required_settings = []
+        for block_size in required_blocks:
+            settings = copy.deepcopy(anchor)
+            settings["blockSize"] = int(block_size)
+            required_settings.append(dflash2_tuning_controls(settings, capability))
+    except (KeyError, TypeError, ValueError):
+        return False
+    if (
+        len(candidates) < len(required_settings)
+        or any(
+            candidate.get("stage") != "block"
+            or candidate.get("settings") != expected
+            for candidate, expected in zip(candidates, required_settings)
+        )
+        or any(candidate.get("stage") == "block" for candidate in candidates[len(required_settings):])
+    ):
+        return False
+    stage_order = {"block": 0, "verifier": 1, "quantization": 2}
+    if [stage_order[item["stage"]] for item in candidates] != sorted(
+        stage_order[item["stage"]] for item in candidates
+    ):
+        return False
+    replay_valid, replay_complete, replay_next_stage = (
+        replay_dflash_optional_search(
+            capability, candidates, len(required_settings),
+        )
+    )
+    if not replay_valid:
+        return False
+    if sweep.get("version") == 1 and not replay_complete:
+        return False
+    if not optional_tuning_search_metadata_verified(
+        sweep, candidates, ("verifier", "quantization"),
+        replay_complete=replay_complete,
+        replay_next_stage=replay_next_stage,
+    ):
+        return False
+    stop = sweep.get("optionalSearchStop")
+    return not (
+        isinstance(stop, dict)
+        and stop.get("stage") == "verifier"
+        and any(candidate.get("stage") == "quantization" for candidate in candidates)
+    )
 
 
 def _local_benchmark_record_verified(
@@ -5657,6 +6025,151 @@ def local_benchmark_verified(
 ) -> bool:
     """Validate locally measured acceleration evidence for the active contract."""
     return verified_local_benchmark(capability, evidence) is not None
+
+
+def route_performance_evidence(
+    model: dict[str, Any], backend: str, capability: dict[str, Any],
+    exact_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Classify speed evidence without turning upstream results into local trust."""
+    local = verified_local_benchmark(capability, exact_evidence)
+    if local is not None:
+        recommendation = str(local.get("recommendation") or "").strip()
+        return {
+            "version": ROUTE_EVIDENCE_SCHEMA_VERSION,
+            "tier": "verified-this-mac",
+            "label": "Verified on this Mac",
+            "detail": recommendation or (
+                "A matching local benchmark is bound to this model artifact, runtime, "
+                "Mac, and measured request contract."
+            ),
+            "source": "local-benchmark",
+            "sourceUrl": None,
+            "sourceHardware": "This Mac",
+            "recordId": str(local.get("id") or "") or None,
+            "createdAt": str(local.get("createdAt") or "") or None,
+            "automaticEligible": True,
+        }
+
+    exact_dflash_pair = bool(
+        backend == "omlx"
+        and capability.get("dflash") is True
+        and capability.get("dflashVersion") == "2"
+        and capability.get("dflashDraftPath")
+        and capability.get("dflashPairFingerprint")
+        and capability.get("dflashRuntimeVersion")
+    )
+    if exact_dflash_pair:
+        return {
+            "version": ROUTE_EVIDENCE_SCHEMA_VERSION,
+            "tier": "upstream-measured",
+            "label": "Upstream measured",
+            "detail": str(DFLASH2_UPSTREAM_PERFORMANCE_EVIDENCE["detail"]),
+            "source": str(DFLASH2_UPSTREAM_PERFORMANCE_EVIDENCE["source"]),
+            "sourceUrl": str(DFLASH2_UPSTREAM_PERFORMANCE_EVIDENCE["sourceUrl"]),
+            "sourceHardware": str(DFLASH2_UPSTREAM_PERFORMANCE_EVIDENCE["sourceHardware"]),
+            "recordId": None,
+            "createdAt": None,
+            "automaticEligible": False,
+        }
+
+    if backend == "whallm" and (
+        model.get("sharedServer") is True or capability.get("sharedServer") is True
+    ):
+        return {
+            "version": ROUTE_EVIDENCE_SCHEMA_VERSION,
+            "tier": "upstream-measured",
+            "label": "Upstream measured",
+            "detail": (
+                "Whallm reports roughly 7.8–9.3 generation tok/s on its tested M5 Pro "
+                "Qwen3.8 Flash-Next route through 16K input. This is not a local result."
+            ),
+            "source": "whallm-upstream",
+            "sourceUrl": WHALLM_BENCHMARK_URL,
+            "sourceHardware": "Apple M5 Pro",
+            "recordId": None,
+            "createdAt": None,
+            "automaticEligible": False,
+        }
+
+    return {
+        "version": ROUTE_EVIDENCE_SCHEMA_VERSION,
+        "tier": "unmeasured",
+        "label": "Not measured on this Mac",
+        "detail": (
+            "No exact local benchmark is available for this model, runtime, Mac, and request contract."
+        ),
+        "source": "none",
+        "sourceUrl": None,
+        "sourceHardware": None,
+        "recordId": None,
+        "createdAt": None,
+        "automaticEligible": False,
+    }
+
+
+def route_host_support(
+    model: dict[str, Any], backend: str, capability: dict[str, Any], *,
+    runtime_installed: bool, artifact_compatible: bool,
+) -> dict[str, Any]:
+    """Classify host support independently from any performance measurement."""
+    profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
+    installed_memory = profile.get("installedMemoryBytes")
+    host_memory = (
+        int(installed_memory)
+        if isinstance(installed_memory, int) and not isinstance(installed_memory, bool)
+        and installed_memory > 0 else None
+    )
+    runnable = bool(runtime_installed and artifact_compatible)
+    support_floor = WHALLM_SUPPORT_FLOOR_BYTES if backend == "whallm" else None
+
+    if not runnable:
+        if not runtime_installed:
+            detail = f"{BACKEND_LABELS.get(backend, backend or 'This runtime')} is not installed on this host."
+        else:
+            detail = str(
+                capability.get("reason")
+                or model.get("status")
+                or "This artifact is not compatible with the installed runtime."
+            )
+        state = "unavailable"
+        label = "Unavailable on this host"
+    else:
+        qualification = (
+            capability.get("nativeContract", {}).get("qualification", {}).get("launcher", {})
+            if backend == "freetoken" else {}
+        )
+        synthetic_only = str(qualification.get("readiness") or "") == "experimental_synthetic_only"
+        whallm_below_floor = bool(
+            backend == "whallm" and host_memory is not None
+            and host_memory < WHALLM_SUPPORT_FLOOR_BYTES
+        )
+        if synthetic_only:
+            state = "experimental"
+            label = "Experimental on this host"
+            detail = "Only the synthetic native FreeToken qualification is complete; a real checkpoint is not yet qualified."
+        elif whallm_below_floor:
+            state = "experimental"
+            label = f"Experimental on {host_memory / 1024**3:.0f} GB"
+            detail = (
+                f"Whallm publishes a {WHALLM_SUPPORT_FLOOR_BYTES / 1024**3:.0f} GB unified-memory "
+                "support floor. Its live route can be inspected here, but this smaller host is not "
+                "an upstream-supported configuration."
+            )
+        else:
+            state = "supported"
+            label = "Supported on this host"
+            detail = "The installed runtime and scanned artifact expose a compatible local route."
+
+    return {
+        "version": ROUTE_EVIDENCE_SCHEMA_VERSION,
+        "state": state,
+        "tier": state,
+        "label": label,
+        "detail": detail,
+        "hostMemoryBytes": host_memory,
+        "supportFloorBytes": support_floor,
+    }
 
 
 def directory_size(path: Path) -> int:
@@ -7924,6 +8437,28 @@ def scan_models() -> list[dict[str, Any]]:
             "remoteModelId": WHALLM_MODEL_ID,
             "ssdStreaming": ssd_profile, "backends": remote_backends,
         }
+    for scanned_model in records.values():
+        capabilities = scanned_model.get("backends")
+        if not isinstance(capabilities, dict):
+            continue
+        for backend_name, capability in capabilities.items():
+            if not isinstance(capability, dict):
+                continue
+            descriptor = ENGINE_ADAPTERS.get(backend_name)
+            installed = bool(descriptor and descriptor.public().get("installed") is True)
+            compatible = bool(
+                scanned_model.get("ready") is True
+                and capability.get("runnable") is True
+            )
+            capability["performanceEvidence"] = route_performance_evidence(
+                scanned_model, backend_name, capability,
+            )
+            capability["hostSupport"] = route_host_support(
+                scanned_model, backend_name, capability,
+                runtime_installed=installed,
+                artifact_compatible=compatible,
+            )
+
     result = list(records.values())
     result.sort(key=lambda item: (not item["ready"], item["name"].lower()))
     return result
@@ -8015,10 +8550,15 @@ def model_library_inventory(models: list[dict[str, Any]]) -> dict[str, Any]:
                 if engine_id == "freetoken" else {}
             )
             qualification_readiness = str(qualification_policy.get("readiness") or "")
-            experimental = bool(
-                runnable and engine_id == "freetoken"
-                and qualification_readiness == "experimental_synthetic_only"
+            performance_evidence = route_performance_evidence(
+                model, engine_id, capability,
             )
+            host_support = route_host_support(
+                model, engine_id, capability,
+                runtime_installed=runtime_installed,
+                artifact_compatible=artifact_compatible,
+            )
+            experimental = host_support["state"] == "experimental"
             if runnable:
                 launchable_engines += 1
 
@@ -8134,6 +8674,8 @@ def model_library_inventory(models: list[dict[str, Any]]) -> dict[str, Any]:
                 "status": engine_status,
                 "reason": engine_reason,
                 "runtimeVersion": str(capability.get("runtimeVersion") or ""),
+                "performanceEvidence": performance_evidence,
+                "hostSupport": host_support,
                 "qualification": {
                     "readiness": qualification_readiness,
                     "realCheckpointVerified": capability.get("realCheckpointVerified") is True,
@@ -8356,10 +8898,12 @@ def fastest_safe_options(
             )
         elif measured_memory_guard in {"balanced", "high"}:
             options["memoryGuard"] = measured_memory_guard
-        # ANE prefill currently requantises part of the path to INT8 and is
-        # explicitly approximate upstream. Keep the quality-preserving preset
-        # exact; a measured ANE result remains a separate user opt-in.
-        options["anePrefill"] = "off"
+        measured_ane_prefill = str(measured_engine_settings.get("anePrefill") or "")
+        options["anePrefill"] = (
+            measured_ane_prefill
+            if local_verified and measured_ane_prefill in {"off", "tuned"}
+            else "off"
+        )
         if preferred in {"mtp", "dflash"}:
             options["depth"] = safe_int(
                 capability.get("depth"), 1, 1, int(capability.get("depthMax") or 8)
@@ -8370,7 +8914,11 @@ def fastest_safe_options(
             options["dflashDraftQuant"] = str(benchmark_settings["draftQuant"])
             options["dflashVerify"] = str(benchmark_settings["verifyMode"])
         rationale.append("Use oMLX's throughput-oriented stream batching; target tokens remain unchanged.")
-        rationale.append("Keep approximate ANE prefill off unless you explicitly choose a locally measured result.")
+        rationale.append(
+            "Reuse the exact locally measured ANE prefill setting."
+            if options["anePrefill"] == "tuned" else
+            "Keep approximate ANE prefill off unless a matching local result measured it."
+        )
         if preferred == "dflash":
             evidence_tier = "local-benchmark"
             evidence_label = "Locally benchmarked speed preset"
@@ -9526,9 +10074,16 @@ def add_benchmark_engine_evidence(
 ) -> dict[str, Any]:
     """Bind fixed engine controls without mixing them into the shared prompt contract."""
     by_backend: dict[str, dict[str, Any]] = {}
+    cross_engine = len(backends) > 1
     for backend in backends:
         capability = model.get("backends", {}).get(backend, {})
-        canonical = validated_profile_options(backend, model, capability, raw_options)
+        canonical = (
+            validated_cross_engine_profile_options(
+                backend, model, capability, raw_options,
+            )
+            if cross_engine else
+            validated_profile_options(backend, model, capability, raw_options)
+        )
         settings = benchmark_engine_settings(backend, canonical)
         if backend == "omlx" and is_qwen4_exp_record(model):
             settings["pleStorage"] = "mmap"
@@ -9539,8 +10094,96 @@ def add_benchmark_engine_evidence(
     return evidence
 
 
+def validated_optimizer_evidence_binding(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate an optional UI receipt binding without trusting display metadata."""
+    raw = payload.get("evidenceBinding")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("The saved performance result reference is invalid. Refresh it before applying.")
+    scope = str(raw.get("scope") or "")
+    if scope not in {"engine", "route"}:
+        raise ValueError("The saved performance result has an unsupported scope. Refresh it before applying.")
+    suite = str(raw.get("suite") or "")
+    if suite not in BENCHMARK_SUITES:
+        raise ValueError("The saved performance result no longer names a supported workload suite.")
+    preference = str(raw.get("preference") or "throughput")
+    if preference not in ENGINE_PREFERENCE_LABELS:
+        raise ValueError("The saved performance result no longer names a supported decision goal.")
+
+    def identifier(key: str) -> str:
+        value = str(raw.get(key) or "")
+        if value and (len(value) > 128 or re.fullmatch(r"[A-Za-z0-9._:-]+", value) is None):
+            raise ValueError("The saved performance result reference is invalid. Refresh it before applying.")
+        return value
+
+    shootout_id = identifier("shootoutId")
+    record_id = identifier("recordId")
+    raw_record_ids = raw.get("recordIds")
+    record_ids: dict[str, str] = {}
+    if raw_record_ids is not None:
+        if not isinstance(raw_record_ids, dict):
+            raise ValueError("The saved engine comparison reference is invalid. Refresh it before applying.")
+        for backend, value in raw_record_ids.items():
+            if backend not in ENGINE_ADAPTERS or not isinstance(value, str):
+                raise ValueError("The saved engine comparison reference is invalid. Refresh it before applying.")
+            if not value or len(value) > 128 or re.fullmatch(r"[A-Za-z0-9._:-]+", value) is None:
+                raise ValueError("The saved engine comparison reference is invalid. Refresh it before applying.")
+            record_ids[str(backend)] = value
+    if scope == "route" and not record_id:
+        raise ValueError("The saved route result has no exact record reference. Refresh it before applying.")
+    if scope == "route" and (shootout_id or record_ids):
+        raise ValueError("The saved route result reference is inconsistent. Refresh it before applying.")
+    if scope == "engine" and record_id:
+        raise ValueError("The saved engine comparison reference is inconsistent. Refresh it before applying.")
+    if scope == "engine" and (not shootout_id or not record_ids):
+        raise ValueError(
+            "The saved engine comparison has no exact shootout and record references. "
+            "Refresh it before applying."
+        )
+    result: dict[str, Any] = {
+        "scope": scope, "suite": suite, "preference": preference,
+    }
+    if shootout_id:
+        result["shootoutId"] = shootout_id
+    if record_id:
+        result["recordId"] = record_id
+    if record_ids:
+        result["recordIds"] = record_ids
+    return result
+
+
+def optimizer_evidence_bound_route_record(
+    capability: dict[str, Any], backend: str, binding: dict[str, Any],
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve exactly one still-valid route record named by a displayed receipt."""
+    records = capability.get("localBenchmarks")
+    candidates = [item for item in records if isinstance(item, dict)] if isinstance(records, list) else []
+    latest = capability.get("localBenchmark")
+    if isinstance(latest, dict) and latest not in candidates:
+        candidates.append(latest)
+    matches = [
+        record for record in candidates
+        if str(record.get("id") or "") == binding["recordId"]
+        and str(record.get("suite") or "") == binding["suite"]
+        and str(record.get("backend") or "") == backend
+        and not record.get("shootoutId")
+        and _local_benchmark_record_verified(capability, record, evidence)
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            "That saved route measurement is stale or no longer matches the visible contract. "
+            "Refresh performance evidence before applying it."
+        )
+    return copy.deepcopy(matches[0])
+
+
 def optimal_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> dict[str, Any]:
     """Resolve an optimizer result without allocating a port or creating a run."""
+    binding = validated_optimizer_evidence_binding(payload)
+    if binding is not None and binding["scope"] != "route":
+        raise ValueError("An engine comparison cannot be applied as a current-route result.")
     backend = str(payload.get("backend", ""))
     if backend not in ENGINE_ADAPTERS or backend not in OPTIMIZER_KEYS:
         raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, or Whallm.")
@@ -9589,8 +10232,24 @@ def optimal_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> di
     optimizer_capability = copy.deepcopy(capability)
     if backend == "omlx" and is_qwen4_exp_record(model):
         optimizer_capability["qwen4Ple"] = copy.deepcopy(model.get("qwen4Ple"))
+    if binding is not None:
+        record = optimizer_evidence_bound_route_record(
+            capability, backend, binding, evidence,
+        )
+        optimizer_capability["localBenchmark"] = copy.deepcopy(record)
+        optimizer_capability["localBenchmarks"] = [copy.deepcopy(record)]
+        optimizer_capability["preferredAccelerationSource"] = "local-benchmark"
+        optimizer_capability["preferredAcceleration"] = {
+            "ar": "off", "mtp": "mtp", "dflash2": "dflash",
+        }.get(str(record.get("winner") or ""), "off")
+        if record.get("winner") == "dflash2":
+            optimizer_capability["dflashPreferred"] = True
+            optimizer_capability["dflashBenchmarkVerified"] = True
+            optimizer_capability["dflashBenchmark"] = copy.deepcopy(record)
     result = fastest_safe_options(backend, optimizer_capability, options, evidence)
     result.update({"backend": backend, "modelId": model_id, "model": model.get("name")})
+    if binding is not None:
+        result["evidenceBinding"] = copy.deepcopy(binding)
     return result
 
 
@@ -10412,6 +11071,9 @@ def _optimizer_with_forced_record(
 ) -> dict[str, Any]:
     target_payload = copy.deepcopy(payload)
     target_payload["backend"] = backend
+    # The caller has already resolved and validated the exact record. Avoid
+    # recursively treating an engine-shootout binding as a current-route receipt.
+    target_payload.pop("evidenceBinding", None)
     # Run the normal validator first so an engine switch never bypasses its
     # client, reasoning, model, limit, or installation checks.
     validated = optimal_request(target_payload, models)
@@ -10637,6 +11299,218 @@ def accelerated_model_alternatives(
     return candidates[:2]
 
 
+def qwen_flash_next_model_alternatives(
+    selected: dict[str, Any], visible_request: dict[str, Any],
+    models: list[dict[str, Any]], *,
+    resource_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Offer an explicit smaller-model DFlash route without changing selection."""
+    if not is_qwen4_exp_record(selected):
+        return []
+    identity = " ".join(str(selected.get(key) or "") for key in (
+        "name", "path", "architecture", "modelType",
+    )).casefold()
+    ssd_profile = (
+        selected.get("ssdStreaming")
+        if isinstance(selected.get("ssdStreaming"), dict) else {}
+    )
+    if (
+        ssd_profile.get("qwen38FlashNext") is not True
+        and not re.search(r"qwen3[._-]?8.*flash[._-]?next", identity)
+    ):
+        return []
+
+    client = str(visible_request.get("client") or "")
+    reasoning = str(visible_request.get("reasoning") or "auto")
+    visible_options = (
+        copy.deepcopy(visible_request.get("options"))
+        if isinstance(visible_request.get("options"), dict) else {}
+    )
+    kv = str(visible_options.get("kv") or "off")
+    chat = (
+        copy.deepcopy(visible_request.get("chat"))
+        if isinstance(visible_request.get("chat"), dict) else {}
+    )
+    snapshot = (
+        copy.deepcopy(resource_snapshot)
+        if isinstance(resource_snapshot, dict) else apple_resource_snapshot()
+    )
+    resource = public_session_resource(snapshot)
+    candidates: list[dict[str, Any]] = []
+
+    for source in models:
+        candidate = source if isinstance(source, dict) else {}
+        candidate_id = str(candidate.get("id") or "")
+        candidate_identity = " ".join(str(candidate.get(key) or "") for key in (
+            "name", "path", "architecture", "modelType",
+        )).casefold()
+        candidate_backends = (
+            candidate.get("backends")
+            if isinstance(candidate.get("backends"), dict) else {}
+        )
+        capability = candidate_backends.get("omlx", {})
+        if not isinstance(capability, dict):
+            continue
+        readiness = (
+            capability.get("dflashReadiness")
+            if isinstance(capability.get("dflashReadiness"), dict) else {}
+        )
+        exact_pair = bool(
+            candidate_id
+            and candidate_id != str(selected.get("id") or "")
+            and re.search(r"qwen3[._-]?8[^/]*27b", candidate_identity)
+            and "flash-next" not in candidate_identity
+            and "flash_next" not in candidate_identity
+            and "ornith" not in candidate_identity
+            and candidate.get("ready") is True
+            and capability.get("runnable") is True
+            and capability.get("dflash") is True
+            and capability.get("dflashVersion") == "2"
+            and capability.get("dflashDraftPath")
+            and capability.get("dflashPairFingerprint")
+            and capability.get("dflashRuntimeVersion")
+            and readiness.get("runtimeRecommended") is True
+            and readiness.get("targetCompatible") is not False
+            and readiness.get("draftComplete") is not False
+        )
+        if not exact_pair:
+            continue
+        # The scan is only a snapshot. Revalidate the target, draft tensors,
+        # runtime identity, and pair fingerprint before advertising an explicit
+        # different-model route from a freshly opened calibration plan.
+        if not dflash2_capability_valid(candidate, capability):
+            continue
+        allowed, _reason = optimizer_backend_eligibility(
+            candidate, "omlx", client, reasoning, kv, chat,
+        )
+        if not allowed:
+            continue
+
+        candidate_models = copy.deepcopy(models)
+        candidate_copy = next(
+            item for item in candidate_models
+            if str(item.get("id") or "") == candidate_id
+        )
+        candidate_capability = candidate_copy["backends"]["omlx"]
+        draft_size = candidate_capability.get("dflashDraftSize")
+        if (
+            not isinstance(draft_size, int) or isinstance(draft_size, bool)
+            or draft_size <= 0
+        ):
+            candidate_capability["dflashDraftSize"] = DFLASH2_DRAFT_BYTES
+        block_size = capability.get("dflashBlockSize")
+        if not isinstance(block_size, int) or isinstance(block_size, bool) or block_size < 1:
+            block_size = 1
+        candidate_options = copy.deepcopy(visible_options)
+        candidate_options.update({
+            "acceleration": "dflash",
+            "depth": block_size,
+            "anePrefill": "off",
+            "memoryGuard": "balanced",
+        })
+        candidate_payload = copy.deepcopy(visible_request)
+        candidate_payload.update({
+            "backend": "omlx",
+            "modelId": candidate_id,
+            "options": candidate_options,
+        })
+        try:
+            candidate_request = validated_launch_profile_request(
+                candidate_payload, candidate_models,
+            )
+            admission = session_memory_admission(
+                candidate_request, candidate_models, resource,
+                {"phase": "idle", "message": ""}, {"active": False},
+            )
+        except (KeyError, StopIteration, TypeError, ValueError):
+            continue
+        if (
+            admission.get("launchable") is not True
+            or admission.get("decision") != "ready"
+            or admission.get("requiresAcknowledgement") is not False
+        ):
+            continue
+        estimate = admission.get("estimate") if isinstance(admission.get("estimate"), dict) else {}
+        required = estimate.get("requiredHeadroomBytes")
+        total = resource.get("totalMemoryBytes")
+        if (
+            isinstance(required, int) and not isinstance(required, bool)
+            and isinstance(total, int) and not isinstance(total, bool)
+            and total > 0 and required > total
+        ):
+            continue
+
+        exact_evidence = optimizer_evidence(
+            candidate, int(candidate_request["context"]), int(candidate_request["output"]),
+            client, reasoning, kv, chat,
+        )
+        add_benchmark_engine_evidence(
+            exact_evidence, candidate, candidate_request["options"], ["omlx"],
+        )
+        local = verified_local_benchmark(capability, exact_evidence)
+        evidence_capability = capability
+        if local is None or local.get("winner") != "dflash2":
+            evidence_capability = copy.deepcopy(capability)
+            evidence_capability["localBenchmark"] = None
+            evidence_capability["localBenchmarks"] = []
+        performance = route_performance_evidence(
+            candidate, "omlx", evidence_capability, exact_evidence,
+        )
+        host_support = route_host_support(
+            candidate, "omlx", capability,
+            runtime_installed=True, artifact_compatible=True,
+        )
+        if isinstance(total, int) and not isinstance(total, bool) and total > 0:
+            host_support["hostMemoryBytes"] = total
+        capacity = {
+            key: copy.deepcopy(admission.get(key))
+            for key in (
+                "decision", "label", "detail", "launchable",
+                "requiresAcknowledgement", "projectedHeadroomBytes",
+            )
+        }
+        capacity["estimate"] = copy.deepcopy(estimate)
+        capacity["sizeLabel"] = str(candidate.get("sizeLabel") or "")
+        capacity["quantization"] = str(candidate.get("quantization") or "Unknown")
+        candidates.append({
+            "kind": "explicit-different-model",
+            "label": "Fast 48 GB candidate",
+            "modelId": candidate_id,
+            "modelName": str(candidate.get("name") or candidate_id),
+            "name": str(candidate.get("name") or candidate_id),
+            "backend": "omlx",
+            "backendLabel": BACKEND_LABELS["omlx"],
+            "modes": ["DFlash 2"],
+            "quantization": str(candidate.get("quantization") or "Unknown"),
+            "sizeLabel": str(candidate.get("sizeLabel") or ""),
+            "differentArtifact": True,
+            "differentModel": True,
+            "differentArchitecture": True,
+            "intelligenceContractChanged": True,
+            "requiresExplicitSelection": True,
+            "automaticEligible": False,
+            "performanceEvidence": performance,
+            "hostSupport": host_support,
+            "preservedContract": {
+                "client": client,
+                "context": int(candidate_request["context"]),
+                "output": int(candidate_request["output"]),
+                "reasoning": reasoning,
+                "kv": kv,
+                "chat": copy.deepcopy(candidate_request.get("chat") or {}),
+            },
+            "capacity": capacity,
+        })
+
+    candidates.sort(key=lambda item: (
+        0 if item["performanceEvidence"]["tier"] == "verified-this-mac" else 1,
+        0 if "optimized-speed" in item["modelName"].casefold() else 1,
+        int(item["capacity"].get("estimate", {}).get("requiredHeadroomBytes") or 2**63),
+        item["modelName"].casefold(),
+    ))
+    return candidates[:1]
+
+
 def route_qualification_metrics(record: dict[str, Any]) -> dict[str, Any] | None:
     """Recompute the bounded, authoritative public metrics for one qualified route."""
     if (
@@ -10778,10 +11652,19 @@ def public_route_qualification_result(
 
 def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> dict[str, Any]:
     """Choose an engine only when a complete, like-for-like local matrix proves it."""
-    current = optimal_request(payload, models)
+    binding = validated_optimizer_evidence_binding(payload)
+    if binding is not None and binding["scope"] != "engine":
+        raise ValueError("A saved route result cannot be applied as an engine comparison.")
+    base_payload = copy.deepcopy(payload)
+    base_payload.pop("evidenceBinding", None)
+    current = optimal_request(base_payload, models)
     preference = str(payload.get("enginePreference") or "throughput")
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported measured engine preference.")
+    if binding is not None and binding["preference"] != preference:
+        raise ValueError(
+            "That saved engine result used a different decision goal. Refresh it before applying."
+        )
     current_backend = str(current["backend"])
     model_id = str(current["modelId"])
     model = next(item for item in models if item.get("id") == model_id)
@@ -10808,6 +11691,23 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
 
     add_benchmark_engine_evidence(evidence, model, options, eligible)
     entries = verified_cross_engine_entries(model, eligible, evidence)
+    if binding is not None:
+        bound_suite = str(binding["suite"])
+        bound_shootout = str(binding.get("shootoutId") or "")
+        bound_record_ids = binding.get("recordIds") or {}
+        entries = [
+            entry for entry in entries
+            if str(entry.get("record", {}).get("suite") or "") == bound_suite
+            and (
+                not bound_shootout
+                or str(entry.get("record", {}).get("shootoutId") or "") == bound_shootout
+            )
+            and (
+                not bound_record_ids
+                or str(entry.get("record", {}).get("id") or "")
+                == str(bound_record_ids.get(str(entry.get("backend") or "")) or "")
+            )
+        ]
     groups: dict[str, dict[str, dict[str, Any]]] = {}
     for entry in entries:
         shootout_id = str(entry.get("record", {}).get("shootoutId") or "")
@@ -10833,6 +11733,11 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         "excludedBackends": excluded,
     }
     if eligible == [current_backend]:
+        if binding is not None:
+            raise ValueError(
+                "That saved engine comparison no longer has two compatible engines. "
+                "Refresh performance evidence before applying it."
+            )
         qualification = verified_route_qualification(
             model, current_backend, evidence,
         )
@@ -10856,7 +11761,17 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
                 "engineEvidenceLabel": "Qualified oMLX route",
                 "comparedEngines": [], "qualifiedRoutes": [qualified_route],
                 "missingEngines": [], "engineRationale": [reason],
-                "engineDecision": {**engine_meta, "routeQualification": True},
+                "engineDecision": {
+                    **engine_meta, "routeQualification": True,
+                    "evidenceBinding": {
+                        "scope": "route", "suite": str(qualification.get("suite") or "agentic"),
+                        "preference": preference, "recordId": str(qualification.get("id") or ""),
+                    },
+                },
+                "engineEvidenceBinding": {
+                    "scope": "route", "suite": str(qualification.get("suite") or "agentic"),
+                    "preference": preference, "recordId": str(qualification.get("id") or ""),
+                },
                 "enginePreference": preference,
                 "engineNextAction": engine_selection_next_action(
                     "keep-current", preference, current_backend, client, reason,
@@ -10905,6 +11820,11 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         current["rationale"] = current["engineRationale"] + list(current.get("rationale") or [])
         return current
     if not complete:
+        if binding is not None:
+            raise ValueError(
+                "That saved engine comparison is stale or no longer matches every compatible engine. "
+                "Refresh performance evidence before applying it."
+            )
         largest = max(groups.values(), key=len, default={})
         measured = sorted(largest)
         missing = [backend for backend in eligible if backend not in largest]
@@ -10953,6 +11873,11 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         if quality.get("comparable") is True
     ]
     if not usable_complete:
+        if binding is not None:
+            raise ValueError(
+                "That saved engine comparison no longer passes output and workload parity. "
+                "Refresh performance evidence before applying it."
+            )
         newest_group, quality = max(
             comparable_complete, key=lambda item: _cross_engine_group_rank(item[0], client),
         )
@@ -10985,6 +11910,44 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
     chosen_group, workload_comparison = max(
         usable_complete, key=lambda item: _cross_engine_group_rank(item[0], client),
     )
+    selected_suites = {
+        str(item.get("record", {}).get("suite") or "") for item in chosen_group
+    }
+    if len(selected_suites) != 1 or "" in selected_suites:
+        raise RuntimeError("The selected engine comparison has no single workload suite.")
+    selected_shootouts = {
+        str(item.get("record", {}).get("shootoutId") or "") for item in chosen_group
+    }
+    selected_suite = next(iter(selected_suites))
+    selected_shootout = (
+        next(iter(selected_shootouts))
+        if len(selected_shootouts) == 1 and "" not in selected_shootouts else ""
+    )
+    selected_binding: dict[str, Any] | None = None
+    if selected_shootout:
+        selected_record_ids = {
+            str(item["backend"]): str(item.get("record", {}).get("id") or "")
+            for item in chosen_group
+        }
+        if (
+            set(selected_record_ids) == set(eligible)
+            and all(selected_record_ids.values())
+            and len(set(selected_record_ids.values())) == len(selected_record_ids)
+        ):
+            selected_binding = {
+                "scope": "engine", "suite": selected_suite, "preference": preference,
+                "shootoutId": selected_shootout,
+                "recordIds": selected_record_ids,
+            }
+    if binding is not None and (
+        selected_binding is None or binding != selected_binding
+    ):
+        raise ValueError(
+            "That saved engine comparison changed while it was being applied. "
+            "Refresh performance evidence and try again."
+        )
+    if selected_binding is not None:
+        engine_meta["evidenceBinding"] = copy.deepcopy(selected_binding)
     engine_meta["workloadComparison"] = copy.deepcopy(workload_comparison)
     profile = rank_cross_engine_profile(chosen_group, preference)
     ranked = profile.get("ranked") if profile.get("available") else _speed_ranked_entries(chosen_group)
@@ -11030,6 +11993,11 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         for item in ranked
     ]
     if not profile.get("available"):
+        if binding is not None:
+            raise ValueError(
+                "That saved engine comparison no longer contains the selected metric. "
+                "Refresh performance evidence before applying it."
+            )
         missing_profile = [str(item) for item in profile.get("missing") or []]
         missing_public = [
             {
@@ -11056,6 +12024,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
                 ),
             ],
             "engineDecision": engine_meta,
+            **({"engineEvidenceBinding": copy.deepcopy(selected_binding)} if selected_binding else {}),
             "enginePreference": preference,
             "engineNextAction": engine_selection_next_action(
                 "calibrate", preference, current_backend, client,
@@ -11072,6 +12041,14 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         "currentInLeadingBand": current_in_leading_band,
     })
     if not profile_trusted and current_in_leading_band:
+        current_entry = next(
+            item for item in chosen_group
+            if str(item["backend"]) == current_backend
+        )
+        current = _optimizer_with_forced_record(
+            payload, models, model, current_backend,
+            current_entry["record"], evidence,
+        )
         tie_reason = str(profile.get("tieReason") or "The measured difference did not clear the switch threshold.")
         rationale = [
             tie_reason,
@@ -11086,6 +12063,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             "comparedEngines": compared, "missingEngines": [],
             "engineRationale": rationale,
             "engineDecision": engine_meta,
+            **({"engineEvidenceBinding": copy.deepcopy(selected_binding)} if selected_binding else {}),
             "enginePreference": preference,
             "enginePreferenceMetric": profile["metric"],
             "leadingBackends": list(leading_backends),
@@ -11137,6 +12115,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
         "engineOutputWarning": str(workload_comparison.get("warning") or ""),
         "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
         "engineDecision": engine_meta,
+        **({"engineEvidenceBinding": copy.deepcopy(selected_binding)} if selected_binding else {}),
         "enginePreference": preference,
         "enginePreferenceMetric": profile["metric"],
         "leadingBackends": list(leading_backends),
@@ -11491,6 +12470,20 @@ def validated_profile_options(
             ),
         }
     raise ValueError("Choose a supported runtime.")
+
+
+def validated_cross_engine_profile_options(
+    backend: str, model: dict[str, Any], capability: dict[str, Any], value: Any,
+) -> dict[str, Any]:
+    """Validate one engine's fixed controls without inheriting another engine's route."""
+    raw = copy.deepcopy(value) if isinstance(value, dict) else {}
+    # Acceleration and its depth/tuning controls belong to the candidate engine's
+    # measured route matrix.  Reusing the currently selected engine's explicit
+    # route (for example MTPLX MTP) would incorrectly make an otherwise valid
+    # oMLX AR candidate fail capability validation.  All engine-owned fixed
+    # controls remain in ``raw`` and are still validated below.
+    raw["acceleration"] = "auto"
+    return validated_profile_options(backend, model, capability, raw)
 
 
 def validated_launch_profile_request(
@@ -12126,6 +13119,10 @@ def benchmark_history_request(
             and record["outputMin"] <= output <= record["outputMax"]
             and record.get("suite") == suite_name
             and list(record.get("scenarioContract") or []) == scenario_contract
+            # History may describe only evidence that could also drive Apply.
+            # Reuse the complete local-record verifier here so a structurally
+            # matching but failed or tampered shootout never becomes a receipt.
+            and _local_benchmark_record_verified(capability, record, evidence)
         )
 
     exact_records = [record for record in source_records if exact(record)]
@@ -12198,6 +13195,7 @@ def benchmark_history_request(
             value, value_display, lower_is_better = _benchmark_history_value(item, preference)
             engine_rows.append({
                 "backend": item["backend"], "label": BACKEND_LABELS[item["backend"]],
+                "recordId": str(item["record"].get("id") or ""),
                 "mode": str(item["record"].get("winner") or "ar"),
                 "modeLabel": BenchmarkManager._mode_label(str(item["record"].get("winner") or "ar")),
                 "value": value, "valueDisplay": value_display,
@@ -12362,6 +13360,11 @@ def benchmark_history_request(
         )
         receipt = {
             "state": "trusted-engine", "scope": "engine",
+            "shootoutId": latest_shootout.get("id"),
+            "recordIds": {
+                str(item.get("backend") or ""): str(item.get("recordId") or "")
+                for item in latest_shootout.get("engines", [])
+            },
             "backend": winner_backend,
             "backendLabel": BACKEND_LABELS.get(winner_backend, winner_backend),
             "mode": winner_engine.get("mode"),
@@ -12378,6 +13381,11 @@ def benchmark_history_request(
         recommended_backend = str(latest_shootout.get("recommendedBackend") or "")
         receipt = {
             "state": "tie", "scope": "engine",
+            "shootoutId": latest_shootout.get("id"),
+            "recordIds": {
+                str(item.get("backend") or ""): str(item.get("recordId") or "")
+                for item in latest_shootout.get("engines", [])
+            },
             "createdAt": latest_shootout.get("createdAt"),
             "summary": latest_shootout.get("summary"),
             "currentBackend": backend,
@@ -12394,6 +13402,7 @@ def benchmark_history_request(
         route = current_route_runs[0]
         receipt = {
             "state": "trusted-route", "scope": "route",
+            "recordId": route.get("id"),
             "backend": route.get("backend"),
             "backendLabel": route.get("backendLabel"),
             "mode": route.get("winner"),
@@ -12435,6 +13444,36 @@ def benchmark_history_request(
         {"backend": item, "label": BACKEND_LABELS[item]} for item in eligible
     ]
     receipt["reasoningContract"] = copy.deepcopy(reasoning_contract)
+    if receipt.get("state") in {"trusted-engine", "tie"}:
+        shootout_id = str(receipt.get("shootoutId") or "")
+        record_ids = receipt.get("recordIds") if isinstance(receipt.get("recordIds"), dict) else {}
+        if shootout_id and record_ids and all(record_ids.values()):
+            receipt["evidenceBinding"] = {
+                "scope": "engine", "suite": suite_name, "preference": preference,
+                "shootoutId": shootout_id, "recordIds": copy.deepcopy(record_ids),
+            }
+    elif receipt.get("state") == "trusted-route" and receipt.get("recordId"):
+        receipt["evidenceBinding"] = {
+            "scope": "route", "suite": suite_name, "preference": preference,
+            "recordId": str(receipt["recordId"]),
+        }
+    receipt_backend = str(receipt.get("backend") or backend)
+    receipt_capability = model.get("backends", {}).get(receipt_backend, {})
+    receipt_descriptor = ENGINE_ADAPTERS.get(receipt_backend)
+    receipt_runtime_installed = bool(
+        receipt_descriptor and receipt_descriptor.public().get("installed") is True
+    )
+    receipt["performanceEvidence"] = route_performance_evidence(
+        model, receipt_backend, receipt_capability, evidence,
+    )
+    receipt["hostSupport"] = route_host_support(
+        model, receipt_backend, receipt_capability,
+        runtime_installed=receipt_runtime_installed,
+        artifact_compatible=bool(
+            model.get("ready") is True
+            and receipt_capability.get("runnable") is True
+        ),
+    )
 
     public_runs = []
     for run in evaluated[:BENCHMARK_HISTORY_VISIBLE_RUNS]:
@@ -14835,6 +15874,7 @@ def lmstudio_mtp_tuning_plan(job: dict[str, Any]) -> dict[str, Any]:
         "freshLoadPerCandidate": True,
         "greedyParityPerCandidate": True,
         "resourceGatePerCandidate": True,
+        "resourceCooldownMemoryToleranceBytes": BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
     }
 
 
@@ -14903,6 +15943,7 @@ def dflash2_tuning_plan(job: dict[str, Any]) -> dict[str, Any]:
         "freshLoadPerCandidate": True,
         "greedyParityPerCandidate": True,
         "resourceGatePerCandidate": True,
+        "resourceCooldownMemoryToleranceBytes": BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
     }
 
 
@@ -15116,11 +16157,11 @@ def validated_engine_shootout_request(
         candidate["backend"] = backend
         candidate.pop("scope", None)
         try:
+            candidate["options"] = validated_cross_engine_profile_options(
+                backend, model, model.get("backends", {}).get(backend, {}),
+                candidate.get("options"),
+            )
             if ssd_lane:
-                candidate["options"] = validated_profile_options(
-                    backend, model, model.get("backends", {}).get(backend, {}),
-                    candidate.get("options"),
-                )
                 candidate["options"]["ssdCacheState"] = "natural-cold-to-warm"
             job = validated_benchmark_request(
                 candidate, models, allow_baseline_only=True,
@@ -15361,7 +16402,7 @@ def calibration_plan(
                     "acceleration": "auto", "kv": kv,
                     "fan": calibration_cooling,
                 })
-                candidate["options"] = validated_profile_options(
+                candidate["options"] = validated_cross_engine_profile_options(
                     backend, model, model.get("backends", {}).get(backend, {}),
                     candidate_option_source,
                 )
@@ -15435,6 +16476,14 @@ def calibration_plan(
                     f" MTPLX is reloaded at every verified draft depth (D1–D{max(depths)}); "
                     "only the fastest AR-matching depth is kept."
                 )
+        engine_capability = model.get("backends", {}).get(backend, {})
+        engine_runtime_installed = bool(
+            ENGINE_ADAPTERS[backend].public().get("installed") is True
+        )
+        engine_artifact_compatible = bool(
+            model.get("ready") is True
+            and engine_capability.get("runnable") is True
+        )
         engines.append({
             "backend": backend,
             "label": BACKEND_LABELS[backend],
@@ -15472,6 +16521,15 @@ def calibration_plan(
                 else []
             ),
             "runtimeVersion": str(job.get("runtimeVersion") or "") if job else "",
+            "performanceEvidence": route_performance_evidence(
+                model, backend, engine_capability,
+                job.get("evidence") if job is not None else None,
+            ),
+            "hostSupport": route_host_support(
+                model, backend, engine_capability,
+                runtime_installed=engine_runtime_installed,
+                artifact_compatible=engine_artifact_compatible,
+            ),
         })
 
     route_qualification = bool(
@@ -15590,6 +16648,54 @@ def calibration_plan(
         "cross-engine-local-benchmark", "cross-engine-leading-band",
         "cross-engine-noise-floor", "local-route-qualification",
     }
+    raw_decision_binding = decision.get("engineEvidenceBinding")
+    decision_binding: dict[str, Any] | None = None
+    if raw_decision_binding is not None:
+        try:
+            candidate_binding = validated_optimizer_evidence_binding({
+                "evidenceBinding": raw_decision_binding,
+            })
+        except ValueError:
+            decision_ready = False
+        else:
+            expected_scope = (
+                "route" if evidence_tier == "local-route-qualification" else "engine"
+            )
+            if (
+                candidate_binding is None
+                or candidate_binding.get("scope") != expected_scope
+                or candidate_binding.get("suite") != suite_name
+                or candidate_binding.get("preference") != preference
+            ):
+                decision_ready = False
+            else:
+                decision_binding = candidate_binding
+    if decision_ready and raw_decision_binding is None:
+        if evidence_tier == "local-route-qualification":
+            fallback_binding = {
+                "scope": "route", "suite": suite_name, "preference": preference,
+            }
+            qualified_routes = decision.get("qualifiedRoutes")
+            record_id = (
+                qualified_routes[0].get("recordId")
+                if isinstance(qualified_routes, list) and len(qualified_routes) == 1
+                and isinstance(qualified_routes[0], dict) else None
+            )
+            if record_id:
+                fallback_binding["recordId"] = str(record_id)
+                try:
+                    decision_binding = validated_optimizer_evidence_binding({
+                        "evidenceBinding": fallback_binding,
+                    })
+                except ValueError:
+                    decision_ready = False
+            else:
+                decision_ready = False
+        else:
+            # A suite name alone is not an immutable engine result. Older
+            # ungrouped matrices remain visible for review, but must be rerun
+            # once before Apply can target one exact shootout fail-closed.
+            decision_ready = False
     resolved_backend = str(decision.get("backend") or request["backend"])
     rationale = list(decision.get("engineRationale") or decision.get("rationale") or [])
     workload_comparison = (
@@ -15609,6 +16715,9 @@ def calibration_plan(
     suggested_name = f"Quick Launch · {model.get('name') or request['modelId']}"
     if len(suggested_name) > LAUNCH_PROFILE_NAME_MAX:
         suggested_name = suggested_name[:LAUNCH_PROFILE_NAME_MAX].rstrip()
+    model_alternatives = qwen_flash_next_model_alternatives(
+        model, visible_request, models,
+    )
     action = "apply-existing" if decision_ready else ("measure" if ready else "blocked")
     return {
         "version": 2,
@@ -15642,6 +16751,7 @@ def calibration_plan(
         "ssdStreaming": ssd_lane,
         "ssdContract": copy.deepcopy(ssd_profile.get("calibration")) if ssd_lane else None,
         "contextAdjustment": context_adjustment,
+        "modelAlternatives": model_alternatives,
         "calibrationCooling": calibration_cooling,
         "calibrationCoolingLabel": {
             "default": "System controlled",
@@ -15657,6 +16767,7 @@ def calibration_plan(
             isinstance(job.get("calibrationTuningPlan"), dict) for job in jobs
         ),
         "resourceCooldownMaxSecondsPerRoute": BENCHMARK_COOLDOWN_MAX_SECONDS,
+        "resourceCooldownMemoryToleranceBytes": BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
         "evidence": {
             "trusted": trusted,
             "decisionReady": decision_ready,
@@ -15674,6 +16785,7 @@ def calibration_plan(
                 decision.get("engineOutputWarning")
                 or workload_comparison.get("warning") or ""
             ),
+            **({"evidenceBinding": copy.deepcopy(decision_binding)} if decision_binding else {}),
             "comparedEngines": copy.deepcopy(decision.get("comparedEngines") or []),
             "qualifiedRoutes": copy.deepcopy(decision.get("qualifiedRoutes") or []),
         },
@@ -17555,6 +18667,10 @@ def summarize_agentic_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
 
 class LaunchCancelled(RuntimeError):
     """Internal control flow for a user-cancelled in-flight launch."""
+
+
+class BenchmarkResourceCooldownTimeout(RuntimeError):
+    """A benchmark route exhausted its bounded wait for comparable resources."""
 
 
 class RunManager:
@@ -20669,7 +21785,7 @@ class BenchmarkManager:
                         "version": 1,
                         "maxWaitSeconds": BENCHMARK_COOLDOWN_MAX_SECONDS,
                         "stableSamplesRequired": BENCHMARK_COOLDOWN_STABLE_SAMPLES,
-                        "memoryToleranceBytes": BENCHMARK_MEMORY_MEANINGFUL_BYTES,
+                        "memoryToleranceBytes": BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
                     },
                     "engines": [
                         {
@@ -20734,7 +21850,7 @@ class BenchmarkManager:
                         "version": 1,
                         "maxWaitSeconds": BENCHMARK_COOLDOWN_MAX_SECONDS,
                         "stableSamplesRequired": BENCHMARK_COOLDOWN_STABLE_SAMPLES,
-                        "memoryToleranceBytes": BENCHMARK_MEMORY_MEANINGFUL_BYTES,
+                        "memoryToleranceBytes": BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
                     },
                 }
                 self.state = {
@@ -20831,6 +21947,47 @@ class BenchmarkManager:
             parts.append("Low Power Mode on" if condition["lowPowerMode"] else "Low Power Mode off")
         return " · ".join(parts) or "resource signals unavailable"
 
+    @staticmethod
+    def _resource_comparison_text(
+        reference: dict[str, Any], observed: dict[str, Any], readiness: dict[str, Any],
+    ) -> str:
+        """Describe a route start against the fixed shootout reference."""
+        parts: list[str] = []
+        delta = readiness.get("memoryDeltaBytes")
+        if isinstance(delta, int) and not isinstance(delta, bool):
+            if delta == 0:
+                parts.append("memory headroom matched the fixed reference")
+            else:
+                direction = "more" if delta > 0 else "less"
+                parts.append(
+                    f"memory headroom {abs(delta) / 1024**3:.2f} GiB {direction} than the "
+                    f"fixed reference ({BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES / 1024**3:.1f} GiB allowed)"
+                )
+        elif reference.get("memoryAvailable") is True:
+            parts.append("memory headroom could not be compared with the fixed reference")
+        if (
+            reference.get("thermalAvailable") is True
+            and observed.get("thermalAvailable") is True
+        ):
+            parts.append(
+                f"thermal {observed.get('thermalState')} vs fixed reference "
+                f"{reference.get('thermalState')}"
+            )
+        elif reference.get("thermalAvailable") is True:
+            parts.append("thermal state unavailable against the fixed reference")
+        if (
+            isinstance(reference.get("lowPowerMode"), bool)
+            and isinstance(observed.get("lowPowerMode"), bool)
+        ):
+            observed_power = "on" if observed["lowPowerMode"] else "off"
+            reference_power = "on" if reference["lowPowerMode"] else "off"
+            parts.append(
+                f"Low Power Mode {observed_power} vs fixed reference {reference_power}"
+            )
+        elif isinstance(reference.get("lowPowerMode"), bool):
+            parts.append("Low Power Mode unavailable against the fixed reference")
+        return " · ".join(parts) or "resource comparison signals unavailable"
+
     def _wait_for_resource_baseline(
         self, route_label: str, backend: str,
         reference: dict[str, Any] | None = None, *,
@@ -20843,6 +22000,7 @@ class BenchmarkManager:
         deadline = started + maximum
         samples = 0
         stable_samples = 0
+        improved_samples = 0
         previous: dict[str, Any] | None = None
         raw: dict[str, Any] = {}
         observed: dict[str, Any] = {}
@@ -20899,13 +22057,28 @@ class BenchmarkManager:
                     break
             else:
                 readiness = compare_benchmark_resource_condition(reference, observed)
-                if readiness.get("thermalImproved") or readiness.get("memoryImproved"):
-                    status = "condition-improved"
-                    break
+                improved = bool(
+                    readiness.get("thermalImproved") or readiness.get("memoryImproved")
+                )
+                improved_comparable = bool(
+                    readiness.get("memoryWithinTolerance") is not False
+                    and (
+                        readiness.get("thermalMatches") is not False
+                        or readiness.get("thermalImproved") is True
+                    )
+                    and readiness.get("lowPowerModeMatches") is not False
+                )
+                if improved and improved_comparable:
+                    improved_samples += 1
+                else:
+                    improved_samples = 0
                 if readiness["ready"]:
                     stable_samples += 1
                 else:
                     stable_samples = 0
+                if improved_samples >= BENCHMARK_COOLDOWN_STABLE_SAMPLES:
+                    status = "condition-improved"
+                    break
                 if stable_samples >= BENCHMARK_COOLDOWN_STABLE_SAMPLES:
                     status = "ready"
                     break
@@ -20914,8 +22087,13 @@ class BenchmarkManager:
                 status = "timeout"
                 break
             with self.lock:
+                condition = (
+                    self._resource_comparison_text(reference, observed, readiness)
+                    if reference is not None else
+                    self._resource_condition_text(observed)
+                )
                 self.state["message"] = (
-                    f"Stabilising before {route_label} · {self._resource_condition_text(observed)} · "
+                    f"Stabilising before {route_label} · {condition} · "
                     f"{min(maximum, elapsed):.0f}/{maximum:.0f}s"
                 )
             previous = observed
@@ -20924,6 +22102,11 @@ class BenchmarkManager:
                 raise LaunchCancelled("Engine Shootout cancelled during resource cooldown.")
         waited = round(max(0.0, time.monotonic() - started), 3)
         baseline = copy.deepcopy(reference if reference is not None else observed)
+        condition_detail = (
+            self._resource_comparison_text(baseline, observed, readiness)
+            if reference is not None else
+            self._resource_condition_text(observed)
+        )
         gate = {
             "version": 1,
             "status": status,
@@ -20931,10 +22114,11 @@ class BenchmarkManager:
             "sampleCount": samples,
             "stableSamplesRequired": BENCHMARK_COOLDOWN_STABLE_SAMPLES,
             "maxWaitSeconds": maximum,
-            "memoryToleranceBytes": BENCHMARK_MEMORY_MEANINGFUL_BYTES,
+            "memoryToleranceBytes": BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
             "reference": baseline,
             "observed": copy.deepcopy(observed),
             "readiness": copy.deepcopy(readiness),
+            "conditionDetail": condition_detail,
             "_initialSnapshot": copy.deepcopy(raw),
         }
         if status in {"reference-ready", "ready"}:
@@ -20950,7 +22134,9 @@ class BenchmarkManager:
             )
         else:
             self._event(
-                f"Resource cooldown reached its {maximum:.0f}s limit before {route_label}; measurement will continue and final evidence checks will fail closed if starts differ.",
+                f"Resource cooldown reached its {maximum:.0f}s limit before {route_label}; "
+                f"{condition_detail}. Measurement will continue and final evidence checks "
+                "will fail closed if starts differ.",
                 "warning",
             )
         return gate
@@ -21451,23 +22637,10 @@ class BenchmarkManager:
     def _best_tuning_candidate(
         candidates: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        if not candidates:
+        best = deterministic_tuning_best_candidate(candidates)
+        if best is None:
             raise RuntimeError("Tuning produced no complete candidates.")
-
-        def score(candidate: dict[str, Any]) -> tuple[int, int, float, float]:
-            quality = candidate.get("qualityMatchesAR") is True
-            clears_floor = bool(
-                quality
-                and float(candidate["medianSpeedupVsAR"]) >= BENCHMARK_MINIMUM_SPEEDUP
-                and float(candidate["worstCaseSpeedupVsAR"]) >= BENCHMARK_MINIMUM_SPEEDUP
-            )
-            return (
-                int(quality), int(clears_floor),
-                float(candidate["medianSpeedupVsAR"]),
-                float(candidate["worstCaseSpeedupVsAR"]),
-            )
-
-        return max(candidates, key=score)
+        return best
 
     @staticmethod
     def _tuning_gate_reference(
@@ -21614,6 +22787,8 @@ class BenchmarkManager:
                 "strategy": "bounded-coordinate-search",
                 "complete": True,
                 "resourceComparable": True,
+                "optionalSearchComplete": True,
+                "optionalSearchStop": None,
                 "baselineResourceStatus": str(baseline_gate.get("status") or ""),
                 "candidateCount": len(public_candidates),
                 "maximumCandidates": BENCHMARK_MTP_TUNER_MAX_CANDIDATES,
@@ -21878,6 +23053,8 @@ class BenchmarkManager:
                 "baselineModes": list(plan["baselineModes"]),
                 "complete": True,
                 "resourceComparable": True,
+                "optionalSearchComplete": True,
+                "optionalSearchStop": None,
                 "baselineResourceStatus": str(baseline_gate.get("status") or ""),
                 "candidateCount": len(public_candidates),
                 "maximumCandidates": BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES,
@@ -22088,7 +23265,7 @@ class BenchmarkManager:
                 "version": 1,
                 "maxWaitSeconds": BENCHMARK_COOLDOWN_MAX_SECONDS,
                 "stableSamplesRequired": BENCHMARK_COOLDOWN_STABLE_SAMPLES,
-                "memoryToleranceBytes": BENCHMARK_MEMORY_MEANINGFUL_BYTES,
+                "memoryToleranceBytes": BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
             },
             "trustedWinner": public_decision["trustedWinner"],
             "recommendedBackend": public_decision["backend"],
@@ -22106,6 +23283,15 @@ class BenchmarkManager:
         )
         status = str(gate.get("status") or "")
         reference = resource_reference
+        if status == "timeout":
+            condition = str(
+                gate.get("conditionDetail")
+                or "the observed memory, thermal, or power condition did not match"
+            )
+            raise BenchmarkResourceCooldownTimeout(
+                f"{route_label} did not return to comparable Mac conditions "
+                f"before the bounded resource cooldown expired: {condition}."
+            )
         if reference is None:
             if status in {"reference-ready", "ready"}:
                 candidate = gate.get("reference")
@@ -22157,6 +23343,7 @@ class BenchmarkManager:
         capability = job["model"]["backends"]["lmstudio"]
         candidates: list[dict[str, Any]] = []
         candidate_by_key: dict[str, dict[str, Any]] = {}
+        optional_search_stop: dict[str, Any] | None = None
         baseline_gate, resource_reference = self._shootout_tuning_gate(
             "LM Studio · AR tuning baseline", "lmstudio", resource_reference,
         )
@@ -22206,6 +23393,28 @@ class BenchmarkManager:
             )
             return summary
 
+        def measure_optional_candidate(
+            settings: dict[str, Any], stage: str,
+        ) -> bool:
+            """Stop only optional refinement when its comparable-start wait expires."""
+            nonlocal optional_search_stop
+            try:
+                measure_candidate(settings, stage)
+            except BenchmarkResourceCooldownTimeout:
+                optional_search_stop = {
+                    "reason": "resource-cooldown-timeout",
+                    "stage": stage,
+                    "completedCandidateCount": len(candidates),
+                }
+                self._event(
+                    "LM Studio's optional cutoff/minimum refinement reached its resource "
+                    "cooldown limit after every required depth was measured. Calibration "
+                    "will keep the fastest completed comparable candidate.",
+                    "warning",
+                )
+                return False
+            return True
+
         anchor = copy.deepcopy(plan["anchor"])
         for depth in plan["depthCandidates"]:
             settings = copy.deepcopy(anchor)
@@ -22221,17 +23430,20 @@ class BenchmarkManager:
         ]):
             settings = copy.deepcopy(cutoff_anchor)
             settings["mtpMinContinueProbability"] = cutoff
-            measure_candidate(settings, "cutoff")
+            if not measure_optional_candidate(settings, "cutoff"):
+                break
         best = self._best_tuning_candidate(candidates)
         minimum_anchor = copy.deepcopy(best["settings"])
-        for minimum in _ordered_unique([
-            minimum_anchor["mtpMinTokens"], 0, 1, minimum_anchor["depth"],
-        ]):
-            settings = copy.deepcopy(minimum_anchor)
-            settings["mtpMinTokens"] = max(
-                0, min(int(settings["depth"]), int(minimum)),
-            )
-            measure_candidate(settings, "minimum")
+        if optional_search_stop is None:
+            for minimum in _ordered_unique([
+                minimum_anchor["mtpMinTokens"], 0, 1, minimum_anchor["depth"],
+            ]):
+                settings = copy.deepcopy(minimum_anchor)
+                settings["mtpMinTokens"] = max(
+                    0, min(int(settings["depth"]), int(minimum)),
+                )
+                if not measure_optional_candidate(settings, "minimum"):
+                    break
         if self.cancel_event.is_set():
             raise LaunchCancelled("Engine Shootout cancelled before LM Studio tuning was committed.")
         best = self._best_tuning_candidate(candidates)
@@ -22255,6 +23467,8 @@ class BenchmarkManager:
             "version": BENCHMARK_MTP_TUNER_VERSION,
             "strategy": "bounded-coordinate-search",
             "complete": True, "resourceComparable": True,
+            "optionalSearchComplete": optional_search_stop is None,
+            "optionalSearchStop": copy.deepcopy(optional_search_stop),
             "baselineResourceStatus": str(baseline_gate.get("status") or ""),
             "candidateCount": len(public_candidates),
             "maximumCandidates": BENCHMARK_MTP_TUNER_MAX_CANDIDATES,
@@ -22274,6 +23488,12 @@ class BenchmarkManager:
             f"Keep AR: none of {len(candidates)} bounded LM Studio MTP candidates "
             "cleared exact parity and the speed noise floor."
         )
+        if optional_search_stop is not None:
+            record["recommendation"] += (
+                " Optional cutoff/minimum refinement stopped at the resource cooldown "
+                "limit after every required draft depth was compared; this result uses "
+                "the fastest completed comparable candidate."
+            )
         if not _local_benchmark_record_verified(capability, record, job["evidence"]):
             raise RuntimeError("The completed LM Studio Calibration sweep failed its evidence contract.")
         return record, completed, resource_reference
@@ -22288,6 +23508,7 @@ class BenchmarkManager:
         capability = job["model"]["backends"]["omlx"]
         candidates: list[dict[str, Any]] = []
         candidate_by_key: dict[str, dict[str, Any]] = {}
+        optional_search_stop: dict[str, Any] | None = None
         baseline_gate, resource_reference = self._shootout_tuning_gate(
             "oMLX · AR tuning baseline", "omlx", resource_reference,
         )
@@ -22347,6 +23568,28 @@ class BenchmarkManager:
             )
             return summary
 
+        def measure_optional_candidate(
+            settings: dict[str, Any], stage: str,
+        ) -> bool:
+            """Stop only optional refinement when its comparable-start wait expires."""
+            nonlocal optional_search_stop
+            try:
+                measure_candidate(settings, stage)
+            except BenchmarkResourceCooldownTimeout:
+                optional_search_stop = {
+                    "reason": "resource-cooldown-timeout",
+                    "stage": stage,
+                    "completedCandidateCount": len(candidates),
+                }
+                self._event(
+                    "oMLX's optional verifier/quantization refinement reached its resource "
+                    "cooldown limit after every required DFlash block size was measured. "
+                    "Calibration will keep the fastest completed comparable candidate.",
+                    "warning",
+                )
+                return False
+            return True
+
         anchor = copy.deepcopy(plan["anchor"])
         for block_size in plan["blockCandidates"]:
             settings = copy.deepcopy(anchor)
@@ -22359,15 +23602,18 @@ class BenchmarkManager:
         ]):
             settings = copy.deepcopy(verifier_anchor)
             settings["verifyMode"] = str(verify_mode)
-            measure_candidate(settings, "verifier")
+            if not measure_optional_candidate(settings, "verifier"):
+                break
         best = self._best_tuning_candidate(candidates)
         quant_anchor = copy.deepcopy(best["settings"])
-        for draft_quant in _ordered_unique([
-            quant_anchor["draftQuant"], *plan["quantCandidates"],
-        ]):
-            settings = copy.deepcopy(quant_anchor)
-            settings["draftQuant"] = str(draft_quant)
-            measure_candidate(settings, "quantization")
+        if optional_search_stop is None:
+            for draft_quant in _ordered_unique([
+                quant_anchor["draftQuant"], *plan["quantCandidates"],
+            ]):
+                settings = copy.deepcopy(quant_anchor)
+                settings["draftQuant"] = str(draft_quant)
+                if not measure_optional_candidate(settings, "quantization"):
+                    break
         if self.cancel_event.is_set():
             raise LaunchCancelled("Engine Shootout cancelled before DFlash tuning was committed.")
         best = self._best_tuning_candidate(candidates)
@@ -22392,6 +23638,8 @@ class BenchmarkManager:
             "searchedAxes": ["blockSize", "verifyMode", "draftQuant"],
             "baselineModes": list(plan["baselineModes"]),
             "complete": True, "resourceComparable": True,
+            "optionalSearchComplete": optional_search_stop is None,
+            "optionalSearchStop": copy.deepcopy(optional_search_stop),
             "baselineResourceStatus": str(baseline_gate.get("status") or ""),
             "candidateCount": len(public_candidates),
             "maximumCandidates": BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES,
@@ -22417,6 +23665,12 @@ class BenchmarkManager:
                 f"Keep AR: none of {len(candidates)} bounded DFlash candidates"
                 + (" or native MTP" if "mtp" in plan["baselineModes"] else "")
                 + " cleared exact parity and the speed noise floor."
+            )
+        if optional_search_stop is not None:
+            record["recommendation"] += (
+                " Optional verifier/quantization refinement stopped at the resource "
+                "cooldown limit after every required DFlash block size was compared; "
+                "this result uses the fastest completed comparable candidate."
             )
         if not _local_benchmark_record_verified(capability, record, job["evidence"]):
             raise RuntimeError("The completed DFlash Calibration sweep failed its evidence contract.")
@@ -22706,8 +23960,8 @@ class BenchmarkManager:
                 )
             if self.cancel_event.is_set():
                 raise LaunchCancelled("Engine Shootout cancelled before its matrix was committed.")
-            save_benchmark_records(records)
             result = self._build_shootout_result(shootout, records, models)
+            save_benchmark_records(records)
             result["persistence"] = {
                 "saved": True,
                 "scope": "local",

@@ -216,15 +216,30 @@ LLAMACPP_RUNTIME_FILE_MANIFEST = (
 LLAMACPP_RUNTIME_REQUIRED_FLAGS = (
     "--model", "-ngl", "-c", "--parallel", "--load-mode",
     "--lazy-mode", "-fit", "--jinja", "-fa", "--reasoning",
-    "--reasoning-format", "--reasoning-preserve", "--spec-type",
+    "--reasoning-format", "--reasoning-preserve", "--reasoning-budget-message",
+    "--spec-type",
     "--cache-type-k", "--cache-type-v", "--host", "--port",
-    "--alias", "--api-key",
+    "--alias", "--api-key-file",
 )
-# Successful file checks are cached only for an exact current filesystem
-# identity. A controller restart intentionally empties this bounded cache.
+LLAMACPP_API_KEY_FILE_NAME = "llamacpp-api-key"
+LLAMACPP_PRIVATE_BEARER_FILE_NAMES = (
+    LLAMACPP_API_KEY_FILE_NAME,
+    "session-proxy.json",
+    "codex-proxy.json",
+)
+# Authoritative SHA results live only for one exact current-process filesystem
+# identity. A separate persisted snapshot may make discovery responsive, but it
+# never grants launch authority or populates this proof cache.
 VERIFIED_FILE_SHA256_CACHE_MAX_ENTRIES = 96
 _VERIFIED_FILE_SHA256_CACHE: dict[tuple[Any, ...], bool] = {}
 _VERIFIED_FILE_SHA256_CACHE_LOCK = threading.Lock()
+ATOMIC_PRESENTATION_SNAPSHOT_SCHEMA_VERSION = 1
+ATOMIC_PRESENTATION_SNAPSHOT_MAX_BYTES = 128 * 1024
+_ATOMIC_PRESENTATION_LOCK = threading.RLock()
+_ATOMIC_CURRENT_PROCESS_PROOFS: dict[str, dict[str, Any]] = {}
+_ATOMIC_VERIFICATION_STATES: dict[str, dict[str, Any]] = {}
+_ATOMIC_VERIFICATION_THREADS: dict[str, threading.Thread] = {}
+_ATOMIC_VERIFICATION_GENERATION = 0
 RUNTIME_UPDATE_SCHEMA_VERSION = 2
 RUNTIME_UPDATE_PLAN_TTL_SECONDS = 30 * 60
 RUNTIME_UPDATE_DIR = STATE_DIR / "runtime-updates"
@@ -416,6 +431,23 @@ BENCHMARK_REASONING_POLICY_ALL_ENGINES = "all-engines-model-default"
 ROUTE_QUALIFICATION_VERSION = 1
 ROUTE_QUALIFICATION_MAX_TOKENS = 512
 ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS = 128
+ROUTE_QUALIFICATION_THINKING_TOKENS = (
+    ROUTE_QUALIFICATION_MAX_TOKENS - ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS
+)
+ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS = 128
+LLAMACPP_QUALIFICATION_CORRECTNESS_ID = "atomicchat-arithmetic-nonce-v1"
+LLAMACPP_QUALIFICATION_CORRECTNESS_EXPECTED = "RQ-8K-742"
+LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID = "atomicchat-budget-zero-boundary-v1"
+# Qwen's documented transition sentence is forced immediately before the
+# auto-detected closing thinking tag when llama.cpp exhausts a per-request
+# reasoning budget.  Without it, Qwen can continue the interrupted thought
+# into visible content instead of switching cleanly to its final answer.
+LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE = (
+    "\n\n Considering the limited time by the user, "
+    "I have to give the solution based on the thinking directly now."
+)
+ROUTE_QUALIFICATION_SCENARIOS = ["cold", "warmPrefix", "toolIngest", "steadyTurn"]
+ROUTE_QUALIFICATION_8K_SUITE = "route-qualification-8k"
 QWEN_PLE_QUALIFICATION_CONTEXT = 16_384
 QWEN_PLE_QUALIFICATION_OUTPUT = 8_192
 QWEN_PLE_QUALIFICATION_REASONING = "medium"
@@ -558,6 +590,11 @@ LLAMACPP_ATOMIC_TOTAL_BYTES = sum(item[1] for item in LLAMACPP_ATOMIC_FILE_MANIF
 LLAMACPP_PLE_CONTEXT = 8_192
 LLAMACPP_PLE_MEMORY_CEILING_GIB = 44.0
 LLAMACPP_PLE_MEMORY_CEILING_BYTES = int(LLAMACPP_PLE_MEMORY_CEILING_GIB * 1024**3)
+LLAMACPP_PLE_MINIMUM_DECODE_TPS = 15.0
+# A kernel value above one TiB is not a credible Metal wired-memory limit on
+# the supported machines. Bound the native value before converting MiB to
+# bytes so a corrupt ABI read can never turn into an enormous Python integer.
+APPLE_IOGPU_WIRED_LIMIT_MAX_MIB = 1024**2
 MFERENCE_CONTEXT_WINDOWS = (4_096, 8_192, 16_384, 32_768, 65_536, 128_000)
 SSD_STREAMING_RUNTIME_URLS = {
     "swiftlm": "https://github.com/SharpAI/SwiftLM",
@@ -603,6 +640,14 @@ BENCHMARK_SUITES = {
         "promptTokens": [8_192, 12_288], "maxTokens": 256, "repetitions": 1,
         "prefixTokens": 8_192, "toolTokens": 4_096, "requiredContext": 16_384,
         "scenarios": ["cold", "warmPrefix", "toolIngest", "steadyTurn"],
+    },
+    ROUTE_QUALIFICATION_8K_SUITE: {
+        "label": "8K Agentic Route Qualification", "kind": "agentic",
+        "promptTokens": [3_072, 4_096], "maxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+        "repetitions": 1, "prefixTokens": 3_072, "toolTokens": 1_024,
+        "requiredContext": LLAMACPP_PLE_CONTEXT,
+        "scenarios": list(ROUTE_QUALIFICATION_SCENARIOS),
+        "internal": True,
     },
 }
 DFLASH2_MINIMUM_RUNTIME = "0.6.3rc1"
@@ -715,6 +760,16 @@ WHALLM_CONTEXT_WINDOWS = (4_096, 8_192, 16_384)
 WHALLM_MODEL_BYTES = 125_291_490_955
 WHALLM_MEASURED_PEAK_BYTES = round(18.92 * 1024**3)
 WHALLM_SUPPORT_FLOOR_BYTES = 64 * 1024**3
+WHALLM_STATUS_MAX_RESPONSE = 64 * 1024
+LLAMACPP_WHALLM_CONFLICT_LABEL = "Unload Whallm temporarily"
+LLAMACPP_WHALLM_CONFLICT_DETAIL = (
+    "Whallm is currently loading or serving a model on 127.0.0.1:11434. "
+    "Unload it in Whallm, then recheck; the launcher will not stop it automatically."
+)
+LLAMACPP_WHALLM_UNKNOWN_DETAIL = (
+    "Whallm's fixed loopback server is live, but its loaded-model status could not be "
+    "verified. Close or unload Whallm, then recheck; the launcher will not change it."
+)
 WHALLM_RELEASE_URL = "https://github.com/yanun0323/Whallm/releases/tag/v1.1.2"
 WHALLM_DOCS_URL = "https://github.com/yanun0323/Whallm"
 WHALLM_BENCHMARK_URL = "https://github.com/yanun0323/Whallm/blob/master/BENCHMARK.md"
@@ -928,6 +983,97 @@ def probe_whallm_endpoint(timeout: float = 1.5) -> dict[str, Any]:
         "endpoint": WHALLM_ENDPOINT,
         "model": WHALLM_MODEL_ID,
         "server": str(probe.get("server") or "Whallm")[:120],
+    }
+
+
+def _whallm_loopback_listening(timeout: float = 0.25) -> bool:
+    """Distinguish a closed fixed port from a live server with a bad response."""
+    try:
+        with socket.create_connection(("127.0.0.1", 11_434), timeout=timeout):
+            return True
+    except (OSError, TimeoutError):
+        return False
+
+
+def probe_whallm_runtime_status(timeout: float = 1.5) -> dict[str, Any]:
+    """Read Whallm's bounded lifecycle status; never infer residency from its catalog."""
+    opener = urllib.request.build_opener(_NoFreetokenRedirects())
+    request = urllib.request.Request(
+        f"{WHALLM_ENDPOINT}/api/status",
+        headers={"Accept": "application/json", "User-Agent": f"LLM-Launcher/{VERSION}"},
+    )
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            status = int(getattr(response, "status", 0) or 0)
+            body = response.read(WHALLM_STATUS_MAX_RESPONSE + 1)
+    except urllib.error.HTTPError as error:
+        return {
+            "reachable": True, "valid": False, "loaded_model": None,
+            "loading_model": None, "reason": f"http-{error.code}",
+        }
+    except (OSError, urllib.error.URLError, TimeoutError):
+        reachable = _whallm_loopback_listening(timeout=min(0.25, max(0.05, timeout)))
+        return {
+            "reachable": reachable, "valid": False, "loaded_model": None,
+            "loading_model": None,
+            "reason": "status-unreadable" if reachable else "offline",
+        }
+    if status != HTTPStatus.OK:
+        return {
+            "reachable": True, "valid": False, "loaded_model": None,
+            "loading_model": None, "reason": f"http-{status or 'unknown'}",
+        }
+    if len(body) > WHALLM_STATUS_MAX_RESPONSE:
+        return {
+            "reachable": True, "valid": False, "loaded_model": None,
+            "loading_model": None, "reason": "response-too-large",
+        }
+    try:
+        value = json.loads(body)
+    except (ValueError, UnicodeError):
+        value = None
+    if not isinstance(value, dict) or not {"loaded_model", "loading_model"}.issubset(value):
+        return {
+            "reachable": True, "valid": False, "loaded_model": None,
+            "loading_model": None, "reason": "invalid-json-contract",
+        }
+
+    normalized: dict[str, str | None] = {}
+    for key in ("loaded_model", "loading_model"):
+        raw = value.get(key)
+        if raw is None or raw == "":
+            normalized[key] = None
+        elif (
+            isinstance(raw, str) and len(raw) <= 512 and "\0" not in raw
+            and raw.strip()
+        ):
+            normalized[key] = raw.strip()
+        else:
+            return {
+                "reachable": True, "valid": False, "loaded_model": None,
+                "loading_model": None, "reason": "invalid-model-state",
+            }
+    return {"reachable": True, "valid": True, **normalized, "reason": "ok"}
+
+
+def whallm_qualification_conflict(timeout: float = 1.5) -> dict[str, Any]:
+    """Fail closed for any resident/loading Whallm model or unreadable live daemon."""
+    status = probe_whallm_runtime_status(timeout=timeout)
+    if status.get("reachable") is not True:
+        return {}
+    if status.get("valid") is not True:
+        return {"state": "unknown", "detail": LLAMACPP_WHALLM_UNKNOWN_DETAIL}
+    active = [
+        str(status.get(key) or "")
+        for key in ("loaded_model", "loading_model")
+        if status.get(key)
+    ]
+    if not active:
+        return {}
+    return {
+        "state": "resident",
+        "exactPinnedModel": WHALLM_MODEL_ID in active,
+        "detail": LLAMACPP_WHALLM_CONFLICT_DETAIL,
     }
 
 
@@ -3115,6 +3261,71 @@ def model_roots() -> list[tuple[str, Path]]:
     return unique
 
 
+def _physical_directory_identity(path: Path) -> tuple[int, int] | None:
+    """Identify one directory independently of aliases and path spelling.
+
+    APFS commonly preserves the spelling supplied to ``realpath`` even when
+    two case variants address the same directory.  A resolved-path string is
+    therefore not an authoritative dedupe key on the Mac.  The device/inode
+    pair is, and using the directory identity (rather than any weight-file
+    identity) keeps separate model folders separate even if they hard-link a
+    payload.
+    """
+    try:
+        details = path.stat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(details.st_mode):
+        return None
+    return int(details.st_dev), int(details.st_ino)
+
+
+def _preferred_scan_root_spellings(
+    roots: list[tuple[str, Path]],
+) -> dict[tuple[int, int], Path]:
+    """Choose a stable spelling for each physical model-library root.
+
+    Launcher acquisition destinations come first so a model downloaded to
+    ``Documents/models`` keeps that configured path and consequently keeps
+    its model id and artifact fingerprint.  Other roots retain their existing
+    scan order.  Origin labels are intentionally merged later, at candidate
+    level, rather than being discarded here.
+    """
+    preferred: dict[tuple[int, int], Path] = {}
+    candidates: list[Path] = []
+    for item in model_acquisition_roots():
+        value = item.get("path") if isinstance(item, dict) else None
+        if isinstance(value, str) and value:
+            candidates.append(Path(value).expanduser())
+    candidates.extend(path.expanduser() for _label, path in roots)
+    for path in candidates:
+        identity = _physical_directory_identity(path)
+        if identity is not None:
+            preferred.setdefault(identity, path)
+    return preferred
+
+
+def _preferred_physical_candidate_path(
+    candidate: Path,
+    scanned_root: Path,
+    preferred_root: Path | None,
+    identity: tuple[int, int],
+) -> Path | None:
+    """Resolve a candidate through the preferred alias when it is identical."""
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    if preferred_root is None:
+        return resolved
+    try:
+        relative = candidate.relative_to(scanned_root)
+        preferred = (preferred_root / relative).resolve(strict=True)
+    except (OSError, ValueError):
+        return resolved
+    return preferred if _physical_directory_identity(preferred) == identity else resolved
+
+
 def candidate_dirs(root: Path, max_depth: int = 4) -> list[Path]:
     found: list[Path] = []
     if not root.exists():
@@ -3310,9 +3521,8 @@ def mference_bundle_validation(path: Path) -> tuple[bool, str, int]:
     return True, f"Verified Mference {family} receipt and SSD-streaming payload layout.", total
 
 
-def llamacpp_atomic_artifact_contract(path: Path) -> dict[str, Any]:
-    """Bind the nested 28-shard quant to its exact verified parent acquisition."""
-    base = {
+def _llamacpp_atomic_base() -> dict[str, Any]:
+    return {
         "ready": False,
         "repoId": LLAMACPP_ATOMIC_REPO,
         "pinnedRevision": LLAMACPP_ATOMIC_REVISION,
@@ -3323,7 +3533,42 @@ def llamacpp_atomic_artifact_contract(path: Path) -> dict[str, Any]:
         "context": LLAMACPP_PLE_CONTEXT,
         "firstShard": None,
         "receiptFingerprint": None,
+        "verificationState": "unverified",
+        "currentProcessVerified": False,
+        "verifiedShards": 0,
+        "totalShards": LLAMACPP_ATOMIC_SHARDS,
+        "presentationSnapshot": False,
     }
+
+
+def _atomic_file_identity(path: Path, expected_checksum: str) -> dict[str, Any] | None:
+    """Describe one current shard without treating metadata as a hash proof."""
+    try:
+        requested = path.expanduser()
+        details = requested.lstat()
+        resolved = requested.resolve(strict=True)
+    except OSError:
+        return None
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+        return None
+    birthtime = getattr(details, "st_birthtime", 0.0)
+    return {
+        "path": str(requested),
+        "resolvedPath": str(resolved),
+        "device": int(details.st_dev),
+        "inode": int(details.st_ino),
+        "mode": int(details.st_mode),
+        "size": int(details.st_size),
+        "mtimeNs": int(details.st_mtime_ns),
+        "ctimeNs": int(details.st_ctime_ns),
+        "birthtimeNs": int(float(birthtime) * 1_000_000_000),
+        "expectedSha256": str(expected_checksum).casefold(),
+    }
+
+
+def _llamacpp_atomic_structural_contract(path: Path) -> dict[str, Any]:
+    """Validate receipt, exact file set, and identities without hashing payloads."""
+    base = _llamacpp_atomic_base()
     try:
         root = path.expanduser().resolve(strict=True)
     except OSError:
@@ -3331,7 +3576,7 @@ def llamacpp_atomic_artifact_contract(path: Path) -> dict[str, Any]:
     if not root.is_dir() or root.name != LLAMACPP_ATOMIC_VARIANT:
         return {**base, "reason": "This is not the exact allowlisted AtomicChat AD-3.84 folder."}
     marker_path = root.parent / MODEL_ACQUISITION_MARKER
-    marker, _marker_data, marker_error = _bounded_regular_json(marker_path)
+    marker, marker_data, marker_error = _bounded_regular_json(marker_path)
     if marker_error:
         return {
             **base,
@@ -3364,6 +3609,7 @@ def llamacpp_atomic_artifact_contract(path: Path) -> dict[str, Any]:
         by_path[relative] = item
 
     normalized: list[dict[str, Any]] = []
+    file_identities: list[dict[str, Any]] = []
     actual_names: set[str] = set()
     for index, (relative, expected_size, expected_checksum) in enumerate(
         LLAMACPP_ATOMIC_FILE_MANIFEST, 1,
@@ -3392,12 +3638,11 @@ def llamacpp_atomic_artifact_contract(path: Path) -> dict[str, Any]:
             or details.st_size != expected_size or magic != b"GGUF"
         ):
             return {**base, "reason": f"AtomicChat shard {index} changed after verification."}
-        if not _cached_regular_file_sha256_matches(candidate, expected_checksum):
-            return {
-                **base,
-                "reason": f"AtomicChat shard {index} no longer matches its verified SHA-256 checksum.",
-            }
+        file_identity = _atomic_file_identity(candidate, expected_checksum)
+        if file_identity is None:
+            return {**base, "reason": f"AtomicChat shard {index} is missing or unsafe."}
         actual_names.add(candidate.name)
+        file_identities.append(file_identity)
         normalized.append({
             "path": relative, "size": expected_size, "sha256": expected_checksum,
         })
@@ -3417,13 +3662,353 @@ def llamacpp_atomic_artifact_contract(path: Path) -> dict[str, Any]:
     fingerprint = hashlib.sha256(json.dumps(
         identity, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
+    marker_identity = _atomic_file_identity(
+        marker_path, hashlib.sha256(marker_data).hexdigest(),
+    )
+    if marker_identity is None:
+        return {**base, "reason": "The AtomicChat acquisition receipt became unsafe."}
+    presentation = {
+        "schemaVersion": ATOMIC_PRESENTATION_SNAPSHOT_SCHEMA_VERSION,
+        "kind": "atomicchat-llamacpp-presentation",
+        "modelPath": str(root),
+        "manifestFingerprint": fingerprint,
+        "receiptFingerprint": fingerprint,
+        "marker": marker_identity,
+        "files": file_identities,
+    }
+    identity_key = hashlib.sha256(json.dumps(
+        presentation, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
     return {
         **base,
-        "ready": True,
-        "reason": "Exact pinned AtomicChat 28-shard receipt verified for SSD-only PLE mmap.",
+        "reason": "Exact pinned AtomicChat receipt and 28-shard structure found; SHA-256 verification is required in this controller process.",
         "firstShard": str(root / Path(llamacpp_atomic_shard_relative(1)).name),
         "receiptFingerprint": fingerprint,
         "files": normalized,
+        "_structurallyReady": True,
+        "_root": str(root),
+        "_identityKey": identity_key,
+        "_presentation": presentation,
+    }
+
+
+def _atomic_public_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: copy.deepcopy(value)
+        for key, value in contract.items()
+        if not str(key).startswith("_")
+    }
+
+
+def _register_atomic_current_process_proof(
+    structural: dict[str, Any], contract: dict[str, Any],
+) -> int:
+    global _ATOMIC_VERIFICATION_GENERATION
+    path = str(structural.get("_root") or "")
+    identity_key = str(structural.get("_identityKey") or "")
+    if not path or not identity_key:
+        return 0
+    with _ATOMIC_PRESENTATION_LOCK:
+        _ATOMIC_VERIFICATION_GENERATION += 1
+        generation = _ATOMIC_VERIFICATION_GENERATION
+        _ATOMIC_CURRENT_PROCESS_PROOFS[path] = {
+            "identityKey": identity_key,
+            "generation": generation,
+            "contract": _atomic_public_contract(contract),
+        }
+    return generation
+
+
+def _atomic_current_process_contract(
+    structural: dict[str, Any],
+) -> dict[str, Any] | None:
+    path = str(structural.get("_root") or "")
+    identity_key = str(structural.get("_identityKey") or "")
+    with _ATOMIC_PRESENTATION_LOCK:
+        proof = copy.deepcopy(_ATOMIC_CURRENT_PROCESS_PROOFS.get(path))
+        if proof and proof.get("identityKey") != identity_key:
+            _ATOMIC_CURRENT_PROCESS_PROOFS.pop(path, None)
+            proof = None
+    if not isinstance(proof, dict):
+        return None
+    contract = proof.get("contract")
+    if not isinstance(contract, dict) or contract.get("ready") is not True:
+        return None
+    return {
+        **_atomic_public_contract(structural),
+        **copy.deepcopy(contract),
+        "ready": True,
+        "verificationState": "verified",
+        "currentProcessVerified": True,
+        "verificationGeneration": int(proof.get("generation") or 0),
+        "verifiedShards": LLAMACPP_ATOMIC_SHARDS,
+        "totalShards": LLAMACPP_ATOMIC_SHARDS,
+    }
+
+
+def llamacpp_atomic_artifact_contract(
+    path: Path, *, progress: Any = None,
+) -> dict[str, Any]:
+    """Hash and bind the exact 28-shard quant in the current process."""
+    structural = _llamacpp_atomic_structural_contract(path)
+    if structural.get("_structurallyReady") is not True:
+        return _atomic_public_contract(structural)
+    current = _atomic_current_process_contract(structural)
+    if current is not None:
+        return current
+    initial_identity = str(structural["_identityKey"])
+    root = Path(str(structural["_root"]))
+    for index, (relative, _expected_size, expected_checksum) in enumerate(
+        LLAMACPP_ATOMIC_FILE_MANIFEST, 1,
+    ):
+        candidate = root / Path(relative).name
+        if not _cached_regular_file_sha256_matches(candidate, expected_checksum):
+            return {
+                **_atomic_public_contract(structural),
+                "reason": f"AtomicChat shard {index} no longer matches its verified SHA-256 checksum.",
+                "verificationState": "failed",
+                "verifiedShards": index - 1,
+            }
+        if callable(progress):
+            try:
+                progress(index, LLAMACPP_ATOMIC_SHARDS)
+            except Exception:
+                pass
+    final = _llamacpp_atomic_structural_contract(root)
+    if (
+        final.get("_structurallyReady") is not True
+        or final.get("_identityKey") != initial_identity
+    ):
+        return {
+            **_atomic_public_contract(final),
+            "ready": False,
+            "reason": "The AtomicChat GGUF or receipt changed during SHA-256 verification.",
+            "verificationState": "failed",
+        }
+    verified = {
+        **_atomic_public_contract(final),
+        "ready": True,
+        "reason": "Exact pinned AtomicChat 28-shard receipt verified for SSD-only PLE mmap in this controller process.",
+        "verificationState": "verified",
+        "currentProcessVerified": True,
+        "verifiedShards": LLAMACPP_ATOMIC_SHARDS,
+        "totalShards": LLAMACPP_ATOMIC_SHARDS,
+    }
+    generation = _register_atomic_current_process_proof(final, verified)
+    verified["verificationGeneration"] = generation
+    with _ATOMIC_PRESENTATION_LOCK:
+        proof = _ATOMIC_CURRENT_PROCESS_PROOFS.get(str(final["_root"]))
+        if isinstance(proof, dict):
+            proof["contract"] = copy.deepcopy(verified)
+    return verified
+
+
+def atomic_presentation_snapshot_path() -> Path:
+    """Resolve lazily so tests and portable state directories remain isolated."""
+    return STATE_DIR / "verification" / "atomicchat-llamacpp-presentation.json"
+
+
+def _strict_atomic_snapshot_payload(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "schemaVersion", "kind", "modelPath", "manifestFingerprint",
+        "receiptFingerprint", "marker", "files",
+    }:
+        return False
+    if type(value.get("schemaVersion")) is not int:
+        return False
+    if any(type(value.get(key)) is not str for key in (
+        "kind", "modelPath", "manifestFingerprint", "receiptFingerprint",
+    )):
+        return False
+    identity_keys = {
+        "path", "resolvedPath", "device", "inode", "mode", "size",
+        "mtimeNs", "ctimeNs", "birthtimeNs", "expectedSha256",
+    }
+
+    def valid_identity(item: Any) -> bool:
+        return bool(
+            isinstance(item, dict)
+            and set(item) == identity_keys
+            and type(item.get("path")) is str
+            and type(item.get("resolvedPath")) is str
+            and type(item.get("expectedSha256")) is str
+            and re.fullmatch(r"[0-9a-f]{64}", item["expectedSha256"]) is not None
+            and all(type(item.get(key)) is int for key in (
+                "device", "inode", "mode", "size", "mtimeNs", "ctimeNs", "birthtimeNs",
+            ))
+        )
+
+    files = value.get("files")
+    return bool(
+        valid_identity(value.get("marker"))
+        and isinstance(files, list)
+        and len(files) == LLAMACPP_ATOMIC_SHARDS
+        and all(valid_identity(item) for item in files)
+    )
+
+
+def _load_atomic_presentation_snapshot(
+    structural: dict[str, Any],
+) -> bool:
+    expected = structural.get("_presentation")
+    if not _strict_atomic_snapshot_payload(expected):
+        return False
+    path = atomic_presentation_snapshot_path()
+    try:
+        directory = path.parent.lstat()
+        details = path.lstat()
+        if (
+            path.parent.is_symlink() or not stat.S_ISDIR(directory.st_mode)
+            or directory.st_uid != os.geteuid() or directory.st_mode & 0o077
+            or path.is_symlink() or not stat.S_ISREG(details.st_mode)
+            or details.st_uid != os.geteuid() or details.st_mode & 0o077
+            or not 0 < details.st_size <= ATOMIC_PRESENTATION_SNAPSHOT_MAX_BYTES
+        ):
+            return False
+        raw = path.read_bytes()
+        value = json.loads(raw)
+    except (OSError, ValueError, UnicodeError):
+        return False
+    return _strict_atomic_snapshot_payload(value) and value == expected
+
+
+def _write_atomic_presentation_snapshot(structural: dict[str, Any]) -> bool:
+    payload = structural.get("_presentation")
+    if not _strict_atomic_snapshot_payload(payload):
+        return False
+    path = atomic_presentation_snapshot_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        directory = path.parent.lstat()
+        if (
+            path.parent.is_symlink() or not stat.S_ISDIR(directory.st_mode)
+            or directory.st_uid != os.geteuid()
+        ):
+            return False
+        os.chmod(path.parent, 0o700)
+        atomic_json(path, payload, mode=0o600)
+        return True
+    except OSError:
+        return False
+
+
+def _atomic_verification_status(path: str) -> dict[str, Any]:
+    with _ATOMIC_PRESENTATION_LOCK:
+        state = copy.deepcopy(_ATOMIC_VERIFICATION_STATES.get(path) or {})
+    return state
+
+
+def _start_atomic_background_verification(
+    structural: dict[str, Any],
+) -> dict[str, Any]:
+    path = str(structural.get("_root") or "")
+    identity_key = str(structural.get("_identityKey") or "")
+    if not path or not identity_key:
+        return {}
+    with _ATOMIC_PRESENTATION_LOCK:
+        thread = _ATOMIC_VERIFICATION_THREADS.get(path)
+        state = _ATOMIC_VERIFICATION_STATES.get(path)
+        if thread is not None and thread.is_alive():
+            return copy.deepcopy(state or {})
+        if isinstance(state, dict) and state.get("identityKey") == identity_key:
+            if state.get("phase") in {"verified", "failed"}:
+                return copy.deepcopy(state)
+        job_id = secrets.token_hex(12)
+        state = {
+            "phase": "checking",
+            "identityKey": identity_key,
+            "jobId": job_id,
+            "verifiedShards": 0,
+            "totalShards": LLAMACPP_ATOMIC_SHARDS,
+            "reason": "Checking the exact pinned shards in the background.",
+        }
+        _ATOMIC_VERIFICATION_STATES[path] = state
+
+        def worker() -> None:
+            def report(completed: int, total: int) -> None:
+                with _ATOMIC_PRESENTATION_LOCK:
+                    current = _ATOMIC_VERIFICATION_STATES.get(path)
+                    if not isinstance(current, dict) or current.get("jobId") != job_id:
+                        return
+                    current["verifiedShards"] = max(0, min(int(completed), LLAMACPP_ATOMIC_SHARDS))
+                    current["totalShards"] = LLAMACPP_ATOMIC_SHARDS
+
+            try:
+                result = llamacpp_atomic_artifact_contract(Path(path), progress=report)
+                final_structural = _llamacpp_atomic_structural_contract(Path(path))
+                proof = _atomic_current_process_contract(final_structural)
+                succeeded = bool(
+                    result.get("ready") is True
+                    and proof is not None
+                    and final_structural.get("_identityKey") == identity_key
+                )
+                snapshot_saved = (
+                    _write_atomic_presentation_snapshot(final_structural)
+                    if succeeded else False
+                )
+            except Exception as error:
+                result = {
+                    "ready": False,
+                    "reason": f"Background SHA-256 verification failed safely: {error}",
+                }
+                succeeded = False
+                snapshot_saved = False
+            with _ATOMIC_PRESENTATION_LOCK:
+                current = _ATOMIC_VERIFICATION_STATES.get(path)
+                if not isinstance(current, dict) or current.get("jobId") != job_id:
+                    return
+                current.update({
+                    "phase": "verified" if succeeded else "failed",
+                    "verifiedShards": LLAMACPP_ATOMIC_SHARDS if succeeded else int(
+                        result.get("verifiedShards") or current.get("verifiedShards") or 0
+                    ),
+                    "totalShards": LLAMACPP_ATOMIC_SHARDS,
+                    "snapshotSaved": snapshot_saved,
+                    "reason": (
+                        "Current-process SHA-256 verification completed."
+                        if succeeded else str(result.get("reason") or "SHA-256 verification failed.")
+                    ),
+                })
+
+        thread = threading.Thread(
+            target=worker, name="llm-launcher-atomic-verifier", daemon=True,
+        )
+        _ATOMIC_VERIFICATION_THREADS[path] = thread
+        thread.start()
+        return copy.deepcopy(state)
+
+
+def llamacpp_atomic_scan_contract(path: Path) -> dict[str, Any]:
+    """Start current-process verification without blocking catalog discovery."""
+    structural = _llamacpp_atomic_structural_contract(path)
+    if structural.get("_structurallyReady") is not True:
+        return _atomic_public_contract(structural)
+    current = _atomic_current_process_contract(structural)
+    if current is not None:
+        return current
+    snapshot = _load_atomic_presentation_snapshot(structural)
+    state = _start_atomic_background_verification(structural)
+    current = _atomic_current_process_contract(structural)
+    if current is not None:
+        return current
+    phase = str(state.get("phase") or "checking")
+    completed = max(0, min(
+        int(state.get("verifiedShards") or 0), LLAMACPP_ATOMIC_SHARDS,
+    ))
+    if phase == "failed":
+        reason = str(state.get("reason") or "Background SHA-256 verification failed.")
+    else:
+        phase = "checking"
+        reason = f"Verifying exact pinned shards in this controller process ({completed}/{LLAMACPP_ATOMIC_SHARDS})."
+    return {
+        **_atomic_public_contract(structural),
+        "ready": False,
+        "reason": reason,
+        "verificationState": phase,
+        "currentProcessVerified": False,
+        "verifiedShards": completed,
+        "totalShards": LLAMACPP_ATOMIC_SHARDS,
+        "presentationSnapshot": snapshot,
     }
 
 
@@ -4783,20 +5368,77 @@ def apple_memory_pressure_state() -> dict[str, Any]:
     }
 
 
-def apple_iogpu_wired_limit_bytes() -> int:
-    """Return an explicitly raised Apple GPU wired-memory limit, or zero."""
-    if sys.platform != "darwin":
-        return 0
+def _apple_iogpu_wired_limit_mib_native() -> int | None:
+    """Read the native signed sysctl value, or ``None`` when unavailable.
+
+    ``iogpu.wired_limit_mb`` has appeared as both a 32-bit and a 64-bit native
+    integer. Ask the kernel for the width first and accept only those two
+    layouts. This avoids spawning ``sysctl`` in the quarter-second safety
+    monitor, where process creation can time out while a very large model is
+    faulting pages and falsely look like a changed limit.
+    """
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        call = libc.sysctlbyname
+        call.argtypes = [
+            ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_void_p, ctypes.c_size_t,
+        ]
+        call.restype = ctypes.c_int
+        native_size = ctypes.c_size_t(0)
+        name = b"iogpu.wired_limit_mb"
+        if call(name, None, ctypes.byref(native_size), None, 0) != 0:
+            return None
+        widths = {
+            ctypes.sizeof(ctypes.c_int32): ctypes.c_int32,
+            ctypes.sizeof(ctypes.c_int64): ctypes.c_int64,
+        }
+        value_type = widths.get(int(native_size.value))
+        if value_type is None:
+            return None
+        expected_size = int(native_size.value)
+        value = value_type()
+        if call(name, ctypes.byref(value), ctypes.byref(native_size), None, 0) != 0:
+            return None
+        if int(native_size.value) != expected_size:
+            return None
+        return int(value.value)
+    except (
+        AttributeError, OSError, TypeError, ValueError, OverflowError,
+        ctypes.ArgumentError,
+    ):
+        return None
+
+
+def _apple_iogpu_wired_limit_mib_command() -> int | None:
+    """Conservative compatibility fallback for an unavailable native call."""
     try:
         result = subprocess.run(
             ["/usr/sbin/sysctl", "-n", "iogpu.wired_limit_mb"], text=True,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             timeout=2, check=False,
         )
-        value_mib = int(result.stdout.strip())
-        return value_mib * 1024**2 if value_mib > 0 else 0
+        raw = result.stdout.strip()
+        if result.returncode != 0 or re.fullmatch(r"[0-9]+", raw) is None:
+            return None
+        return int(raw)
     except (OSError, TypeError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def apple_iogpu_wired_limit_bytes() -> int:
+    """Return a bounded explicitly raised Apple GPU wired limit, or zero."""
+    if sys.platform != "darwin":
         return 0
+    value_mib = _apple_iogpu_wired_limit_mib_native()
+    if value_mib is None:
+        value_mib = _apple_iogpu_wired_limit_mib_command()
+    if (
+        isinstance(value_mib, bool) or not isinstance(value_mib, int)
+        or not 0 < value_mib <= APPLE_IOGPU_WIRED_LIMIT_MAX_MIB
+    ):
+        return 0
+    return value_mib * 1024**2
 
 
 def apple_resource_snapshot() -> dict[str, Any]:
@@ -4808,16 +5450,134 @@ def apple_resource_snapshot() -> dict[str, Any]:
     }
 
 
+class _DarwinRusageInfoV4(ctypes.Structure):
+    """Public Darwin rusage_info_v4 layout through its lifetime footprint counters."""
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        *[(name, ctypes.c_uint64) for name in (
+            "ri_user_time", "ri_system_time", "ri_pkg_idle_wkups",
+            "ri_interrupt_wkups", "ri_pageins", "ri_wired_size",
+            "ri_resident_size", "ri_phys_footprint", "ri_proc_start_abstime",
+            "ri_proc_exit_abstime", "ri_child_user_time", "ri_child_system_time",
+            "ri_child_pkg_idle_wkups", "ri_child_interrupt_wkups",
+            "ri_child_pageins", "ri_child_elapsed_abstime", "ri_diskio_bytesread",
+            "ri_diskio_byteswritten", "ri_cpu_time_qos_default",
+            "ri_cpu_time_qos_maintenance", "ri_cpu_time_qos_background",
+            "ri_cpu_time_qos_utility", "ri_cpu_time_qos_legacy",
+            "ri_cpu_time_qos_user_initiated", "ri_cpu_time_qos_user_interactive",
+            "ri_billed_system_time", "ri_serviced_system_time", "ri_logical_writes",
+            "ri_lifetime_max_phys_footprint", "ri_instructions", "ri_cycles",
+            "ri_billed_energy", "ri_serviced_energy",
+            "ri_interval_max_phys_footprint", "ri_runnable_time", "ri_flags",
+        )],
+    ]
+
+
+def darwin_process_physical_footprint(pid: int) -> dict[str, Any]:
+    """Read an owned process's kernel-accounted footprint; never substitute RSS."""
+    if sys.platform != "darwin" or isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return {
+            "processFootprintAvailable": False, "processFootprintSource": None,
+            "processPhysicalFootprintBytes": None,
+            "processLifetimePeakPhysicalFootprintBytes": None,
+        }
+    try:
+        libc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        call = libc.proc_pid_rusage
+        call.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        call.restype = ctypes.c_int
+        value = _DarwinRusageInfoV4()
+        if call(pid, 4, ctypes.byref(value)) != 0:
+            raise OSError(ctypes.get_errno(), "proc_pid_rusage failed")
+        current = int(value.ri_phys_footprint)
+        lifetime = int(value.ri_lifetime_max_phys_footprint)
+        if current <= 0 or lifetime <= 0 or lifetime < current:
+            raise ValueError("Darwin returned invalid physical-footprint counters.")
+        return {
+            "processFootprintAvailable": True,
+            "processFootprintSource": "proc_pid_rusage RUSAGE_INFO_V4",
+            "processPhysicalFootprintBytes": current,
+            "processLifetimePeakPhysicalFootprintBytes": lifetime,
+        }
+    except (AttributeError, OSError, TypeError, ValueError):
+        return {
+            "processFootprintAvailable": False, "processFootprintSource": None,
+            "processPhysicalFootprintBytes": None,
+            "processLifetimePeakPhysicalFootprintBytes": None,
+        }
+
+
+def darwin_all_process_ids() -> list[int] | None:
+    """Enumerate Darwin processes through libproc without trusting parsed command output."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        libc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        call = libc.proc_listallpids
+        call.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        call.restype = ctypes.c_int
+        capacity = max(64, int(call(None, 0)) + 64)
+        for _attempt in range(3):
+            buffer = (ctypes.c_int * capacity)()
+            count = int(call(buffer, ctypes.sizeof(buffer)))
+            if count < 0:
+                raise OSError(ctypes.get_errno(), "proc_listallpids failed")
+            if count < capacity:
+                return sorted({int(buffer[index]) for index in range(count) if int(buffer[index]) > 0})
+            capacity *= 2
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    return None
+
+
+def darwin_process_group_physical_footprint(pgid: int) -> dict[str, Any]:
+    """Sum kernel physical footprints for every live member of an owned process group."""
+    if sys.platform != "darwin" or not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0:
+        return {"processGroupFootprintAvailable": False, "processGroupMemberCount": 0}
+    all_pids = darwin_all_process_ids()
+    if all_pids is None:
+        return {"processGroupFootprintAvailable": False, "processGroupMemberCount": 0}
+    pids: list[int] = []
+    for pid in all_pids:
+        try:
+            if os.getpgid(pid) == pgid:
+                pids.append(pid)
+        except (OSError, ProcessLookupError):
+            continue
+    readings = [darwin_process_physical_footprint(pid) for pid in pids]
+    if not pids or any(item.get("processFootprintAvailable") is not True for item in readings):
+        return {
+            "processGroupFootprintAvailable": False,
+            "processGroupMemberCount": len(pids),
+        }
+    return {
+        "processGroupFootprintAvailable": True,
+        "processGroupMemberCount": len(pids),
+        "processGroupPhysicalFootprintBytes": sum(
+            int(item["processPhysicalFootprintBytes"]) for item in readings
+        ),
+        "processGroupLifetimePeakPhysicalFootprintBytes": sum(
+            int(item["processLifetimePeakPhysicalFootprintBytes"]) for item in readings
+        ),
+    }
+
+
 class BenchmarkTelemetrySampler:
     """Sample low-overhead, system-wide Apple-silicon resource signals."""
 
-    def __init__(self, interval: float = BENCHMARK_TELEMETRY_INTERVAL_SECONDS) -> None:
+    def __init__(
+        self, interval: float = BENCHMARK_TELEMETRY_INTERVAL_SECONDS,
+        process_provider: Any = None, invariant_callback: Any = None,
+    ) -> None:
         self.interval = max(0.25, float(interval))
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.samples: list[dict[str, Any]] = []
         self.summary: dict[str, Any] | None = None
+        self.process_provider = process_provider
+        self.invariant_callback = invariant_callback
+        self.violation: str | None = None
 
     def _sample(self) -> None:
         try:
@@ -4829,8 +5589,22 @@ class BenchmarkTelemetrySampler:
                 "thermalLabel": "unavailable", "lowPowerMode": None,
                 "capturedAt": time.monotonic(),
             }
+        process = self.process_provider() if callable(self.process_provider) else None
+        if process is not None and getattr(process, "poll", lambda: 0)() is None:
+            value["processAlive"] = True
+            value.update(darwin_process_physical_footprint(int(process.pid)))
+            try:
+                value.update(darwin_process_group_physical_footprint(os.getpgid(int(process.pid))))
+            except (OSError, ProcessLookupError):
+                value.update({"processGroupFootprintAvailable": False, "processGroupMemberCount": 0})
         with self.lock:
             self.samples.append(value)
+        if callable(self.invariant_callback) and self.violation is None:
+            try:
+                self.invariant_callback(value)
+            except Exception as error:  # noqa: BLE001 - preserve exact live safety failure
+                self.violation = str(error)
+                self.stop_event.set()
 
     def _worker(self) -> None:
         while not self.stop_event.wait(self.interval):
@@ -4853,8 +5627,12 @@ class BenchmarkTelemetrySampler:
         self.stop_event.set()
         thread = self.thread
         if thread and thread is not threading.current_thread():
-            thread.join(timeout=3)
-        self._sample()
+            thread.join(timeout=10)
+        sampling_complete = not bool(thread and thread.is_alive())
+        if sampling_complete:
+            self._sample()
+        elif self.violation is None:
+            self.violation = "Resource telemetry did not stop cleanly; qualification evidence is incomplete."
         with self.lock:
             samples = copy.deepcopy(self.samples)
         memory = [
@@ -4870,6 +5648,26 @@ class BenchmarkTelemetrySampler:
             and not isinstance(item.get("thermalState"), bool)
             and item["thermalState"] in THERMAL_STATE_LABELS
         ]
+        footprints = [
+            item for item in samples
+            if item.get("processFootprintAvailable") is True
+            and isinstance(item.get("processLifetimePeakPhysicalFootprintBytes"), int)
+            and not isinstance(item.get("processLifetimePeakPhysicalFootprintBytes"), bool)
+        ]
+        alive_samples = [item for item in samples if item.get("processAlive") is True]
+        group_footprints = [
+            item for item in samples
+            if item.get("processGroupFootprintAvailable") is True
+            and isinstance(item.get("processGroupLifetimePeakPhysicalFootprintBytes"), int)
+            and not isinstance(item.get("processGroupLifetimePeakPhysicalFootprintBytes"), bool)
+        ]
+        wired_limits = [
+            int(item["metalWiredLimitBytes"])
+            for item in samples
+            if isinstance(item.get("metalWiredLimitBytes"), int)
+            and not isinstance(item.get("metalWiredLimitBytes"), bool)
+            and int(item["metalWiredLimitBytes"]) > 0
+        ]
         baseline_free = float(memory[0]["freePercent"]) if memory else None
         minimum_free = min(float(item["freePercent"]) for item in memory) if memory else None
         total = int(memory[0].get("totalBytes") or 0) if memory else 0
@@ -4881,6 +5679,7 @@ class BenchmarkTelemetrySampler:
         thermal_worst = max(int(item["thermalState"]) for item in thermal) if thermal else None
         result = {
             "version": 1,
+            "samplingComplete": sampling_complete,
             "sampleCount": len(samples),
             "memoryAvailable": bool(memory),
             "memorySource": "memory_pressure -Q" if memory else None,
@@ -4892,6 +5691,33 @@ class BenchmarkTelemetrySampler:
                 round(total * pressure_delta / 100)
                 if total > 0 and pressure_delta is not None else None
             ),
+            "processFootprintAvailable": bool(footprints),
+            "processAliveSampleCount": len(alive_samples),
+            "processFootprintSampleCount": len(footprints),
+            "processFootprintSource": (
+                "proc_pid_rusage RUSAGE_INFO_V4" if footprints else None
+            ),
+            "peakProcessPhysicalFootprintBytes": (
+                max(int(item["processLifetimePeakPhysicalFootprintBytes"]) for item in footprints)
+                if footprints else None
+            ),
+            "processGroupFootprintAvailable": bool(group_footprints),
+            "processGroupFootprintSampleCount": len(group_footprints),
+            "processGroupMemberCountMinimum": (
+                min(int(item["processGroupMemberCount"]) for item in group_footprints)
+                if group_footprints else None
+            ),
+            "processGroupMemberCountMaximum": (
+                max(int(item["processGroupMemberCount"]) for item in group_footprints)
+                if group_footprints else None
+            ),
+            "peakProcessGroupPhysicalFootprintBytes": (
+                max(int(item["processGroupLifetimePeakPhysicalFootprintBytes"]) for item in group_footprints)
+                if group_footprints else None
+            ),
+            "metalWiredLimitSampleCount": len(wired_limits),
+            "metalWiredLimitMinimumBytes": min(wired_limits) if wired_limits else None,
+            "metalWiredLimitMaximumBytes": max(wired_limits) if wired_limits else None,
             "thermalAvailable": bool(thermal),
             "thermalSource": "NSProcessInfo.thermalState" if thermal else None,
             "thermalStart": THERMAL_STATE_LABELS.get(thermal_start, "unavailable"),
@@ -5563,6 +6389,13 @@ def benchmark_runtime_integrity_issue(record: dict[str, Any]) -> str | None:
 
 def benchmark_record_identity(record: dict[str, Any]) -> tuple[Any, ...]:
     """Identify one repeatable benchmark route without collapsing its history."""
+    qualification_output_contract = (
+        record.get("configuredOutputLimit"),
+        record.get("measuredRequestMaxTokens"),
+    ) if (
+        record.get("kind") == "route-qualification"
+        and record.get("backend") == "llamacpp"
+    ) else (None, None)
     return (
         record.get("backend"), record.get("modelFingerprint"),
         record.get("ssdComparisonIdentity"),
@@ -5572,6 +6405,7 @@ def benchmark_record_identity(record: dict[str, Any]) -> tuple[Any, ...]:
         record.get("outputMin"), record.get("outputMax"), record.get("suite"),
         json.dumps(record.get("engineSettings") or {}, sort_keys=True, separators=(",", ":")),
         json.dumps(record.get("scenarioContract") or [], sort_keys=True, separators=(",", ":")),
+        *qualification_output_contract,
     )
 
 
@@ -5789,15 +6623,15 @@ def _agentic_benchmark_contract_verified(
         return True
     if (
         workload != "agentic"
-        or benchmark.get("suite") != "agentic"
+        or benchmark.get("suite") not in {"agentic", ROUTE_QUALIFICATION_8K_SUITE}
         or benchmark.get("scenarioContract")
-        != ["cold", "warmPrefix", "toolIngest", "steadyTurn"]
+        != ROUTE_QUALIFICATION_SCENARIOS
     ):
         return False
     modes = benchmark.get("modes")
     if not isinstance(modes, dict):
         return False
-    expected = ["cold", "warmPrefix", "toolIngest", "steadyTurn"]
+    expected = ROUTE_QUALIFICATION_SCENARIOS
     numeric_metrics = {
         "coldTTFTSeconds", "warmPrefixTTFTSeconds", "prefixReuseFactor",
         "toolIngestTTFTSeconds", "steadyTurnTTFTSeconds", "toolReuseFactor",
@@ -6454,6 +7288,38 @@ def dflash2_tuning_sweep_verified(
     )
 
 
+def benchmark_record_output_contract_verified(
+    benchmark: dict[str, Any], configured_output: Any,
+) -> bool:
+    """Keep the selected ceiling distinct from what a bounded probe measured."""
+    if isinstance(configured_output, bool) or not isinstance(configured_output, int):
+        return False
+    output_min = benchmark.get("outputMin")
+    output_max = benchmark.get("outputMax")
+    if (
+        isinstance(output_min, bool) or not isinstance(output_min, int)
+        or isinstance(output_max, bool) or not isinstance(output_max, int)
+    ):
+        return False
+    if (
+        benchmark.get("kind") == "route-qualification"
+        and benchmark.get("backend") == "llamacpp"
+    ):
+        contract = benchmark.get("qualificationContract")
+        return bool(
+            configured_output == benchmark.get("configuredOutputLimit")
+            and benchmark.get("measuredRequestMaxTokens")
+            == ROUTE_QUALIFICATION_MAX_TOKENS
+            and output_min == ROUTE_QUALIFICATION_MAX_TOKENS
+            and output_max == ROUTE_QUALIFICATION_MAX_TOKENS
+            and isinstance(contract, dict)
+            and contract.get("configuredOutputLimit") == configured_output
+            and contract.get("measuredRequestMaxTokens")
+            == ROUTE_QUALIFICATION_MAX_TOKENS
+        )
+    return output_min <= configured_output <= output_max
+
+
 def _local_benchmark_record_verified(
     capability: dict[str, Any], benchmark: dict[str, Any],
     evidence: dict[str, Any] | None = None,
@@ -6492,9 +7358,7 @@ def _local_benchmark_record_verified(
         or not isinstance(benchmark.get("contextMin"), int)
         or not isinstance(benchmark.get("contextMax"), int)
         or not benchmark["contextMin"] <= context <= benchmark["contextMax"]
-        or not isinstance(benchmark.get("outputMin"), int)
-        or not isinstance(benchmark.get("outputMax"), int)
-        or not benchmark["outputMin"] <= output <= benchmark["outputMax"]
+        or not benchmark_record_output_contract_verified(benchmark, output)
     ):
         return False
     if benchmark.get("client") not in {None, "any", (evidence or {}).get("client")}:
@@ -6563,6 +7427,39 @@ def _local_benchmark_record_verified(
         capability, benchmark, mode_settings,
     ):
         return False
+    if benchmark.get("kind") == "route-qualification":
+        metrics = route_qualification_metrics(benchmark)
+        qualification = benchmark.get("qualification")
+        contract = benchmark.get("qualificationContract")
+        if (
+            metrics is None or not isinstance(qualification, dict)
+            or qualification.get("metrics") != metrics
+            or qualification.get("reasoningEnabled") is not True
+            or qualification.get("reasoningObserved") is not True
+            or qualification.get("answerObserved") is not True
+            or (
+                backend == "llamacpp"
+                and qualification.get("reasoningBoundaryVerified") is not True
+            )
+            or qualification.get("terminalCompletionObserved") is not True
+            or qualification.get("authoritativeUsage") is not True
+            or (not isinstance(contract, dict) and backend != "omlx")
+        ):
+            return False
+        if backend == "llamacpp" and (
+            capability.get("llamacppPle") is not True
+            or capability.get("currentProcessVerified") is not True
+            or not isinstance(capability.get("verificationGeneration"), int)
+            or capability.get("verificationGeneration") <= 0
+            or capability.get("atomicPle", {}).get("ready") is not True
+            or capability.get("atomicPle", {}).get("currentProcessVerified") is not True
+            or capability.get("atomicPle", {}).get("verificationGeneration")
+            != capability.get("verificationGeneration")
+            or contract.get("receiptFingerprint") != capability.get("receiptFingerprint")
+            or contract.get("runtimeVersion") != capability.get("runtimeVersion")
+            or contract.get("memoryCeilingBytes") != LLAMACPP_PLE_MEMORY_CEILING_BYTES
+        ):
+            return False
     if winner == "ar":
         return True
     try:
@@ -8178,20 +9075,29 @@ def lmstudio_model_load_key_index(
 def scan_models() -> list[dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
     roots = model_roots()
+    preferred_root_spellings = _preferred_scan_root_spellings(roots)
     lmstudio_load_keys = lmstudio_model_load_key_index()
     benchmark_records = load_benchmark_records()
     ane_tuning_records = load_ane_tuning_records()
     machine_fingerprint = hardware_fingerprint() if benchmark_records or ane_tuning_records else ""
     installed_memory = physical_memory_bytes()
-    discovered: dict[str, dict[str, Any]] = {}
+    discovered: dict[tuple[int, int], dict[str, Any]] = {}
     for origin, root in roots:
-        for candidate in candidate_dirs(root):
-            try:
-                real = candidate.resolve(strict=True)
-            except OSError:
+        scanned_root = root.expanduser().absolute()
+        root_identity = _physical_directory_identity(scanned_root)
+        preferred_root = preferred_root_spellings.get(root_identity) if root_identity else None
+        for candidate in candidate_dirs(scanned_root):
+            candidate_identity = _physical_directory_identity(candidate)
+            if candidate_identity is None:
                 continue
-            key = str(real)
-            item = discovered.setdefault(key, {"path": real, "origins": []})
+            real = _preferred_physical_candidate_path(
+                candidate, scanned_root, preferred_root, candidate_identity,
+            )
+            if real is None:
+                continue
+            item = discovered.setdefault(
+                candidate_identity, {"path": real, "origins": []},
+            )
             if origin not in item["origins"]:
                 item["origins"].append(origin)
 
@@ -8263,7 +9169,7 @@ def scan_models() -> list[dict[str, Any]]:
         ready, status, weight_bytes = weight_completeness(real, config)
         atomic_named_variant = real.name == LLAMACPP_ATOMIC_VARIANT
         atomic_ple = (
-            llamacpp_atomic_artifact_contract(real)
+            llamacpp_atomic_scan_contract(real)
             if atomic_named_variant else {
                 "ready": False,
                 "reason": "The dedicated llama.cpp route requires the exact pinned AtomicChat GGUF split.",
@@ -8311,7 +9217,12 @@ def scan_models() -> list[dict[str, Any]]:
         architecture = str(architectures[0]) if isinstance(architectures, list) and architectures else model_type
         quant = deep_get(config, ("quantization", "bits"), ("quantization_config", "bits"))
         quantization = f"{quant}-bit" if isinstance(quant, (int, float)) else "From artifact"
-        atomic_ple_ready = atomic_ple.get("ready") is True
+        atomic_ple_ready = bool(
+            atomic_ple.get("ready") is True
+            and atomic_ple.get("currentProcessVerified") is True
+            and isinstance(atomic_ple.get("verificationGeneration"), int)
+            and atomic_ple.get("verificationGeneration") > 0
+        )
         if atomic_ple_ready:
             context = LLAMACPP_PLE_CONTEXT
             root_model_type = "qwen4exp"
@@ -8742,6 +9653,14 @@ def scan_models() -> list[dict[str, Any]]:
                     "contextMaximum": LLAMACPP_PLE_CONTEXT,
                     "atomicPle": copy.deepcopy(atomic_ple),
                     "llamacppPle": atomic_ple_ready,
+                    "verificationState": atomic_ple.get("verificationState"),
+                    "currentProcessVerified": atomic_ple.get("currentProcessVerified") is True,
+                    "verificationGeneration": atomic_ple.get("verificationGeneration"),
+                    "verifiedShards": int(atomic_ple.get("verifiedShards") or 0),
+                    "totalShards": int(
+                        atomic_ple.get("totalShards") or LLAMACPP_ATOMIC_SHARDS
+                    ),
+                    "presentationSnapshot": atomic_ple.get("presentationSnapshot") is True,
                     "receiptFingerprint": atomic_ple.get("receiptFingerprint"),
                     "modelPath": str(real),
                     "firstShard": atomic_ple.get("firstShard"),
@@ -8946,6 +9865,12 @@ def scan_models() -> list[dict[str, Any]]:
             "nativeFreetoken": freetoken_capability.get("native") is True,
             "ssdStreaming": ssd_profile,
             "atomicPle": copy.deepcopy(atomic_ple),
+            "verificationState": atomic_ple.get("verificationState") if atomic_named_variant else None,
+            "currentProcessVerified": atomic_ple.get("currentProcessVerified") is True,
+            "verificationProgress": {
+                "completed": int(atomic_ple.get("verifiedShards") or 0),
+                "total": int(atomic_ple.get("totalShards") or LLAMACPP_ATOMIC_SHARDS),
+            } if atomic_named_variant else None,
             "backends": backend,
         }
     # A verified Mference repack and its ordinary MLX source are separate
@@ -10913,6 +11838,20 @@ def validated_optimizer_evidence_binding(payload: dict[str, Any]) -> dict[str, A
     return result
 
 
+def route_qualification_record_is_fresh(
+    record: dict[str, Any], now: datetime | None = None,
+) -> bool:
+    """Keep stale single-route receipts from driving Apply/Best decisions."""
+    created = _benchmark_created_at(record.get("createdAt"))
+    if created is None:
+        return False
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if created > current:
+        return False
+    age_days = max(0.0, (current - created).total_seconds() / 86_400)
+    return age_days <= BENCHMARK_HISTORY_FRESH_DAYS
+
+
 def optimizer_evidence_bound_route_record(
     capability: dict[str, Any], backend: str, binding: dict[str, Any],
     evidence: dict[str, Any],
@@ -10929,6 +11868,7 @@ def optimizer_evidence_bound_route_record(
         and str(record.get("suite") or "") == binding["suite"]
         and str(record.get("backend") or "") == backend
         and not record.get("shootoutId")
+        and route_qualification_record_is_fresh(record)
         and _local_benchmark_record_verified(capability, record, evidence)
     ]
     if len(matches) != 1:
@@ -10946,7 +11886,7 @@ def optimal_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> di
         raise ValueError("An engine comparison cannot be applied as a current-route result.")
     backend = str(payload.get("backend", ""))
     if backend not in ENGINE_ADAPTERS or backend not in OPTIMIZER_KEYS:
-        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, or Whallm.")
+        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, Whallm, or llama.cpp SSD PLE.")
     client = str(payload.get("client", ""))
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose Pi, OpenCode, Codex, or Chat.")
@@ -11031,6 +11971,11 @@ def optimizer_backend_eligibility(
     adapter = ENGINE_ADAPTERS.get(backend)
     if not adapter or not BINARIES.get(adapter.binary_key or ""):
         return False, f"{BACKEND_LABELS.get(backend, backend or 'Engine')} is not installed."
+    if backend == "llamacpp" and _llamacpp_route_qualification_capability(model) is None:
+        return False, (
+            "The pinned llama.cpp route must finish SHA-256 verification in this "
+            "controller before it can be optimised."
+        )
     if not model.get("ready") or not capability.get("runnable"):
         return False, str(capability.get("reason") or "The model is not runnable in this engine.")
     support = resolved_client_support(backend, client, capability)
@@ -11063,6 +12008,7 @@ def optimizer_backend_eligibility(
         "swiftlm": {"off"},
         "mference": {"off"},
         "whallm": {"off"},
+        "llamacpp": {"off"},
     }[backend]
     if kv not in allowed_kv or (kv != "off" and capability.get("kv") is not True):
         return False, "This engine cannot preserve the selected KV precision."
@@ -11164,6 +12110,107 @@ def benchmark_reasoning_contract(
     return contract
 
 
+def _llamacpp_route_qualification_capability(
+    model: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return only the controller's exact receipt-bound AtomicChat capability."""
+    capability = model.get("backends", {}).get("llamacpp", {})
+    atomic = capability.get("atomicPle")
+    model_atomic = model.get("atomicPle")
+    receipt = capability.get("receiptFingerprint")
+    if not (
+        model.get("ready") is True
+        and isinstance(capability, dict)
+        and capability.get("runnable") is True
+        and capability.get("llamacppPle") is True
+        and capability.get("currentProcessVerified") is True
+        and isinstance(capability.get("verificationGeneration"), int)
+        and capability.get("verificationGeneration") > 0
+        and isinstance(atomic, dict) and atomic.get("ready") is True
+        and atomic.get("currentProcessVerified") is True
+        and atomic.get("verificationGeneration") == capability.get("verificationGeneration")
+        and isinstance(model_atomic, dict) and model_atomic == atomic
+        and atomic.get("repoId") == LLAMACPP_ATOMIC_REPO
+        and atomic.get("pinnedRevision") == LLAMACPP_ATOMIC_REVISION
+        and atomic.get("variantId") == LLAMACPP_ATOMIC_VARIANT_ID
+        and atomic.get("variant") == LLAMACPP_ATOMIC_VARIANT
+        and atomic.get("shardCount") == LLAMACPP_ATOMIC_SHARDS
+        and atomic.get("weightBytes") == LLAMACPP_ATOMIC_TOTAL_BYTES
+        and atomic.get("context") == LLAMACPP_PLE_CONTEXT
+        and capability.get("contextWindows") == [LLAMACPP_PLE_CONTEXT]
+        and capability.get("contextMaximum") == LLAMACPP_PLE_CONTEXT
+        and capability.get("memoryCeilingBytes") == LLAMACPP_PLE_MEMORY_CEILING_BYTES
+        and isinstance(receipt, str)
+        and re.fullmatch(r"[0-9a-f]{64}", receipt) is not None
+        and atomic.get("receiptFingerprint") == receipt
+        and capability.get("firstShard") == atomic.get("firstShard")
+        and capability.get("modelPath") == model.get("path")
+        and isinstance(capability.get("runtimeVersion"), str)
+        and bool(capability.get("runtimeVersion"))
+        and isinstance(capability.get("benchmarkModelFingerprint"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", capability["benchmarkModelFingerprint"]) is not None
+        and capability.get("agentReasoning") == ["auto"]
+        and capability.get("codexReasoning") == ["auto"]
+    ):
+        return None
+    return capability
+
+
+def route_qualification_spec(
+    model: dict[str, Any], backend: str | None = None,
+) -> dict[str, Any] | None:
+    """Describe one exact single-route qualification without inventing peers."""
+    selected = str(backend or "")
+    if selected in {"", "omlx"} and is_qwen4_exp_record(model):
+        capability = model.get("backends", {}).get("omlx", {})
+        if (
+            capability.get("runnable") is True
+            and capability.get("mtp") is not True
+            and capability.get("dflash") is not True
+        ):
+            return {
+                "id": "qwen-omlx-ple-ar-v1", "version": 1,
+                "backend": "omlx", "mode": "ar", "modeLabel": "AR + PLE mmap",
+                "suite": "agentic", "context": None,
+                "reasoningPolicy": "explicit-selectable",
+                "toolProbeRequired": False, "memoryProofRequired": False,
+                "routeLabel": "oMLX AR + PLE mmap route",
+            }
+    if selected in {"", "llamacpp"} and _llamacpp_route_qualification_capability(model):
+        return {
+            "id": "atomicchat-llamacpp-ssd-ple-8k-v1", "version": 1,
+            "scope": "route", "clientAgnostic": True,
+            "backend": "llamacpp", "mode": "ar", "modeLabel": "SSD PLE",
+            "suite": ROUTE_QUALIFICATION_8K_SUITE,
+            "context": LLAMACPP_PLE_CONTEXT,
+            "reasoningPolicy": "runtime-fixed-on",
+            "toolProbeRequired": True, "memoryProofRequired": True,
+            "memoryCeilingBytes": LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+            "routeLabel": "llama.cpp SSD-PLE 8K route",
+        }
+    return None
+
+
+def route_qualification_reasoning_contract(
+    payload: dict[str, Any], model: dict[str, Any], spec: dict[str, Any],
+) -> dict[str, Any]:
+    if spec["reasoningPolicy"] == "runtime-fixed-on":
+        return {
+            "policy": "runtime-fixed-reasoning-on",
+            "requested": str(payload.get("reasoning") or "auto"),
+            "measured": "auto", "normalized": False,
+            "normalizedFor": [], "normalizedForLabels": [],
+            "label": "Runtime controlled · reasoning on",
+            "detail": (
+                "The audited llama.cpp route fixes reasoning on at the server boundary; "
+                "Auto accurately records that no user-selectable effort level is exposed."
+            ),
+            "changesVisibleSettingWhenApplied": False,
+            "reasoningEnabled": True, "runtimeControlled": True,
+        }
+    return qwen_ple_route_qualification_reasoning_contract(payload, model)
+
+
 def qwen_ple_route_qualification_reasoning_contract(
     payload: dict[str, Any], model: dict[str, Any],
 ) -> dict[str, Any]:
@@ -11215,7 +12262,7 @@ def qwen_ple_route_qualification_reasoning_contract(
     }
 
 
-def apply_qwen_ple_route_qualification_budget(job: dict[str, Any]) -> None:
+def apply_route_qualification_budget(job: dict[str, Any]) -> None:
     """Reserve visible-answer space inside each bounded reasoning sample.
 
     The saved launch contract keeps its original response ceiling.  These
@@ -11223,17 +12270,20 @@ def apply_qwen_ple_route_qualification_budget(job: dict[str, Any]) -> None:
     samples, preventing a reasoning-capable model from spending the complete
     sample allowance before it can emit the final answer being qualified.
     """
-    sample_tokens = min(
-        ROUTE_QUALIFICATION_MAX_TOKENS,
-        max(256, int(job["output"])),
-    )
-    answer_reserve = min(
-        ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS,
-        max(1, sample_tokens // 2),
-    )
+    if int(job["output"]) < ROUTE_QUALIFICATION_MAX_TOKENS:
+        raise ValueError(
+            "Route qualification requires at least 512 visible response tokens for its exact "
+            "384 reasoning + 128 final-answer contract."
+        )
+    sample_tokens = ROUTE_QUALIFICATION_MAX_TOKENS
+    answer_reserve = ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS
     job["suite"]["maxTokens"] = sample_tokens
     job["qualificationThinkingBudgetTokens"] = max(1, sample_tokens - answer_reserve)
     job["qualificationAnswerReserveTokens"] = answer_reserve
+
+
+# Compatibility name for older callers and tests while both route specs share the budget.
+apply_qwen_ple_route_qualification_budget = apply_route_qualification_budget
 
 
 def cross_engine_benchmark_measurement(
@@ -12271,12 +13321,30 @@ def qwen_flash_next_model_alternatives(
     return candidates[:1]
 
 
-def route_qualification_metrics(record: dict[str, Any]) -> dict[str, Any] | None:
+def route_qualification_metrics(
+    record: dict[str, Any], spec: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Recompute the bounded, authoritative public metrics for one qualified route."""
+    backend = str(record.get("backend") or "")
+    contract = record.get("qualificationContract")
+    contract_id = contract.get("id") if isinstance(contract, dict) else None
+    if spec is not None:
+        legacy_qwen_v1 = bool(
+            spec["backend"] == "omlx"
+            and contract is None
+            and record.get("qualificationVersion") == 1
+        )
+        if not legacy_qwen_v1 and (
+            backend != spec["backend"]
+            or contract_id != spec["id"]
+            or not isinstance(contract, dict)
+            or contract.get("version") != spec["version"]
+        ):
+            return None
     if (
         record.get("kind") != "route-qualification"
         or record.get("qualificationVersion") != ROUTE_QUALIFICATION_VERSION
-        or record.get("backend") != "omlx"
+        or backend not in {"omlx", "llamacpp"}
         or record.get("winner") != "ar"
         or record.get("comparedModes") != ["ar"]
     ):
@@ -12284,7 +13352,12 @@ def route_qualification_metrics(record: dict[str, Any]) -> dict[str, Any] | None
     modes = record.get("modes")
     route = modes.get("ar") if isinstance(modes, dict) else None
     samples = route.get("samples") if isinstance(route, dict) else None
-    if not isinstance(samples, list) or not samples:
+    if (
+        not isinstance(samples, list)
+        or len(samples) != len(ROUTE_QUALIFICATION_SCENARIOS)
+        or [sample.get("scenario") for sample in samples if isinstance(sample, dict)]
+        != ROUTE_QUALIFICATION_SCENARIOS
+    ):
         return None
     prompt_tokens = 0
     completion_tokens = 0
@@ -12299,6 +13372,7 @@ def route_qualification_metrics(record: dict[str, Any]) -> dict[str, Any] | None
         completion = sample.get("completionTokens")
         speed = sample.get("decodeTokensPerSecond")
         first = sample.get("ttftSeconds")
+        elapsed = sample.get("totalSeconds")
         if (
             isinstance(prompt, bool) or not isinstance(prompt, int) or prompt <= 0
             or isinstance(completion, bool) or not isinstance(completion, int) or completion <= 0
@@ -12306,6 +13380,8 @@ def route_qualification_metrics(record: dict[str, Any]) -> dict[str, Any] | None
             or not math.isfinite(float(speed)) or float(speed) <= 0
             or isinstance(first, bool) or not isinstance(first, (int, float))
             or not math.isfinite(float(first)) or float(first) <= 0
+            or isinstance(elapsed, bool) or not isinstance(elapsed, (int, float))
+            or not math.isfinite(float(elapsed)) or float(elapsed) <= float(first)
             or sample.get("finishReason") != "stop"
             or sample.get("terminalState") != "complete"
             or sample.get("terminalComplete") is not True
@@ -12318,24 +13394,203 @@ def route_qualification_metrics(record: dict[str, Any]) -> dict[str, Any] | None
         ttft.append(float(first))
         reasoning_turns += int(sample.get("reasoningObserved") is True)
         answer_turns += int(sample.get("answerObserved") is True)
-    return {
+    result = {
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
         "sampleCount": len(samples),
         "reasoningTurns": reasoning_turns,
         "answerTurns": answer_turns,
         "medianDecodeTokensPerSecond": round(statistics.median(decode), 3),
+        "minimumDecodeTokensPerSecond": round(min(decode), 3),
         "medianTTFTSeconds": round(statistics.median(ttft), 4),
     }
+    if backend == "llamacpp":
+        telemetry = route.get("resourceTelemetry") if isinstance(route, dict) else None
+        tool = record.get("toolContract")
+        unload = record.get("unloadEvidence")
+        correctness = record.get("correctnessContract")
+        expected_correctness_hash = hashlib.sha256(
+            LLAMACPP_QUALIFICATION_CORRECTNESS_EXPECTED.encode("utf-8")
+        ).hexdigest()
+        expected_budget_message_hash = hashlib.sha256(
+            LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+        ).hexdigest()
+        checked_ports = unload.get("checkedPorts") if isinstance(unload, dict) else None
+        closed_ports = unload.get("closedPorts") if isinstance(unload, dict) else None
+        valid_checked_ports = bool(
+            isinstance(checked_ports, list)
+            and checked_ports
+            and len(checked_ports) == len(set(checked_ports))
+            and all(
+                isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65_535
+                for port in checked_ports
+            )
+        )
+        peak = telemetry.get("peakProcessPhysicalFootprintBytes") if isinstance(telemetry, dict) else None
+        minimum_cap = telemetry.get("metalWiredLimitMinimumBytes") if isinstance(telemetry, dict) else None
+        maximum_cap = telemetry.get("metalWiredLimitMaximumBytes") if isinstance(telemetry, dict) else None
+        group_peak = telemetry.get("peakProcessGroupPhysicalFootprintBytes") if isinstance(telemetry, dict) else None
+        if (
+            not isinstance(contract, dict)
+            or contract.get("id") != "atomicchat-llamacpp-ssd-ple-8k-v1"
+            or contract.get("version") != 1
+            or contract.get("scope") != "route"
+            or contract.get("clientAgnostic") is not True
+            or record.get("client") != "any"
+            or contract.get("backend") != "llamacpp"
+            or contract.get("exactContext") != LLAMACPP_PLE_CONTEXT
+            or isinstance(contract.get("configuredOutputLimit"), bool)
+            or not isinstance(contract.get("configuredOutputLimit"), int)
+            or contract.get("configuredOutputLimit") < ROUTE_QUALIFICATION_MAX_TOKENS
+            or record.get("configuredOutputLimit")
+            != contract.get("configuredOutputLimit")
+            or record.get("measuredRequestMaxTokens")
+            != ROUTE_QUALIFICATION_MAX_TOKENS
+            or record.get("outputMin") != ROUTE_QUALIFICATION_MAX_TOKENS
+            or record.get("outputMax") != ROUTE_QUALIFICATION_MAX_TOKENS
+            or contract.get("scenarioContract") != ROUTE_QUALIFICATION_SCENARIOS
+            or contract.get("sampleMaxTokens") != ROUTE_QUALIFICATION_MAX_TOKENS
+            or contract.get("answerReserveTokens") != ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS
+            or contract.get("minimumDecodeTokensPerSecond") != LLAMACPP_PLE_MINIMUM_DECODE_TPS
+            or contract.get("thinkingBudgetTokens") != ROUTE_QUALIFICATION_THINKING_TOKENS
+            or contract.get("minimumCompletionTokens")
+            != ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS
+            or contract.get("measuredRequestMaxTokens")
+            != ROUTE_QUALIFICATION_MAX_TOKENS
+            or contract.get("reasoningBoundaryContractId")
+            != LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID
+            or contract.get("reasoningBudgetMessageSha256")
+            != expected_budget_message_hash
+            or contract.get("reasoningPolicy") != "runtime-fixed-on"
+            or contract.get("toolProbeRequired") is not True
+            or contract.get("memoryProofRequired") is not True
+            or contract.get("memoryCeilingBytes") != LLAMACPP_PLE_MEMORY_CEILING_BYTES
+            or not isinstance(contract.get("receiptFingerprint"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", contract["receiptFingerprint"]) is None
+            or not isinstance(contract.get("runtimeVersion"), str)
+            or not contract["runtimeVersion"].strip()
+            or record.get("contextMin") != LLAMACPP_PLE_CONTEXT
+            or record.get("contextMax") != LLAMACPP_PLE_CONTEXT
+            or not isinstance(peak, int) or isinstance(peak, bool)
+            or not 0 < peak < LLAMACPP_PLE_MEMORY_CEILING_BYTES
+            or minimum_cap != LLAMACPP_PLE_MEMORY_CEILING_BYTES
+            or maximum_cap != LLAMACPP_PLE_MEMORY_CEILING_BYTES
+            or telemetry.get("metalWiredLimitSampleCount") != telemetry.get("sampleCount")
+            or not isinstance(telemetry.get("sampleCount"), int)
+            or isinstance(telemetry.get("sampleCount"), bool)
+            or telemetry.get("sampleCount") <= 0
+            or telemetry.get("processFootprintAvailable") is not True
+            or telemetry.get("processFootprintSource") != "proc_pid_rusage RUSAGE_INFO_V4"
+            or telemetry.get("processGroupFootprintAvailable") is not True
+            or telemetry.get("samplingComplete") is not True
+            or not isinstance(telemetry.get("processGroupFootprintSampleCount"), int)
+            or isinstance(telemetry.get("processGroupFootprintSampleCount"), bool)
+            or telemetry.get("processGroupFootprintSampleCount") <= 0
+            or telemetry.get("processAliveSampleCount")
+            != telemetry.get("processFootprintSampleCount")
+            or telemetry.get("processAliveSampleCount")
+            != telemetry.get("processGroupFootprintSampleCount")
+            or telemetry.get("processGroupMemberCountMinimum") != 1
+            or telemetry.get("processGroupMemberCountMaximum") != 1
+            or not isinstance(group_peak, int) or isinstance(group_peak, bool)
+            or not 0 < group_peak < LLAMACPP_PLE_MEMORY_CEILING_BYTES
+            or reasoning_turns != len(ROUTE_QUALIFICATION_SCENARIOS)
+            or answer_turns != len(ROUTE_QUALIFICATION_SCENARIOS)
+            or any(speed < LLAMACPP_PLE_MINIMUM_DECODE_TPS for speed in decode)
+            or any(
+                sample.get("thinkingBudgetTokensRequested")
+                != ROUTE_QUALIFICATION_THINKING_TOKENS
+                for sample in samples
+            )
+            or any(
+                sample.get("reasoningBudgetMessageSha256")
+                != expected_budget_message_hash
+                for sample in samples
+            )
+            or any(
+                sample.get("requestedMaxTokens") != ROUTE_QUALIFICATION_MAX_TOKENS
+                for sample in samples
+            )
+            or any(
+                int(sample["completionTokens"]) > ROUTE_QUALIFICATION_MAX_TOKENS
+                for sample in samples
+            )
+            or any(
+                int(sample["completionTokens"]) < ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS
+                for sample in samples
+            )
+            or any(
+                abs(
+                    float(sample["decodeTokensPerSecond"])
+                    - round(
+                        max(1, int(sample["completionTokens"]) - 1)
+                        / max(
+                            0.000_001,
+                            float(sample["totalSeconds"]) - float(sample["ttftSeconds"]),
+                        ),
+                        4,
+                    )
+                ) > max(0.01, float(sample["decodeTokensPerSecond"]) * 0.001)
+                for sample in samples
+            )
+            or any(
+                int(sample["promptTokens"]) + ROUTE_QUALIFICATION_MAX_TOKENS
+                > LLAMACPP_PLE_CONTEXT
+                for sample in samples
+            )
+            or not isinstance(tool, dict)
+            or tool.get("protocol") != "chat-completions"
+            or tool.get("toolContractValid") is not True
+            or tool.get("toolCallCount") != 1
+            or tool.get("toolNameSeen") is not True
+            or tool.get("terminalComplete") is not True
+            or tool.get("thinkingBudgetTokensRequested") != 32
+            or tool.get("reasoningBudgetMessageSha256")
+            != expected_budget_message_hash
+            or not isinstance(correctness, dict)
+            or correctness.get("id") != LLAMACPP_QUALIFICATION_CORRECTNESS_ID
+            or correctness.get("expectedAnswerSha256") != expected_correctness_hash
+            or correctness.get("observedAnswerSha256") != expected_correctness_hash
+            or correctness.get("exact") is not True
+            or correctness.get("terminalComplete") is not True
+            or correctness.get("authoritativeUsage") is not True
+            or correctness.get("reasoningBoundaryContractId")
+            != LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID
+            or correctness.get("reasoningBudgetTokensRequested") != 0
+            or correctness.get("reasoningBudgetMessageSha256")
+            != expected_budget_message_hash
+            or correctness.get("reasoningTagLeakDetected") is not False
+            or correctness.get("transitionMessageLeakDetected") is not False
+            or correctness.get("reasoningBoundaryClean") is not True
+            or not isinstance(unload, dict) or unload.get("clean") is not True
+            or unload.get("processExited") is not True
+            or unload.get("processGroupExited") is not True
+            or unload.get("managerIdle") is not True
+            or unload.get("portsClosed") is not True
+            or not valid_checked_ports
+            or closed_ports != checked_ports
+        ):
+            return None
+        result.update({
+            "peakMemoryBytes": group_peak,
+            "toolContractVerified": True,
+            "cleanUnloadVerified": True,
+            "correctnessVerified": True,
+            "correctnessContractId": LLAMACPP_QUALIFICATION_CORRECTNESS_ID,
+            "reasoningBoundaryVerified": True,
+            "reasoningBoundaryContractId": LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID,
+        })
+    return result
 
 
 def verified_route_qualification(
     model: dict[str, Any], backend: str, evidence: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Return only a complete local Qwen PLE reasoning-route qualification."""
-    if backend != "omlx" or not is_qwen4_exp_record(model):
+    """Return only a complete local receipt-bound single-route qualification."""
+    spec = route_qualification_spec(model, backend)
+    if spec is None:
         return None
-    capability = model.get("backends", {}).get("omlx", {})
+    capability = model.get("backends", {}).get(backend, {})
     candidates = capability.get("localBenchmarks")
     records = [item for item in candidates if isinstance(item, dict)] if isinstance(candidates, list) else []
     latest = capability.get("localBenchmark")
@@ -12343,14 +13598,19 @@ def verified_route_qualification(
         records.append(latest)
     matches: list[dict[str, Any]] = []
     for record in records:
-        metrics = route_qualification_metrics(record)
+        metrics = route_qualification_metrics(record, spec)
         stored = record.get("qualification")
         if (
             metrics is None
+            or not route_qualification_record_is_fresh(record)
             or not isinstance(stored, dict)
             or stored.get("reasoningEnabled") is not True
             or stored.get("reasoningObserved") is not True
             or stored.get("answerObserved") is not True
+            or (
+                backend == "llamacpp"
+                and stored.get("reasoningBoundaryVerified") is not True
+            )
             or stored.get("terminalCompletionObserved") is not True
             or stored.get("authoritativeUsage") is not True
             or stored.get("metrics") != metrics
@@ -12367,29 +13627,34 @@ def public_route_qualification_result(
     model: dict[str, Any], record: dict[str, Any], preference: str = "throughput",
 ) -> dict[str, Any]:
     """Expose one qualified route without presenting it as a competition winner."""
+    backend = str(record.get("backend") or "")
+    spec = route_qualification_spec(model, backend)
     measurement = cross_engine_benchmark_measurement(record)
-    metrics = route_qualification_metrics(record)
+    metrics = route_qualification_metrics(record, spec) if spec else None
     if measurement is None or metrics is None:
         raise RuntimeError("The saved route qualification is incomplete.")
     value, profile_display, _lower_is_better = _benchmark_history_value(
         measurement, preference,
     )
     return {
-        "backend": "omlx", "label": BACKEND_LABELS["omlx"],
+        "backend": backend, "label": BACKEND_LABELS[backend],
         "qualified": True, "mode": "ar", "modeLabel": "AR",
         "testedModes": ["ar"],
         "modeDetail": (
-            "Qualified the exact Qwen PLE mmap autoregressive route with separate reasoning "
-            "and final-answer output."
+            "Qualified the exact receipt-bound llama.cpp SSD-PLE 8K route with a clean forced-"
+            "reasoning handoff, final-answer output, Jinja tools, bounded memory, and clean unload."
+            if backend == "llamacpp" else
+            "Qualified the exact Qwen PLE mmap autoregressive route with separate reasoning and final-answer output."
         ),
         "settingsLabel": benchmark_engine_settings_label(
-            "omlx", record.get("engineSettings"),
+            backend, record.get("engineSettings"),
         ),
-        "routeSettingsLabel": "AR · PLE mmap",
+        "routeSettingsLabel": "SSD PLE · exact 8K" if backend == "llamacpp" else "AR · PLE mmap",
         "display": measurement["display"],
         "profileDisplay": profile_display if value is not None else measurement["display"],
         "firstTokenSeconds": measurement.get("firstTokenSeconds"),
         "decodeTokensPerSecond": measurement.get("decodeTokensPerSecond"),
+        "minimumDecodeTokensPerSecond": metrics.get("minimumDecodeTokensPerSecond"),
         "peakPressureDeltaBytes": measurement.get("peakPressureDeltaBytes"),
         "baselineHeadroomPercent": measurement.get("baselineHeadroomPercent"),
         "minimumHeadroomPercent": measurement.get("minimumHeadroomPercent"),
@@ -12402,9 +13667,20 @@ def public_route_qualification_result(
         "resourceCooldownStatus": measurement.get("resourceCooldownStatus"),
         "promptTokens": metrics["promptTokens"],
         "completionTokens": metrics["completionTokens"],
+        "configuredOutputLimit": record.get("configuredOutputLimit"),
+        "measuredRequestMaxTokens": record.get("measuredRequestMaxTokens"),
         "reasoningTurns": metrics["reasoningTurns"],
         "answerTurns": metrics["answerTurns"],
         "sampleCount": metrics["sampleCount"],
+        "peakMemoryBytes": metrics.get("peakMemoryBytes"),
+        "reasoningObserved": metrics["reasoningTurns"] == metrics["sampleCount"],
+        "answerObserved": metrics["answerTurns"] == metrics["sampleCount"],
+        "toolContractVerified": metrics.get("toolContractVerified") is True,
+        "cleanUnloadVerified": metrics.get("cleanUnloadVerified") is True,
+        "correctnessVerified": metrics.get("correctnessVerified") is True,
+        "correctnessContractId": metrics.get("correctnessContractId"),
+        "reasoningBoundaryVerified": metrics.get("reasoningBoundaryVerified") is True,
+        "reasoningBoundaryContractId": metrics.get("reasoningBoundaryContractId"),
         "recordId": record.get("id"),
         "runtimeVersion": record.get("runtimeVersion"),
     }
@@ -12439,7 +13715,12 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
     eligible: list[str] = []
     excluded: list[dict[str, str]] = []
     ssd_profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
-    candidate_backends = ssd_profile_candidate_backends(ssd_profile) if ssd_profile.get("recommended") is True else tuple(ENGINE_ADAPTERS)
+    selected_spec = route_qualification_spec(model, current_backend)
+    candidate_backends = (
+        (current_backend,) if selected_spec is not None else
+        ssd_profile_candidate_backends(ssd_profile)
+        if ssd_profile.get("recommended") is True else tuple(ENGINE_ADAPTERS)
+    )
     for backend in candidate_backends:
         allowed, reason = optimizer_backend_eligibility(
             model, backend, client, reasoning, kv, chat,
@@ -12507,7 +13788,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             )
             metrics = qualification["qualification"]["metrics"]
             reason = (
-                f"The exact oMLX AR + PLE mmap route is locally qualified at "
+                f"The exact {selected_spec['routeLabel'] if selected_spec else BACKEND_LABELS[current_backend]} is locally qualified at "
                 f"{float(metrics['medianDecodeTokensPerSecond']):.1f} generation tok/s "
                 f"with {float(metrics['medianTTFTSeconds']):.2f}s median time to first output; "
                 "separate reasoning and final-answer output were both observed."
@@ -12518,7 +13799,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             result.update({
                 "engineChanged": False,
                 "engineEvidenceTier": "local-route-qualification",
-                "engineEvidenceLabel": "Qualified oMLX route",
+                "engineEvidenceLabel": f"Qualified {BACKEND_LABELS[current_backend]} route",
                 "comparedEngines": [], "qualifiedRoutes": [qualified_route],
                 "missingEngines": [], "engineRationale": [reason],
                 "engineDecision": {
@@ -12539,22 +13820,17 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
                 "settingsEvidenceTier": result.get("evidenceTier"),
                 "settingsEvidenceLabel": result.get("evidenceLabel"),
                 "evidenceTier": "local-route-qualification",
-                "evidenceLabel": "Qualified oMLX route",
+                "evidenceLabel": f"Qualified {BACKEND_LABELS[current_backend]} route",
             })
             result["rationale"] = result["engineRationale"] + list(result.get("rationale") or [])
             return result
-        omlx_capability = model.get("backends", {}).get("omlx", {})
-        qwen_qualification = bool(
-            current_backend == "omlx"
-            and is_qwen4_exp_record(model)
-            and omlx_capability.get("mtp") is not True
-            and omlx_capability.get("dflash") is not True
-        )
+        route_spec = route_qualification_spec(model, current_backend)
+        route_qualification_needed = route_spec is not None
         reason = (
-            "oMLX AR + PLE mmap is the only honest route for this exact Qwen checkpoint. "
+            f"{route_spec['routeLabel']} is the only honest route for this exact checkpoint. "
             "Run one bounded route qualification to measure authoritative generation TPS, "
-            "time to first output, usage, reasoning, and final-answer reliability."
-            if qwen_qualification else
+            "time to first output, usage, reasoning, final-answer reliability, tools, memory, and unload."
+            if route_spec else
             f"{BACKEND_LABELS[current_backend]} is the only installed route that can run this exact "
             "model and work contract; there is no honest cross-engine calibration to perform."
         )
@@ -12562,18 +13838,18 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             "engineChanged": False,
             "engineEvidenceTier": (
                 "single-route-qualification-needed"
-                if qwen_qualification else "single-compatible-engine"
+                if route_qualification_needed else "single-compatible-engine"
             ),
             "engineEvidenceLabel": (
                 "Route qualification needed"
-                if qwen_qualification else "Only compatible engine"
+                if route_qualification_needed else "Only compatible engine"
             ),
             "comparedEngines": [],
             "missingEngines": [],
             "engineRationale": [reason],
-            "engineDecision": {**engine_meta, "routeQualification": qwen_qualification},
+            "engineDecision": {**engine_meta, "routeQualification": route_qualification_needed},
             "engineNextAction": engine_selection_next_action(
-                "calibrate" if qwen_qualification else "keep-current",
+                "calibrate" if route_qualification_needed else "keep-current",
                 preference, current_backend, client, reason,
             ),
         })
@@ -13889,9 +15165,7 @@ def benchmark_history_request(
             and isinstance(record.get("contextMin"), int)
             and isinstance(record.get("contextMax"), int)
             and record["contextMin"] <= context <= record["contextMax"]
-            and isinstance(record.get("outputMin"), int)
-            and isinstance(record.get("outputMax"), int)
-            and record["outputMin"] <= output <= record["outputMax"]
+            and benchmark_record_output_contract_verified(record, output)
             and record.get("suite") == suite_name
             and list(record.get("scenarioContract") or []) == scenario_contract
             # History may describe only evidence that could also drive Apply.
@@ -14046,7 +15320,7 @@ def benchmark_history_request(
         measurement = cross_engine_benchmark_measurement(record)
         if not measurement:
             continue
-        current_route_runs.append({
+        route_summary = {
             "id": record.get("id"), "createdAt": record.get("createdAt"),
             "backend": backend, "backendLabel": BACKEND_LABELS[backend],
             "winner": record.get("winner"),
@@ -14056,7 +15330,14 @@ def benchmark_history_request(
             "peakPressureDeltaBytes": measurement.get("peakPressureDeltaBytes"),
             "thermalWorst": measurement.get("thermalWorst"),
             "recommendation": record.get("recommendation"),
-        })
+        }
+        if record.get("kind") == "route-qualification":
+            route_summary.update({
+                "kind": "route-qualification",
+                "routeQualification": True,
+                "qualifiedBackend": backend,
+            })
+        current_route_runs.append(route_summary)
         if len(current_route_runs) >= 4:
             break
 
@@ -14103,15 +15384,21 @@ def benchmark_history_request(
         default=None,
         key=lambda item: item or datetime.min.replace(tzinfo=timezone.utc),
     )
+    latest_is_future = bool(latest_time is not None and latest_time > current_time)
     age_days = (
-        max(0.0, (current_time - latest_time).total_seconds() / 86_400)
-        if latest_time else None
+        (current_time - latest_time).total_seconds() / 86_400
+        if latest_time is not None and not latest_is_future else None
     )
     if latest_time is None:
         freshness = "missing"
         freshness_message = (
             "No saved run matches every visible contract field."
             + (" Other local evidence is retained below but cannot drive Apply fastest safe settings." if other_reasons else "")
+        )
+    elif latest_is_future:
+        freshness = "older"
+        freshness_message = (
+            "The newest exact run is dated in the future. Rerun before relying on this evidence."
         )
     elif age_days is not None and age_days > BENCHMARK_HISTORY_FRESH_DAYS:
         freshness = "older"
@@ -14187,6 +15474,12 @@ def benchmark_history_request(
             "createdAt": route.get("createdAt"),
             "summary": route.get("recommendation"),
         }
+        if route.get("kind") == "route-qualification":
+            receipt.update({
+                "kind": "route-qualification",
+                "routeQualification": True,
+                "qualifiedBackend": route.get("qualifiedBackend"),
+            })
     elif latest_shootout:
         receipt = {
             "state": "incomplete", "scope": "engine",
@@ -14202,13 +15495,15 @@ def benchmark_history_request(
             ),
         }
     receipt_time = _benchmark_created_at(receipt.get("createdAt"))
+    receipt_is_future = bool(receipt_time is not None and receipt_time > current_time)
     receipt_age_days = (
-        max(0.0, (current_time - receipt_time).total_seconds() / 86_400)
-        if receipt_time else None
+        (current_time - receipt_time).total_seconds() / 86_400
+        if receipt_time is not None and not receipt_is_future else None
     )
     receipt["ageDays"] = round(receipt_age_days, 2) if receipt_age_days is not None else None
     receipt["fresh"] = bool(
         receipt_time is not None
+        and not receipt_is_future
         and receipt_age_days is not None
         and receipt_age_days <= BENCHMARK_HISTORY_FRESH_DAYS
     )
@@ -15270,6 +16565,19 @@ def normalized_request(
         port = free_port(preferred)
     run_id = str(uuid.uuid4())
     options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    if backend == "llamacpp" and purpose in {"session", "route-check"}:
+        qualification_evidence = optimizer_evidence(
+            model, context, output, client, reasoning,
+            str(options.get("kv") or "off"), chat,
+        )
+        add_benchmark_engine_evidence(
+            qualification_evidence, model, options, [backend],
+        )
+        if verified_route_qualification(model, backend, qualification_evidence) is None:
+            raise ValueError(
+                "This exact llama.cpp SSD-PLE route needs a fresh successful local qualification "
+                "before ordinary inference can start."
+            )
     optimization: dict[str, Any] | None = None
     if mode == "fastest":
         fastest_evidence = optimizer_evidence(
@@ -15298,9 +16606,24 @@ def normalized_request(
     if backend == "lmstudio":
         plan.options["_sharedServerWasRunning"] = lm_running
     plan.run_dir = RUNS_DIR / run_id
-    build_engine_plan(plan)
-    build_client_plan(plan)
+    try:
+        build_engine_plan(plan)
+        build_client_plan(plan)
+    except Exception:
+        dispose_llamacpp_plan_bearers(plan)
+        raise
     return plan
+
+
+def preview_launch_request(
+    payload: dict[str, Any], models: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Render one launch preview without retaining an unowned bearer file."""
+    plan = normalized_request(payload, models)
+    try:
+        return plan.public()
+    finally:
+        dispose_llamacpp_plan_bearers(plan)
 
 
 def build_engine_plan(plan: LaunchPlan) -> None:
@@ -15311,7 +16634,15 @@ def build_engine_plan(plan: LaunchPlan) -> None:
     cap = plan.model.get("backends", {}).get(plan.backend)
     if not isinstance(cap, dict):
         raise ValueError("The selected model has no capability record for this engine adapter.")
-    plan.run_dir.mkdir(parents=True, exist_ok=True)
+    plan.run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    details = plan.run_dir.lstat()
+    if (
+        plan.run_dir.is_symlink()
+        or not stat.S_ISDIR(details.st_mode)
+        or details.st_uid != os.geteuid()
+    ):
+        raise ValueError("The private run folder is not an owner-controlled directory.")
+    os.chmod(plan.run_dir, 0o700)
     builder(plan, cap)
 
 
@@ -15874,6 +17205,10 @@ def _validated_llamacpp_route(
         raise ValueError(str(artifact.get("reason") or "The AtomicChat receipt is no longer valid."))
     if (
         cap.get("llamacppPle") is not True
+        or cap.get("currentProcessVerified") is not True
+        or not isinstance(cap.get("verificationGeneration"), int)
+        or cap.get("verificationGeneration") <= 0
+        or cap.get("verificationGeneration") != artifact.get("verificationGeneration")
         or cap.get("receiptFingerprint") != artifact.get("receiptFingerprint")
         or cap.get("firstShard") != artifact.get("firstShard")
         or cap.get("modelPath") != str(model_path)
@@ -15884,9 +17219,15 @@ def _validated_llamacpp_route(
     wired_limit = apple_iogpu_wired_limit_bytes()
     if wired_limit != LLAMACPP_PLE_MEMORY_CEILING_BYTES:
         raise ValueError(
-            f"This qualification requires the temporary Metal wired-memory limit to be exactly "
+            f"This exact route requires the temporary Metal wired-memory limit to be exactly "
             f"{LLAMACPP_PLE_MEMORY_CEILING_GIB:.0f} GiB; it cannot be bypassed or raised."
         )
+    whallm_conflict = whallm_qualification_conflict()
+    if whallm_conflict:
+        raise ValueError(
+            f"{LLAMACPP_WHALLM_CONFLICT_LABEL}. {whallm_conflict['detail']}"
+        )
+    _validate_llamacpp_qualified_session_boundary(plan)
     try:
         after = _llamacpp_launch_file_identities(model_path)
     except OSError as error:
@@ -15897,7 +17238,8 @@ def _validated_llamacpp_route(
 
 
 def _llamacpp_engine_argv(
-    plan: LaunchPlan, binary: str, artifact: dict[str, Any], served: str, api_key: str,
+    plan: LaunchPlan, binary: str, artifact: dict[str, Any], served: str,
+    api_key_file: Path,
 ) -> list[str]:
     return [
         binary,
@@ -15913,14 +17255,134 @@ def _llamacpp_engine_argv(
         "--reasoning", "on",
         "--reasoning-format", "deepseek",
         "--reasoning-preserve",
+        "--reasoning-budget-message", LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE,
         "--spec-type", "none",
         "--cache-type-k", "f16",
         "--cache-type-v", "f16",
         "--host", "127.0.0.1",
         "--port", str(plan.port),
         "--alias", served,
-        "--api-key", api_key,
+        "--api-key-file", str(api_key_file),
     ]
+
+
+def _llamacpp_api_key_file(plan: LaunchPlan) -> Path:
+    if plan.run_dir is None:
+        raise ValueError("The private llama.cpp run folder is missing.")
+    return plan.run_dir / LLAMACPP_API_KEY_FILE_NAME
+
+
+def dispose_llamacpp_plan_bearers(plan: LaunchPlan) -> None:
+    """Remove fixed bearer files from an unstarted or stopped llama.cpp plan.
+
+    Planning creates the server credential because the exact argv is part of
+    the launch contract.  Read-only previews and a last-second admission race
+    must therefore remove that credential themselves instead of relying on
+    the run manager's stop path.  The operation is deliberately idempotent and
+    limited to the fixed bearer-file names in this plan's owner-controlled run
+    directory.
+    """
+    if plan.backend != "llamacpp":
+        return
+    run_dir = plan.run_dir
+    try:
+        if run_dir is None:
+            raise OSError("missing run directory")
+        directory = run_dir.lstat()
+        if (
+            run_dir.is_symlink()
+            or not stat.S_ISDIR(directory.st_mode)
+            or directory.st_uid != os.geteuid()
+        ):
+            raise OSError("unsafe run directory")
+        for name in LLAMACPP_PRIVATE_BEARER_FILE_NAMES:
+            candidate = run_dir / name
+            try:
+                details = candidate.lstat()
+                if stat.S_ISDIR(details.st_mode) or details.st_uid != os.geteuid():
+                    continue
+                # unlink removes a replaced symlink itself, never its target.
+                candidate.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                continue
+    except OSError:
+        pass
+    for key in ("apiKey", "clientApiKey", "proxyControlKey"):
+        plan.secrets.pop(key, None)
+
+
+def _validated_llamacpp_api_key_file(plan: LaunchPlan) -> Path:
+    """Bind the live credential to one owner-only regular file in this run."""
+    key_file = _llamacpp_api_key_file(plan)
+    run_dir = plan.run_dir
+    if run_dir is None:
+        raise ValueError("The private llama.cpp run folder is missing.")
+    expected = str(plan.secrets.get("apiKey") or "")
+    try:
+        run_details = run_dir.lstat()
+        details = key_file.lstat()
+        resolved_run_dir = run_dir.resolve(strict=True)
+        resolved_key_file = key_file.resolve(strict=True)
+        if (
+            run_dir.is_symlink()
+            or not stat.S_ISDIR(run_details.st_mode)
+            or run_details.st_uid != os.geteuid()
+            or key_file.is_symlink()
+            or not stat.S_ISREG(details.st_mode)
+            or details.st_uid != os.geteuid()
+            or details.st_nlink != 1
+            or stat.S_IMODE(details.st_mode) != 0o600
+            or not 1 <= details.st_size <= 1_024
+            or resolved_key_file.parent != resolved_run_dir
+            or resolved_key_file != resolved_run_dir / LLAMACPP_API_KEY_FILE_NAME
+        ):
+            raise ValueError("The private llama.cpp API-key file changed before launch.")
+        raw = key_file.read_bytes()
+        value = raw.decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ValueError("The private llama.cpp API-key file is missing or unreadable.") from error
+    if (
+        not expected
+        or len(expected) > 512
+        or "\0" in expected
+        or not secrets.compare_digest(value, expected + "\n")
+    ):
+        raise ValueError("The private llama.cpp API-key file changed before launch.")
+    return key_file
+
+
+def _validate_llamacpp_qualified_session_boundary(plan: LaunchPlan) -> None:
+    """Rebind a normal load to its measured peak and current macOS headroom."""
+    if plan.purpose not in {"session", "route-check"}:
+        return
+    resource = public_session_resource(apple_resource_snapshot())
+    record, metrics, estimate = _llamacpp_qualified_session_capacity(
+        {
+            "backend": plan.backend, "client": plan.client,
+            "modelId": plan.model.get("id"), "context": plan.context,
+            "output": plan.output, "reasoning": plan.reasoning,
+            "options": copy.deepcopy(plan.options),
+            "chat": copy.deepcopy(plan.chat),
+        },
+        plan.model, resource,
+    )
+    headroom = resource.get("headroomBytes")
+    if record is None or metrics is None:
+        raise ValueError(
+            "The exact llama.cpp qualification receipt became stale before launch. "
+            "Run the bounded route qualification again."
+        )
+    if (
+        resource.get("memoryAvailable") is not True
+        or not isinstance(headroom, int) or isinstance(headroom, bool)
+        or headroom < int(estimate["requiredHeadroomBytes"])
+    ):
+        raise ValueError(
+            "Current unified-memory headroom no longer covers the exact measured llama.cpp "
+            "process-group peak plus the protected 4 GiB macOS reserve."
+        )
 
 
 def validate_llamacpp_launch_boundary(
@@ -15936,14 +17398,15 @@ def validate_llamacpp_launch_boundary(
     api_key = str(plan.secrets.get("apiKey") or "")
     if not served or not api_key:
         raise ValueError("The private llama.cpp route credentials are missing.")
-    expected_argv = _llamacpp_engine_argv(plan, binary, artifact, served, api_key)
+    key_file = _validated_llamacpp_api_key_file(plan)
+    expected_argv = _llamacpp_engine_argv(plan, binary, artifact, served, key_file)
     if plan.engine_argv != expected_argv:
         raise ValueError("The fixed llama.cpp launch command changed after validation.")
     if plan.engine_env or any(key.startswith("DYLD_") for key in plan.engine_env):
         raise ValueError("The fixed llama.cpp launch environment changed after validation.")
     if any(plan.options.get(key) != value for key, value in options.items()):
         raise ValueError("The fixed llama.cpp launch options changed after validation.")
-    return identities
+    return (*identities, _llamacpp_strong_path_identity(key_file))
 
 
 def confirm_llamacpp_launch_identities(
@@ -15953,10 +17416,23 @@ def confirm_llamacpp_launch_identities(
     try:
         model_path = Path(str(plan.model.get("path") or "")).expanduser().resolve(strict=True)
         current = _llamacpp_launch_file_identities(model_path)
+        key_file = _validated_llamacpp_api_key_file(plan)
+        key_identity = _llamacpp_strong_path_identity(key_file)
     except OSError as error:
         raise ValueError("The audited llama.cpp runtime or AtomicChat GGUF changed before launch.") from error
-    if current != expected:
+    if not expected or current != expected[:-1] or key_identity != expected[-1]:
         raise ValueError("The audited llama.cpp runtime or AtomicChat GGUF changed before launch.")
+    whallm_conflict = whallm_qualification_conflict()
+    if whallm_conflict:
+        raise ValueError(
+            f"{LLAMACPP_WHALLM_CONFLICT_LABEL}. {whallm_conflict['detail']}"
+        )
+    if apple_iogpu_wired_limit_bytes() != LLAMACPP_PLE_MEMORY_CEILING_BYTES:
+        raise ValueError(
+            f"The Metal wired-memory limit changed before launch; it must still equal exactly "
+            f"{LLAMACPP_PLE_MEMORY_CEILING_GIB:.0f} GiB."
+        )
+    _validate_llamacpp_qualified_session_boundary(plan)
 
 
 def build_llamacpp(plan: LaunchPlan, cap: dict[str, Any]) -> None:
@@ -15965,13 +17441,31 @@ def build_llamacpp(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     plan.options.update(options)
     served = f"llm-launcher-atomic-ple-{plan.run_id[:8]}"
     api_key = secrets.token_urlsafe(32)
+    key_file = _llamacpp_api_key_file(plan)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(key_file, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(api_key + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(key_file, 0o600)
+    except OSError as error:
+        try:
+            key_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ValueError("Could not create the private llama.cpp API-key file.") from error
     plan.model["servedId"] = served
     plan.secrets["apiKey"] = api_key
-    plan.engine_argv = _llamacpp_engine_argv(plan, binary, artifact, served, api_key)
+    plan.engine_argv = _llamacpp_engine_argv(plan, binary, artifact, served, key_file)
     plan.engine_env = {}
     plan.warnings.extend([
         "This exact AD-3.84 quant keeps only its isolated PLE table in read-only SSD mmap; ordinary model weights are not SSD streamed.",
         "The route is fixed to 8K context, full-precision KV, one request lane, no MTP, and an exact 44 GiB Metal ceiling for initial qualification.",
+        "The launcher relay caps automatic reasoning at the qualified 384-token budget while preserving final-answer space; a stricter smaller client budget is preserved.",
         "AD-3.84 is an aggressive low-bit quality tradeoff. Do not treat the publisher's M5 Max speed as a measurement for this Mac.",
     ])
 
@@ -16459,8 +17953,9 @@ def benchmark_agentic_cases(
     prefix = benchmark_words(max(512, prefix_tokens - 320), 183_211)
     tool_result = benchmark_words(max(256, tool_tokens - 192), 271_828)
     completion_instruction = (
-        "\n\nAfter separate reasoning, return a complete final answer in at most 80 tokens, then stop."
-        if require_complete_answer else ""
+            "\n\nFirst provide substantive separate reasoning. Then return a complete final answer of "
+            "about 96 to 112 tokens and stop, leaving headroom for the terminal marker."
+            if require_complete_answer else ""
     )
     base = [
         {
@@ -16952,78 +18447,129 @@ def rotated_engine_shootout_jobs(
 def validated_route_qualification_request(
     payload: dict[str, Any], models: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Lock the one honest oMLX AR route for an exact Qwen PLE qualification."""
+    """Lock one exact receipt-bound route; never manufacture an engine comparison."""
     model_id = str(payload.get("modelId") or "")
     model = next((item for item in models if item.get("id") == model_id), None)
     if not model:
         raise ValueError("The selected model is no longer in the scanned catalog. Refresh models.")
-    if not is_qwen4_exp_record(model):
-        raise ValueError("Route qualification is reserved for a verified Qwen PLE mmap artifact.")
     preference = str(payload.get("enginePreference") or "throughput")
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported route-qualification metric.")
     visible = validated_launch_profile_request(payload, models)
-    if visible.get("backend") != "omlx":
-        raise ValueError("This Qwen PLE route qualification must use oMLX.")
-    if visible.get("options", {}).get("memoryGuard") != "high":
+    backend = str(visible.get("backend") or "")
+    spec = route_qualification_spec(model, backend)
+    if spec is None:
+        raise ValueError("This exact controller-scanned route has no dedicated qualification contract.")
+    if backend == "omlx" and visible.get("options", {}).get("memoryGuard") != "high":
         raise ValueError(
             "Choose Qwen high-memory mode before qualifying this PLE route."
         )
-    reasoning_contract = qwen_ple_route_qualification_reasoning_contract(
-        visible, model,
-    )
+    if backend == "llamacpp":
+        if visible.get("client") == "codex":
+            raise ValueError("The fixed llama.cpp SSD-PLE qualification does not expose a Codex Responses route.")
+        if int(visible.get("context") or 0) != LLAMACPP_PLE_CONTEXT:
+            raise ValueError("The llama.cpp SSD-PLE qualification is fixed to exactly 8,192 context tokens.")
+        if int(visible.get("output") or 0) < ROUTE_QUALIFICATION_MAX_TOKENS:
+            raise ValueError(
+                "The llama.cpp SSD-PLE qualification requires at least 512 visible response tokens."
+            )
+    reasoning_contract = route_qualification_reasoning_contract(visible, model, spec)
     if reasoning_contract.get("reasoningEnabled") is not True:
         raise ValueError(str(reasoning_contract.get("detail") or "Choose a reasoning level first."))
     request = copy.deepcopy(visible)
     request["reasoning"] = reasoning_contract["measured"]
-    request["suite"] = "agentic"
-    request.setdefault("options", {})["fan"] = validated_calibration_cooling(payload)
+    request["suite"] = spec["suite"]
+    if backend == "omlx":
+        request.setdefault("options", {})["fan"] = validated_calibration_cooling(payload)
     job = validated_benchmark_request(
         request, models, allow_baseline_only=True,
     )
     if job.get("modes") != ["ar"]:
         raise ValueError(
-            "This model now exposes another verified oMLX route. Use engine/route calibration instead."
+            "This model now exposes another verified route. Use engine/route calibration instead."
         )
     eligible: list[str] = []
     excluded: list[dict[str, str]] = []
     kv = str(request.get("options", {}).get("kv") or "off")
     chat = request.get("chat") if isinstance(request.get("chat"), dict) else None
-    for backend in ENGINE_ADAPTERS:
-        allowed, reason = benchmark_backend_eligibility(
-            model, backend, request["client"], request["reasoning"], kv, chat,
-        )
-        if allowed:
-            eligible.append(backend)
-        else:
-            excluded.append({
-                "backend": backend, "label": BACKEND_LABELS[backend], "reason": reason,
-            })
-    if eligible != ["omlx"]:
+    if backend == "llamacpp":
+        eligible = [backend]
+        excluded = [
+            {"backend": candidate, "label": BACKEND_LABELS[candidate],
+             "reason": "Not part of this receipt-bound single-route qualification."}
+            for candidate in ENGINE_ADAPTERS if candidate != backend
+        ]
+    else:
+        for candidate in ENGINE_ADAPTERS:
+            allowed, reason = benchmark_backend_eligibility(
+                model, candidate, request["client"], request["reasoning"], kv, chat,
+            )
+            if allowed:
+                eligible.append(candidate)
+            else:
+                excluded.append({
+                    "backend": candidate, "label": BACKEND_LABELS[candidate], "reason": reason,
+                })
+    if eligible != [backend]:
         raise ValueError(
-            "Single-route qualification is available only while oMLX AR is the sole exact-artifact route."
+            "Single-route qualification is available only while the selected route is the sole exact-artifact route."
         )
+    capability = model["backends"][backend]
+    qualification_contract = {
+        "id": spec["id"], "version": spec["version"], "backend": backend,
+        "exactContext": int(request["context"]),
+        "scenarioContract": list(ROUTE_QUALIFICATION_SCENARIOS),
+        "sampleMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+        "answerReserveTokens": ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS,
+        "minimumDecodeTokensPerSecond": (
+            LLAMACPP_PLE_MINIMUM_DECODE_TPS if backend == "llamacpp" else None
+        ),
+        "thinkingBudgetTokens": (
+            ROUTE_QUALIFICATION_THINKING_TOKENS if backend == "llamacpp" else None
+        ),
+        "reasoningPolicy": spec["reasoningPolicy"],
+        "toolProbeRequired": spec["toolProbeRequired"],
+        "memoryProofRequired": spec["memoryProofRequired"],
+        "memoryCeilingBytes": spec.get("memoryCeilingBytes"),
+        "receiptFingerprint": capability.get("receiptFingerprint"),
+        "runtimeVersion": capability.get("runtimeVersion"),
+    }
+    if backend == "llamacpp":
+        qualification_contract.update({
+            "scope": "route",
+            "clientAgnostic": True,
+            "minimumCompletionTokens": ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS,
+            "configuredOutputLimit": int(request["output"]),
+            "measuredRequestMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+            "reasoningBoundaryContractId": LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID,
+            "reasoningBudgetMessageSha256": hashlib.sha256(
+                LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+            ).hexdigest(),
+        })
     job.update({
         "kind": "route-qualification",
         "routeQualification": True,
         "qualificationVersion": ROUTE_QUALIFICATION_VERSION,
         "qualificationReasoningContract": copy.deepcopy(reasoning_contract),
+        "qualificationContract": qualification_contract,
         "enginePreference": preference,
     })
     # Keep the four bounded agentic stages while reserving part of each sample
     # for the final answer that makes the route usable.
-    apply_qwen_ple_route_qualification_budget(job)
+    apply_route_qualification_budget(job)
     return {
         "id": job["id"], "kind": "route-qualification",
         "request": copy.deepcopy(request),
         "reasoningContract": reasoning_contract,
+        "routeSpec": copy.deepcopy(spec),
+        "qualificationContract": copy.deepcopy(qualification_contract),
         "enginePreference": job["enginePreference"],
         "modelId": model_id, "model": model["name"],
         "client": request["client"],
         "suite": job["suiteName"], "suiteLabel": job["suite"]["label"],
         "workloadKind": job["workloadKind"],
         "job": job, "jobs": [job],
-        "executionOrder": ["omlx"],
+        "executionOrder": [backend],
         "excludedEngines": excluded,
     }
 
@@ -17039,6 +18585,12 @@ def validated_engine_shootout_request(
     model = next((item for item in models if item.get("id") == model_id), None)
     if not model:
         raise ValueError("The selected model is no longer in the scanned catalog. Refresh models.")
+    atomic_spec = route_qualification_spec(model, "llamacpp")
+    if atomic_spec is not None and atomic_spec["backend"] == "llamacpp":
+        raise ValueError(
+            "The receipt-bound llama.cpp SSD-PLE route uses dedicated single-route qualification; "
+            "it cannot enter a generic Engine Shootout or be presented as a cross-engine winner."
+        )
     reasoning_contract = benchmark_reasoning_contract(payload, model)
     comparison_payload = copy.deepcopy(payload)
     comparison_payload["reasoning"] = reasoning_contract["measured"]
@@ -17269,23 +18821,20 @@ def calibration_plan(
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported calibration goal.")
     model = next(item for item in models if item.get("id") == visible_request["modelId"])
-    omlx_capability = model.get("backends", {}).get("omlx", {})
-    route_qualification_candidate = bool(
-        visible_request.get("backend") == "omlx"
-        and is_qwen4_exp_record(model)
-        and omlx_capability.get("mtp") is not True
-        and omlx_capability.get("dflash") is not True
+    route_spec = route_qualification_spec(
+        model, str(visible_request.get("backend") or ""),
     )
+    route_qualification_candidate = route_spec is not None
     requested_suite_name = str(
         payload.get("suite")
         or ("standard" if visible_request["client"] == "chat" else "agentic")
     )
-    suite_name = "agentic" if route_qualification_candidate else requested_suite_name
+    suite_name = str(route_spec["suite"]) if route_spec else requested_suite_name
     suite = BENCHMARK_SUITES.get(suite_name)
     if not suite:
         raise ValueError("Choose a Quick, Standard, Thorough, or Agentic calibration workload.")
     reasoning_contract = (
-        qwen_ple_route_qualification_reasoning_contract(visible_request, model)
+        route_qualification_reasoning_contract(visible_request, model, route_spec)
         if route_qualification_candidate else
         benchmark_reasoning_contract(
             {
@@ -17305,7 +18854,10 @@ def calibration_plan(
     jobs: list[dict[str, Any]] = []
     ssd_profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
     ssd_lane = ssd_profile.get("recommended") is True
-    candidate_backends = ssd_profile_candidate_backends(ssd_profile) if ssd_lane else tuple(ENGINE_ADAPTERS)
+    candidate_backends = (
+        (str(route_spec["backend"]),) if route_spec else
+        ssd_profile_candidate_backends(ssd_profile) if ssd_lane else tuple(ENGINE_ADAPTERS)
+    )
     for backend in candidate_backends:
         allowed, reason = benchmark_backend_eligibility(
             model, backend, request["client"], request["reasoning"], kv,
@@ -17319,28 +18871,71 @@ def calibration_plan(
             try:
                 candidate_option_source = copy.deepcopy(raw_options)
                 candidate_option_source.update({
-                    "acceleration": "auto", "kv": kv,
+                    "acceleration": (
+                        "off" if route_spec and backend == "llamacpp" else "auto"
+                    ), "kv": kv,
                     "fan": calibration_cooling,
                 })
-                candidate["options"] = validated_cross_engine_profile_options(
-                    backend, model, model.get("backends", {}).get(backend, {}),
-                    candidate_option_source,
+                candidate["options"] = (
+                    validated_profile_options(
+                        backend, model, model.get("backends", {}).get(backend, {}),
+                        candidate_option_source,
+                    )
+                    if route_spec else
+                    validated_cross_engine_profile_options(
+                        backend, model, model.get("backends", {}).get(backend, {}),
+                        candidate_option_source,
+                    )
                 )
                 job = validated_benchmark_request(
                     candidate, models, allow_baseline_only=True,
                 )
                 if (
-                    route_qualification_candidate and backend == "omlx"
+                    route_qualification_candidate and backend == route_spec["backend"]
                     and job.get("modes") == ["ar"]
                 ):
+                    capability = model["backends"][backend]
+                    qualification_contract = {
+                        "id": route_spec["id"], "version": route_spec["version"],
+                        "backend": backend,
+                        "exactContext": int(request["context"]),
+                        "scenarioContract": list(ROUTE_QUALIFICATION_SCENARIOS),
+                        "sampleMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+                        "answerReserveTokens": ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS,
+                        "minimumDecodeTokensPerSecond": (
+                            LLAMACPP_PLE_MINIMUM_DECODE_TPS if backend == "llamacpp" else None
+                        ),
+                        "thinkingBudgetTokens": (
+                            ROUTE_QUALIFICATION_THINKING_TOKENS if backend == "llamacpp" else None
+                        ),
+                        "reasoningPolicy": route_spec["reasoningPolicy"],
+                        "toolProbeRequired": route_spec["toolProbeRequired"],
+                        "memoryProofRequired": route_spec["memoryProofRequired"],
+                        "memoryCeilingBytes": route_spec.get("memoryCeilingBytes"),
+                        "receiptFingerprint": capability.get("receiptFingerprint"),
+                        "runtimeVersion": capability.get("runtimeVersion"),
+                    }
+                    if backend == "llamacpp":
+                        qualification_contract.update({
+                            "scope": "route",
+                            "clientAgnostic": True,
+                            "minimumCompletionTokens": ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS,
+                            "configuredOutputLimit": int(request["output"]),
+                            "measuredRequestMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+                            "reasoningBoundaryContractId": LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID,
+                            "reasoningBudgetMessageSha256": hashlib.sha256(
+                                LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+                            ).hexdigest(),
+                        })
                     job.update({
                         "kind": "route-qualification",
                         "routeQualification": True,
                         "qualificationVersion": ROUTE_QUALIFICATION_VERSION,
                         "qualificationReasoningContract": copy.deepcopy(reasoning_contract),
+                        "qualificationContract": qualification_contract,
                         "enginePreference": preference,
                     })
-                    apply_qwen_ple_route_qualification_budget(job)
+                    apply_route_qualification_budget(job)
                 if backend in SSD_STREAMING_BACKENDS:
                     job["options"]["ssdCacheState"] = "natural-cold-to-warm"
                     add_benchmark_engine_evidence(
@@ -17366,8 +18961,8 @@ def calibration_plan(
         )
         if job is not None and job.get("routeQualification") is True:
             mode_detail = (
-                "Qualifies one exact oMLX AR + read-only PLE mmap load across cold, "
-                "shared-prefix, tool-ingestion, and warm reasoning turns."
+                f"Qualifies one exact {route_spec['routeLabel']} across cold, shared-prefix, "
+                "tool-ingestion, and warm reasoning turns."
             )
         if (
             job is not None and backend == "lmstudio"
@@ -17455,12 +19050,12 @@ def calibration_plan(
     route_qualification = bool(
         route_qualification_candidate
         and len(jobs) == 1
-        and jobs[0].get("backend") == "omlx"
+        and jobs[0].get("backend") == route_spec["backend"]
         and jobs[0].get("modes") == ["ar"]
         and reasoning_contract.get("reasoningEnabled") is True
     )
     qualification_preparation: dict[str, Any] | None = None
-    if route_qualification_candidate:
+    if route_qualification_candidate and route_spec["backend"] == "omlx":
         try:
             qualification_preparation = qwen_ple_qualification_preparation(
                 visible_request, model, models, calibration_cooling,
@@ -17483,7 +19078,10 @@ def calibration_plan(
         str(job["model"].get("backends", {}).get(job["backend"], {}).get("comparisonIdentity") or "")
         for job in jobs
     }
-    if ssd_lane and jobs and ("" in comparison_identities or len(comparison_identities) != 1):
+    if (
+        not route_qualification and ssd_lane and jobs
+        and ("" in comparison_identities or len(comparison_identities) != 1)
+    ):
         blockers.append(
             "The SSD artifacts do not prove one matching pinned source revision, so their speeds cannot be compared safely."
         )
@@ -17530,7 +19128,10 @@ def calibration_plan(
     ) if ready else 0
     measured_requests = sum(
         benchmark_job_maximum_route_count(job)
-        * (2 + benchmark_measurement_count(job["suite"]))
+        * (
+            2 + benchmark_measurement_count(job["suite"])
+            + int(job.get("qualificationContract", {}).get("toolProbeRequired") is True)
+        )
         for job in jobs
     ) if ready else 0
     prompt_schedule = (
@@ -17645,6 +19246,11 @@ def calibration_plan(
         "action": action,
         "ready": ready,
         "routeQualification": route_qualification,
+        "routeSpec": copy.deepcopy(route_spec) if route_qualification else None,
+        "qualificationContract": (
+            copy.deepcopy(jobs[0].get("qualificationContract"))
+            if route_qualification else None
+        ),
         "qualificationPreparation": copy.deepcopy(qualification_preparation),
         "blockers": blockers,
         "memoryAdmission": copy.deepcopy(memory_admission),
@@ -17661,10 +19267,10 @@ def calibration_plan(
         "suiteAdjustment": (
             {
                 "requested": requested_suite_name,
-                "measured": "agentic",
-                "reason": "Qwen PLE route qualification uses the bounded four-turn reasoning workload.",
+                "measured": suite_name,
+                "reason": "Single-route qualification uses the bounded four-turn reasoning workload.",
             }
-            if route_qualification_candidate and requested_suite_name != "agentic" else None
+            if route_qualification_candidate and requested_suite_name != suite_name else None
         ),
         "preference": preference,
         "preferenceLabel": ENGINE_PREFERENCE_LABELS[preference],
@@ -18042,6 +19648,64 @@ def launch_memory_estimate(
     }
 
 
+def _llamacpp_qualified_session_capacity(
+    request: dict[str, Any], model: dict[str, Any], resource: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any]]:
+    """Resolve one fresh exact qualification without using GGUF file size as RAM."""
+    record: dict[str, Any] | None = None
+    metrics: dict[str, Any] | None = None
+    try:
+        evidence = optimizer_evidence(
+            model, int(request["context"]), int(request["output"]),
+            str(request["client"]), str(request["reasoning"]),
+            str(request.get("options", {}).get("kv") or "off"),
+            request.get("chat") if isinstance(request.get("chat"), dict) else None,
+        )
+        add_benchmark_engine_evidence(
+            evidence, model,
+            request.get("options") if isinstance(request.get("options"), dict) else {},
+            ["llamacpp"],
+        )
+        record = verified_route_qualification(model, "llamacpp", evidence)
+        spec = route_qualification_spec(model, "llamacpp")
+        metrics = route_qualification_metrics(record, spec) if record and spec else None
+    except (KeyError, TypeError, ValueError):
+        record = None
+        metrics = None
+    peak = (
+        int(metrics["peakMemoryBytes"])
+        if isinstance(metrics, dict)
+        and isinstance(metrics.get("peakMemoryBytes"), int)
+        and not isinstance(metrics.get("peakMemoryBytes"), bool)
+        else 0
+    )
+    reserve = SESSION_OS_RESERVE_MIN_BYTES
+    estimate = {
+        "version": SESSION_MEMORY_ESTIMATE_VERSION,
+        "qualifiedRoute": record is not None and metrics is not None and peak > 0,
+        "qualificationRecordId": str(record.get("id") or "") if record else "",
+        "qualificationCreatedAt": str(record.get("createdAt") or "") if record else "",
+        "artifactBytesOnDisk": max(0, int(model.get("size") or 0)),
+        "measuredProcessGroupPeakBytes": peak or None,
+        "estimatedWorkingSetBytes": peak,
+        "requiredHeadroomBytes": peak + reserve if peak else reserve,
+        "osReserveBytes": reserve,
+        "memoryCeilingBytes": LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+        "contextTokens": LLAMACPP_PLE_CONTEXT,
+        "parallelLanes": 1,
+        "geometryReady": True,
+        "ssdPle": True,
+        "estimateIsMeasured": peak > 0,
+        "basis": (
+            "Exact local route qualification process-group peak plus a protected 4 GiB macOS reserve. "
+            "The 79 GiB split GGUF is an on-disk artifact and is not treated as a resident-memory estimate."
+            if peak else
+            "No fresh exact route qualification is bound to these visible settings; the on-disk GGUF size is not used as a bypassable RAM warning."
+        ),
+    }
+    return record, metrics, estimate
+
+
 def session_memory_admission(
     payload: dict[str, Any], models: list[dict[str, Any]],
     resource: dict[str, Any], hub: dict[str, Any], operation: dict[str, Any],
@@ -18049,7 +19713,15 @@ def session_memory_admission(
     """Return a one-launch admission decision; never allocate a port or create run files."""
     request = validated_launch_profile_request(payload, models)
     model = next(item for item in models if item.get("id") == request["modelId"])
-    estimate = launch_memory_estimate(request, model, resource)
+    llama_route = request.get("backend") == "llamacpp"
+    llama_record: dict[str, Any] | None = None
+    llama_metrics: dict[str, Any] | None = None
+    if llama_route:
+        llama_record, llama_metrics, estimate = _llamacpp_qualified_session_capacity(
+            request, model, resource,
+        )
+    else:
+        estimate = launch_memory_estimate(request, model, resource)
     phase = str(hub.get("phase") or "idle")
     operation_active = bool(operation.get("active"))
     qwen4_ple_route = bool(
@@ -18087,6 +19759,63 @@ def session_memory_admission(
         launchable = True
         label = "Whallm route is already loaded"
         detail = "Whallm already owns the model and SSD cache; this launch adds only a private loopback bridge and the selected work surface. The 48 GB host remains an experimental upstream configuration."
+    elif llama_route and (llama_record is None or llama_metrics is None):
+        decision = "qualification"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Qualify this exact route once"
+        detail = (
+            "No fresh successful llama.cpp SSD-PLE qualification matches the current model, runtime, "
+            "8K context, response limit, reasoning, sampling, and fixed engine settings. Run the bounded "
+            "route qualification; a checkbox cannot bypass it."
+        )
+    elif (
+        llama_route
+        and int(resource.get("metalWiredLimitBytes") or 0)
+        != LLAMACPP_PLE_MEMORY_CEILING_BYTES
+    ):
+        decision = "system-setting"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Set the exact 44 GiB Metal limit"
+        detail = (
+            "This qualified route can load only while the Metal wired-memory limit equals exactly "
+            "44 GiB (45056 MiB). The launcher never raises it or accepts a higher value."
+        )
+    elif llama_route and (whallm_conflict := whallm_qualification_conflict(timeout=0.35)):
+        decision = "runtime-conflict"
+        requires_acknowledgement = False
+        launchable = False
+        label = LLAMACPP_WHALLM_CONFLICT_LABEL
+        detail = str(whallm_conflict["detail"])
+    elif llama_route and resource.get("memoryAvailable") is not True:
+        decision = "unknown"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Memory headroom unavailable"
+        detail = (
+            "macOS did not provide current unified-memory headroom, so the measured qualified route "
+            "cannot be admitted safely. Refresh capacity and retry."
+        )
+    elif llama_route and headroom < int(estimate["requiredHeadroomBytes"]):
+        decision = "pressure"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Free memory before launch"
+        detail = (
+            f"This exact qualification measured a {int(estimate['measuredProcessGroupPeakBytes']) / 1024**3:.1f} GiB "
+            f"process-group peak and protects another {SESSION_OS_RESERVE_MIN_BYTES / 1024**3:.0f} GiB for macOS. "
+            f"Current headroom is {headroom / 1024**3:.1f} GiB; close memory-heavy apps and refresh."
+        )
+    elif llama_route:
+        decision = "ready"
+        requires_acknowledgement = False
+        launchable = True
+        label = "Qualified SSD-PLE route ready"
+        detail = (
+            f"The fresh exact receipt, {int(estimate['measuredProcessGroupPeakBytes']) / 1024**3:.1f} GiB measured peak, "
+            "44 GiB ceiling, current headroom, and Whallm isolation all pass."
+        )
     elif qwen4_ple_route and not high_memory_route:
         decision = "configuration"
         requires_acknowledgement = False
@@ -18198,7 +19927,11 @@ def session_memory_admission(
         if isinstance(headroom_value, int) and not isinstance(headroom_value, bool) else None
     )
     contract_id = hashlib.sha256(json.dumps(
-        {"request": request, "estimateVersion": SESSION_MEMORY_ESTIMATE_VERSION},
+        {
+            "request": request, "estimateVersion": SESSION_MEMORY_ESTIMATE_VERSION,
+            "qualificationRecordId": estimate.get("qualificationRecordId"),
+            "measuredProcessGroupPeakBytes": estimate.get("measuredProcessGroupPeakBytes"),
+        },
         sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     ).encode("utf-8")).hexdigest()[:16]
     return {
@@ -18230,7 +19963,7 @@ def route_qualification_memory_admission(
     hub: dict[str, Any] | None = None,
     operation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Re-use Sessions' fail-closed capacity gate for a Qwen PLE test.
+    """Apply the dedicated fail-closed capacity gate for one qualified route.
 
     This is read-only: it samples current capacity and never changes the Metal
     limit.  Callers running inside Benchmark Lab may pass the current benchmark
@@ -18246,6 +19979,65 @@ def route_qualification_memory_admission(
         copy.deepcopy(resource_snapshot)
         if isinstance(resource_snapshot, dict) else apple_resource_snapshot()
     )
+    visible = validated_launch_profile_request(request, models)
+    model = next(item for item in models if item.get("id") == visible["modelId"])
+    spec = route_qualification_spec(model, str(visible.get("backend") or ""))
+    if spec is not None and spec["backend"] == "llamacpp":
+        resource = public_session_resource(snapshot)
+        phase = str(current_hub.get("phase") or "idle")
+        busy = phase in {"preflight", "starting", "running", "stopping"} or bool(
+            current_operation.get("active")
+        )
+        cap = snapshot.get("metalWiredLimitBytes")
+        headroom = resource.get("headroomBytes")
+        memory_ready = bool(
+            resource.get("memoryAvailable") is True
+            and isinstance(headroom, int) and not isinstance(headroom, bool)
+            and headroom >= SESSION_OS_RESERVE_MIN_BYTES
+        )
+        if busy:
+            decision, label = "busy", "Another local operation is active"
+            detail = str(current_operation.get("detail") or current_hub.get("message") or "Stop it before qualification.")
+        elif cap != LLAMACPP_PLE_MEMORY_CEILING_BYTES:
+            decision, label = "system-setting", "Set the exact 44 GiB Metal limit"
+            detail = "The audited SSD-PLE route requires the wired-memory limit to equal exactly 44 GiB throughout qualification."
+        else:
+            whallm_conflict = whallm_qualification_conflict()
+            if whallm_conflict:
+                decision, label = "runtime-conflict", LLAMACPP_WHALLM_CONFLICT_LABEL
+                detail = str(whallm_conflict["detail"])
+            elif not memory_ready:
+                decision, label = "pressure", "Free memory before qualification"
+                detail = "Current macOS headroom must preserve at least 4 GiB before the receipt-bound SSD-PLE load."
+            else:
+                decision, label = "ready", "llama.cpp SSD-PLE route ready"
+                detail = "The exact receipt, 8K route, 44 GiB cap, and current macOS reserve passed the pre-load gate."
+        return {
+            "contractId": hashlib.sha256(json.dumps(
+                {"request": visible, "qualification": spec["id"]},
+                sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()[:16],
+            "decision": decision, "label": label, "detail": detail,
+            "launchable": decision == "ready", "requiresAcknowledgement": False,
+            "request": visible,
+            "route": {
+                "backend": "llamacpp", "backendLabel": BACKEND_LABELS["llamacpp"],
+                "client": visible["client"], "modelId": visible["modelId"],
+                "model": str(model.get("name") or visible["modelId"]),
+                "context": LLAMACPP_PLE_CONTEXT, "kv": "off",
+            },
+            "estimate": {
+                "basis": "Receipt-bound lazy mmap route; qualification measures Darwin physical footprint.",
+                "memoryCeilingBytes": LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+                "osReserveBytes": SESSION_OS_RESERVE_MIN_BYTES,
+            },
+            "projectedHeadroomBytes": None,
+            "privacy": {
+                "startsRuntime": False, "allocatesPort": False,
+                "createsRunFiles": False, "usesProjectData": False,
+                "changesExternalState": False,
+            },
+        }
     return session_memory_admission(
         request, models, public_session_resource(snapshot),
         current_hub, current_operation,
@@ -18263,7 +20055,7 @@ def route_qualification_admission_ready(admission: dict[str, Any]) -> bool:
 
 def build_benchmark_completion_request(
     plan: LaunchPlan, prompt: str | list[dict[str, str]], max_tokens: int,
-    sampling: dict[str, Any],
+    sampling: dict[str, Any], *, reasoning_budget_tokens: int | None = None,
 ) -> urllib.request.Request:
     if isinstance(prompt, str):
         messages = [{"role": "user", "content": prompt}]
@@ -18286,6 +20078,28 @@ def build_benchmark_completion_request(
         "stream_options": {"include_usage": True},
         "max_tokens": max_tokens,
     }
+    qualification_budget = (
+        reasoning_budget_tokens
+        if reasoning_budget_tokens is not None else
+        plan.options.get("_qualificationThinkingBudgetTokens")
+    )
+    if reasoning_budget_tokens is not None and (
+        plan.backend != "llamacpp"
+        or isinstance(reasoning_budget_tokens, bool)
+        or not isinstance(reasoning_budget_tokens, int)
+        or not 0 <= reasoning_budget_tokens < max_tokens
+        or max_tokens != ROUTE_QUALIFICATION_MAX_TOKENS
+    ):
+        raise ValueError("The explicit reasoning-boundary budget is invalid.")
+    if (
+        plan.backend == "llamacpp"
+        and isinstance(qualification_budget, int)
+        and not isinstance(qualification_budget, bool)
+        and 0 <= qualification_budget < max_tokens
+        and max_tokens == ROUTE_QUALIFICATION_MAX_TOKENS
+    ):
+        body["reasoning_budget_tokens"] = qualification_budget
+        body["reasoning_budget_message"] = LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE
     for key in (
         "temperature", "top_p", "top_k", "presence_penalty",
         "frequency_penalty", "seed",
@@ -18365,16 +20179,25 @@ def _openai_error_detail(payload: Any) -> str | None:
 def run_benchmark_completion(
     plan: LaunchPlan, prompt: str | list[dict[str, str]], max_tokens: int,
     sampling: dict[str, Any],
-    cancel_event: threading.Event,
+    cancel_event: threading.Event, *, correctness_expected: str | None = None,
+    reasoning_budget_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Measure one streamed request and require authoritative token usage."""
-    request = build_benchmark_completion_request(plan, prompt, max_tokens, sampling)
+    request = build_benchmark_completion_request(
+        plan, prompt, max_tokens, sampling,
+        reasoning_budget_tokens=reasoning_budget_tokens,
+    )
     started = time.monotonic()
     first_token_at: float | None = None
     content: list[str] = []
     reasoning: list[str] = []
     usage: dict[str, Any] = {}
     finish_reasons: set[str] = set()
+    strict_qualification_stream = (
+        plan.backend == "llamacpp"
+        and plan.options.get("_qualificationThinkingBudgetTokens")
+        == ROUTE_QUALIFICATION_THINKING_TOKENS
+    )
 
     def observe_finish_reason(value: Any) -> None:
         if value is None:
@@ -18394,6 +20217,11 @@ def run_benchmark_completion(
         raise RuntimeError(f"Benchmark could not reach the model: {error}") from error
     with response:
         content_type = response.headers.get("Content-Type", "").lower()
+        if strict_qualification_stream and not content_type.startswith("text/event-stream"):
+            raise RuntimeError(
+                "Qualification requires a text/event-stream response so TTFT and decode TPS "
+                "can be measured authoritatively."
+            )
         if content_type.startswith("application/json"):
             data = json.loads(response.read(MAX_JSON))
             runtime_error = _openai_error_detail(data)
@@ -18421,7 +20249,11 @@ def run_benchmark_completion(
                     continue
                 try:
                     event = json.loads(payload)
-                except ValueError:
+                except ValueError as error:
+                    if strict_qualification_stream:
+                        raise RuntimeError(
+                            "Qualification stream emitted a malformed JSON data event."
+                        ) from error
                     continue
                 runtime_error = _openai_error_detail(event)
                 if runtime_error:
@@ -18478,7 +20310,21 @@ def run_benchmark_completion(
         terminal_state = "unknown"
     else:
         terminal_state = "incomplete"
-    return {
+    answer_text = "".join(content).strip()
+    requested_reasoning_budget = (
+        reasoning_budget_tokens
+        if reasoning_budget_tokens is not None else
+        plan.options.get("_qualificationThinkingBudgetTokens")
+    )
+    if not (
+        plan.backend == "llamacpp"
+        and isinstance(requested_reasoning_budget, int)
+        and not isinstance(requested_reasoning_budget, bool)
+        and 0 <= requested_reasoning_budget < max_tokens
+        and max_tokens == ROUTE_QUALIFICATION_MAX_TOKENS
+    ):
+        requested_reasoning_budget = None
+    result = {
         "promptTokens": prompt_tokens,
         "cachedPromptTokens": cached_prompt_tokens,
         "uncachedPromptTokens": (
@@ -18489,6 +20335,14 @@ def run_benchmark_completion(
             if cached_prompt_tokens is not None else None
         ),
         "completionTokens": completion_tokens,
+        "requestedMaxTokens": max_tokens,
+        "thinkingBudgetTokensRequested": requested_reasoning_budget,
+        "reasoningBudgetMessageSha256": (
+            hashlib.sha256(
+                LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+            ).hexdigest()
+            if requested_reasoning_budget is not None else None
+        ),
         "ttftSeconds": round(ttft, 6),
         "totalSeconds": round(total, 6),
         "decodeTokensPerSecond": round(decode_tokens / decode_seconds, 4),
@@ -18501,6 +20355,35 @@ def run_benchmark_completion(
         "responseLimitReached": response_limit_reached,
         "outputHash": hashlib.sha256(output_identity).hexdigest(),
     }
+    if correctness_expected is not None:
+        tag_leak = re.search(r"<\s*/?\s*(?:think|thinking)\b", answer_text, re.IGNORECASE)
+        transition_leak = (
+            LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.strip().casefold()
+            in answer_text.casefold()
+        )
+        result["correctnessContract"] = {
+            "id": LLAMACPP_QUALIFICATION_CORRECTNESS_ID,
+            "expectedAnswerSha256": hashlib.sha256(
+                correctness_expected.encode("utf-8")
+            ).hexdigest(),
+            "observedAnswerSha256": hashlib.sha256(answer_text.encode("utf-8")).hexdigest(),
+            "exact": answer_text == correctness_expected,
+            "terminalComplete": terminal_state == "complete",
+            "authoritativeUsage": True,
+            "reasoningBoundaryContractId": LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID,
+            "reasoningBudgetTokensRequested": requested_reasoning_budget,
+            "reasoningBudgetMessageSha256": result["reasoningBudgetMessageSha256"],
+            "reasoningTagLeakDetected": tag_leak is not None,
+            "transitionMessageLeakDetected": transition_leak,
+            "reasoningBoundaryClean": bool(
+                requested_reasoning_budget == 0
+                and answer_text == correctness_expected
+                and terminal_state == "complete"
+                and tag_leak is None
+                and not transition_leak
+            ),
+        }
+    return result
 
 
 def build_route_check_request(
@@ -18546,7 +20429,16 @@ def build_route_check_request(
         url = f"http://127.0.0.1:{plan.client_port}/v1/responses"
     elif descriptor.protocol == "chat-completions":
         messages: list[dict[str, str]] = []
-        if plan.client == "chat" and str(plan.chat.get("systemPrompt") or ""):
+        generated_only_qualification = bool(
+            tool_probe
+            and plan.backend == "llamacpp"
+            and plan.options.get("_qualificationThinkingBudgetTokens")
+            == ROUTE_QUALIFICATION_THINKING_TOKENS
+        )
+        if (
+            not generated_only_qualification
+            and plan.client == "chat" and str(plan.chat.get("systemPrompt") or "")
+        ):
             messages.append({"role": "system", "content": str(plan.chat["systemPrompt"])})
         messages.append({"role": "user", "content": tool_prompt if tool_probe else ROUTE_CHECK_PROMPT})
         body = {
@@ -18556,7 +20448,15 @@ def build_route_check_request(
             "stream_options": {"include_usage": True},
             "max_tokens": min(ROUTE_CHECK_MAX_TOKENS, plan.output),
         }
-        if plan.client == "chat" and plan.chat.get("sampling") == "custom":
+        if generated_only_qualification:
+            body.update({
+                "reasoning_budget_tokens": 32,
+                "reasoning_budget_message": LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE,
+            })
+        if (
+            not generated_only_qualification
+            and plan.client == "chat" and plan.chat.get("sampling") == "custom"
+        ):
             body.update({
                 "temperature": plan.chat["temperature"],
                 "top_p": plan.chat["topP"],
@@ -20099,6 +21999,22 @@ def run_route_check_request(
         **tool_evidence,
         "terminalState": terminal_state,
         "terminalComplete": terminal_complete,
+        "thinkingBudgetTokensRequested": (
+            32
+            if tool_probe and plan.backend == "llamacpp"
+            and plan.options.get("_qualificationThinkingBudgetTokens")
+            == ROUTE_QUALIFICATION_THINKING_TOKENS
+            else None
+        ),
+        "reasoningBudgetMessageSha256": (
+            hashlib.sha256(
+                LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+            ).hexdigest()
+            if tool_probe and plan.backend == "llamacpp"
+            and plan.options.get("_qualificationThinkingBudgetTokens")
+            == ROUTE_QUALIFICATION_THINKING_TOKENS
+            else None
+        ),
         "usage": _route_check_usage(usage),
         "firstOutputSeconds": round(first_output, 4) if first_output is not None else None,
         "totalSeconds": round(elapsed, 4),
@@ -20150,6 +22066,10 @@ class BenchmarkResourceCooldownTimeout(RuntimeError):
     """A benchmark route exhausted its bounded wait for comparable resources."""
 
 
+class QualificationSafetyFailure(RuntimeError):
+    """A fail-closed qualification invariant stopped the owned model route."""
+
+
 class RunManager:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -20163,6 +22083,8 @@ class RunManager:
         self.aux_process: subprocess.Popen[str] | None = None
         self.worker_thread: threading.Thread | None = None
         self.monitor_thread: threading.Thread | None = None
+        self.llamacpp_guard_thread: threading.Thread | None = None
+        self.llamacpp_safety_violation: str | None = None
         self.cancel_event = threading.Event()
         self.cleanup_started = False
         self.cleanup_complete = threading.Event()
@@ -21351,6 +23273,7 @@ class RunManager:
                 self.state["phase"] in {"preflight", "starting", "running", "stopping"}
                 or (self.worker_thread and self.worker_thread.is_alive())
                 or (self.monitor_thread and self.monitor_thread.is_alive())
+                or (self.llamacpp_guard_thread and self.llamacpp_guard_thread.is_alive())
             ):
                 raise ValueError("Another launcher run is active. Stop it first.")
             plan.secrets.pop("omlxAdminSessionCookie", None)
@@ -21366,6 +23289,7 @@ class RunManager:
             self.attachments = {}
             self.agent_consoles = {}
             self.cache_observations = []
+            self.llamacpp_safety_violation = None
             if plan.purpose == "session":
                 self.attachments[plan.run_id] = SurfaceAttachment(
                     owner_run_id=plan.run_id,
@@ -21502,6 +23426,13 @@ class RunManager:
                         stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True,
                     )
                     self._publish_owned_process("process", process, plan, cancel_event)
+                    if plan.backend == "llamacpp":
+                        guard = threading.Thread(
+                            target=self._guard_llamacpp_memory,
+                            args=(plan, process, cancel_event), daemon=True,
+                        )
+                        self.llamacpp_guard_thread = guard
+                        guard.start()
             self._check_cancelled(cancel_event)
             self._wait_ready(plan, cancel_event)
             self._check_cancelled(cancel_event)
@@ -21710,15 +23641,76 @@ class RunManager:
             cancel_event.wait(1.5)
         raise RuntimeError(f"Timed out waiting for the model. {last_error}".strip())
 
+    def _guard_llamacpp_memory(
+        self, plan: LaunchPlan, process: subprocess.Popen[str],
+        cancel_event: threading.Event,
+    ) -> None:
+        """Enforce the exact cap and owned-group ceiling from Popen through unload."""
+        last_whallm_check = 0.0
+        try:
+            while not cancel_event.is_set() and process.poll() is None:
+                wired = apple_iogpu_wired_limit_bytes()
+                reason = ""
+                if wired != LLAMACPP_PLE_MEMORY_CEILING_BYTES:
+                    reason = "The 44 GiB Metal wired-memory limit changed; the llama.cpp route was stopped."
+                else:
+                    try:
+                        pgid = os.getpgid(process.pid)
+                    except (OSError, ProcessLookupError):
+                        pgid = 0
+                    group = darwin_process_group_physical_footprint(pgid)
+                    current = group.get("processGroupPhysicalFootprintBytes")
+                    peak = group.get("processGroupLifetimePeakPhysicalFootprintBytes")
+                    if (
+                        group.get("processGroupFootprintAvailable") is not True
+                        or group.get("processGroupMemberCount") != 1
+                        or not isinstance(current, int) or isinstance(current, bool)
+                        or not isinstance(peak, int) or isinstance(peak, bool)
+                    ):
+                        reason = "The llama.cpp process-group memory proof became incomplete; the route was stopped."
+                    elif max(current, peak) >= LLAMACPP_PLE_MEMORY_CEILING_BYTES:
+                        reason = "The llama.cpp process group reached the strict 44 GiB ceiling and was stopped."
+                now = time.monotonic()
+                if not reason and now - last_whallm_check >= 1.0:
+                    last_whallm_check = now
+                    if whallm_qualification_conflict(timeout=0.25):
+                        reason = (
+                            "Whallm became active while the llama.cpp route was loaded; "
+                            "the route was stopped before combined memory residency became unsafe."
+                        )
+                if not reason:
+                    if cancel_event.wait(0.25):
+                        return
+                    continue
+                with self.lock:
+                    if self.plan is not plan or self.process is not process:
+                        return
+                    self.state["phase"] = "failed"
+                    self.state["message"] = reason
+                    self.state["events"] = (
+                        self.state.get("events", [])
+                        + [{"time": time.strftime("%H:%M:%S"), "level": "error", "message": reason}]
+                    )[-80:]
+                    self.llamacpp_safety_violation = reason
+                cancel_event.set()
+                self._stop_owned(plan)
+                return
+        finally:
+            with self.lock:
+                if self.llamacpp_guard_thread is threading.current_thread():
+                    self.llamacpp_guard_thread = None
+
     def _monitor_run(self, plan: LaunchPlan, cancel_event: threading.Event) -> None:
         """Notice an unexpected engine/proxy/model loss and clean up once."""
         missing_responses = 0
         unreachable_since: float | None = None
         degraded_reported = False
+        last_health_check = 0.0
         headers = {"Authorization": f"Bearer {plan.secrets.get('apiKey', 'local')}"}
         try:
-            while not cancel_event.wait(3.0):
+            while not cancel_event.wait(0.25 if plan.backend == "llamacpp" else 3.0):
                 reason = ""
+                llama_safety_reason = False
                 if plan.backend != "lmstudio" and self.process and self.process.poll() is not None:
                     reason = f"{plan.backend} exited unexpectedly (code {self.process.returncode})."
                 elif self.proxy_process and self.proxy_process.poll() is not None:
@@ -21727,6 +23719,35 @@ class RunManager:
                         if plan.purpose == "session" else
                         "The Codex compatibility guard exited unexpectedly."
                     )
+                if not reason and plan.backend == "llamacpp" and self.process is not None:
+                    wired = apple_iogpu_wired_limit_bytes()
+                    if wired != LLAMACPP_PLE_MEMORY_CEILING_BYTES:
+                        reason = "The 44 GiB Metal wired-memory limit changed; the llama.cpp route was stopped."
+                    else:
+                        try:
+                            pgid = os.getpgid(self.process.pid)
+                        except (OSError, ProcessLookupError):
+                            pgid = 0
+                        group = darwin_process_group_physical_footprint(pgid)
+                        group_current = group.get("processGroupPhysicalFootprintBytes")
+                        group_peak = group.get("processGroupLifetimePeakPhysicalFootprintBytes")
+                        if (
+                            group.get("processGroupFootprintAvailable") is not True
+                            or group.get("processGroupMemberCount") != 1
+                            or not isinstance(group_current, int) or isinstance(group_current, bool)
+                            or not isinstance(group_peak, int) or isinstance(group_peak, bool)
+                        ):
+                            reason = "The llama.cpp process-group memory proof became incomplete; the route was stopped."
+                        elif max(group_current, group_peak) >= LLAMACPP_PLE_MEMORY_CEILING_BYTES:
+                            reason = "The llama.cpp process group reached the strict 44 GiB ceiling and was stopped."
+                    llama_safety_reason = bool(reason)
+                now_monotonic = time.monotonic()
+                if (
+                    not reason and plan.backend == "llamacpp"
+                    and now_monotonic - last_health_check < 3.0
+                ):
+                    continue
+                last_health_check = now_monotonic
                 if not reason and plan.purpose == "session":
                     activity = self.request_activity()
                     idle_policy = activity.get("idlePolicy") or {}
@@ -21795,6 +23816,8 @@ class RunManager:
                         self.state.get("events", [])
                         + [{"time": time.strftime("%H:%M:%S"), "level": "error", "message": reason}]
                     )[-80:]
+                    if llama_safety_reason:
+                        self.llamacpp_safety_violation = reason
                 cancel_event.set()
                 self._stop_owned(plan)
                 return
@@ -22445,6 +24468,10 @@ class RunManager:
             "outputLimit": plan.output,
             "reasoning": plan.reasoning,
             "backend": plan.backend,
+            "reasoningBudgetMessage": (
+                LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE
+                if plan.backend == "llamacpp" else None
+            ),
             "servedModel": plan.model["servedId"],
             "templateReasoningEfforts": plan.model.get("templateReasoningEfforts", []),
             "surfaces": [{
@@ -22633,7 +24660,13 @@ class RunManager:
                         return
                     worker = self.worker_thread
                     monitor = self.monitor_thread
-                    if self.state["phase"] == "idle" and not (worker and worker.is_alive()) and not (monitor and monitor.is_alive()):
+                    guard = self.llamacpp_guard_thread
+                    if (
+                        self.state["phase"] == "idle"
+                        and not (worker and worker.is_alive())
+                        and not (monitor and monitor.is_alive())
+                        and not (guard and guard.is_alive())
+                    ):
                         return
                     self.state["phase"] = "stopping"
                     target_cancel.set()
@@ -22648,10 +24681,15 @@ class RunManager:
                 worker.join(timeout=20)
             if monitor and monitor is not threading.current_thread():
                 monitor.join(timeout=8)
+            if guard and guard is not threading.current_thread():
+                guard.join(timeout=8)
             with self.lock:
                 if self.plan is not target_plan or self.cancel_event is not target_cancel:
                     return
-                if (worker and worker.is_alive()) or (monitor and monitor.is_alive()):
+                if (
+                    (worker and worker.is_alive()) or (monitor and monitor.is_alive())
+                    or (guard and guard.is_alive())
+                ):
                     self.state["phase"] = "failed"
                     self.state["message"] = "A launcher worker did not stop cleanly; no new run will start until it exits."
                     return
@@ -22746,6 +24784,11 @@ class RunManager:
                     self._schedule_lmstudio_cleanup(target_id)
             self._terminate_process(engine, 12)
         finally:
+            if plan.backend == "llamacpp":
+                # Proxy processes are already terminated above, so their
+                # owner-only configs and the engine key can now be removed
+                # without racing a live bearer reader.
+                dispose_llamacpp_plan_bearers(plan)
             complete.set()
 
     @staticmethod
@@ -23194,6 +25237,53 @@ def build_runtime_promotion_result(
     }
 
 
+def _process_group_is_gone(pgid: int | None) -> bool:
+    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except (OSError, PermissionError):
+        return False
+    return False
+
+
+def _loopback_port_is_closed(port: int | None) -> bool:
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65_535:
+        return True
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.25)
+            return probe.connect_ex(("127.0.0.1", port)) != 0
+    except OSError:
+        return False
+
+
+def benchmark_clean_unload_evidence(
+    manager: RunManager, process: Any, pgid: int | None,
+    ports: list[int],
+) -> dict[str, Any]:
+    snapshot = manager.snapshot()
+    process_exited = bool(process is not None and process.poll() is not None)
+    group_exited = _process_group_is_gone(pgid)
+    manager_idle = bool(
+        snapshot.get("phase") == "idle"
+        and manager.plan is None and manager.process is None
+        and manager.proxy_process is None and manager.aux_process is None
+    )
+    checked_ports = sorted({int(port) for port in ports if isinstance(port, int) and port > 0})
+    closed_ports = [port for port in checked_ports if _loopback_port_is_closed(port)]
+    ports_closed = bool(checked_ports) and closed_ports == checked_ports
+    clean = process_exited and group_exited and manager_idle and ports_closed
+    return {
+        "clean": clean, "processExited": process_exited,
+        "processGroupExited": group_exited, "managerIdle": manager_idle,
+        "portsClosed": ports_closed, "checkedPorts": checked_ports,
+        "closedPorts": closed_ports,
+    }
+
+
 class BenchmarkManager:
     ACTIVE_PHASES = {"queued", "cooldown", "starting", "running", "stopping"}
 
@@ -23201,6 +25291,7 @@ class BenchmarkManager:
         self.run_manager = run_manager
         self.lock = threading.RLock()
         self.cancel_event = threading.Event()
+        self.qualification_safety_violation: str | None = None
         self.thread: threading.Thread | None = None
         self.active_plan: LaunchPlan | None = None
         self.state: dict[str, Any] = {
@@ -23257,6 +25348,7 @@ class BenchmarkManager:
             if self.is_active():
                 raise ValueError("A benchmark is already running.")
             self.cancel_event = threading.Event()
+            self.qualification_safety_violation = None
             if shootout:
                 public_job = {
                     "id": shootout["id"], "kind": shootout["kind"],
@@ -23313,6 +25405,8 @@ class BenchmarkManager:
                 return copy.deepcopy(public_job)
             if qualification:
                 qualification_job = qualification["job"]
+                qualification_backend = str(qualification_job["backend"])
+                route_spec = qualification["routeSpec"]
                 public_job = {
                     "id": qualification["id"], "kind": qualification["kind"],
                     "client": qualification["client"], "modelId": qualification["modelId"],
@@ -23322,6 +25416,8 @@ class BenchmarkManager:
                     "enginePreference": qualification["enginePreference"],
                     "enginePreferenceLabel": ENGINE_PREFERENCE_LABELS[qualification["enginePreference"]],
                     "reasoningContract": copy.deepcopy(qualification["reasoningContract"]),
+                    "routeQualification": True,
+                    "qualificationContract": copy.deepcopy(qualification["qualificationContract"]),
                     "reasoningBudget": {
                         "sampleMaxTokens": int(qualification_job["suite"]["maxTokens"]),
                         "thinkingMaxTokens": int(qualification_job["qualificationThinkingBudgetTokens"]),
@@ -23329,9 +25425,9 @@ class BenchmarkManager:
                         "visibleResponseLimit": int(qualification_job["output"]),
                     },
                     "memoryAdmission": copy.deepcopy(qualification.get("memoryAdmission")),
-                    "executionOrder": ["omlx"],
+                    "executionOrder": [qualification_backend],
                     "engines": [{
-                        "backend": "omlx", "label": BACKEND_LABELS["omlx"],
+                        "backend": qualification_backend, "label": BACKEND_LABELS[qualification_backend],
                         "modes": benchmark_job_public_modes(qualification_job),
                         "measurementRouteCount": 1,
                     }],
@@ -23345,11 +25441,11 @@ class BenchmarkManager:
                 }
                 self.state = {
                     "phase": "queued",
-                    "message": "Route qualification accepted. Preparing the exact oMLX AR + PLE mmap route…",
+                    "message": f"Route qualification accepted. Preparing the exact {route_spec['routeLabel']}…",
                     "progress": 0.0, "job": public_job, "modes": {},
                     "engines": {
-                        "omlx": {
-                            "backend": "omlx", "label": BACKEND_LABELS["omlx"],
+                        qualification_backend: {
+                            "backend": qualification_backend, "label": BACKEND_LABELS[qualification_backend],
                             "phase": "queued", "modes": {}, "record": None,
                         },
                     },
@@ -23417,7 +25513,11 @@ class BenchmarkManager:
 
     def cancel(self) -> None:
         with self.lock:
-            if not self.is_active():
+            # A worker can still be unwinding its final Python frames after it
+            # has atomically published a completed/failed result.  Do not turn
+            # that terminal UI state back into "stopping" merely because the
+            # thread has not returned yet.
+            if self.state.get("phase") not in self.ACTIVE_PHASES:
                 return
             self.state["phase"] = "stopping"
             self.state["message"] = "Stopping Benchmark Lab…"
@@ -23634,6 +25734,12 @@ class BenchmarkManager:
     def _wait_for_engine(self, plan: LaunchPlan) -> None:
         deadline = time.monotonic() + 930
         while time.monotonic() < deadline:
+            safety_failure = (
+                self.qualification_safety_violation
+                or self.run_manager.llamacpp_safety_violation
+            )
+            if safety_failure:
+                raise QualificationSafetyFailure(safety_failure)
             if self.cancel_event.wait(0.2):
                 raise LaunchCancelled("Benchmark cancelled.")
             status = self.run_manager.snapshot()
@@ -23739,6 +25845,10 @@ class BenchmarkManager:
         *, display_label: str | None = None, state_key: str | None = None,
     ) -> tuple[dict[str, Any], int]:
         label = display_label or self._mode_label(mode)
+        if job["backend"] == "llamacpp" and job.get("routeQualification") is not True:
+            raise RuntimeError(
+                "The Atomic llama.cpp route can load for Benchmark Lab only through its dedicated qualification."
+            )
         shootout = bool(job.get("shootoutId"))
         grouped = shootout or job.get("routeQualification") is True
         route_label = (
@@ -23758,14 +25868,19 @@ class BenchmarkManager:
             runtime_binary=str(job.get("_runtimeBinary")) if promotion else None,
         )
         if job.get("routeQualification") is True:
-            admission = route_qualification_memory_admission(
-                mode_payload, models, hub=self.run_manager.snapshot(),
-                operation={
-                    "active": False, "kind": "benchmark", "phase": "starting",
-                    "detail": "This route qualification owns the next model load.",
-                },
-            )
+            try:
+                admission = route_qualification_memory_admission(
+                    mode_payload, models, hub=self.run_manager.snapshot(),
+                    operation={
+                        "active": False, "kind": "benchmark", "phase": "starting",
+                        "detail": "This route qualification owns the next model load.",
+                    },
+                )
+            except BaseException:
+                dispose_llamacpp_plan_bearers(plan)
+                raise
             if not route_qualification_admission_ready(admission):
+                dispose_llamacpp_plan_bearers(plan)
                 raise RuntimeError(
                     "Capacity changed immediately before the Qwen model load. "
                     f"{admission.get('label') or 'The route is blocked'}: "
@@ -23774,31 +25889,133 @@ class BenchmarkManager:
             with self.lock:
                 if isinstance(self.state.get("job"), dict):
                     self.state["job"]["memoryAdmission"] = copy.deepcopy(admission)
-        telemetry = BenchmarkTelemetrySampler()
+        strict_llama = bool(
+            job.get("routeQualification") is True and job["backend"] == "llamacpp"
+        )
+
+        def live_invariant(value: dict[str, Any]) -> None:
+            process = self.run_manager.process
+            if not strict_llama or process is None or process.poll() is not None:
+                return
+            def abort(message: str) -> None:
+                with self.lock:
+                    self.qualification_safety_violation = message
+                threading.Thread(target=self.run_manager.stop, daemon=True).start()
+                raise QualificationSafetyFailure(message)
+
+            if value.get("metalWiredLimitBytes") != LLAMACPP_PLE_MEMORY_CEILING_BYTES:
+                abort("The 44 GiB Metal wired-memory limit changed during qualification.")
+            footprint = value.get("processGroupPhysicalFootprintBytes")
+            lifetime_peak = value.get("processGroupLifetimePeakPhysicalFootprintBytes")
+            if (
+                value.get("processFootprintAvailable") is not True
+                or
+                value.get("processGroupFootprintAvailable") is not True
+                or value.get("processGroupMemberCount") != 1
+                or not isinstance(footprint, int) or isinstance(footprint, bool)
+                or not isinstance(lifetime_peak, int) or isinstance(lifetime_peak, bool)
+            ):
+                abort("The owned process-group physical footprint became unreadable during qualification.")
+            if max(footprint, lifetime_peak) >= LLAMACPP_PLE_MEMORY_CEILING_BYTES:
+                abort("The owned process group reached the strict 44 GiB qualification ceiling.")
+
+        telemetry = BenchmarkTelemetrySampler(
+            process_provider=lambda: self.run_manager.process,
+            invariant_callback=live_invariant,
+        )
+
+        def measured_completion(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            try:
+                measured = run_benchmark_completion(*args, **kwargs)
+            except Exception as error:
+                safety_failure = (
+                    self.qualification_safety_violation
+                    or self.run_manager.llamacpp_safety_violation
+                    or telemetry.violation
+                )
+                if safety_failure:
+                    raise QualificationSafetyFailure(safety_failure) from error
+                raise
+            safety_failure = (
+                self.qualification_safety_violation
+                or self.run_manager.llamacpp_safety_violation
+                or telemetry.violation
+            )
+            if safety_failure:
+                raise QualificationSafetyFailure(safety_failure)
+            return measured
         gate = copy.deepcopy(resource_gate) if isinstance(resource_gate, dict) else None
         initial_sample = gate.pop("_initialSnapshot", None) if gate else None
         telemetry.start(initial_sample if isinstance(initial_sample, dict) else None)
         with self.lock:
             self.active_plan = plan
+        result: dict[str, Any] | None = None
+        tool_contract: dict[str, Any] | None = None
+        run_manager_accepted_plan = False
         try:
             self.run_manager.start(plan)
+            run_manager_accepted_plan = True
             self._wait_for_engine(plan)
             with self.lock:
                 self.state["phase"] = "running"
                 if grouped and job["backend"] in self.state.get("engines", {}):
                     self.state["engines"][job["backend"]]["phase"] = "running"
-            run_benchmark_completion(
+            measured_completion(
                 plan, benchmark_prompt(128, 11_000 + job["modes"].index(mode)), 32,
                 {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "seed": 17},
                 self.cancel_event,
             )
             completed += 1
             self._update_progress(completed, total, f"{route_label} warm-up complete.")
-            quality = run_benchmark_completion(
-                plan, benchmark_prompt(256, 71_771), 64,
+            llama_qualification = bool(
+                job.get("routeQualification") is True and job["backend"] == "llamacpp"
+            )
+            correctness_prompt: str | list[dict[str, str]] = (
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "This is a generated local reliability check. Calculate silently, then "
+                            "return only the requested nonce and integer with no punctuation or explanation."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": "Compute (37 * 19) + 39. Reply exactly as RQ-8K-<integer>.",
+                    },
+                ]
+                if llama_qualification else benchmark_prompt(256, 71_771)
+            )
+            quality = measured_completion(
+                plan, correctness_prompt,
+                ROUTE_QUALIFICATION_MAX_TOKENS if llama_qualification else 64,
                 {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "seed": 17},
                 self.cancel_event,
+                correctness_expected=(
+                    LLAMACPP_QUALIFICATION_CORRECTNESS_EXPECTED
+                    if llama_qualification else None
+                ),
+                reasoning_budget_tokens=(0 if llama_qualification else None),
             )
+            if llama_qualification:
+                boundary = quality.get("correctnessContract")
+                if not (
+                    isinstance(boundary, dict)
+                    and boundary.get("reasoningBoundaryContractId")
+                    == LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID
+                    and boundary.get("reasoningBudgetTokensRequested") == 0
+                    and boundary.get("reasoningBudgetMessageSha256")
+                    == hashlib.sha256(
+                        LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+                    ).hexdigest()
+                    and boundary.get("reasoningBoundaryClean") is True
+                    and boundary.get("reasoningTagLeakDetected") is False
+                    and boundary.get("transitionMessageLeakDetected") is False
+                ):
+                    raise RuntimeError(
+                        "The forced Qwen reasoning boundary leaked into the visible answer; "
+                        "the route was not qualified."
+                    )
             completed += 1
             self._update_progress(completed, total, f"{route_label} greedy correctness probe complete.")
             samples: list[dict[str, Any]] = []
@@ -23807,7 +26024,7 @@ class BenchmarkManager:
                     job["suite"],
                     require_complete_answer=job.get("routeQualification") is True,
                 ):
-                    sample = run_benchmark_completion(
+                    sample = measured_completion(
                         plan, case["messages"],
                         int(job["suite"]["maxTokens"]), job["speedSampling"], self.cancel_event,
                     )
@@ -23816,6 +26033,15 @@ class BenchmarkManager:
                         "cacheExpected": case["cacheExpected"],
                         "targetPromptTokens": case["targetPromptTokens"], "repetition": 1,
                     })
+                    if (
+                        job.get("qualificationContract", {}).get("id")
+                        == "atomicchat-llamacpp-ssd-ple-8k-v1"
+                        and int(sample["promptTokens"]) + int(job["suite"]["maxTokens"])
+                        > LLAMACPP_PLE_CONTEXT
+                    ):
+                        raise RuntimeError(
+                            "The authoritative prompt usage plus bounded answer reserve exceeded the exact 8K route."
+                        )
                     samples.append(sample)
                     completed += 1
                     cached = sample.get("cachedPromptTokens")
@@ -23838,7 +26064,7 @@ class BenchmarkManager:
             else:
                 for prompt_index, target in enumerate(job["suite"]["promptTokens"]):
                     for repetition in range(int(job["suite"]["repetitions"])):
-                        sample = run_benchmark_completion(
+                        sample = measured_completion(
                             plan,
                             benchmark_prompt(int(target), 90_000 + prompt_index * 101 + repetition),
                             int(job["suite"]["maxTokens"]), job["speedSampling"], self.cancel_event,
@@ -23859,17 +26085,64 @@ class BenchmarkManager:
                                 "endToEndTokensPerSecond": sample["endToEndTokensPerSecond"],
                             },
                         )
+            qualification_contract = job.get("qualificationContract")
+            safety_failure = (
+                self.qualification_safety_violation
+                or self.run_manager.llamacpp_safety_violation
+                or telemetry.violation
+            )
+            if safety_failure:
+                raise QualificationSafetyFailure(safety_failure)
+            if (
+                isinstance(qualification_contract, dict)
+                and qualification_contract.get("toolProbeRequired") is True
+            ):
+                probe = run_route_check_request(
+                    plan, self.cancel_event, tool_probe=True,
+                )
+                tool_contract = {
+                    "protocol": probe.get("protocol"),
+                    "toolContractValid": probe.get("toolContractValid") is True,
+                    "toolCallCount": probe.get("toolCallCount"),
+                    "toolNameSeen": probe.get("toolNameSeen") is True,
+                    "terminalComplete": probe.get("terminalComplete") is True,
+                    "thinkingBudgetTokensRequested": probe.get("thinkingBudgetTokensRequested"),
+                    "reasoningBudgetMessageSha256": probe.get("reasoningBudgetMessageSha256"),
+                    "toolContractDetail": str(probe.get("toolContractDetail") or "")[:400],
+                }
+                if not (
+                    tool_contract["toolContractValid"] is True
+                    and tool_contract["toolCallCount"] == 1
+                    and tool_contract["toolNameSeen"] is True
+                    and tool_contract["terminalComplete"] is True
+                    and tool_contract["thinkingBudgetTokensRequested"] == 32
+                    and tool_contract["reasoningBudgetMessageSha256"]
+                    == hashlib.sha256(
+                        LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+                    ).hexdigest()
+                ):
+                    raise RuntimeError(
+                        "The same loaded route did not produce the one exact Jinja tool call required for qualification."
+                    )
+                completed += 1
+                self._update_progress(
+                    completed, total,
+                    f"{route_label}: Jinja tool-call contract verified on the same loaded route.",
+                )
             result = {
                 "label": label,
                 "settings": self._mode_settings(job, mode, plan.options),
                 "qualityHash": quality["outputHash"],
                 "qualityCompletionTokens": quality["completionTokens"],
+                "correctnessContract": copy.deepcopy(quality.get("correctnessContract")),
                 "medianTTFT": round(statistics.median(item["ttftSeconds"] for item in samples), 4),
                 "medianDecodeTokensPerSecond": round(statistics.median(item["decodeTokensPerSecond"] for item in samples), 3),
                 "medianEndToEndTokensPerSecond": round(statistics.median(item["endToEndTokensPerSecond"] for item in samples), 3),
                 "samples": samples,
-                "resourceTelemetry": telemetry.stop(),
+                "resourceTelemetry": {},
             }
+            if tool_contract is not None:
+                result["toolContract"] = tool_contract
             if gate is not None:
                 result["resourceCooldown"] = gate
             if job["workloadKind"] == "agentic":
@@ -23881,11 +26154,43 @@ class BenchmarkManager:
                     self.state["modes"][state_key or mode] = copy.deepcopy(result)
             return result, completed
         finally:
-            telemetry.stop()
-            self.run_manager.stop()
+            resource_telemetry = telemetry.stop()
+            owned_process = self.run_manager.process
+            try:
+                owned_pgid = os.getpgid(owned_process.pid) if owned_process is not None else None
+            except (OSError, ProcessLookupError):
+                owned_pgid = None
+            known_ports = [
+                port for port in (
+                    plan.port, plan.client_port,
+                    self.run_manager.codex_proxy_port,
+                    self.run_manager.session_proxy_port,
+                ) if isinstance(port, int)
+            ]
+            if run_manager_accepted_plan or self.run_manager.plan is plan:
+                self.run_manager.stop()
+                unload = benchmark_clean_unload_evidence(
+                    self.run_manager, owned_process, owned_pgid, known_ports,
+                )
+            else:
+                # RunManager rejected this plan before taking ownership (for
+                # example, a concurrent launch won the final race). Never stop
+                # that other run, and never leave this plan's bearer file.
+                dispose_llamacpp_plan_bearers(plan)
+                unload = {}
+            if result is not None:
+                result["resourceTelemetry"] = resource_telemetry
+                result["unloadEvidence"] = unload
             with self.lock:
                 if self.active_plan is plan:
                     self.active_plan = None
+            safety_failure = (
+                self.qualification_safety_violation
+                or self.run_manager.llamacpp_safety_violation
+                or telemetry.violation
+            )
+            if safety_failure:
+                raise QualificationSafetyFailure(safety_failure)
 
     def _build_record(self, job: dict[str, Any], results: dict[str, dict[str, Any]]) -> dict[str, Any]:
         baseline = results["ar"]
@@ -23940,6 +26245,14 @@ class BenchmarkManager:
                 and results[winner]["qualityCompletionTokens"] == baseline["qualityCompletionTokens"]
             )
         )
+        bounded_llamacpp_qualification = bool(
+            job.get("routeQualification") is True
+            and job.get("backend") == "llamacpp"
+        )
+        measured_output_limit = (
+            int(job["suite"]["maxTokens"])
+            if bounded_llamacpp_qualification else int(job["output"])
+        )
         record = {
             "id": job["id"], "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "scope": "local", "backend": job["backend"], "modelId": job["modelId"],
@@ -23947,10 +26260,15 @@ class BenchmarkManager:
             "runtimeVersion": job["runtimeVersion"], "hardwareFingerprint": hardware_fingerprint(),
             "suite": job["suiteName"], "workloadKind": job["workloadKind"],
             "scenarioContract": list(job["suite"].get("scenarios") or []),
-            "client": job["client"], "reasoning": job["reasoning"],
+            "client": (
+                "any"
+                if job.get("routeQualification") is True and job["backend"] == "llamacpp"
+                else job["client"]
+            ),
+            "reasoning": job["reasoning"],
             "targetKV": job["evidence"]["kv"], "samplingFingerprint": job["evidence"]["samplingFingerprint"],
             "contextMin": job["context"], "contextMax": job["context"],
-            "outputMin": job["output"], "outputMax": job["output"],
+            "outputMin": measured_output_limit, "outputMax": measured_output_limit,
             "promptTokensMin": min(item["promptTokens"] for item in all_samples),
             "promptTokensMax": max(item["promptTokens"] for item in all_samples),
             "comparedModes": list(job["modes"]), "modes": public_modes,
@@ -23990,17 +26308,28 @@ class BenchmarkManager:
                 )
             ),
         }
+        if bounded_llamacpp_qualification:
+            record.update({
+                "configuredOutputLimit": int(job["output"]),
+                "measuredRequestMaxTokens": measured_output_limit,
+            })
         if job.get("routeQualification") is True:
             record.update({
                 "kind": "route-qualification",
                 "qualificationVersion": ROUTE_QUALIFICATION_VERSION,
+                "qualificationContract": copy.deepcopy(job.get("qualificationContract")),
+                "toolContract": copy.deepcopy(baseline.get("toolContract")),
+                "correctnessContract": copy.deepcopy(baseline.get("correctnessContract")),
+                "unloadEvidence": copy.deepcopy(baseline.get("unloadEvidence")),
             })
             metrics = route_qualification_metrics(record)
             if metrics is None:
                 raise RuntimeError(
                     "Route qualification did not return complete authoritative usage, TPS, and TTFT telemetry."
                 )
-            reasoning_enabled = str(job.get("reasoning") or "auto") not in {"auto", "off"}
+            reasoning_enabled = bool(
+                job.get("qualificationReasoningContract", {}).get("reasoningEnabled") is True
+            )
             reasoning_observed = metrics["reasoningTurns"] == metrics["sampleCount"]
             answer_observed = metrics["answerTurns"] == metrics["sampleCount"]
             if not reasoning_enabled or not reasoning_observed or not answer_observed:
@@ -24011,16 +26340,27 @@ class BenchmarkManager:
                 "reasoningEnabled": True,
                 "reasoningObserved": True,
                 "answerObserved": True,
+                "reasoningBoundaryVerified": (
+                    metrics.get("reasoningBoundaryVerified") is True
+                    if job["backend"] == "llamacpp" else None
+                ),
                 "terminalCompletionObserved": True,
                 "authoritativeUsage": True,
                 "metrics": metrics,
             }
+            route_label = str(
+                job.get("qualificationContract", {}).get("id") or job["backend"]
+            )
             record["recommendation"] = (
-                f"oMLX AR + PLE mmap qualified at "
+                f"The exact {route_label} route qualified at "
                 f"{float(metrics['medianDecodeTokensPerSecond']):.1f} generation tok/s "
                 f"with {float(metrics['medianTTFTSeconds']):.2f}s median time to first output. "
                 f"All {int(metrics['sampleCount'])} bounded agentic turns exposed separate "
                 "reasoning and a final answer."
+                + (
+                    " The zero-budget Qwen handoff stayed out of visible content."
+                    if metrics.get("reasoningBoundaryVerified") is True else ""
+                )
             )
         return record
 
@@ -25174,36 +27514,45 @@ class BenchmarkManager:
             item for item in models if item.get("id") == qualification["modelId"]
         )
         preference = str(qualification.get("enginePreference") or "throughput")
+        backend = str(record["backend"])
         route = public_route_qualification_result(model, record, preference)
         metrics = record["qualification"]["metrics"]
         rationale = str(record["recommendation"])
+        binding = {
+            "scope": "route", "suite": str(record.get("suite") or qualification["suite"]),
+            "preference": preference, "recordId": str(record["id"]),
+        }
         decision = {
             "preference": preference,
             "preferenceLabel": ENGINE_PREFERENCE_LABELS[preference],
-            "backend": "omlx", "label": BACKEND_LABELS["omlx"],
-            "backendLabel": BACKEND_LABELS["omlx"],
+            "backend": backend, "label": BACKEND_LABELS[backend],
+            "backendLabel": BACKEND_LABELS[backend],
             "engineChanged": False,
             "evidenceTier": "local-route-qualification",
-            "evidenceLabel": "Qualified oMLX route",
+            "evidenceLabel": f"Qualified {BACKEND_LABELS[backend]} route",
             "qualified": True, "trusted": True, "trustedWinner": False,
             "comparedEngines": [], "qualifiedRoutes": [route],
             "missingEngines": [], "rationale": [rationale],
             "recommendation": rationale,
             "leadingBackends": [], "currentInLeadingBand": True,
+            "routeQualification": True, "evidenceBinding": copy.deepcopy(binding),
         }
         return {
             "id": qualification["id"], "kind": "route-qualification",
+            "routeQualification": True,
             "qualificationVersion": ROUTE_QUALIFICATION_VERSION,
             "modelId": qualification["modelId"], "model": qualification["model"],
             "suite": qualification["suite"],
             "workloadKind": qualification["workloadKind"],
             "reasoningContract": copy.deepcopy(qualification["reasoningContract"]),
-            "qualified": True, "qualifiedBackend": "omlx",
+            "qualificationContract": copy.deepcopy(record.get("qualificationContract")),
+            "qualified": True, "qualifiedBackend": backend,
             "qualifiedRoutes": [route], "engines": [route],
             "authoritativeUsage": {
                 "promptTokens": metrics["promptTokens"],
                 "completionTokens": metrics["completionTokens"],
             },
+            "evidenceBinding": binding,
             "decision": decision, "recommendation": rationale,
         }
 
@@ -25211,10 +27560,15 @@ class BenchmarkManager:
         self, qualification: dict[str, Any], models: list[dict[str, Any]],
     ) -> None:
         job = qualification["job"]
-        total = 2 + benchmark_measurement_count(job["suite"])
+        backend = str(job["backend"])
+        spec = qualification["routeSpec"]
+        total = (
+            2 + benchmark_measurement_count(job["suite"])
+            + int(spec.get("toolProbeRequired") is True)
+        )
         try:
             gate = self._wait_for_resource_baseline(
-                "oMLX AR + PLE mmap route qualification", "omlx",
+                f"{spec['routeLabel']} qualification", backend,
             )
             admission = route_qualification_memory_admission(
                 qualification["request"], models,
@@ -25226,7 +27580,7 @@ class BenchmarkManager:
             )
             if not route_qualification_admission_ready(admission):
                 raise RuntimeError(
-                    "Capacity changed before the Qwen model load. "
+                    "Capacity changed before the qualified model load. "
                     f"{admission.get('label') or 'The route is blocked'}: "
                     f"{admission.get('detail') or 'refresh capacity and try again.'}"
                 )
@@ -25235,42 +27589,95 @@ class BenchmarkManager:
                     self.state["job"]["memoryAdmission"] = copy.deepcopy(admission)
             result, _completed = self._measure_mode(
                 job, models, "ar", 0, total, gate,
-                display_label="AR + PLE mmap", state_key="ar",
+                display_label=str(spec["modeLabel"]), state_key="ar",
             )
             if self.cancel_event.is_set():
                 raise LaunchCancelled("Route qualification cancelled before its result was saved.")
             record = self._build_record(job, {"ar": result})
-            save_benchmark_record(record)
+            qualification_model = next(
+                (
+                    item for item in models
+                    if item.get("id") == qualification.get("modelId")
+                ),
+                None,
+            )
+            capability = (
+                qualification_model.get("backends", {}).get(backend)
+                if isinstance(qualification_model, dict) else None
+            )
+            if (
+                not isinstance(capability, dict)
+                or not _local_benchmark_record_verified(
+                    capability, record, job["evidence"],
+                )
+            ):
+                raise RuntimeError(
+                    "The completed route failed its immutable local-evidence audit; "
+                    "no qualification result was trusted or saved."
+                )
             public_result = self._build_qualification_result(
                 qualification, record, models,
             )
-            public_result["persistence"] = {
-                "saved": True, "scope": "local", "recordCount": 1,
-                "savedAt": datetime.now(timezone.utc).isoformat(),
-            }
             with self.lock:
+                # Cancellation and the persistence/publication boundary share
+                # this lock.  Stop therefore wins before saving, or observes
+                # one already-completed result; it can never publish
+                # "stopping" between those two outcomes.
+                if self.cancel_event.is_set():
+                    raise LaunchCancelled(
+                        "Route qualification cancelled before its result was saved."
+                    )
+                save_benchmark_record(record)
+                public_result["persistence"] = {
+                    "saved": True, "scope": "local", "recordCount": 1,
+                    "savedAt": datetime.now(timezone.utc).isoformat(),
+                }
                 self.state["phase"] = "completed"
                 self.state["progress"] = 1.0
                 self.state["result"] = copy.deepcopy(public_result)
-                engine = self.state.get("engines", {}).get("omlx")
+                engine = self.state.get("engines", {}).get(backend)
                 if isinstance(engine, dict):
                     engine["phase"] = "completed"
                     engine["record"] = {
-                        "winner": "ar", "winnerLabel": "AR + PLE mmap",
+                        "qualifiedRoute": "ar", "qualifiedRouteLabel": str(spec["modeLabel"]),
                         "recommendation": record["recommendation"],
                     }
             self._event(record["recommendation"])
+        except QualificationSafetyFailure as error:
+            with self.lock:
+                self.state["phase"] = "failed"
+                engine = self.state.get("engines", {}).get(backend)
+                if isinstance(engine, dict):
+                    engine["phase"] = "failed"
+            self._event(str(error), "error")
         except LaunchCancelled:
             with self.lock:
                 self.state["phase"] = "cancelled"
+                engine = self.state.get("engines", {}).get(backend)
+                if isinstance(engine, dict):
+                    engine["phase"] = "cancelled"
             self._event(
                 "Route qualification cancelled. No partial result was trusted or saved.",
                 "warning",
             )
         except Exception as error:  # noqa: BLE001
-            if self.cancel_event.is_set():
+            safety_failure = (
+                self.qualification_safety_violation
+                or self.run_manager.llamacpp_safety_violation
+            )
+            if safety_failure:
+                with self.lock:
+                    self.state["phase"] = "failed"
+                    engine = self.state.get("engines", {}).get(backend)
+                    if isinstance(engine, dict):
+                        engine["phase"] = "failed"
+                self._event(safety_failure, "error")
+            elif self.cancel_event.is_set():
                 with self.lock:
                     self.state["phase"] = "cancelled"
+                    engine = self.state.get("engines", {}).get(backend)
+                    if isinstance(engine, dict):
+                        engine["phase"] = "cancelled"
                 self._event(
                     "Route qualification cancelled. No partial result was trusted or saved.",
                     "warning",
@@ -25278,6 +27685,9 @@ class BenchmarkManager:
             else:
                 with self.lock:
                     self.state["phase"] = "failed"
+                    engine = self.state.get("engines", {}).get(backend)
+                    if isinstance(engine, dict):
+                        engine["phase"] = "failed"
                 self._event(
                     f"Route qualification stopped before saving its result: {error}",
                     "error",
@@ -29521,8 +31931,10 @@ class Handler(SimpleHTTPRequestHandler):
                     "models": models,
                 })
             elif self.path == "/api/preview":
-                plan = normalized_request(payload, scan_models())
-                self.json_response({"ok": True, "plan": plan.public()})
+                self.json_response({
+                    "ok": True,
+                    "plan": preview_launch_request(payload, scan_models()),
+                })
             elif self.path == "/api/route-check/plan":
                 self.json_response({
                     "ok": True,

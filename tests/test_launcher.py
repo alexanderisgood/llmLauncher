@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import base64
+import ctypes
 import hashlib
 import http.client
 import io
@@ -10,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -235,6 +237,18 @@ class LauncherTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.real_models = launcher.scan_models()
+        # A persisted AtomicChat presentation snapshot intentionally lets a
+        # production controller return while its current-process SHA pass runs
+        # in the background.  Unit tests patch the hashing helpers later, so
+        # never let that real verifier leak into an unrelated test's mocks.
+        with launcher._ATOMIC_PRESENTATION_LOCK:
+            verifiers = list(launcher._ATOMIC_VERIFICATION_THREADS.values())
+        for verifier in verifiers:
+            verifier.join(120)
+        if any(verifier.is_alive() for verifier in verifiers):
+            raise RuntimeError("The AtomicChat test preflight verifier did not finish.")
+        if verifiers:
+            cls.real_models = launcher.scan_models()
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="llm-launcher-tests-")
@@ -295,6 +309,7 @@ class LauncherTests(unittest.TestCase):
                 **{name: "/usr/bin/true" for name in ("omlx", "lms", "mtplx", "pi", "opencode", "codex", "hf")},
                 "freetoken": None,
                 "freetoken_native": None,
+                "whallm": None,
             },
         )
         self.binary_patch.start()
@@ -469,6 +484,15 @@ class LauncherTests(unittest.TestCase):
             for item in marker["files"]
         )
 
+    @staticmethod
+    def reset_atomic_verification_state() -> None:
+        with launcher._VERIFIED_FILE_SHA256_CACHE_LOCK:
+            launcher._VERIFIED_FILE_SHA256_CACHE.clear()
+        with launcher._ATOMIC_PRESENTATION_LOCK:
+            launcher._ATOMIC_CURRENT_PROCESS_PROOFS.clear()
+            launcher._ATOMIC_VERIFICATION_STATES.clear()
+            launcher._ATOMIC_VERIFICATION_THREADS.clear()
+
     def llamacpp_runtime_fixture(self) -> tuple[Path, Path, tuple]:
         root = Path(self.temp.name).resolve() / "runtimes" / "llama.cpp-b10740"
         root.mkdir(parents=True)
@@ -503,6 +527,15 @@ class LauncherTests(unittest.TestCase):
             ),
         )
         return root, server, manifest
+
+    @staticmethod
+    def install_llamacpp_key_fixture(plan: object) -> tuple:
+        key = "llamacpp-test-key-" + "k" * 32
+        plan.secrets["apiKey"] = key
+        key_file = launcher._llamacpp_api_key_file(plan)
+        key_file.write_text(key + "\n", encoding="utf-8")
+        key_file.chmod(0o600)
+        return launcher._llamacpp_strong_path_identity(key_file)
 
     def test_controller_source_freshness_blocks_new_work_but_not_stop(self) -> None:
         source = Path(self.temp.name) / "launcher-copy.py"
@@ -1238,6 +1271,84 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(partial_record["ready"])
         self.assertEqual(len([item for item in scanned if item["name"] == "with-config"]), 1)
         self.assertCountEqual(gguf_record["origins"], ["A", "B"])
+
+    def test_scan_dedupes_case_variant_roots_by_physical_directory_identity(self) -> None:
+        preferred_root = Path(self.temp.name) / "models"
+        model = preferred_root / "owner" / "Shared-Model"
+        model.mkdir(parents=True)
+        (model / "config.json").write_text(
+            '{"model_type":"test","max_position_embeddings":8192}', encoding="utf-8",
+        )
+        with open(model / "model.gguf", "wb") as handle:
+            handle.write(b"GGUF")
+            handle.truncate(1_100_000)
+
+        # APFS resolves this case variant to the same inode while preserving
+        # the spelling in the resolved-path string.  The symlink fallback
+        # keeps the physical-alias part of the regression portable.
+        case_alias = Path(self.temp.name) / "Models"
+        if launcher._physical_directory_identity(case_alias) != launcher._physical_directory_identity(
+            preferred_root,
+        ):
+            case_alias.symlink_to(preferred_root, target_is_directory=True)
+        self.assertEqual(
+            launcher._physical_directory_identity(case_alias),
+            launcher._physical_directory_identity(preferred_root),
+        )
+
+        # Identical hard-linked payload bytes in another model directory must
+        # remain a distinct artifact: dedupe is based on the directory inode,
+        # never a weight inode or display name.
+        other = preferred_root / "other-owner" / "Shared-Model"
+        other.mkdir(parents=True)
+        (other / "config.json").write_text(
+            '{"model_type":"test","max_position_embeddings":8192}', encoding="utf-8",
+        )
+        os.link(model / "model.gguf", other / "model.gguf")
+        acquisition_roots = [{
+            "id": "documents", "label": "Documents models", "path": str(preferred_root),
+        }]
+
+        def scan(roots: list[tuple[str, Path]]) -> list[dict]:
+            with (
+                mock.patch.object(launcher, "model_roots", return_value=roots),
+                mock.patch.object(
+                    launcher, "model_acquisition_roots", return_value=acquisition_roots,
+                ),
+                mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+                mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
+                mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
+                mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
+                mock.patch.object(launcher, "probe_whallm_endpoint", return_value=None),
+                mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
+                mock.patch.object(
+                    launcher, "llamacpp_runtime_contract",
+                    return_value={"ready": False, "version": "Not installed"},
+                ),
+            ):
+                return launcher.scan_models()
+
+        alias_first = scan([
+            ("Case alias", case_alias), ("Configured library", preferred_root),
+        ])
+        configured_first = scan([
+            ("Configured library", preferred_root), ("Case alias", case_alias),
+        ])
+        expected_path = str(model.resolve())
+        first = next(item for item in alias_first if item["path"] == expected_path)
+        second = next(item for item in configured_first if item["path"] == expected_path)
+        self.assertEqual(len(alias_first), 2)
+        self.assertEqual(len(configured_first), 2)
+        self.assertCountEqual(first["origins"], ["Case alias", "Configured library"])
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(
+            first["backends"]["omlx"]["benchmarkModelFingerprint"],
+            second["backends"]["omlx"]["benchmarkModelFingerprint"],
+        )
+        self.assertNotEqual(
+            launcher._physical_directory_identity(model),
+            launcher._physical_directory_identity(other),
+        )
 
     def test_lmstudio_index_resolves_canonical_load_keys_without_starting_the_daemon(self) -> None:
         catalog = Path(self.temp.name) / "lmstudio" / "models"
@@ -2991,6 +3102,93 @@ class LauncherTests(unittest.TestCase):
                 b'{"model":"served-model"}', {**config, "reasoning": "ultra"},
             )
 
+        llama_config = {
+            "servedModel": "served-model", "outputLimit": 2_048,
+            "backend": "llamacpp", "reasoning": "auto",
+        }
+        injected = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "max_tokens": 512,
+        }).encode(), llama_config))
+        self.assertEqual(injected["reasoning_budget_tokens"], 384)
+        self.assertEqual(
+            injected["reasoning_budget_message"],
+            session_proxy.LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE,
+        )
+        self.assertNotIn("thinking_budget_tokens", injected)
+        stricter = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "max_tokens": 512,
+            "thinking_budget_tokens": 96,
+        }).encode(), llama_config))
+        self.assertEqual(stricter["reasoning_budget_tokens"], 96)
+        self.assertNotIn("thinking_budget_tokens", stricter)
+        clamped = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "max_tokens": 512,
+            "reasoning_budget_tokens": 500,
+        }).encode(), llama_config))
+        self.assertEqual(clamped["reasoning_budget_tokens"], 384)
+        small = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "max_tokens": 64,
+        }).encode(), llama_config))
+        self.assertEqual(small["reasoning_budget_tokens"], 48)
+        modern_limit = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "max_completion_tokens": 512,
+        }).encode(), llama_config))
+        self.assertEqual(modern_limit["max_tokens"], 512)
+        self.assertEqual(modern_limit["reasoning_budget_tokens"], 384)
+        self.assertNotIn("max_completion_tokens", modern_limit)
+        modern_clamped = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "max_completion_tokens": 32_768,
+        }).encode(), llama_config))
+        self.assertEqual(modern_clamped["max_tokens"], 2_048)
+        self.assertEqual(modern_clamped["reasoning_budget_tokens"], 384)
+        self.assertNotIn("max_completion_tokens", modern_clamped)
+        conflicting_limits = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "max_tokens": 1_024,
+            "max_completion_tokens": 256,
+        }).encode(), llama_config))
+        self.assertEqual(conflicting_limits["max_tokens"], 256)
+        self.assertEqual(conflicting_limits["reasoning_budget_tokens"], 192)
+        self.assertNotIn("max_completion_tokens", conflicting_limits)
+        for requested_tokens, expected_budget in (
+            (1, 0), (2, 1), (511, 384), (512, 384), (2_048, 384),
+        ):
+            boundary = json.loads(session_proxy.transform_chat_request(json.dumps({
+                "model": "served-model", "max_tokens": requested_tokens,
+            }).encode(), llama_config))
+            self.assertEqual(boundary["reasoning_budget_tokens"], expected_budget)
+        zero_budget = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "max_tokens": 1,
+            "thinking_budget_tokens": 0,
+        }).encode(), llama_config))
+        self.assertEqual(zero_budget["reasoning_budget_tokens"], 0)
+        self.assertNotIn("thinking_budget_tokens", zero_budget)
+        with self.assertRaisesRegex(ValueError, "invalid thinking_budget_tokens"):
+            session_proxy.transform_chat_request(json.dumps({
+                "model": "served-model", "thinking_budget_tokens": "384",
+            }).encode(), llama_config)
+        with self.assertRaisesRegex(ValueError, "invalid reasoning_budget_tokens"):
+            session_proxy.transform_chat_request(json.dumps({
+                "model": "served-model", "reasoning_budget_tokens": "384",
+            }).encode(), llama_config)
+        dual_budget = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "max_tokens": 512,
+            "reasoning_budget_tokens": 160, "thinking_budget_tokens": 96,
+        }).encode(), llama_config))
+        self.assertEqual(dual_budget["reasoning_budget_tokens"], 96)
+        self.assertNotIn("thinking_budget_tokens", dual_budget)
+        for invalid_completion_limit in (False, 0, -1, "512"):
+            with self.assertRaisesRegex(ValueError, "invalid max_completion_tokens"):
+                session_proxy.transform_chat_request(json.dumps({
+                    "model": "served-model",
+                    "max_completion_tokens": invalid_completion_limit,
+                }).encode(), llama_config)
+
+        non_llama_modern_limit = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "max_completion_tokens": 4_096,
+        }).encode(), config))
+        self.assertEqual(non_llama_modern_limit["max_tokens"], 256)
+        self.assertEqual(non_llama_modern_limit["max_completion_tokens"], 4_096)
+
         pi_plan = make_plan("xhigh", "pi")
         launcher.build_pi_client(pi_plan, launcher.ClientRoute(
             provider="launcher-whallm-test", served="served-model",
@@ -3001,6 +3199,60 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(provider["model"]["thinkingLevelMap"]["off"], "none")
         self.assertIsNone(provider["model"]["thinkingLevelMap"]["minimal"])
         self.assertEqual(provider["model"]["thinkingLevelMap"]["xhigh"], "xhigh")
+
+    def test_session_relay_config_accepts_every_launcher_response_limit(self) -> None:
+        home = Path(self.temp.name) / "relay-home"
+        run_dir = (
+            home / "Library" / "Application Support" / "LLM Launcher"
+            / "runs" / "relay-config-test"
+        )
+        run_dir.mkdir(parents=True)
+        config_path = run_dir / "session-proxy.json"
+        base = {
+            "version": 2,
+            "listenPort": 18_181,
+            "upstreamPort": 18_182,
+            "lanes": 1,
+            "outputLimit": 512,
+            "backend": "llamacpp",
+            "reasoning": "auto",
+            "reasoningBudgetMessage": session_proxy.LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE,
+            "controlKey": "control-" + "a" * 32,
+            "upstreamKey": "upstream-" + "b" * 32,
+            "servedModel": "served-model",
+            "surfaces": [{
+                "id": str(uuid.uuid4()),
+                "client": "pi",
+                "key": "surface-" + "c" * 32,
+            }],
+        }
+
+        def load(overrides: dict[str, object]) -> dict[str, object]:
+            config_path.write_text(
+                json.dumps({**base, **overrides}), encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+            with mock.patch.object(session_proxy.Path, "home", return_value=home):
+                return session_proxy.load_config(config_path)
+
+        self.assertEqual(load({"outputLimit": 256})["outputLimit"], 256)
+        self.assertEqual(load({"outputLimit": 512})["outputLimit"], 512)
+        self.assertEqual(
+            load({
+                "backend": "whallm", "outputLimit": 256,
+                "reasoningBudgetMessage": None,
+            })["outputLimit"],
+            256,
+        )
+        for invalid in (
+            {"outputLimit": 255},
+            {"outputLimit": "512"},
+            {"listenPort": 1_023},
+            {"reasoningBudgetMessage": "wrong"},
+        ):
+            with mock.patch.object(session_proxy.sys, "stderr", io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    load(invalid)
         pi_source = (ROOT / "pi-provider.js").read_text(encoding="utf-8")
         self.assertIn("thinkingLevelMap: model.thinkingLevelMap", pi_source)
         self.assertIn("supportsReasoningEffort: Boolean(model.supportsReasoningEffort)", pi_source)
@@ -5614,6 +5866,108 @@ for line in sys.stdin:
         self.assertEqual(measured["terminalState"], "complete")
         self.assertTrue(measured["terminalComplete"])
 
+        malformed = Response([
+            b'data: {"choices":[{"delta":{"reasoning_content":"inspect"}}]}\n',
+            b'data: {definitely-not-json}\n',
+        ])
+        ordinary_plan = copy.deepcopy(plan)
+        with mock.patch.object(launcher.urllib.request, "urlopen", return_value=malformed):
+            with self.assertRaisesRegex(RuntimeError, "authoritative"):
+                launcher.run_benchmark_completion(
+                    ordinary_plan, "synthetic", 32, {}, threading.Event(),
+                )
+        qualification_plan = copy.deepcopy(plan)
+        qualification_plan.backend = "llamacpp"
+        qualification_plan.options["_qualificationThinkingBudgetTokens"] = (
+            launcher.ROUTE_QUALIFICATION_THINKING_TOKENS
+        )
+        malformed_qualification = Response([
+            b'data: {"choices":[{"delta":{"reasoning_content":"inspect"}}]}\n',
+            b'data: {definitely-not-json}\n',
+        ])
+        with mock.patch.object(
+            launcher.urllib.request, "urlopen", return_value=malformed_qualification,
+        ), self.assertRaisesRegex(RuntimeError, "malformed JSON data event"):
+            launcher.run_benchmark_completion(
+                qualification_plan, "synthetic", 512, {}, threading.Event(),
+            )
+
+        class JsonResponse:
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit: int) -> bytes:
+                return json.dumps({
+                    "choices": [{
+                        "message": {"reasoning_content": "inspect", "content": "answer"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 3_000, "completion_tokens": 256},
+                }).encode("utf-8")
+
+        with mock.patch.object(
+            launcher.urllib.request, "urlopen", return_value=JsonResponse(),
+        ), self.assertRaisesRegex(RuntimeError, "requires a text/event-stream response"):
+            launcher.run_benchmark_completion(
+                qualification_plan, "synthetic", 512, {}, threading.Event(),
+            )
+
+        with mock.patch.object(
+            launcher.urllib.request, "urlopen", return_value=JsonResponse(),
+        ):
+            ordinary_json = launcher.run_benchmark_completion(
+                ordinary_plan, "synthetic", 512, {}, threading.Event(),
+            )
+        self.assertEqual(ordinary_json["completionTokens"], 256)
+
+        boundary_clean = Response([
+            b'data: {"choices":[{"delta":{"content":"RQ-8K-742"},"finish_reason":"stop"}]}\n',
+            b'data: {"choices":[],"usage":{"prompt_tokens":128,"completion_tokens":4}}\n',
+            b'data: [DONE]\n',
+        ])
+        captured_boundary_body: dict[str, object] = {}
+
+        def boundary_urlopen(request: object, timeout: int) -> Response:
+            self.assertEqual(timeout, 900)
+            captured_boundary_body.update(json.loads(request.data))  # type: ignore[attr-defined]
+            return boundary_clean
+
+        with mock.patch.object(
+            launcher.urllib.request, "urlopen", side_effect=boundary_urlopen,
+        ):
+            clean_boundary = launcher.run_benchmark_completion(
+                qualification_plan, "boundary", 512, {}, threading.Event(),
+                correctness_expected=launcher.LLAMACPP_QUALIFICATION_CORRECTNESS_EXPECTED,
+                reasoning_budget_tokens=0,
+            )
+        self.assertEqual(captured_boundary_body["reasoning_budget_tokens"], 0)
+        self.assertEqual(
+            captured_boundary_body["reasoning_budget_message"],
+            launcher.LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE,
+        )
+        self.assertTrue(clean_boundary["correctnessContract"]["reasoningBoundaryClean"])
+
+        leaked_boundary = Response([
+            b'data: {"choices":[{"delta":{"content":"unfinished thought </think>RQ-8K-742"},"finish_reason":"stop"}]}\n',
+            b'data: {"choices":[],"usage":{"prompt_tokens":128,"completion_tokens":9}}\n',
+            b'data: [DONE]\n',
+        ])
+        with mock.patch.object(
+            launcher.urllib.request, "urlopen", return_value=leaked_boundary,
+        ):
+            leaked = launcher.run_benchmark_completion(
+                qualification_plan, "boundary", 512, {}, threading.Event(),
+                correctness_expected=launcher.LLAMACPP_QUALIFICATION_CORRECTNESS_EXPECTED,
+                reasoning_budget_tokens=0,
+            )
+        self.assertTrue(leaked["correctnessContract"]["reasoningTagLeakDetected"])
+        self.assertFalse(leaked["correctnessContract"]["reasoningBoundaryClean"])
+
         missing_usage = Response([b'data: {"choices":[{"delta":{"content":"hello"}}]}\n'])
         with mock.patch.object(launcher.urllib.request, "urlopen", return_value=missing_usage):
             with self.assertRaisesRegex(RuntimeError, "authoritative"):
@@ -5669,15 +6023,23 @@ for line in sys.stdin:
             "finishReason": "stop", "terminalState": "complete",
             "terminalComplete": True, "responseLimitReached": False,
         })
-        qualification_record["modes"]["ar"]["samples"] = [completed_sample]
+        completed_samples = []
+        for scenario in launcher.ROUTE_QUALIFICATION_SCENARIOS:
+            sample = copy.deepcopy(completed_sample)
+            sample["scenario"] = scenario
+            completed_samples.append(sample)
+        qualification_record["modes"]["ar"]["samples"] = completed_samples
         self.assertIsNotNone(launcher.route_qualification_metrics(qualification_record))
 
         unknown_terminal = copy.deepcopy(completed_sample)
         unknown_terminal.update({
+            "scenario": launcher.ROUTE_QUALIFICATION_SCENARIOS[0],
             "finishReason": None, "terminalState": "unknown",
             "terminalComplete": False,
         })
-        qualification_record["modes"]["ar"]["samples"] = [unknown_terminal]
+        qualification_record["modes"]["ar"]["samples"] = [
+            unknown_terminal, *copy.deepcopy(completed_samples[1:]),
+        ]
         self.assertIsNone(launcher.route_qualification_metrics(qualification_record))
 
     def test_route_check_plan_is_read_only_bounded_and_protocol_specific(self) -> None:
@@ -6603,7 +6965,9 @@ for line in sys.stdin:
                 message for message in reversed(case["messages"])
                 if message["role"] == "user"
             )
-            self.assertIn("complete final answer in at most 80 tokens", final_user["content"])
+            self.assertIn("substantive separate reasoning", final_user["content"])
+            self.assertIn("about 96 to 112 tokens", final_user["content"])
+            self.assertIn("headroom for the terminal marker", final_user["content"])
         self.assertNotIn("use the full response budget", json.dumps(qualification_cases).lower())
 
         def sample(scenario: str, speed: float, ttft: float, prompt: int, cached: int | None) -> dict:
@@ -8196,6 +8560,206 @@ for line in sys.stdin:
             self.assertFalse(cached_rejection["ready"])
             self.assertEqual(stream_hash.call_count, launcher.LLAMACPP_ATOMIC_SHARDS + 1)
 
+    def test_atomicchat_presentation_snapshot_is_fast_but_not_launch_authority(self) -> None:
+        _library, model, marker, total = self.small_atomicchat_llamacpp_fixture()
+        manifest = self.small_atomicchat_manifest(marker)
+        self.reset_atomic_verification_state()
+        with (
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_FILE_MANIFEST", manifest),
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_TOTAL_BYTES", total),
+        ):
+            verified = launcher.llamacpp_atomic_artifact_contract(model)
+            self.assertTrue(verified["ready"])
+            structural = launcher._llamacpp_atomic_structural_contract(model)
+            self.assertTrue(launcher._write_atomic_presentation_snapshot(structural))
+            snapshot_path = launcher.atomic_presentation_snapshot_path()
+            self.assertEqual(snapshot_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(snapshot_path.parent.stat().st_mode & 0o777, 0o700)
+            snapshot_path.chmod(0o644)
+            self.assertFalse(launcher._load_atomic_presentation_snapshot(structural))
+            snapshot_path.chmod(0o600)
+
+            # A controller restart discards every authoritative result. The
+            # presentation snapshot can avoid the payload read, but cannot set
+            # ready/runnable until the new process verifier finishes.
+            self.reset_atomic_verification_state()
+            pending = {
+                "phase": "checking", "verifiedShards": 3,
+                "totalShards": launcher.LLAMACPP_ATOMIC_SHARDS,
+            }
+            with (
+                mock.patch.object(
+                    launcher, "_start_atomic_background_verification",
+                    return_value=pending,
+                ) as start,
+                mock.patch.object(
+                    launcher, "_stream_file_sha256",
+                    wraps=launcher._stream_file_sha256,
+                ) as stream_hash,
+            ):
+                presented = launcher.llamacpp_atomic_scan_contract(model)
+            self.assertFalse(presented["ready"])
+            self.assertFalse(presented["currentProcessVerified"])
+            self.assertEqual(presented["verificationState"], "checking")
+            self.assertEqual(presented["verifiedShards"], 3)
+            self.assertTrue(presented["presentationSnapshot"])
+            start.assert_called_once()
+            stream_hash.assert_not_called()
+
+    def test_atomicchat_first_scan_is_background_only_and_fail_closed(self) -> None:
+        _library, model, marker, total = self.small_atomicchat_llamacpp_fixture()
+        manifest = self.small_atomicchat_manifest(marker)
+        self.reset_atomic_verification_state()
+        pending = {
+            "phase": "checking", "verifiedShards": 0,
+            "totalShards": launcher.LLAMACPP_ATOMIC_SHARDS,
+        }
+        with (
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_FILE_MANIFEST", manifest),
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_TOTAL_BYTES", total),
+            mock.patch.object(
+                launcher, "_start_atomic_background_verification", return_value=pending,
+            ) as start,
+            mock.patch.object(
+                launcher, "_stream_file_sha256", wraps=launcher._stream_file_sha256,
+            ) as stream_hash,
+        ):
+            presented = launcher.llamacpp_atomic_scan_contract(model)
+        self.assertFalse(presented["ready"])
+        self.assertFalse(presented["currentProcessVerified"])
+        self.assertEqual(presented["verificationState"], "checking")
+        self.assertFalse(presented["presentationSnapshot"])
+        start.assert_called_once()
+        stream_hash.assert_not_called()
+
+    def test_atomicchat_snapshot_identity_change_fails_closed(self) -> None:
+        _library, model, marker, total = self.small_atomicchat_llamacpp_fixture()
+        manifest = self.small_atomicchat_manifest(marker)
+        self.reset_atomic_verification_state()
+        with (
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_FILE_MANIFEST", manifest),
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_TOTAL_BYTES", total),
+        ):
+            self.assertTrue(launcher.llamacpp_atomic_artifact_contract(model)["ready"])
+            structural = launcher._llamacpp_atomic_structural_contract(model)
+            self.assertTrue(launcher._write_atomic_presentation_snapshot(structural))
+            self.reset_atomic_verification_state()
+
+            shard = model / Path(launcher.llamacpp_atomic_shard_relative(9)).name
+            with open(shard, "r+b") as handle:
+                handle.seek(8_192)
+                handle.write(b"z")
+            changed = launcher._llamacpp_atomic_structural_contract(model)
+            self.assertTrue(changed["_structurallyReady"])
+            self.assertFalse(launcher._load_atomic_presentation_snapshot(changed))
+            pending = launcher.llamacpp_atomic_scan_contract(model)
+            self.assertEqual(pending["verificationState"], "checking")
+            thread = launcher._ATOMIC_VERIFICATION_THREADS[str(model.resolve())]
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+            rejected = launcher.llamacpp_atomic_scan_contract(model)
+            self.assertFalse(rejected["ready"])
+            self.assertFalse(rejected["currentProcessVerified"])
+            self.assertEqual(rejected["verificationState"], "failed")
+            self.assertIn("SHA-256", rejected["reason"])
+
+    def test_atomicchat_background_verifier_is_deduplicated(self) -> None:
+        _library, model, marker, total = self.small_atomicchat_llamacpp_fixture()
+        manifest = self.small_atomicchat_manifest(marker)
+        self.reset_atomic_verification_state()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_contract(_path: Path, *, progress: Any = None) -> dict:
+            entered.set()
+            release.wait(5)
+            return {"ready": False, "reason": "test stop", "verifiedShards": 0}
+
+        with (
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_FILE_MANIFEST", manifest),
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_TOTAL_BYTES", total),
+            mock.patch.object(
+                launcher, "llamacpp_atomic_artifact_contract",
+                side_effect=blocked_contract,
+            ) as verify,
+        ):
+            structural = launcher._llamacpp_atomic_structural_contract(model)
+            first = launcher._start_atomic_background_verification(structural)
+            self.assertTrue(entered.wait(2))
+            second = launcher._start_atomic_background_verification(structural)
+            self.assertEqual(first["jobId"], second["jobId"])
+            self.assertEqual(verify.call_count, 1)
+            release.set()
+            thread = launcher._ATOMIC_VERIFICATION_THREADS[str(model.resolve())]
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+
+    def test_atomicchat_checking_scan_cannot_launch_apply_or_qualify(self) -> None:
+        library, model, marker, total = self.small_atomicchat_llamacpp_fixture()
+        manifest = self.small_atomicchat_manifest(marker)
+        self.reset_atomic_verification_state()
+        runtime = {
+            "ready": True,
+            "version": f"llama.cpp {launcher.LLAMACPP_RUNTIME_TAG}",
+            "reason": "runtime ready",
+        }
+        with (
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_FILE_MANIFEST", manifest),
+            mock.patch.object(launcher, "LLAMACPP_ATOMIC_TOTAL_BYTES", total),
+        ):
+            self.assertTrue(launcher.llamacpp_atomic_artifact_contract(model)["ready"])
+            self.assertTrue(launcher._write_atomic_presentation_snapshot(
+                launcher._llamacpp_atomic_structural_contract(model),
+            ))
+            self.reset_atomic_verification_state()
+            pending = {
+                "phase": "checking", "verifiedShards": 0,
+                "totalShards": launcher.LLAMACPP_ATOMIC_SHARDS,
+            }
+            with (
+                mock.patch.object(launcher, "model_roots", return_value=[("Test", library)]),
+                mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+                mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
+                mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
+                mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
+                mock.patch.object(launcher, "probe_whallm_endpoint", return_value=None),
+                mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
+                mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
+                mock.patch.object(
+                    launcher, "_start_atomic_background_verification",
+                    return_value=pending,
+                ),
+                mock.patch.dict(launcher.BINARIES, {"llamacpp": "/usr/bin/true"}),
+            ):
+                scanned = launcher.scan_models()
+            record = next(item for item in scanned if item["path"] == str(model.resolve()))
+            capability = record["backends"]["llamacpp"]
+            self.assertFalse(record["ready"])
+            self.assertEqual(record["verificationState"], "checking")
+            self.assertFalse(capability["runnable"])
+            self.assertFalse(capability["llamacppPle"])
+            self.assertFalse(capability["currentProcessVerified"])
+            self.assertIsNone(launcher._llamacpp_route_qualification_capability(record))
+            eligible, _reason = launcher.optimizer_backend_eligibility(
+                record, "llamacpp", "chat", "auto", "off",
+            )
+            self.assertFalse(eligible)
+            forged = copy.deepcopy(record)
+            forged["ready"] = True
+            forged["backends"]["llamacpp"]["runnable"] = True
+            eligible, reason = launcher.optimizer_backend_eligibility(
+                forged, "llamacpp", "chat", "auto", "off",
+            )
+            self.assertFalse(eligible)
+            self.assertIn("this controller", reason)
+            with self.assertRaisesRegex(ValueError, "Verifying exact pinned shards"):
+                launcher.normalized_request({
+                    "backend": "llamacpp", "client": "chat", "mode": "custom",
+                    "modelId": record["id"], "context": launcher.LLAMACPP_PLE_CONTEXT,
+                    "output": 512, "reasoning": "auto", "project": self.temp.name,
+                    "options": {"kv": "off"},
+                }, scanned)
+
     def test_atomicchat_scan_exposes_only_receipt_bound_llamacpp_route(self) -> None:
         library, model_path, _marker = self.atomicchat_llamacpp_fixture()
         arbitrary = library / "other" / "arbitrary-qwen4"
@@ -8217,6 +8781,9 @@ for line in sys.stdin:
             mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
             self.atomicchat_fixture_hash_patch(),
         ):
+            self.assertTrue(
+                launcher.llamacpp_atomic_artifact_contract(model_path)["ready"],
+            )
             models = launcher.scan_models()
         atomic = next(item for item in models if item["path"] == str(model_path.resolve()))
         other = next(item for item in models if item["path"] == str(arbitrary.resolve()))
@@ -8251,6 +8818,73 @@ for line in sys.stdin:
             stale = launcher.scan_models()
         stale_atomic = next(item for item in stale if item["path"] == str(model_path.resolve()))
         self.assertFalse(stale_atomic["backends"]["llamacpp"]["runnable"])
+
+    def test_atomicchat_case_alias_keeps_one_exact_receipt_bound_capability(self) -> None:
+        library, model_path, _marker = self.atomicchat_llamacpp_fixture()
+        case_alias = library.with_name(library.name.upper())
+        if launcher._physical_directory_identity(case_alias) != launcher._physical_directory_identity(
+            library,
+        ):
+            case_alias.symlink_to(library, target_is_directory=True)
+        runtime = {
+            "ready": True,
+            "version": f"llama.cpp {launcher.LLAMACPP_RUNTIME_TAG} · {launcher.LLAMACPP_RUNTIME_COMMIT[:12]}",
+            "reason": "runtime ready",
+        }
+        acquisition_roots = [{
+            "id": "documents", "label": "Documents models", "path": str(library),
+        }]
+
+        def scan(roots: list[tuple[str, Path]]) -> dict:
+            with (
+                mock.patch.object(launcher, "model_roots", return_value=roots),
+                mock.patch.object(
+                    launcher, "model_acquisition_roots", return_value=acquisition_roots,
+                ),
+                mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+                mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
+                mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
+                mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
+                mock.patch.object(launcher, "probe_whallm_endpoint", return_value=None),
+                mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
+                mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
+                self.atomicchat_fixture_hash_patch(),
+            ):
+                self.assertTrue(
+                    launcher.llamacpp_atomic_artifact_contract(model_path)["ready"],
+                )
+                models = launcher.scan_models()
+            matches = [
+                item for item in models if item["name"] == launcher.LLAMACPP_ATOMIC_VARIANT
+            ]
+            self.assertEqual(len(matches), 1)
+            return matches[0]
+
+        alias_first = scan([
+            ("Case alias", case_alias), ("Acquired here", library),
+        ])
+        configured_first = scan([
+            ("Acquired here", library), ("Case alias", case_alias),
+        ])
+        expected_path = str(model_path.resolve())
+        self.assertEqual(alias_first["path"], expected_path)
+        self.assertEqual(configured_first["path"], expected_path)
+        self.assertEqual(alias_first["id"], configured_first["id"])
+        self.assertCountEqual(alias_first["origins"], ["Case alias", "Acquired here"])
+        capability = alias_first["backends"]["llamacpp"]
+        self.assertTrue(capability["runnable"])
+        self.assertTrue(capability["llamacppPle"])
+        self.assertTrue(capability["atomicPle"]["ready"])
+        self.assertEqual(capability["modelPath"], expected_path)
+        self.assertEqual(
+            capability["receiptFingerprint"],
+            capability["atomicPle"]["receiptFingerprint"],
+        )
+        self.assertRegex(capability["receiptFingerprint"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            alias_first["backends"]["omlx"]["benchmarkModelFingerprint"],
+            configured_first["backends"]["omlx"]["benchmarkModelFingerprint"],
+        )
 
     def test_atomicchat_partial_nested_download_is_not_model_ready(self) -> None:
         library = Path(self.temp.name) / "partial-atomic-models"
@@ -8333,7 +8967,7 @@ for line in sys.stdin:
                 f"{launcher.LLAMACPP_RUNTIME_COMMIT}\n--model -ngl -c --parallel "
                 "--load-mode --lazy-mode -fit --jinja -fa --reasoning "
                 "--reasoning-format --reasoning-preserve --spec-type "
-                "--cache-type-k --cache-type-v --host --port --alias --api-key"
+                "--cache-type-k --cache-type-v --host --port --alias --api-key-file"
             )) as command,
         ):
             contract = launcher.llamacpp_runtime_contract(str(server))
@@ -8441,7 +9075,7 @@ for line in sys.stdin:
             "--model", "-ngl", "-c", "--parallel", "--load-mode", "--lazy-mode",
             "-fit", "--jinja", "-fa", "--reasoning", "--reasoning-format",
             "--reasoning-preserve", "--spec-type", "--cache-type-k", "--cache-type-v",
-            "--host", "--port", "--alias", "--api-key",
+            "--host", "--port", "--alias", "--api-key-file",
         ))
 
         def command_output(_path: str, *args: str) -> str:
@@ -8513,6 +9147,8 @@ for line in sys.stdin:
             "runnable": True,
             "runtimeVersion": runtime["version"],
             "llamacppPle": True,
+            "currentProcessVerified": True,
+            "verificationGeneration": artifact["verificationGeneration"],
             "atomicPle": artifact,
             "receiptFingerprint": artifact["receiptFingerprint"],
             "firstShard": artifact["firstShard"],
@@ -8527,8 +9163,9 @@ for line in sys.stdin:
             "atomic-builder", "llamacpp", "chat", model, self.temp.name,
             launcher.LLAMACPP_PLE_CONTEXT, 4_096, "auto", 18_123, "custom",
             {"acceleration": "off", "depth": 1, "kv": "off"},
-            run_dir=self.state / "atomic-builder",
+            purpose="benchmark", run_dir=self.state / "atomic-builder",
         )
+        plan.run_dir.mkdir(parents=True)
         with (
             mock.patch.dict(launcher.BINARIES, {"llamacpp": "/test/llama-server"}),
             mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
@@ -8537,6 +9174,7 @@ for line in sys.stdin:
                 launcher, "apple_iogpu_wired_limit_bytes",
                 return_value=launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
             ),
+            mock.patch.object(launcher, "whallm_qualification_conflict", return_value={}),
             self.atomicchat_fixture_hash_patch(),
         ):
             launcher.build_llamacpp(plan, capability)
@@ -8548,12 +9186,27 @@ for line in sys.stdin:
             ("--load-mode", "mmap"), ("--lazy-mode", "on"), ("-fit", "off"),
             ("-fa", "on"), ("--reasoning", "on"),
             ("--reasoning-format", "deepseek"), ("--spec-type", "none"),
+            (
+                "--reasoning-budget-message",
+                launcher.LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE,
+            ),
             ("--cache-type-k", "f16"), ("--cache-type-v", "f16"),
             ("--host", "127.0.0.1"), ("--port", "18123"),
         ):
             self.assertEqual(argv[argv.index(flag) + 1], value)
         for flag in ("--jinja", "--reasoning-preserve"):
             self.assertIn(flag, argv)
+        self.assertIn("--api-key-file", argv)
+        self.assertNotIn("--api-key", argv)
+        key_file = Path(argv[argv.index("--api-key-file") + 1])
+        key_details = key_file.lstat()
+        self.assertTrue(key_file.is_file())
+        self.assertFalse(key_file.is_symlink())
+        self.assertEqual(key_details.st_uid, os.geteuid())
+        self.assertEqual(key_details.st_nlink, 1)
+        self.assertEqual(stat.S_IMODE(key_details.st_mode), 0o600)
+        self.assertEqual(key_file.read_text(encoding="utf-8"), plan.secrets["apiKey"] + "\n")
+        self.assertNotIn(plan.secrets["apiKey"], argv)
         for forbidden in (
             "--ngram-load-mode", "--model-ngram", "--cpu-moe", "-ot",
             "--model-draft", "--mmproj", "--cache-type-k-q4", "--cache-type-v-q4",
@@ -8571,6 +9224,7 @@ for line in sys.stdin:
                 launcher, "apple_iogpu_wired_limit_bytes",
                 return_value=launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES + 1024**2,
             ),
+            mock.patch.object(launcher, "whallm_qualification_conflict", return_value={}),
             self.atomicchat_fixture_hash_patch(),
             self.assertRaisesRegex(ValueError, "exactly 44 GiB"),
         ):
@@ -8583,6 +9237,7 @@ for line in sys.stdin:
             mock.patch.dict(launcher.BINARIES, {"llamacpp": "/test/llama-server"}),
             mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
             mock.patch.object(launcher, "_llamacpp_launch_file_identities", return_value=(("stable",),)),
+            mock.patch.object(launcher, "whallm_qualification_conflict", return_value={}),
             self.atomicchat_fixture_hash_patch(),
             self.assertRaisesRegex(ValueError, "changed after verification"),
         ):
@@ -8596,7 +9251,7 @@ for line in sys.stdin:
             "--model", "-ngl", "-c", "--parallel", "--load-mode", "--lazy-mode",
             "-fit", "--jinja", "-fa", "--reasoning", "--reasoning-format",
             "--reasoning-preserve", "--spec-type", "--cache-type-k", "--cache-type-v",
-            "--host", "--port", "--alias", "--api-key",
+            "--host", "--port", "--alias", "--api-key-file",
         ))
 
         def command_output(_path: str, *args: str) -> str:
@@ -8619,6 +9274,7 @@ for line in sys.stdin:
                 launcher, "apple_iogpu_wired_limit_bytes",
                 return_value=launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
             ),
+            mock.patch.object(launcher, "whallm_qualification_conflict", return_value={}),
         ):
             runtime = launcher.llamacpp_runtime_contract(str(server))
             artifact = launcher.llamacpp_atomic_artifact_contract(model_path)
@@ -8628,6 +9284,8 @@ for line in sys.stdin:
                 "runnable": True,
                 "runtimeVersion": runtime["version"],
                 "llamacppPle": True,
+                "currentProcessVerified": True,
+                "verificationGeneration": artifact["verificationGeneration"],
                 "atomicPle": artifact,
                 "receiptFingerprint": artifact["receiptFingerprint"],
                 "firstShard": artifact["firstShard"],
@@ -8669,6 +9327,170 @@ for line in sys.stdin:
         self.assertEqual(manager.state["phase"], "failed")
         self.assertIn("SHA-256", manager.state["message"])
 
+    def test_llamacpp_api_key_file_is_private_identity_bound_and_cleaned(self) -> None:
+        run_dir = self.state / "llamacpp-key-boundary"
+        run_dir.mkdir(parents=True, mode=0o700)
+        plan = launcher.LaunchPlan(
+            "llamacpp-key-boundary", "llamacpp", "chat",
+            {"id": "atomic-key", "name": "Atomic fixture", "path": self.temp.name},
+            self.temp.name, launcher.LLAMACPP_PLE_CONTEXT, 4_096, "auto",
+            18_129, "custom", {"acceleration": "off", "depth": 1, "kv": "off"},
+            purpose="benchmark", run_dir=run_dir,
+        )
+        original_identity = self.install_llamacpp_key_fixture(plan)
+        key_file = launcher._validated_llamacpp_api_key_file(plan)
+        self.assertEqual(key_file.name, launcher.LLAMACPP_API_KEY_FILE_NAME)
+
+        key_file.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, "changed before launch"):
+            launcher._validated_llamacpp_api_key_file(plan)
+        key_file.chmod(0o600)
+        key_file.write_text("x" * len(plan.secrets["apiKey"]) + "\n", encoding="utf-8")
+        key_file.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "changed before launch"):
+            launcher._validated_llamacpp_api_key_file(plan)
+
+        key_file.write_text(plan.secrets["apiKey"] + "\n", encoding="utf-8")
+        key_file.chmod(0o600)
+        linked_key = run_dir / "linked-key"
+        os.link(key_file, linked_key)
+        with self.assertRaisesRegex(ValueError, "changed before launch"):
+            launcher._validated_llamacpp_api_key_file(plan)
+        linked_key.unlink()
+        replacement_identity = launcher._llamacpp_strong_path_identity(key_file)
+        self.assertNotEqual(original_identity, replacement_identity)
+        with (
+            mock.patch.object(
+                launcher, "_llamacpp_launch_file_identities", return_value=(("stable",),),
+            ),
+            mock.patch.object(launcher, "whallm_qualification_conflict", return_value={}),
+            mock.patch.object(
+                launcher, "apple_iogpu_wired_limit_bytes",
+                return_value=launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+            ),
+            self.assertRaisesRegex(ValueError, "changed before launch"),
+        ):
+            launcher.confirm_llamacpp_launch_identities(
+                plan, (("stable",), original_identity),
+            )
+
+        plan.secrets.update({
+            "clientApiKey": "client-" + "c" * 32,
+            "proxyControlKey": "control-" + "p" * 32,
+        })
+        private_configs = [
+            run_dir / "session-proxy.json",
+            run_dir / "codex-proxy.json",
+        ]
+        for config in private_configs:
+            launcher.atomic_json(config, {
+                "upstreamKey": plan.secrets["apiKey"],
+                "clientKey": plan.secrets["clientApiKey"],
+            })
+        log_file = run_dir / "engine.log"
+        log_file.write_text("safe diagnostic\n", encoding="utf-8")
+
+        manager = launcher.RunManager()
+        manager.plan = plan
+        manager.cancel_event = threading.Event()
+        manager._stop_owned(plan)
+        self.assertFalse(key_file.exists())
+        self.assertTrue(all(not config.exists() for config in private_configs))
+        self.assertTrue(log_file.exists())
+        self.assertFalse(
+            {"apiKey", "clientApiKey", "proxyControlKey"} & set(plan.secrets),
+        )
+        launcher.dispose_llamacpp_plan_bearers(plan)
+        self.assertTrue(log_file.exists())
+
+    def test_llamacpp_preview_and_rejected_benchmark_dispose_unowned_bearers(self) -> None:
+        def unowned_plan(name: str) -> launcher.LaunchPlan:
+            run_dir = self.state / name
+            run_dir.mkdir(parents=True, mode=0o700)
+            plan = launcher.LaunchPlan(
+                name, "llamacpp", "chat",
+                {
+                    "id": f"atomic-{name}", "name": "Atomic fixture",
+                    "path": self.temp.name, "backends": {"llamacpp": {}},
+                },
+                self.temp.name, launcher.LLAMACPP_PLE_CONTEXT, 4_096, "auto",
+                18_130, "custom", {"acceleration": "off", "depth": 1, "kv": "off"},
+                purpose="benchmark", run_dir=run_dir,
+            )
+            self.install_llamacpp_key_fixture(plan)
+            plan.secrets.update({
+                "clientApiKey": "client-" + "c" * 32,
+                "proxyControlKey": "control-" + "p" * 32,
+            })
+            plan.engine_argv = [
+                "/verified/llama-server", "--api-key-file",
+                str(launcher._llamacpp_api_key_file(plan)),
+            ]
+            return plan
+
+        preview = unowned_plan("llamacpp-preview")
+        preview_key = preview.secrets["apiKey"]
+        preview_config = preview.run_dir / "session-proxy.json"
+        launcher.atomic_json(preview_config, {"upstreamKey": preview.secrets["apiKey"]})
+        with mock.patch.object(launcher, "normalized_request", return_value=preview):
+            public = launcher.preview_launch_request({}, [])
+        self.assertEqual(public["runId"], preview.run_id)
+        self.assertNotIn(preview_key, public["engineCommand"])
+        self.assertFalse(launcher._llamacpp_api_key_file(preview).exists())
+        self.assertFalse(preview_config.exists())
+        self.assertFalse(
+            {"apiKey", "clientApiKey", "proxyControlKey"} & set(preview.secrets),
+        )
+
+        run_manager = launcher.RunManager()
+        benchmark = launcher.BenchmarkManager(run_manager)
+        job = {
+            "backend": "llamacpp", "routeQualification": True,
+            "shootoutId": None,
+        }
+        blocked = {
+            "decision": "pressure", "launchable": False,
+            "requiresAcknowledgement": False,
+            "label": "Free memory before qualification", "detail": "test pressure",
+        }
+        rejected = unowned_plan("llamacpp-benchmark-rejected")
+        with (
+            mock.patch.object(benchmark, "_mode_payload", return_value={}),
+            mock.patch.object(launcher, "normalized_request", return_value=rejected),
+            mock.patch.object(
+                launcher, "route_qualification_memory_admission", return_value=blocked,
+            ),
+            self.assertRaisesRegex(RuntimeError, "Capacity changed"),
+        ):
+            benchmark._measure_mode(job, [], "ar", 0, 1)
+        self.assertFalse(launcher._llamacpp_api_key_file(rejected).exists())
+
+        raced = unowned_plan("llamacpp-benchmark-race")
+        ready = {
+            "decision": "ready", "launchable": True,
+            "requiresAcknowledgement": False,
+        }
+        telemetry = mock.Mock(violation=None)
+        telemetry.stop.return_value = {}
+        with (
+            mock.patch.object(benchmark, "_mode_payload", return_value={}),
+            mock.patch.object(launcher, "normalized_request", return_value=raced),
+            mock.patch.object(
+                launcher, "route_qualification_memory_admission", return_value=ready,
+            ),
+            mock.patch.object(
+                launcher, "BenchmarkTelemetrySampler", return_value=telemetry,
+            ),
+            mock.patch.object(
+                run_manager, "start", side_effect=ValueError("synthetic start race"),
+            ),
+            mock.patch.object(run_manager, "stop") as stop,
+            self.assertRaisesRegex(ValueError, "synthetic start race"),
+        ):
+            benchmark._measure_mode(job, [], "ar", 0, 1)
+        stop.assert_not_called()
+        self.assertFalse(launcher._llamacpp_api_key_file(raced).exists())
+
     def test_llamacpp_final_popen_environment_strips_every_dyld_override(self) -> None:
         run_dir = self.state / "llamacpp-env"
         run_dir.mkdir(parents=True)
@@ -8706,6 +9528,292 @@ for line in sys.stdin:
             manager._worker(plan, cancel_event)
         self.assertFalse(any(key.startswith("DYLD_") for key in observed))
         self.assertEqual(observed["LLM_LAUNCHER_SAFE_SENTINEL"], "preserved")
+
+    def test_llamacpp_final_confirmation_rejects_changed_wired_cap_before_popen(self) -> None:
+        run_dir = self.state / "llamacpp-final-cap"
+        run_dir.mkdir(parents=True)
+        plan = launcher.LaunchPlan(
+            "llamacpp-final-cap", "llamacpp", "chat",
+            {"id": "atomic-cap", "name": "Atomic fixture", "path": self.temp.name},
+            self.temp.name, launcher.LLAMACPP_PLE_CONTEXT, 4_096, "auto",
+            18_126, "custom", {"acceleration": "off", "depth": 1, "kv": "off"},
+            purpose="benchmark", run_dir=run_dir,
+        )
+        plan.engine_argv = ["/verified/llama-server"]
+
+        for final_cap in (0, 45 * 1024**3):
+            key_identity = self.install_llamacpp_key_fixture(plan)
+            cap_samples = iter((launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES, final_cap))
+
+            def validate(_plan):
+                self.assertEqual(
+                    launcher.apple_iogpu_wired_limit_bytes(),
+                    launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+                )
+                return (("stable",), key_identity)
+
+            manager = launcher.RunManager()
+            cancel_event = threading.Event()
+            manager.plan = plan
+            manager.cancel_event = cancel_event
+            with (
+                mock.patch.object(
+                    launcher, "apple_iogpu_wired_limit_bytes",
+                    side_effect=lambda: next(cap_samples),
+                ),
+                mock.patch.object(
+                    launcher, "validate_llamacpp_launch_boundary", side_effect=validate,
+                ),
+                mock.patch.object(
+                    launcher, "_llamacpp_launch_file_identities",
+                    return_value=(("stable",),),
+                ),
+                mock.patch.object(launcher.subprocess, "Popen") as popen,
+            ):
+                manager._worker(plan, cancel_event)
+            popen.assert_not_called()
+            self.assertEqual(manager.state["phase"], "failed")
+            self.assertIn("still equal exactly 44 GiB", manager.state["message"])
+
+    def test_llamacpp_final_confirmation_rejects_reloaded_whallm_before_popen(self) -> None:
+        run_dir = self.state / "llamacpp-final-whallm"
+        run_dir.mkdir(parents=True)
+        plan = launcher.LaunchPlan(
+            "llamacpp-final-whallm", "llamacpp", "chat",
+            {"id": "atomic-whallm", "name": "Atomic fixture", "path": self.temp.name},
+            self.temp.name, launcher.LLAMACPP_PLE_CONTEXT, 4_096, "auto",
+            18_127, "custom", {"acceleration": "off", "depth": 1, "kv": "off"},
+            purpose="benchmark", run_dir=run_dir,
+        )
+        plan.engine_argv = ["/verified/llama-server"]
+        key_identity = self.install_llamacpp_key_fixture(plan)
+        live_whallm = {
+            "connected": True, "endpoint": launcher.WHALLM_ENDPOINT,
+            "model": launcher.WHALLM_MODEL_ID, "server": "Whallm test",
+        }
+        manager = launcher.RunManager()
+        cancel_event = threading.Event()
+        manager.plan = plan
+        manager.cancel_event = cancel_event
+        with (
+            mock.patch.object(
+                launcher, "validate_llamacpp_launch_boundary",
+                return_value=(("stable",), key_identity),
+            ),
+            mock.patch.object(
+                launcher, "_llamacpp_launch_file_identities",
+                return_value=(("stable",),),
+            ),
+            mock.patch.object(launcher, "probe_whallm_runtime_status", return_value={
+                "reachable": True, "valid": True,
+                "loaded_model": launcher.WHALLM_MODEL_ID, "loading_model": None,
+                "reason": "ok",
+            }),
+            mock.patch.object(
+                launcher, "apple_iogpu_wired_limit_bytes",
+                return_value=launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+            ),
+            mock.patch.object(launcher.subprocess, "Popen") as popen,
+        ):
+            manager._worker(plan, cancel_event)
+        popen.assert_not_called()
+        self.assertEqual(manager.state["phase"], "failed")
+        self.assertIn(launcher.LLAMACPP_WHALLM_CONFLICT_LABEL, manager.state["message"])
+        self.assertIn("will not stop it automatically", manager.state["message"])
+
+    def test_apple_wired_limit_reads_32_and_64_bit_native_values(self) -> None:
+        class NativeCall:
+            def __init__(self, value_type, raw_value: int) -> None:
+                self.value_type = value_type
+                self.value = value_type(raw_value)
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, name, output, output_size, new_value, new_size) -> int:
+                self.assert_contract(name, new_value, new_size)
+                size = ctypes.cast(output_size, ctypes.POINTER(ctypes.c_size_t))
+                expected = ctypes.sizeof(self.value_type)
+                if output is None:
+                    size.contents.value = expected
+                    return 0
+                ctypes.memmove(output, ctypes.byref(self.value), expected)
+                size.contents.value = expected
+                return 0
+
+            @staticmethod
+            def assert_contract(name, new_value, new_size) -> None:
+                if name != b"iogpu.wired_limit_mb" or new_value is not None or new_size != 0:
+                    raise AssertionError("unexpected sysctlbyname contract")
+
+        class NativeLibrary:
+            def __init__(self, call) -> None:
+                self.sysctlbyname = call
+
+        for value_type in (ctypes.c_int32, ctypes.c_int64):
+            native = NativeCall(value_type, 45_056)
+            with (
+                mock.patch.object(launcher.sys, "platform", "darwin"),
+                mock.patch.object(
+                    launcher.ctypes, "CDLL", return_value=NativeLibrary(native),
+                ),
+                mock.patch.object(launcher.subprocess, "run") as fallback,
+            ):
+                self.assertEqual(
+                    launcher.apple_iogpu_wired_limit_bytes(),
+                    launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+                )
+            fallback.assert_not_called()
+
+    def test_apple_wired_limit_native_failure_uses_strict_command_fallback(self) -> None:
+        with (
+            mock.patch.object(launcher.sys, "platform", "darwin"),
+            mock.patch.object(launcher.ctypes, "CDLL", side_effect=OSError("unavailable")),
+            mock.patch.object(
+                launcher.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="45056\n"),
+            ) as fallback,
+        ):
+            self.assertEqual(
+                launcher.apple_iogpu_wired_limit_bytes(),
+                launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+            )
+        fallback.assert_called_once()
+
+    def test_apple_wired_limit_rejects_invalid_negative_or_oversized_native_values(self) -> None:
+        invalid_values = (
+            0, -1, launcher.APPLE_IOGPU_WIRED_LIMIT_MAX_MIB + 1,
+            True, "45056",
+        )
+        for value in invalid_values:
+            with (
+                mock.patch.object(launcher.sys, "platform", "darwin"),
+                mock.patch.object(
+                    launcher, "_apple_iogpu_wired_limit_mib_native",
+                    return_value=value,
+                ),
+                mock.patch.object(
+                    launcher, "_apple_iogpu_wired_limit_mib_command",
+                ) as fallback,
+            ):
+                self.assertEqual(launcher.apple_iogpu_wired_limit_bytes(), 0)
+            fallback.assert_not_called()
+
+    def test_apple_wired_limit_rejects_failed_or_ambiguous_sysctl_fallback(self) -> None:
+        with mock.patch.object(
+            launcher, "_apple_iogpu_wired_limit_mib_native", return_value=None,
+        ), mock.patch.object(launcher.sys, "platform", "darwin"), mock.patch.object(
+            launcher.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 1, stdout="45056"),
+        ):
+            self.assertEqual(launcher.apple_iogpu_wired_limit_bytes(), 0)
+        with mock.patch.object(
+            launcher, "_apple_iogpu_wired_limit_mib_native", return_value=None,
+        ), mock.patch.object(launcher.sys, "platform", "darwin"), mock.patch.object(
+            launcher.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0, stdout="45056 extra"),
+        ):
+            self.assertEqual(launcher.apple_iogpu_wired_limit_bytes(), 0)
+        with mock.patch.object(
+            launcher, "_apple_iogpu_wired_limit_mib_native", return_value=None,
+        ), mock.patch.object(launcher.sys, "platform", "darwin"), mock.patch.object(
+            launcher.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0, stdout="45056\n"),
+        ):
+            self.assertEqual(
+                launcher.apple_iogpu_wired_limit_bytes(),
+                launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+            )
+
+    def test_llamacpp_startup_memory_guard_stops_before_readiness(self) -> None:
+        plan = mock.Mock()
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        cancel_event = threading.Event()
+        manager = launcher.RunManager()
+        manager.plan = plan
+        manager.process = process
+        manager.state = {"phase": "starting", "message": "Loading", "events": []}
+        with mock.patch.object(
+            launcher, "apple_iogpu_wired_limit_bytes",
+            return_value=launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+        ), mock.patch.object(
+            launcher.os, "getpgid", return_value=4321,
+        ), mock.patch.object(
+            launcher, "darwin_process_group_physical_footprint",
+            return_value={
+                "processGroupFootprintAvailable": True,
+                "processGroupMemberCount": 1,
+                "processGroupPhysicalFootprintBytes": 40 * 1024**3,
+                "processGroupLifetimePeakPhysicalFootprintBytes": 46 * 1024**3,
+            },
+        ), mock.patch.object(manager, "_stop_owned") as stop_owned:
+            manager._guard_llamacpp_memory(plan, process, cancel_event)
+        self.assertTrue(cancel_event.is_set())
+        stop_owned.assert_called_once_with(plan)
+        self.assertEqual(manager.state["phase"], "failed")
+        self.assertIn("strict 44 GiB ceiling", manager.state["message"])
+
+    def test_llamacpp_guard_stops_if_whallm_activates_during_any_route(self) -> None:
+        for purpose in ("benchmark", "session", "route-check"):
+            with self.subTest(purpose=purpose):
+                plan = mock.Mock(purpose=purpose)
+                process = mock.Mock(pid=4321)
+                process.poll.return_value = None
+                cancel_event = threading.Event()
+                manager = launcher.RunManager()
+                manager.plan = plan
+                manager.process = process
+                manager.state = {"phase": "running", "message": "Running", "events": []}
+                with mock.patch.object(
+                    launcher, "apple_iogpu_wired_limit_bytes",
+                    return_value=launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+                ), mock.patch.object(
+                    launcher.os, "getpgid", return_value=4321,
+                ), mock.patch.object(
+                    launcher, "darwin_process_group_physical_footprint",
+                    return_value={
+                        "processGroupFootprintAvailable": True,
+                        "processGroupMemberCount": 1,
+                        "processGroupPhysicalFootprintBytes": 30 * 1024**3,
+                        "processGroupLifetimePeakPhysicalFootprintBytes": 31 * 1024**3,
+                    },
+                ), mock.patch.object(
+                    launcher, "whallm_qualification_conflict",
+                    return_value={"state": "resident", "exactPinnedModel": True},
+                ) as conflict, mock.patch.object(manager, "_stop_owned") as stop_owned:
+                    manager._guard_llamacpp_memory(plan, process, cancel_event)
+                conflict.assert_called_once_with(timeout=0.25)
+                self.assertTrue(cancel_event.is_set())
+                stop_owned.assert_called_once_with(plan)
+                self.assertEqual(manager.state["phase"], "failed")
+                self.assertIn("Whallm became active", manager.state["message"])
+                self.assertIn("combined memory residency", manager.state["message"])
+
+    def test_llamacpp_running_monitor_persists_safety_violation(self) -> None:
+        plan = mock.Mock(
+            backend="llamacpp", purpose="benchmark", port=18_127,
+            secrets={"apiKey": "private"}, model={"servedId": "atomic"},
+        )
+        process = mock.Mock(pid=4321, returncode=None)
+        process.poll.return_value = None
+        cancel_event = threading.Event()
+        manager = launcher.RunManager()
+        manager.plan = plan
+        manager.process = process
+        manager.state = {"phase": "running", "message": "Running", "events": []}
+        with mock.patch.object(
+            launcher, "apple_iogpu_wired_limit_bytes", return_value=0,
+        ), mock.patch.object(
+            launcher, "darwin_process_group_physical_footprint",
+        ) as group_read, mock.patch.object(manager, "_stop_owned") as stop_owned:
+            manager._monitor_run(plan, cancel_event)
+        group_read.assert_not_called()
+        stop_owned.assert_called_once_with(plan)
+        self.assertTrue(cancel_event.is_set())
+        self.assertEqual(
+            manager.llamacpp_safety_violation,
+            "The 44 GiB Metal wired-memory limit changed; the llama.cpp route was stopped.",
+        )
 
     def test_model_acquisition_verifies_mlx_structure_and_pinned_checksum(self) -> None:
         root = Path(self.temp.name) / "verify-root"
@@ -9805,6 +10913,11 @@ for line in sys.stdin:
         self.assertEqual(route_history["receipt"]["state"], "trusted-route")
         self.assertEqual(route_history["receipt"]["backend"], "omlx")
         self.assertTrue(route_history["receipt"]["fresh"])
+        self.assertNotIn("kind", route_history["receipt"])
+        self.assertNotIn("routeQualification", route_history["receipt"])
+        self.assertNotIn("qualifiedBackend", route_history["receipt"])
+        self.assertNotIn("kind", route_history["currentRouteRuns"][0])
+        self.assertNotIn("routeQualification", route_history["currentRouteRuns"][0])
         self.assertEqual(route_history["receipt"]["evidenceBinding"], {
             "scope": "route", "suite": "quick", "preference": "fastest",
             "recordId": "route-only",
@@ -11593,6 +12706,125 @@ for line in sys.stdin:
         with self.assertRaisesRegex(ValueError, "calibration cooling"):
             launcher.calibration_plan({**request, "calibrationCooling": "silent"}, [model])
 
+    def test_whallm_runtime_status_proves_residency_without_using_catalog(self) -> None:
+        unloaded = {
+            "reachable": True, "valid": True,
+            "loaded_model": None, "loading_model": None, "reason": "ok",
+        }
+        catalog = {
+            "connected": True, "endpoint": launcher.WHALLM_ENDPOINT,
+            "model": launcher.WHALLM_MODEL_ID, "server": "Whallm catalog",
+        }
+        with mock.patch.object(
+            launcher, "probe_whallm_runtime_status", return_value=unloaded,
+        ) as status_probe, mock.patch.object(
+            launcher, "probe_whallm_endpoint", return_value=catalog,
+        ) as catalog_probe:
+            self.assertEqual(launcher.whallm_qualification_conflict(), {})
+        status_probe.assert_called_once_with(timeout=1.5)
+        catalog_probe.assert_not_called()
+
+        for field in ("loaded_model", "loading_model"):
+            status = copy.deepcopy(unloaded)
+            status[field] = launcher.WHALLM_MODEL_ID
+            with mock.patch.object(
+                launcher, "probe_whallm_runtime_status", return_value=status,
+            ):
+                conflict = launcher.whallm_qualification_conflict()
+            self.assertEqual(conflict["state"], "resident", field)
+            self.assertTrue(conflict["exactPinnedModel"], field)
+
+        other = copy.deepcopy(unloaded)
+        other["loaded_model"] = "another-whallm-model"
+        with mock.patch.object(
+            launcher, "probe_whallm_runtime_status", return_value=other,
+        ):
+            conflict = launcher.whallm_qualification_conflict()
+        self.assertEqual(conflict["state"], "resident")
+        self.assertFalse(conflict["exactPinnedModel"])
+
+    def test_whallm_runtime_status_is_bounded_and_live_invalid_state_fails_closed(self) -> None:
+        class Response:
+            def __init__(self, body: bytes, status: int = 200) -> None:
+                self.body = body
+                self.status = status
+                self.read_limit: int | None = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, limit: int) -> bytes:
+                self.read_limit = limit
+                return self.body[:limit]
+
+        def status_for(body: bytes) -> tuple[dict, Response, mock.Mock]:
+            response = Response(body)
+            opener = mock.Mock()
+            opener.open.return_value = response
+            with mock.patch.object(
+                launcher.urllib.request, "build_opener", return_value=opener,
+            ):
+                status = launcher.probe_whallm_runtime_status(timeout=0.2)
+            return status, response, opener
+
+        valid, response, opener = status_for(json.dumps({
+            "loaded_model": None, "loading_model": launcher.WHALLM_MODEL_ID,
+        }).encode("utf-8"))
+        self.assertTrue(valid["valid"])
+        self.assertEqual(valid["loading_model"], launcher.WHALLM_MODEL_ID)
+        self.assertEqual(response.read_limit, launcher.WHALLM_STATUS_MAX_RESPONSE + 1)
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, f"{launcher.WHALLM_ENDPOINT}/api/status")
+        self.assertEqual(request.get_method(), "GET")
+
+        for body, reason in (
+            (b"not-json", "invalid-json-contract"),
+            (b"{}", "invalid-json-contract"),
+            (b"x" * (launcher.WHALLM_STATUS_MAX_RESPONSE + 1), "response-too-large"),
+        ):
+            invalid, _response, _opener = status_for(body)
+            self.assertTrue(invalid["reachable"])
+            self.assertFalse(invalid["valid"])
+            self.assertEqual(invalid["reason"], reason)
+            with mock.patch.object(
+                launcher, "probe_whallm_runtime_status", return_value=invalid,
+            ):
+                conflict = launcher.whallm_qualification_conflict()
+            self.assertEqual(conflict["state"], "unknown")
+
+        offline_opener = mock.Mock()
+        offline_opener.open.side_effect = launcher.urllib.error.URLError("offline")
+        with mock.patch.object(
+            launcher.urllib.request, "build_opener", return_value=offline_opener,
+        ), mock.patch.object(
+            launcher, "_whallm_loopback_listening", return_value=False,
+        ):
+            offline = launcher.probe_whallm_runtime_status(timeout=0.2)
+        self.assertFalse(offline["reachable"])
+        self.assertEqual(offline["reason"], "offline")
+        with mock.patch.object(
+            launcher, "probe_whallm_runtime_status", return_value=offline,
+        ):
+            self.assertEqual(launcher.whallm_qualification_conflict(), {})
+
+        with mock.patch.object(
+            launcher.urllib.request, "build_opener", return_value=offline_opener,
+        ), mock.patch.object(
+            launcher, "_whallm_loopback_listening", return_value=True,
+        ):
+            unreadable = launcher.probe_whallm_runtime_status(timeout=0.2)
+        self.assertTrue(unreadable["reachable"])
+        self.assertFalse(unreadable["valid"])
+        with mock.patch.object(
+            launcher, "probe_whallm_runtime_status", return_value=unreadable,
+        ):
+            self.assertEqual(
+                launcher.whallm_qualification_conflict()["state"], "unknown",
+            )
+
     def test_qwen_ple_single_route_qualification_is_measured_saved_and_reused(self) -> None:
         model = copy.deepcopy(self.models[0])
         model.update({
@@ -11661,6 +12893,9 @@ for line in sys.stdin:
         self.assertTrue(plan["qualificationPreparation"]["applicable"])
         self.assertTrue(plan["qualificationPreparation"]["resolvesVisibleSettings"])
         self.assertTrue(plan["qualificationPreparation"]["doesNotChangeMacOS"])
+        self.assertNotIn("scope", plan["qualificationContract"])
+        self.assertNotIn("clientAgnostic", plan["qualificationContract"])
+        self.assertNotIn("minimumCompletionTokens", plan["qualificationContract"])
         self.assertEqual(
             plan["qualificationPreparation"]["settings"]["context"], 16_384,
         )
@@ -11674,6 +12909,9 @@ for line in sys.stdin:
         self.assertEqual(qualification["job"]["suite"]["maxTokens"], 512)
         self.assertEqual(qualification["job"]["qualificationThinkingBudgetTokens"], 384)
         self.assertEqual(qualification["job"]["qualificationAnswerReserveTokens"], 128)
+        self.assertNotIn("scope", qualification["qualificationContract"])
+        self.assertNotIn("clientAgnostic", qualification["qualificationContract"])
+        self.assertNotIn("minimumCompletionTokens", qualification["qualificationContract"])
         bounded_payload = launcher.BenchmarkManager(
             launcher.RunManager(),
         )._mode_payload(qualification["job"], "ar")
@@ -11841,6 +13079,25 @@ for line in sys.stdin:
         self.assertTrue(record["qualification"]["terminalCompletionObserved"])
         self.assertEqual(record["qualification"]["metrics"]["promptTokens"], 35_400)
 
+        legacy_record = copy.deepcopy(record)
+        legacy_record.pop("qualificationContract", None)
+        self.assertIsNotNone(launcher.route_qualification_metrics(
+            legacy_record, launcher.route_qualification_spec(model, "omlx"),
+        ))
+        model["backends"]["omlx"]["localBenchmark"] = copy.deepcopy(legacy_record)
+        model["backends"]["omlx"]["localBenchmarks"] = [copy.deepcopy(legacy_record)]
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="qwen-ple-test-mac",
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission",
+            return_value=ready_admission,
+        ):
+            legacy_reused = launcher.best_engine_request(payload, [model])
+        self.assertEqual(
+            legacy_reused["engineEvidenceTier"], "local-route-qualification",
+        )
+        self.assertFalse(legacy_reused["engineNextAction"]["requiresCalibration"])
+
         model["backends"]["omlx"]["localBenchmark"] = copy.deepcopy(record)
         model["backends"]["omlx"]["localBenchmarks"] = [copy.deepcopy(record)]
         with mock.patch.object(
@@ -11851,6 +13108,9 @@ for line in sys.stdin:
         ):
             reused = launcher.calibration_plan(payload, [model])
             fastest = launcher.best_engine_request(payload, [model])
+            qualification_history = launcher.benchmark_history_request(
+                {**payload, "suite": "agentic"}, [model], [record],
+            )
         self.assertEqual(reused["action"], "apply-existing")
         self.assertEqual(reused["evidence"]["tier"], "local-route-qualification")
         self.assertEqual(len(reused["evidence"]["qualifiedRoutes"]), 1)
@@ -11858,6 +13118,18 @@ for line in sys.stdin:
         self.assertEqual(fastest["engineNextAction"]["id"], "keep-current")
         self.assertFalse(fastest["engineNextAction"]["requiresCalibration"])
         self.assertEqual(fastest["options"]["memoryGuard"], "high")
+        self.assertEqual(qualification_history["receipt"]["state"], "trusted-route")
+        self.assertEqual(
+            qualification_history["receipt"]["kind"], "route-qualification",
+        )
+        self.assertTrue(qualification_history["receipt"]["routeQualification"])
+        self.assertEqual(
+            qualification_history["receipt"]["qualifiedBackend"], "omlx",
+        )
+        self.assertEqual(
+            qualification_history["currentRouteRuns"][0]["kind"],
+            "route-qualification",
+        )
         self.assertEqual(reused["evidence"]["evidenceBinding"], {
             "scope": "route", "suite": "agentic", "preference": "throughput",
             "recordId": record["id"],
@@ -11899,6 +13171,1258 @@ for line in sys.stdin:
         self.assertFalse(
             no_longer_single_route["engineDecision"]["routeQualification"],
         )
+
+    def test_llamacpp_atomic_single_route_qualification_is_measured_saved_and_reused(self) -> None:
+        model = copy.deepcopy(self.models[0])
+        receipt = "a" * 64
+        fingerprint = "b" * 64
+        first_shard = str(Path(self.temp.name) / "atomic-00001-of-00028.gguf")
+        atomic = {
+            "ready": True, "repoId": launcher.LLAMACPP_ATOMIC_REPO,
+            "currentProcessVerified": True, "verificationGeneration": 1,
+            "pinnedRevision": launcher.LLAMACPP_ATOMIC_REVISION,
+            "variantId": launcher.LLAMACPP_ATOMIC_VARIANT_ID,
+            "variant": launcher.LLAMACPP_ATOMIC_VARIANT,
+            "shardCount": launcher.LLAMACPP_ATOMIC_SHARDS,
+            "weightBytes": launcher.LLAMACPP_ATOMIC_TOTAL_BYTES,
+            "context": launcher.LLAMACPP_PLE_CONTEXT,
+            "firstShard": first_shard, "receiptFingerprint": receipt,
+        }
+        model.update({
+            "id": "atomicchat-llamacpp-qualification",
+            "name": launcher.LLAMACPP_ATOMIC_VARIANT,
+            "path": str(Path(self.temp.name) / launcher.LLAMACPP_ATOMIC_VARIANT),
+            "format": "gguf", "nativeContext": launcher.LLAMACPP_PLE_CONTEXT,
+            "ready": True, "atomicPle": copy.deepcopy(atomic), "ssdStreaming": {},
+        })
+        model["backends"]["llamacpp"] = {
+            "runnable": True, "reason": "Exact audited route.",
+            "currentProcessVerified": True, "verificationGeneration": 1,
+            "llamacppPle": True, "atomicPle": copy.deepcopy(atomic),
+            "receiptFingerprint": receipt, "firstShard": first_shard,
+            "modelPath": model["path"],
+            "contextWindows": [launcher.LLAMACPP_PLE_CONTEXT],
+            "contextMaximum": launcher.LLAMACPP_PLE_CONTEXT,
+            "memoryCeilingBytes": launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+            "benchmarkModelFingerprint": fingerprint,
+            "runtimeVersion": "llama.cpp b10740 qualification runtime",
+            "mtp": False, "dflash": False, "kv": False,
+            "depth": 1, "depthMax": 1,
+            "agentReasoning": ["auto"], "codexReasoning": ["auto"],
+        }
+        for backend in launcher.ENGINE_ADAPTERS:
+            if backend != "llamacpp" and backend in model["backends"]:
+                model["backends"][backend]["runnable"] = False
+        payload = self.payload("llamacpp", "pi", model)
+        payload.update({
+            "context": launcher.LLAMACPP_PLE_CONTEXT,
+            "output": 4_096,
+            "reasoning": "auto", "suite": "quick",
+            "enginePreference": "throughput", "calibrationCooling": "default",
+        })
+        payload["options"] = {"acceleration": "off", "depth": 1, "kv": "off"}
+        admission_snapshot = {
+            "memoryAvailable": True, "totalBytes": 48 * 1024**3,
+            "freePercent": 50.0, "thermalAvailable": True,
+            "thermalState": 0, "lowPowerMode": False,
+            "metalWiredLimitBytes": launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+        }
+        cap_missing_snapshot = copy.deepcopy(admission_snapshot)
+        cap_missing_snapshot["metalWiredLimitBytes"] = 0
+        with mock.patch.object(
+            launcher, "probe_whallm_runtime_status",
+        ) as premature_whallm_probe:
+            cap_blocked = launcher.route_qualification_memory_admission(
+                payload, [model], resource_snapshot=cap_missing_snapshot,
+                hub={"phase": "idle", "message": "Ready"},
+                operation={"active": False},
+            )
+        premature_whallm_probe.assert_not_called()
+        self.assertEqual(cap_blocked["decision"], "system-setting")
+        self.assertIn("exact 44 GiB", cap_blocked["label"])
+        with mock.patch.object(
+            launcher, "probe_whallm_runtime_status", return_value={
+                "reachable": True, "valid": True,
+                "loaded_model": launcher.WHALLM_MODEL_ID, "loading_model": None,
+                "reason": "ok",
+            },
+        ) as whallm_status:
+            whallm_blocked = launcher.route_qualification_memory_admission(
+                payload, [model], resource_snapshot=admission_snapshot,
+                hub={"phase": "idle", "message": "Ready"},
+                operation={"active": False},
+            )
+        whallm_status.assert_called_once_with(timeout=1.5)
+        self.assertEqual(whallm_blocked["decision"], "runtime-conflict")
+        self.assertEqual(
+            whallm_blocked["label"], launcher.LLAMACPP_WHALLM_CONFLICT_LABEL,
+        )
+        self.assertIn("temporarily", whallm_blocked["label"])
+        self.assertIn("will not stop it automatically", whallm_blocked["detail"])
+        self.assertFalse(whallm_blocked["launchable"])
+        self.assertFalse(whallm_blocked["privacy"]["changesExternalState"])
+        with mock.patch.object(
+            launcher, "probe_whallm_runtime_status", return_value={
+                "reachable": True, "valid": True,
+                "loaded_model": None, "loading_model": None, "reason": "ok",
+            },
+        ):
+            whallm_clear = launcher.route_qualification_memory_admission(
+                payload, [model], resource_snapshot=admission_snapshot,
+                hub={"phase": "idle", "message": "Ready"},
+                operation={"active": False},
+            )
+        self.assertEqual(whallm_clear["decision"], "ready")
+        self.assertTrue(launcher.route_qualification_admission_ready(whallm_clear))
+        ready_admission = {
+            "decision": "ready", "label": "llama.cpp SSD-PLE route ready",
+            "detail": "Exact route gate passed.", "launchable": True,
+            "requiresAcknowledgement": False, "contractId": "llamacpp-ready",
+            "estimate": {"memoryCeilingBytes": launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES},
+        }
+
+        with mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready_admission,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ):
+            plan = launcher.calibration_plan(payload, [model])
+        self.assertTrue(plan["routeQualification"])
+        self.assertTrue(plan["ready"])
+        self.assertEqual(plan["suite"]["id"], launcher.ROUTE_QUALIFICATION_8K_SUITE)
+        self.assertEqual(plan["measuredRequestCount"], 7)
+        self.assertEqual(plan["eligibleEngineCount"], 1)
+        self.assertEqual(plan["routeSpec"]["backend"], "llamacpp")
+        self.assertEqual(plan["routeSpec"]["scope"], "route")
+        self.assertTrue(plan["routeSpec"]["clientAgnostic"])
+        self.assertEqual(plan["qualificationContract"]["exactContext"], 8_192)
+        self.assertEqual(
+            plan["qualificationContract"]["minimumDecodeTokensPerSecond"], 15.0,
+        )
+        self.assertEqual(plan["qualificationContract"]["thinkingBudgetTokens"], 384)
+        self.assertEqual(plan["request"]["options"]["acceleration"], "off")
+        self.assertTrue(plan["qualificationContract"]["toolProbeRequired"])
+        self.assertEqual(plan["qualificationContract"]["scope"], "route")
+        self.assertTrue(plan["qualificationContract"]["clientAgnostic"])
+        self.assertEqual(plan["qualificationContract"]["minimumCompletionTokens"], 128)
+        self.assertEqual(plan["qualificationContract"]["configuredOutputLimit"], 4_096)
+        self.assertEqual(plan["qualificationContract"]["measuredRequestMaxTokens"], 512)
+        self.assertEqual(
+            plan["qualificationContract"]["reasoningBoundaryContractId"],
+            launcher.LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID,
+        )
+        self.assertEqual(plan["reasoningContract"]["policy"], "runtime-fixed-reasoning-on")
+        self.assertTrue(plan["reasoningContract"]["reasoningEnabled"])
+        self.assertTrue(plan["reasoningContract"]["runtimeControlled"])
+
+        request = copy.deepcopy(payload)
+        request["scope"] = "qualification"
+        qualification = launcher.validated_route_qualification_request(request, [model])
+        self.assertEqual(qualification["executionOrder"], ["llamacpp"])
+        self.assertEqual(qualification["job"]["suiteName"], launcher.ROUTE_QUALIFICATION_8K_SUITE)
+        self.assertEqual(qualification["job"]["suite"]["maxTokens"], 512)
+        self.assertEqual(qualification["job"]["modes"], ["ar"])
+        self.assertEqual(qualification["job"]["options"]["acceleration"], "off")
+        self.assertEqual(qualification["qualificationContract"]["receiptFingerprint"], receipt)
+        bounded_cases = launcher.benchmark_agentic_cases(
+            qualification["job"]["suite"], require_complete_answer=True,
+        )
+        self.assertEqual(len(bounded_cases), 4)
+        for case in bounded_cases:
+            prompt_text = "\n".join(
+                str(message.get("content") or "") for message in case["messages"]
+            )
+            self.assertIn("substantive separate reasoning", prompt_text, case["scenario"])
+            self.assertIn("about 96 to 112 tokens", prompt_text, case["scenario"])
+            self.assertIn("headroom for the terminal marker", prompt_text, case["scenario"])
+
+        samples = []
+        for index, (scenario, prompt_tokens) in enumerate(zip(
+            launcher.ROUTE_QUALIFICATION_SCENARIOS, (3_000, 3_200, 4_200, 4_500),
+        )):
+            ttft = 1.0 + index * 0.1
+            decode_tps = 15.5 + index
+            samples.append({
+                "scenario": scenario, "scenarioLabel": scenario,
+                "cacheExpected": index > 0, "targetPromptTokens": prompt_tokens,
+                "repetition": 1, "promptTokens": prompt_tokens,
+                "cachedPromptTokens": None, "uncachedPromptTokens": None,
+                "cacheHitRate": None, "completionTokens": 256,
+                "requestedMaxTokens": 512,
+                "thinkingBudgetTokensRequested": 384,
+                "reasoningBudgetMessageSha256": hashlib.sha256(
+                    launcher.LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+                ).hexdigest(),
+                "ttftSeconds": ttft,
+                "totalSeconds": round(ttft + 255 / decode_tps, 6),
+                "decodeTokensPerSecond": decode_tps,
+                "endToEndTokensPerSecond": 14.5 + index,
+                "reasoningObserved": True, "answerObserved": True,
+                "finishReason": "stop", "terminalState": "complete",
+                "terminalComplete": True, "responseLimitReached": False,
+                "outputHash": f"llamacpp-sample-{index}",
+            })
+        measured = {
+            "label": "SSD PLE", "settings": {},
+            "qualityHash": "c" * 64, "qualityCompletionTokens": 64,
+            "medianTTFT": 1.15, "medianDecodeTokensPerSecond": 17.0,
+            "medianEndToEndTokensPerSecond": 16.0, "samples": samples,
+            "agenticMetrics": launcher.summarize_agentic_samples(samples),
+            "resourceTelemetry": {
+                "version": 1, "sampleCount": 8, "memoryAvailable": True,
+                "samplingComplete": True,
+                "totalMemoryBytes": 48 * 1024**3,
+                "baselineHeadroomPercent": 25.0, "minimumHeadroomPercent": 10.0,
+                "peakPressureDeltaBytes": 7 * 1024**3,
+                "processFootprintAvailable": True,
+                "processFootprintSource": "proc_pid_rusage RUSAGE_INFO_V4",
+                "peakProcessPhysicalFootprintBytes": 41 * 1024**3,
+                "processGroupFootprintAvailable": True,
+                "processGroupFootprintSampleCount": 8,
+                "processAliveSampleCount": 8,
+                "processFootprintSampleCount": 8,
+                "processGroupMemberCountMinimum": 1,
+                "processGroupMemberCountMaximum": 1,
+                "peakProcessGroupPhysicalFootprintBytes": 41 * 1024**3,
+                "metalWiredLimitSampleCount": 8,
+                "metalWiredLimitMinimumBytes": launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+                "metalWiredLimitMaximumBytes": launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+                "thermalAvailable": True, "thermalStartValue": 0,
+                "thermalStart": "nominal", "thermalWorstValue": 1,
+                "thermalWorst": "fair", "lowPowerMode": False,
+            },
+            "resourceCooldown": {"version": 1, "status": "reference-ready"},
+            "correctnessContract": {
+                "id": launcher.LLAMACPP_QUALIFICATION_CORRECTNESS_ID,
+                "expectedAnswerSha256": hashlib.sha256(b"RQ-8K-742").hexdigest(),
+                "observedAnswerSha256": hashlib.sha256(b"RQ-8K-742").hexdigest(),
+                "exact": True, "terminalComplete": True,
+                "authoritativeUsage": True,
+                "reasoningBoundaryContractId": (
+                    launcher.LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID
+                ),
+                "reasoningBudgetTokensRequested": 0,
+                "reasoningBudgetMessageSha256": hashlib.sha256(
+                    launcher.LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+                ).hexdigest(),
+                "reasoningTagLeakDetected": False,
+                "transitionMessageLeakDetected": False,
+                "reasoningBoundaryClean": True,
+            },
+            "toolContract": {
+                "protocol": "chat-completions", "toolContractValid": True,
+                "toolCallCount": 1, "toolNameSeen": True,
+                "terminalComplete": True,
+                "thinkingBudgetTokensRequested": 32,
+                "reasoningBudgetMessageSha256": hashlib.sha256(
+                    launcher.LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+                ).hexdigest(),
+                "toolContractDetail": "Exact synthetic call verified.",
+            },
+            "unloadEvidence": {
+                "clean": True, "processExited": True,
+                "processGroupExited": True, "managerIdle": True,
+                "portsClosed": True, "checkedPorts": [18_080],
+                "closedPorts": [18_080],
+            },
+        }
+        manager = launcher.BenchmarkManager(launcher.RunManager())
+        manager.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {"id": qualification["id"], "kind": "route-qualification"},
+            "modes": {}, "engines": {
+                "llamacpp": {"backend": "llamacpp", "phase": "queued", "modes": {}, "record": None},
+            }, "result": None, "events": [],
+        }
+        ready_gate = {"version": 1, "status": "reference-ready", "reference": {}, "observed": {}, "_initialSnapshot": {}}
+        with mock.patch.object(
+            manager, "_wait_for_resource_baseline", return_value=ready_gate,
+        ), mock.patch.object(
+            manager, "_measure_mode", return_value=(measured, 7),
+        ) as measure, mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready_admission,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), mock.patch.object(launcher, "save_benchmark_record") as saved:
+            manager._qualification_worker(qualification, [model])
+        self.assertEqual(manager.snapshot()["phase"], "completed", manager.snapshot().get("message"))
+        self.assertEqual(measure.call_args.args[4], 7)
+        result = manager.snapshot()["result"]
+        self.assertTrue(result["routeQualification"])
+        self.assertEqual(result["qualifiedBackend"], "llamacpp")
+        self.assertEqual(result["decision"]["comparedEngines"], [])
+        self.assertFalse(result["decision"]["trustedWinner"])
+        self.assertEqual(result["evidenceBinding"]["recordId"], qualification["id"])
+        route = result["qualifiedRoutes"][0]
+        self.assertAlmostEqual(route["decodeTokensPerSecond"], 17.0)
+        self.assertAlmostEqual(route["minimumDecodeTokensPerSecond"], 15.5)
+        self.assertAlmostEqual(route["firstTokenSeconds"], 1.15)
+        self.assertEqual(route["peakMemoryBytes"], 41 * 1024**3)
+        self.assertTrue(route["reasoningObserved"])
+        self.assertTrue(route["answerObserved"])
+        self.assertTrue(route["toolContractVerified"])
+        self.assertTrue(route["cleanUnloadVerified"])
+        self.assertTrue(route["correctnessVerified"])
+        self.assertTrue(route["reasoningBoundaryVerified"])
+        self.assertEqual(route["configuredOutputLimit"], 4_096)
+        self.assertEqual(route["measuredRequestMaxTokens"], 512)
+
+        failed_finalization = launcher.BenchmarkManager(launcher.RunManager())
+        failed_finalization.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {"id": qualification["id"], "kind": "route-qualification"},
+            "modes": {}, "engines": {
+                "llamacpp": {
+                    "backend": "llamacpp", "phase": "queued", "modes": {},
+                    "record": None,
+                },
+            }, "result": None, "events": [],
+        }
+        with mock.patch.object(
+            failed_finalization, "_wait_for_resource_baseline", return_value=ready_gate,
+        ), mock.patch.object(
+            failed_finalization, "_measure_mode", return_value=(measured, 7),
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready_admission,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), mock.patch.object(
+            failed_finalization, "_build_qualification_result",
+            side_effect=RuntimeError("synthetic qualification finalization failure"),
+        ), mock.patch.object(launcher, "save_benchmark_record") as invalid_save:
+            failed_finalization._qualification_worker(qualification, [model])
+        failed_snapshot = failed_finalization.snapshot()
+        self.assertEqual(failed_snapshot["phase"], "failed")
+        self.assertIsNone(failed_snapshot["result"])
+        self.assertIn("before saving", failed_snapshot["message"])
+        self.assertIn("synthetic qualification finalization failure", failed_snapshot["message"])
+        invalid_save.assert_not_called()
+
+        commit_manager = launcher.BenchmarkManager(launcher.RunManager())
+        commit_manager.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {"id": qualification["id"], "kind": "route-qualification"},
+            "modes": {}, "engines": {
+                "llamacpp": {
+                    "backend": "llamacpp", "phase": "queued", "modes": {},
+                    "record": None,
+                },
+            }, "result": None, "events": [],
+        }
+        save_entered = threading.Event()
+        release_save = threading.Event()
+        terminal_tail_entered = threading.Event()
+        release_terminal_tail = threading.Event()
+
+        def blocking_save(_record: dict[str, object]) -> None:
+            save_entered.set()
+            if not release_save.wait(3):
+                raise RuntimeError("test did not release qualification persistence")
+
+        def blocking_terminal_event(_message: str, _level: str = "info") -> None:
+            terminal_tail_entered.set()
+            if not release_terminal_tail.wait(3):
+                raise RuntimeError("test did not release qualification terminal tail")
+
+        cancel_entered = threading.Event()
+        cancel_finished = threading.Event()
+
+        def cancel_during_commit() -> None:
+            cancel_entered.set()
+            commit_manager.cancel()
+            cancel_finished.set()
+
+        with mock.patch.object(
+            commit_manager, "_wait_for_resource_baseline", return_value=ready_gate,
+        ), mock.patch.object(
+            commit_manager, "_measure_mode", return_value=(measured, 7),
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready_admission,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), mock.patch.object(
+            launcher, "save_benchmark_record", side_effect=blocking_save,
+        ) as committed_save, mock.patch.object(
+            commit_manager, "_event", side_effect=blocking_terminal_event,
+        ):
+            commit_worker = threading.Thread(
+                target=commit_manager._qualification_worker,
+                args=(qualification, [model]), daemon=True,
+            )
+            commit_manager.thread = commit_worker
+            commit_worker.start()
+            self.assertTrue(save_entered.wait(3))
+            cancel_worker = threading.Thread(target=cancel_during_commit, daemon=True)
+            cancel_worker.start()
+            self.assertTrue(cancel_entered.wait(1))
+            self.assertFalse(cancel_finished.wait(0.05))
+            release_save.set()
+            self.assertTrue(cancel_finished.wait(3))
+            self.assertTrue(terminal_tail_entered.wait(3))
+            self.assertEqual(commit_manager.snapshot()["phase"], "completed")
+            self.assertTrue(commit_manager.snapshot()["result"]["persistence"]["saved"])
+            self.assertFalse(commit_manager.cancel_event.is_set())
+            # A second Stop while the completed worker is merely unwinding
+            # must not turn the saved terminal result back into "stopping".
+            commit_manager.cancel()
+            self.assertEqual(commit_manager.snapshot()["phase"], "completed")
+            release_terminal_tail.set()
+            commit_worker.join(timeout=3)
+            cancel_worker.join(timeout=3)
+        self.assertFalse(commit_worker.is_alive())
+        self.assertFalse(cancel_worker.is_alive())
+        committed_save.assert_called_once()
+
+        cancelled_finalization = launcher.BenchmarkManager(launcher.RunManager())
+        cancelled_finalization.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {"id": qualification["id"], "kind": "route-qualification"},
+            "modes": {}, "engines": {
+                "llamacpp": {
+                    "backend": "llamacpp", "phase": "queued", "modes": {},
+                    "record": None,
+                },
+            }, "result": None, "events": [],
+        }
+        public_result_ready = threading.Event()
+        release_public_result = threading.Event()
+        build_public_result = cancelled_finalization._build_qualification_result
+
+        def blocking_public_result(*args: object, **kwargs: object) -> dict[str, object]:
+            value = build_public_result(*args, **kwargs)
+            public_result_ready.set()
+            if not release_public_result.wait(3):
+                raise RuntimeError("test did not release qualification finalization")
+            return value
+
+        with mock.patch.object(
+            cancelled_finalization, "_wait_for_resource_baseline", return_value=ready_gate,
+        ), mock.patch.object(
+            cancelled_finalization, "_measure_mode", return_value=(measured, 7),
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready_admission,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), mock.patch.object(
+            cancelled_finalization, "_build_qualification_result",
+            side_effect=blocking_public_result,
+        ), mock.patch.object(launcher, "save_benchmark_record") as cancelled_save:
+            cancelled_worker = threading.Thread(
+                target=cancelled_finalization._qualification_worker,
+                args=(qualification, [model]), daemon=True,
+            )
+            cancelled_finalization.thread = cancelled_worker
+            cancelled_worker.start()
+            self.assertTrue(public_result_ready.wait(3))
+            cancelled_finalization.cancel()
+            release_public_result.set()
+            cancelled_worker.join(timeout=3)
+        self.assertFalse(cancelled_worker.is_alive())
+        cancelled_snapshot = cancelled_finalization.snapshot()
+        self.assertEqual(cancelled_snapshot["phase"], "cancelled")
+        self.assertEqual(
+            cancelled_snapshot["engines"]["llamacpp"]["phase"], "cancelled",
+        )
+        self.assertIsNone(cancelled_snapshot["result"])
+        cancelled_save.assert_not_called()
+
+        # A changed scanned capability cannot be paired with the immutable
+        # evidence captured when the qualification was admitted.  This audit
+        # runs before public result construction and before persistence.
+        mismatched_model = copy.deepcopy(model)
+        mismatched_model["backends"]["llamacpp"]["runtimeVersion"] = (
+            "llama.cpp changed after qualification admission"
+        )
+        evidence_failure = launcher.BenchmarkManager(launcher.RunManager())
+        evidence_failure.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {"id": qualification["id"], "kind": "route-qualification"},
+            "modes": {}, "engines": {
+                "llamacpp": {
+                    "backend": "llamacpp", "phase": "queued", "modes": {},
+                    "record": None,
+                },
+            }, "result": None, "events": [],
+        }
+        with mock.patch.object(
+            evidence_failure, "_wait_for_resource_baseline", return_value=ready_gate,
+        ), mock.patch.object(
+            evidence_failure, "_measure_mode", return_value=(measured, 7),
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready_admission,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), mock.patch.object(
+            evidence_failure, "_build_qualification_result",
+        ) as mismatched_public_result, mock.patch.object(
+            launcher, "save_benchmark_record",
+        ) as mismatched_save:
+            evidence_failure._qualification_worker(qualification, [mismatched_model])
+        evidence_snapshot = evidence_failure.snapshot()
+        self.assertEqual(evidence_snapshot["phase"], "failed")
+        self.assertEqual(
+            evidence_snapshot["engines"]["llamacpp"]["phase"], "failed",
+        )
+        self.assertIsNone(evidence_snapshot["result"])
+        self.assertIn("immutable local-evidence audit", evidence_snapshot["message"])
+        mismatched_public_result.assert_not_called()
+        mismatched_save.assert_not_called()
+
+        # A failed model load is terminal for the attempted engine, persists
+        # nothing, and leaves the manager eligible to admit a fresh retry.
+        load_failure = launcher.BenchmarkManager(launcher.RunManager())
+        load_failure.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {"id": qualification["id"], "kind": "route-qualification"},
+            "modes": {}, "engines": {
+                "llamacpp": {
+                    "backend": "llamacpp", "phase": "queued", "modes": {},
+                    "record": None,
+                },
+            }, "result": None, "events": [],
+        }
+        load_error = "llama.cpp exited during startup (code 1)."
+        with mock.patch.object(
+            load_failure, "_wait_for_resource_baseline", return_value=ready_gate,
+        ), mock.patch.object(
+            load_failure, "_measure_mode", side_effect=RuntimeError(load_error),
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready_admission,
+        ), mock.patch.object(launcher, "save_benchmark_record") as failed_load_save:
+            load_failure._qualification_worker(qualification, [model])
+        load_snapshot = load_failure.snapshot()
+        self.assertEqual(load_snapshot["phase"], "failed")
+        self.assertEqual(load_snapshot["engines"]["llamacpp"]["phase"], "failed")
+        self.assertIn(load_error, load_snapshot["message"])
+        self.assertIsNone(load_snapshot["result"])
+        failed_load_save.assert_not_called()
+
+        load_failure.qualification_safety_violation = "previous attempt only"
+        retry_thread = mock.Mock()
+        with mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready_admission,
+        ), mock.patch.object(
+            launcher.threading, "Thread", return_value=retry_thread,
+        ) as retry_thread_factory:
+            retry_job = load_failure.start(request, [model])
+        self.assertEqual(retry_job["kind"], "route-qualification")
+        self.assertEqual(load_failure.snapshot()["phase"], "queued")
+        self.assertEqual(
+            load_failure.snapshot()["engines"]["llamacpp"]["phase"], "queued",
+        )
+        self.assertIsNone(load_failure.qualification_safety_violation)
+        self.assertFalse(load_failure.cancel_event.is_set())
+        retry_thread_factory.assert_called_once()
+        retry_thread.start.assert_called_once()
+
+        # Safety failures are not user cancellation.  They preserve the exact
+        # invariant reason, mark both states failed, and save no result.
+        safety_failure = launcher.BenchmarkManager(launcher.RunManager())
+        safety_failure.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {"id": qualification["id"], "kind": "route-qualification"},
+            "modes": {}, "engines": {
+                "llamacpp": {
+                    "backend": "llamacpp", "phase": "queued", "modes": {},
+                    "record": None,
+                },
+            }, "result": None, "events": [],
+        }
+        safety_reason = (
+            "The 44 GiB Metal wired-memory limit changed during qualification."
+        )
+        with mock.patch.object(
+            safety_failure, "_wait_for_resource_baseline", return_value=ready_gate,
+        ), mock.patch.object(
+            safety_failure, "_measure_mode",
+            side_effect=launcher.QualificationSafetyFailure(safety_reason),
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready_admission,
+        ), mock.patch.object(launcher, "save_benchmark_record") as safety_save:
+            safety_failure._qualification_worker(qualification, [model])
+        safety_snapshot = safety_failure.snapshot()
+        self.assertEqual(safety_snapshot["phase"], "failed")
+        self.assertEqual(safety_snapshot["engines"]["llamacpp"]["phase"], "failed")
+        self.assertEqual(safety_snapshot["message"], safety_reason)
+        self.assertFalse(safety_failure.cancel_event.is_set())
+        self.assertIsNone(safety_snapshot["result"])
+        safety_save.assert_not_called()
+
+        # A RunManager guard can race with a lower-level connection error.
+        # Its safety reason must still win classification over that error.
+        guarded_failure = launcher.BenchmarkManager(launcher.RunManager())
+        guarded_failure.run_manager.llamacpp_safety_violation = safety_reason
+        guarded_failure.state = copy.deepcopy(safety_failure.state)
+        guarded_failure.state.update({
+            "phase": "queued", "message": "queued", "result": None,
+            "events": [],
+        })
+        guarded_failure.state["engines"]["llamacpp"]["phase"] = "queued"
+        with mock.patch.object(
+            guarded_failure, "_wait_for_resource_baseline", return_value=ready_gate,
+        ), mock.patch.object(
+            guarded_failure, "_measure_mode",
+            side_effect=RuntimeError("connection closed after safety stop"),
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready_admission,
+        ), mock.patch.object(launcher, "save_benchmark_record") as guarded_save:
+            guarded_failure._qualification_worker(qualification, [model])
+        guarded_snapshot = guarded_failure.snapshot()
+        self.assertEqual(guarded_snapshot["phase"], "failed")
+        self.assertEqual(guarded_snapshot["engines"]["llamacpp"]["phase"], "failed")
+        self.assertEqual(guarded_snapshot["message"], safety_reason)
+        self.assertFalse(guarded_failure.cancel_event.is_set())
+        guarded_save.assert_not_called()
+
+        record = saved.call_args.args[0]
+        self.assertEqual(record["client"], "any")
+        self.assertEqual(record["configuredOutputLimit"], 4_096)
+        self.assertEqual(record["measuredRequestMaxTokens"], 512)
+        self.assertEqual(record["outputMin"], 512)
+        self.assertEqual(record["outputMax"], 512)
+        self.assertTrue(record["qualification"]["reasoningBoundaryVerified"])
+
+        # Scanning compacts repeated history by benchmark identity.  A newer
+        # receipt for a different visible output ceiling must not evict an
+        # older qualification that still exactly matches the current request.
+        output_4096_record = copy.deepcopy(record)
+        output_4096_record.update({
+            "id": "llamacpp-output-4096",
+            "createdAt": datetime.fromtimestamp(
+                time.time() - 120, timezone.utc,
+            ).isoformat(),
+        })
+        output_2048_record = copy.deepcopy(record)
+        output_2048_record.update({
+            "id": "llamacpp-output-2048",
+            "createdAt": datetime.fromtimestamp(
+                time.time() - 60, timezone.utc,
+            ).isoformat(),
+            "configuredOutputLimit": 2_048,
+        })
+        output_2048_record["qualificationContract"]["configuredOutputLimit"] = 2_048
+        self.assertNotEqual(
+            launcher.benchmark_record_identity(output_4096_record),
+            launcher.benchmark_record_identity(output_2048_record),
+        )
+        launcher.save_benchmark_records([output_4096_record, output_2048_record])
+        persisted = launcher.matching_benchmark_records(
+            launcher.load_benchmark_records(), "llamacpp", fingerprint,
+            model["backends"]["llamacpp"]["runtimeVersion"],
+            model["backends"]["llamacpp"], "llamacpp-test-mac",
+        )
+        scanned_records = launcher.latest_benchmark_records_by_identity(persisted)
+        self.assertEqual(
+            [item["id"] for item in scanned_records],
+            ["llamacpp-output-4096", "llamacpp-output-2048"],
+        )
+        scanned_model = copy.deepcopy(model)
+        scanned_capability = scanned_model["backends"]["llamacpp"]
+        scanned_capability["benchmarkHistoryCount"] = len(persisted)
+        scanned_capability["localBenchmarks"] = copy.deepcopy(scanned_records)
+        scanned_capability["localBenchmark"] = copy.deepcopy(scanned_records[-1])
+
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ):
+            older_fastest = launcher.best_engine_request(payload, [scanned_model])
+            older_binding = older_fastest["engineEvidenceBinding"]
+            older_bound = copy.deepcopy(payload)
+            older_bound["evidenceBinding"] = copy.deepcopy(older_binding)
+            older_applied = launcher.optimal_request(older_bound, [scanned_model])
+        self.assertEqual(older_fastest["engineEvidenceTier"], "local-route-qualification")
+        self.assertFalse(older_fastest["engineNextAction"]["requiresCalibration"])
+        self.assertEqual(older_binding["recordId"], "llamacpp-output-4096")
+        self.assertEqual(older_applied["evidenceBinding"], older_binding)
+
+        history_payload = copy.deepcopy(payload)
+        history_payload["suite"] = launcher.ROUTE_QUALIFICATION_8K_SUITE
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ):
+            older_history = launcher.benchmark_history_request(
+                history_payload, [scanned_model], records=scanned_records,
+            )
+        self.assertEqual(older_history["exactRecordCount"], 1)
+        self.assertEqual(older_history["receipt"]["state"], "trusted-route")
+        self.assertEqual(
+            older_history["receipt"]["recordId"], "llamacpp-output-4096",
+        )
+        self.assertEqual(
+            older_history["receipt"]["evidenceBinding"]["recordId"],
+            "llamacpp-output-4096",
+        )
+
+        output_2048_payload = copy.deepcopy(payload)
+        output_2048_payload["output"] = 2_048
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ):
+            newer_fastest = launcher.best_engine_request(
+                output_2048_payload, [scanned_model],
+            )
+        self.assertEqual(newer_fastest["engineEvidenceTier"], "local-route-qualification")
+        self.assertFalse(newer_fastest["engineNextAction"]["requiresCalibration"])
+        self.assertEqual(
+            newer_fastest["engineEvidenceBinding"]["recordId"],
+            "llamacpp-output-2048",
+        )
+
+        model["backends"]["llamacpp"]["localBenchmark"] = copy.deepcopy(record)
+        model["backends"]["llamacpp"]["localBenchmarks"] = [copy.deepcopy(record)]
+        session_resource = {
+            "memoryAvailable": True,
+            "totalMemoryBytes": 48 * 1024**3,
+            "headroomBytes": 46 * 1024**3,
+            "headroomPercent": 95.0,
+            "metalWiredLimitBytes": launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+        }
+        idle_hub = {"phase": "idle", "message": "Ready"}
+        idle_operation = {"active": False}
+        unloaded_whallm = {
+            "reachable": True, "valid": True,
+            "loaded_model": None, "loading_model": None, "reason": "ok",
+        }
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), mock.patch.object(
+            launcher, "probe_whallm_runtime_status", return_value=unloaded_whallm,
+        ), mock.patch.object(
+            launcher, "launch_memory_estimate",
+            side_effect=AssertionError("generic GGUF estimate must not run"),
+        ) as generic_estimate:
+            session_admission = launcher.session_memory_admission(
+                payload, [model], session_resource, idle_hub, idle_operation,
+            )
+        generic_estimate.assert_not_called()
+        self.assertEqual(session_admission["decision"], "ready")
+        self.assertTrue(session_admission["launchable"])
+        self.assertFalse(session_admission["requiresAcknowledgement"])
+        self.assertTrue(session_admission["estimate"]["qualifiedRoute"])
+        self.assertEqual(
+            session_admission["estimate"]["measuredProcessGroupPeakBytes"],
+            41 * 1024**3,
+        )
+        self.assertEqual(
+            session_admission["estimate"]["requiredHeadroomBytes"],
+            45 * 1024**3,
+        )
+        self.assertNotIn("modelBytes", session_admission["estimate"])
+
+        low_headroom = {**session_resource, "headroomBytes": 44 * 1024**3}
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), mock.patch.object(
+            launcher, "probe_whallm_runtime_status", return_value=unloaded_whallm,
+        ):
+            pressure_admission = launcher.session_memory_admission(
+                payload, [model], low_headroom, idle_hub, idle_operation,
+            )
+        self.assertEqual(pressure_admission["decision"], "pressure")
+        self.assertFalse(pressure_admission["launchable"])
+        self.assertFalse(pressure_admission["requiresAcknowledgement"])
+
+        missing_cap = {**session_resource, "metalWiredLimitBytes": 0}
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), mock.patch.object(
+            launcher, "probe_whallm_runtime_status",
+        ) as premature_session_whallm:
+            cap_admission = launcher.session_memory_admission(
+                payload, [model], missing_cap, idle_hub, idle_operation,
+            )
+        premature_session_whallm.assert_not_called()
+        self.assertEqual(cap_admission["decision"], "system-setting")
+        self.assertFalse(cap_admission["requiresAcknowledgement"])
+
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), mock.patch.object(
+            launcher, "probe_whallm_runtime_status", return_value={
+                "reachable": True, "valid": True,
+                "loaded_model": launcher.WHALLM_MODEL_ID,
+                "loading_model": None, "reason": "ok",
+            },
+        ):
+            conflict_admission = launcher.session_memory_admission(
+                payload, [model], session_resource, idle_hub, idle_operation,
+            )
+        self.assertEqual(conflict_admission["decision"], "runtime-conflict")
+        self.assertFalse(conflict_admission["launchable"])
+        self.assertFalse(conflict_admission["requiresAcknowledgement"])
+
+        no_receipt_model = copy.deepcopy(model)
+        no_receipt_model["backends"]["llamacpp"].pop("localBenchmark", None)
+        no_receipt_model["backends"]["llamacpp"]["localBenchmarks"] = []
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ):
+            missing_receipt_admission = launcher.session_memory_admission(
+                payload, [no_receipt_model], session_resource, idle_hub, idle_operation,
+            )
+        self.assertEqual(missing_receipt_admission["decision"], "qualification")
+        self.assertFalse(missing_receipt_admission["launchable"])
+        self.assertFalse(missing_receipt_admission["requiresAcknowledgement"])
+
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ):
+            fastest = launcher.best_engine_request(payload, [model])
+            bound = copy.deepcopy(payload)
+            bound["evidenceBinding"] = result["evidenceBinding"]
+            applied = launcher.optimal_request(bound, [model])
+        self.assertEqual(fastest["engineEvidenceTier"], "local-route-qualification")
+        self.assertEqual(fastest["comparedEngines"], [])
+        self.assertEqual(applied["evidenceBinding"], result["evidenceBinding"])
+        for client in ("pi", "opencode", "chat"):
+            surface_payload = copy.deepcopy(payload)
+            surface_payload["client"] = client
+            if client == "chat":
+                surface_payload["chat"] = {"systemPrompt": "", "sampling": "model"}
+            with mock.patch.object(
+                launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+            ):
+                surface_result = launcher.best_engine_request(surface_payload, [model])
+            self.assertEqual(
+                surface_result["engineEvidenceTier"], "local-route-qualification",
+                client,
+            )
+            self.assertFalse(surface_result["engineNextAction"]["requiresCalibration"], client)
+
+        changed_output = copy.deepcopy(payload)
+        changed_output["output"] = 2_048
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ):
+            changed_output_result = launcher.best_engine_request(changed_output, [model])
+        self.assertEqual(
+            changed_output_result["engineEvidenceTier"],
+            "single-route-qualification-needed",
+        )
+
+        unqualified_model = copy.deepcopy(model)
+        unqualified_model["backends"]["llamacpp"].pop("localBenchmark", None)
+        unqualified_model["backends"]["llamacpp"]["localBenchmarks"] = []
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), self.assertRaisesRegex(ValueError, "fresh successful local qualification"):
+            launcher.normalized_request(payload, [unqualified_model], purpose="session")
+        stale_launch_model = copy.deepcopy(model)
+        stale_launch_model["backends"]["llamacpp"]["localBenchmark"]["createdAt"] = "2025-01-01T00:00:00Z"
+        stale_launch_model["backends"]["llamacpp"]["localBenchmarks"][0]["createdAt"] = "2025-01-01T00:00:00Z"
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), self.assertRaisesRegex(ValueError, "fresh successful local qualification"):
+            launcher.normalized_request(payload, [stale_launch_model], purpose="session")
+        tampered_launch_model = copy.deepcopy(model)
+        tampered_launch_model["backends"]["llamacpp"]["localBenchmark"]["qualificationContract"]["receiptFingerprint"] = "f" * 64
+        tampered_launch_model["backends"]["llamacpp"]["localBenchmarks"][0]["qualificationContract"]["receiptFingerprint"] = "f" * 64
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), self.assertRaisesRegex(ValueError, "fresh successful local qualification"):
+            launcher.normalized_request(payload, [tampered_launch_model], purpose="session")
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ), mock.patch.object(
+            launcher, "build_engine_plan",
+        ), mock.patch.object(
+            launcher, "build_client_plan",
+        ):
+            qualified_plan = launcher.normalized_request(payload, [model], purpose="session")
+        self.assertEqual(qualified_plan.backend, "llamacpp")
+
+        for mutation in (
+            lambda value: value["modes"]["ar"]["resourceTelemetry"].update({"peakProcessPhysicalFootprintBytes": 44 * 1024**3}),
+            lambda value: value["modes"]["ar"]["resourceTelemetry"].update({
+                "peakProcessPhysicalFootprintBytes": 40 * 1024**3,
+                "peakProcessGroupPhysicalFootprintBytes": 46 * 1024**3,
+            }),
+            lambda value: value["modes"]["ar"]["resourceTelemetry"].update({"processFootprintSource": "rss"}),
+            lambda value: value["modes"]["ar"]["resourceTelemetry"].update({"metalWiredLimitMinimumBytes": 43 * 1024**3}),
+            lambda value: value["modes"]["ar"]["resourceTelemetry"].update({"metalWiredLimitSampleCount": 7}),
+            lambda value: value["modes"]["ar"]["resourceTelemetry"].update({"processGroupFootprintSampleCount": 7}),
+            lambda value: value["toolContract"].update({"toolCallCount": 2}),
+            lambda value: value["toolContract"].update({"protocol": "responses"}),
+            lambda value: value["toolContract"].update({"terminalComplete": False}),
+            lambda value: value["correctnessContract"].update({"exact": False}),
+            lambda value: value["correctnessContract"].update({
+                "observedAnswerSha256": hashlib.sha256(b"").hexdigest(),
+            }),
+            lambda value: value["correctnessContract"].update({
+                "observedAnswerSha256": hashlib.sha256(b"RQ-8K-742 extra").hexdigest(),
+            }),
+            lambda value: value["correctnessContract"].update({"reasoningBoundaryClean": False}),
+            lambda value: value["correctnessContract"].update({"reasoningTagLeakDetected": True}),
+            lambda value: value["correctnessContract"].update({"reasoningBudgetTokensRequested": 1}),
+            lambda value: value["toolContract"].update({"reasoningBudgetMessageSha256": ""}),
+            lambda value: value["modes"]["ar"]["samples"][0].update({"reasoningBudgetMessageSha256": ""}),
+            lambda value: value["qualificationContract"].update({"backend": "omlx"}),
+            lambda value: value["qualificationContract"].update({"scope": "engine"}),
+            lambda value: value["qualificationContract"].update({"clientAgnostic": False}),
+            lambda value: value.update({"client": "pi"}),
+            lambda value: value["qualificationContract"].update({"toolProbeRequired": False}),
+            lambda value: value["qualificationContract"].update({"memoryProofRequired": False}),
+            lambda value: value["qualificationContract"].update({"memoryCeilingBytes": 45 * 1024**3}),
+            lambda value: value["qualificationContract"].update({"receiptFingerprint": ""}),
+            lambda value: value["qualificationContract"].update({"runtimeVersion": ""}),
+            lambda value: value.update({"configuredOutputLimit": 8_192}),
+            lambda value: value.update({"measuredRequestMaxTokens": 4_096}),
+            lambda value: value["unloadEvidence"].update({"portsClosed": False}),
+            lambda value: value["unloadEvidence"].update({"checkedPorts": []}),
+            lambda value: value["unloadEvidence"].update({"closedPorts": []}),
+            lambda value: value["modes"]["ar"]["samples"][0].update({"reasoningObserved": False}),
+            lambda value: value["modes"]["ar"]["samples"][0].update({"completionTokens": 127}),
+            lambda value: value["modes"]["ar"]["samples"][0].update({"decodeTokensPerSecond": 16.5}),
+            lambda value: value["modes"]["ar"]["samples"][0].update({"totalSeconds": 99.0}),
+            lambda value: value["modes"]["ar"]["samples"][0].update({"decodeTokensPerSecond": 14.999}),
+        ):
+            broken = copy.deepcopy(record)
+            mutation(broken)
+            self.assertIsNone(launcher.route_qualification_metrics(broken))
+
+        threshold = copy.deepcopy(record)
+        threshold["modes"]["ar"]["samples"][0]["decodeTokensPerSecond"] = 15.0
+        threshold["modes"]["ar"]["samples"][0]["totalSeconds"] = round(
+            threshold["modes"]["ar"]["samples"][0]["ttftSeconds"] + 255 / 15.0,
+            6,
+        )
+        self.assertIsNotNone(launcher.route_qualification_metrics(threshold))
+        missing_budget_proof = copy.deepcopy(record)
+        missing_budget_proof["modes"]["ar"]["samples"][0].pop(
+            "thinkingBudgetTokensRequested",
+        )
+        self.assertIsNone(launcher.route_qualification_metrics(missing_budget_proof))
+        false_sample_limit = copy.deepcopy(record)
+        false_sample_limit["modes"]["ar"]["samples"][0]["requestedMaxTokens"] = 256
+        self.assertIsNone(launcher.route_qualification_metrics(false_sample_limit))
+
+        wrong_runtime_binding = copy.deepcopy(record)
+        wrong_runtime_binding["qualificationContract"]["runtimeVersion"] = "b10740-tampered"
+        self.assertIsNotNone(launcher.route_qualification_metrics(wrong_runtime_binding))
+        model["backends"]["llamacpp"]["localBenchmark"] = wrong_runtime_binding
+        model["backends"]["llamacpp"]["localBenchmarks"] = [wrong_runtime_binding]
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ):
+            wrong_runtime_result = launcher.best_engine_request(payload, [model])
+        self.assertEqual(
+            wrong_runtime_result["engineEvidenceTier"],
+            "single-route-qualification-needed",
+        )
+        model["backends"]["llamacpp"]["localBenchmark"] = copy.deepcopy(record)
+        model["backends"]["llamacpp"]["localBenchmarks"] = [copy.deepcopy(record)]
+
+        stale = copy.deepcopy(record)
+        stale["createdAt"] = "2025-01-01T00:00:00Z"
+        model["backends"]["llamacpp"]["localBenchmark"] = stale
+        model["backends"]["llamacpp"]["localBenchmarks"] = [stale]
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ):
+            stale_fastest = launcher.best_engine_request(payload, [model])
+            with self.assertRaisesRegex(ValueError, "stale"):
+                launcher.optimal_request(bound, [model])
+        self.assertEqual(
+            stale_fastest["engineEvidenceTier"], "single-route-qualification-needed",
+        )
+        future = copy.deepcopy(record)
+        future["createdAt"] = "2099-01-01T00:00:00Z"
+        self.assertFalse(launcher.route_qualification_record_is_fresh(future))
+        future_model = copy.deepcopy(model)
+        future_model["backends"]["llamacpp"]["localBenchmark"] = copy.deepcopy(future)
+        future_model["backends"]["llamacpp"]["localBenchmarks"] = [copy.deepcopy(future)]
+        history_payload = copy.deepcopy(payload)
+        history_payload["suite"] = launcher.ROUTE_QUALIFICATION_8K_SUITE
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="llamacpp-test-mac",
+        ):
+            future_history = launcher.benchmark_history_request(
+                history_payload, [future_model], records=[future],
+                now=datetime(2026, 9, 2, tzinfo=timezone.utc),
+            )
+        self.assertEqual(future_history["freshness"], "older")
+        self.assertIn("dated in the future", future_history["freshnessMessage"])
+        self.assertEqual(future_history["receipt"]["state"], "trusted-route")
+        self.assertFalse(future_history["receipt"]["fresh"])
+        self.assertIsNone(future_history["receipt"]["ageDays"])
+        model["backends"]["llamacpp"]["localBenchmark"] = copy.deepcopy(record)
+        model["backends"]["llamacpp"]["localBenchmarks"] = [copy.deepcopy(record)]
+
+        shootout_request = copy.deepcopy(payload)
+        shootout_request["scope"] = "engines"
+        with self.assertRaisesRegex(ValueError, "dedicated single-route qualification"):
+            launcher.validated_engine_shootout_request(shootout_request, [model])
+        forged_shootout = copy.deepcopy(shootout_request)
+        forged_shootout["backend"] = "omlx"
+        with self.assertRaisesRegex(ValueError, "dedicated single-route qualification"):
+            launcher.validated_engine_shootout_request(forged_shootout, [model])
+        codex_request = copy.deepcopy(request)
+        codex_request["client"] = "codex"
+        with self.assertRaisesRegex(ValueError, "Codex"):
+            launcher.validated_route_qualification_request(codex_request, [model])
+        undersized_request = copy.deepcopy(request)
+        undersized_request["output"] = 256
+        with self.assertRaisesRegex(ValueError, "at least 512"):
+            launcher.validated_route_qualification_request(undersized_request, [model])
+
+    def test_llamacpp_qualification_measurement_runs_same_loaded_jinja_probe(self) -> None:
+        suite = copy.deepcopy(launcher.BENCHMARK_SUITES[launcher.ROUTE_QUALIFICATION_8K_SUITE])
+        job = {
+            "id": "same-loaded-route", "backend": "llamacpp", "client": "pi",
+            "modelId": "atomic", "model": {"backends": {"llamacpp": {"depth": 1, "depthMax": 1}}},
+            "project": str(ROOT), "context": 8_192, "output": 4_096,
+            "reasoning": "auto", "options": {"acceleration": "off", "depth": 1, "kv": "off"},
+            "chat": {"systemPrompt": "", "sampling": "model"},
+            "suiteName": launcher.ROUTE_QUALIFICATION_8K_SUITE,
+            "suite": suite, "workloadKind": "agentic", "modes": ["ar"],
+            "speedSampling": {"temperature": 0.0}, "routeQualification": True,
+            "qualificationThinkingBudgetTokens": 384,
+            "qualificationAnswerReserveTokens": 128,
+            "qualificationContract": {
+                "id": "atomicchat-llamacpp-ssd-ple-8k-v1",
+                "toolProbeRequired": True,
+            },
+        }
+        plan = mock.Mock()
+        plan.options = {"acceleration": "off", "depth": 1, "kv": "off"}
+        plan.port = 18_080
+        plan.client_port = None
+        plan.backend = "llamacpp"
+        plan.model = {"servedId": "atomic-route"}
+        plan.secrets = {"apiKey": "private"}
+        plan.reasoning = "auto"
+        plan.output = 512
+        plan.options["_qualificationThinkingBudgetTokens"] = 384
+        plan.client = "chat"
+        plan.chat = {
+            "systemPrompt": "PRIVATE USER SYSTEM PROMPT",
+            "sampling": "custom", "temperature": 0.9, "topP": 0.8,
+            "topK": 20, "presencePenalty": 0.4, "frequencyPenalty": 0.3,
+            "seed": 99,
+        }
+        budgeted_request = launcher.build_benchmark_completion_request(
+            plan, "bounded reasoning", 512, {"temperature": 0.0},
+        )
+        budgeted_body = json.loads(budgeted_request.data)
+        self.assertEqual(budgeted_body["reasoning_budget_tokens"], 384)
+        self.assertEqual(
+            budgeted_body["reasoning_budget_message"],
+            launcher.LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE,
+        )
+        self.assertNotIn("thinking_budget_tokens", budgeted_body)
+        boundary_body = json.loads(launcher.build_benchmark_completion_request(
+            plan, "boundary canary", 512, {"temperature": 0.0},
+            reasoning_budget_tokens=0,
+        ).data)
+        self.assertEqual(boundary_body["reasoning_budget_tokens"], 0)
+        ordinary_plan = copy.deepcopy(plan)
+        ordinary_plan.options.pop("_qualificationThinkingBudgetTokens")
+        ordinary_body = json.loads(launcher.build_benchmark_completion_request(
+            ordinary_plan, "ordinary session", 512, {"temperature": 0.0},
+        ).data)
+        self.assertNotIn("reasoning_budget_tokens", ordinary_body)
+        self.assertNotIn("reasoning_budget_message", ordinary_body)
+        tool_probe_body = json.loads(
+            launcher.build_route_check_request(plan, tool_probe=True).data
+        )
+        self.assertEqual(tool_probe_body["messages"], [{
+            "role": "user",
+            "content": (
+                f"Call {launcher.ROUTE_CHECK_TOOL_NAME} exactly once with status set to ready. "
+                "This is synthetic local test data; do not inspect files or use another tool."
+            ),
+        }])
+        self.assertEqual(tool_probe_body["max_tokens"], launcher.ROUTE_CHECK_MAX_TOKENS)
+        self.assertEqual(tool_probe_body["reasoning_budget_tokens"], 32)
+        self.assertEqual(
+            tool_probe_body["reasoning_budget_message"],
+            launcher.LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE,
+        )
+        for sampling_key in (
+            "temperature", "top_p", "top_k", "presence_penalty",
+            "frequency_penalty", "seed",
+        ):
+            self.assertNotIn(sampling_key, tool_probe_body)
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        manager = launcher.BenchmarkManager(launcher.RunManager())
+        manager.run_manager.process = process
+        manager.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {}, "modes": {}, "engines": {
+                "llamacpp": {"backend": "llamacpp", "phase": "queued", "modes": {}},
+            }, "result": None, "events": [],
+        }
+        ready = {
+            "decision": "ready", "launchable": True,
+            "requiresAcknowledgement": False,
+        }
+        sample = {
+            "promptTokens": 3_000, "cachedPromptTokens": None,
+            "completionTokens": 256, "ttftSeconds": 1.0,
+            "totalSeconds": 18.0, "decodeTokensPerSecond": 15.0,
+            "endToEndTokensPerSecond": 14.0,
+            "reasoningObserved": True, "answerObserved": True,
+            "finishReason": "stop", "terminalState": "complete",
+            "terminalComplete": True, "responseLimitReached": False,
+            "outputHash": "d" * 64,
+        }
+        telemetry = mock.Mock()
+        telemetry.violation = None
+        telemetry.stop.return_value = {
+            "samplingComplete": True,
+            "processFootprintAvailable": True,
+            "processFootprintSource": "proc_pid_rusage RUSAGE_INFO_V4",
+            "peakProcessPhysicalFootprintBytes": 40 * 1024**3,
+            "processGroupFootprintAvailable": True,
+            "processGroupFootprintSampleCount": 8,
+            "processAliveSampleCount": 8,
+            "processFootprintSampleCount": 8,
+            "processGroupMemberCountMinimum": 1,
+            "processGroupMemberCountMaximum": 1,
+            "peakProcessGroupPhysicalFootprintBytes": 40 * 1024**3,
+            "metalWiredLimitMinimumBytes": launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+            "metalWiredLimitMaximumBytes": launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+        }
+        unload = {
+            "clean": True, "processExited": True, "processGroupExited": True,
+            "managerIdle": True, "portsClosed": True, "checkedPorts": [18_080],
+            "closedPorts": [18_080],
+        }
+        tool = {
+            "protocol": "chat-completions", "toolContractValid": True,
+            "toolCallCount": 1, "toolNameSeen": True,
+            "terminalComplete": True, "toolContractDetail": "valid",
+            "thinkingBudgetTokensRequested": 32,
+            "reasoningBudgetMessageSha256": hashlib.sha256(
+                launcher.LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+            ).hexdigest(),
+        }
+
+        def measured_result(*_args: object, **kwargs: object) -> dict[str, object]:
+            value = copy.deepcopy(sample)
+            if kwargs.get("correctness_expected") is not None:
+                value["thinkingBudgetTokensRequested"] = 0
+                value["reasoningBudgetMessageSha256"] = hashlib.sha256(
+                    launcher.LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+                ).hexdigest()
+                value["correctnessContract"] = {
+                    "id": launcher.LLAMACPP_QUALIFICATION_CORRECTNESS_ID,
+                    "reasoningBoundaryContractId": (
+                        launcher.LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID
+                    ),
+                    "reasoningBudgetTokensRequested": 0,
+                    "reasoningBudgetMessageSha256": value["reasoningBudgetMessageSha256"],
+                    "reasoningTagLeakDetected": False,
+                    "transitionMessageLeakDetected": False,
+                    "reasoningBoundaryClean": True,
+                }
+            return value
+        with mock.patch.object(
+            launcher, "normalized_request", return_value=plan,
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready,
+        ), mock.patch.object(
+            launcher, "BenchmarkTelemetrySampler", return_value=telemetry,
+        ), mock.patch.object(
+            manager.run_manager, "start",
+        ), mock.patch.object(
+            manager, "_wait_for_engine",
+        ), mock.patch.object(
+            launcher, "run_benchmark_completion", side_effect=measured_result,
+        ) as completion, mock.patch.object(
+            launcher, "run_route_check_request", return_value=tool,
+        ) as route_check, mock.patch.object(
+            manager.run_manager, "stop",
+        ), mock.patch.object(
+            launcher.os, "getpgid", return_value=4321,
+        ), mock.patch.object(
+            launcher, "benchmark_clean_unload_evidence", return_value=unload,
+        ):
+            result, completed = manager._measure_mode(job, [], "ar", 0, 7)
+        self.assertEqual(completed, 7)
+        self.assertEqual(completion.call_count, 6)
+        route_check.assert_called_once_with(plan, manager.cancel_event, tool_probe=True)
+        self.assertTrue(result["toolContract"]["toolContractValid"])
+        self.assertTrue(result["unloadEvidence"]["clean"])
+        self.assertEqual(result["resourceTelemetry"]["peakProcessPhysicalFootprintBytes"], 40 * 1024**3)
+
+        violating = mock.Mock()
+        violating.violation = "The 44 GiB Metal wired-memory limit changed during qualification."
+        violating.stop.return_value = copy.deepcopy(telemetry.stop.return_value)
+        stopped_manager = launcher.BenchmarkManager(launcher.RunManager())
+        stopped_manager.run_manager.process = process
+        stopped_manager.state = copy.deepcopy(manager.state)
+        with mock.patch.object(
+            launcher, "normalized_request", return_value=plan,
+        ), mock.patch.object(
+            launcher, "route_qualification_memory_admission", return_value=ready,
+        ), mock.patch.object(
+            launcher, "BenchmarkTelemetrySampler", return_value=violating,
+        ), mock.patch.object(
+            stopped_manager.run_manager, "start",
+        ), mock.patch.object(
+            stopped_manager, "_wait_for_engine",
+        ), mock.patch.object(
+            launcher, "run_benchmark_completion", return_value=copy.deepcopy(sample),
+        ) as stopped_completion, mock.patch.object(
+            launcher, "run_route_check_request",
+        ) as stopped_route_check, mock.patch.object(
+            stopped_manager.run_manager, "stop",
+        ), mock.patch.object(
+            launcher.os, "getpgid", return_value=4321,
+        ), mock.patch.object(
+            launcher, "benchmark_clean_unload_evidence", return_value=unload,
+        ), self.assertRaisesRegex(launcher.QualificationSafetyFailure, "44 GiB"):
+            stopped_manager._measure_mode(job, [], "ar", 0, 7)
+        self.assertEqual(stopped_completion.call_count, 1)
+        stopped_route_check.assert_not_called()
+        self.assertFalse(stopped_manager.cancel_event.is_set())
+
+    def test_benchmark_telemetry_accepts_only_darwin_physical_footprint_proof(self) -> None:
+        sampler = launcher.BenchmarkTelemetrySampler()
+        sampler.samples = [{
+            "memoryAvailable": True, "freePercent": 50.0,
+            "totalBytes": 48 * 1024**3,
+            "thermalAvailable": True, "thermalState": 0,
+            "lowPowerMode": False,
+            "metalWiredLimitBytes": launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
+            "processFootprintAvailable": True,
+            "processFootprintSource": "proc_pid_rusage RUSAGE_INFO_V4",
+            "processPhysicalFootprintBytes": 39 * 1024**3,
+            "processLifetimePeakPhysicalFootprintBytes": 41 * 1024**3,
+            "processGroupFootprintAvailable": True,
+            "processGroupMemberCount": 2,
+            "processGroupPhysicalFootprintBytes": 41 * 1024**3,
+            "processGroupLifetimePeakPhysicalFootprintBytes": 43 * 1024**3,
+        }]
+        with mock.patch.object(sampler, "_sample"):
+            summary = sampler.stop()
+        self.assertTrue(summary["processFootprintAvailable"])
+        self.assertEqual(summary["peakProcessPhysicalFootprintBytes"], 41 * 1024**3)
+        self.assertEqual(summary["peakProcessGroupPhysicalFootprintBytes"], 43 * 1024**3)
+        self.assertEqual(summary["metalWiredLimitMinimumBytes"], launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES)
+        rss_only = copy.deepcopy(summary)
+        rss_only["processFootprintSource"] = "rss"
+        self.assertNotEqual(rss_only["processFootprintSource"], "proc_pid_rusage RUSAGE_INFO_V4")
+
+        with mock.patch.object(launcher.sys, "platform", "darwin"), mock.patch.object(
+            launcher, "darwin_all_process_ids", return_value=[101, 102, 103],
+        ), mock.patch.object(
+            launcher.os, "getpgid", side_effect=lambda pid: 77 if pid in {101, 102} else 88,
+        ), mock.patch.object(
+            launcher, "darwin_process_physical_footprint",
+            side_effect=lambda pid: {
+                "processFootprintAvailable": True,
+                "processPhysicalFootprintBytes": pid * 10,
+                "processLifetimePeakPhysicalFootprintBytes": pid * 20,
+            },
+        ):
+            group = launcher.darwin_process_group_physical_footprint(77)
+        self.assertTrue(group["processGroupFootprintAvailable"])
+        self.assertEqual(group["processGroupMemberCount"], 2)
+        self.assertEqual(group["processGroupPhysicalFootprintBytes"], 2_030)
+        self.assertEqual(group["processGroupLifetimePeakPhysicalFootprintBytes"], 4_060)
 
     def test_cross_engine_requests_do_not_inherit_the_applied_mtplx_mtp_route(self) -> None:
         model = copy.deepcopy(self.models[0])
@@ -14138,7 +16662,8 @@ for line in sys.stdin:
             "calibrationOriginTitle", "calibrationOriginDetail",
         ):
             self.assertIn(f'id="{element_id}"', index)
-        self.assertIn("Generation TPS: measuring…", script)
+        self.assertIn("Measuring…", script)
+        self.assertIn("Last completed turn ·", script)
         self.assertIn("decodeTokensPerSecond", script)
         self.assertIn("promoteCompletedCalibrationResult", script)
         self.assertIn("function calibrationRoutePreview", script)

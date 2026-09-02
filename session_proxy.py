@@ -49,6 +49,10 @@ SUPPORTED_BACKENDS = {
 CHAT_REASONING_LEVELS = frozenset({
     "auto", "off", "minimal", "low", "medium", "high", "xhigh", "max",
 })
+LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE = (
+    "\n\n Considering the limited time by the user, "
+    "I have to give the solution based on the thinking directly now."
+)
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade",
@@ -108,10 +112,15 @@ def load_config(path: Path) -> dict[str, Any]:
         fail("invalid port")
     if value["listenPort"] == value["upstreamPort"]:
         fail("relay and engine ports must differ")
-    if not 1 <= value["lanes"] <= 16 or not 1_024 <= value["outputLimit"] <= 2_000_000:
+    if not 1 <= value["lanes"] <= 16 or not 256 <= value["outputLimit"] <= 2_000_000:
         fail("invalid scheduler or output limit")
     if value.get("backend") not in SUPPORTED_BACKENDS:
         fail("unsupported backend")
+    if value.get("backend") == "llamacpp":
+        if value.get("reasoningBudgetMessage") != LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE:
+            fail("invalid llama.cpp reasoning boundary message")
+    elif value.get("reasoningBudgetMessage") not in {None, ""}:
+        fail("unexpected reasoning boundary message")
     if value.get("reasoning") not in CHAT_REASONING_LEVELS:
         fail("invalid reasoning effort")
     if not all(_valid_secret(value.get(key)) for key in ("controlKey", "upstreamKey")):
@@ -857,12 +866,47 @@ def transform_chat_request(body: bytes, config: dict[str, Any]) -> bytes:
             value.update({"thinking_mode": "thinking", "reasoning_effort": reasoning})
     limit = int(config["outputLimit"])
     requested = value.get("max_tokens")
-    if requested is None:
+    if backend == "llamacpp":
+        # llama.cpp accepts both OpenAI spellings as aliases for the same
+        # generation limit.  Collapse them before forwarding so a modern agent
+        # cannot leave a larger max_completion_tokens value beside the
+        # launcher-capped max_tokens value.
+        requested_limits: list[int] = []
+        for key in ("max_tokens", "max_completion_tokens"):
+            candidate = value.get(key)
+            if candidate is None:
+                continue
+            if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate <= 0:
+                raise ValueError(f"invalid {key}")
+            requested_limits.append(candidate)
+        value["max_tokens"] = min([limit, *requested_limits])
+        value.pop("max_completion_tokens", None)
+    elif requested is None:
         value["max_tokens"] = limit
     elif isinstance(requested, bool) or not isinstance(requested, int) or requested <= 0:
         raise ValueError("invalid max_tokens")
     else:
         value["max_tokens"] = min(requested, limit)
+    if backend == "llamacpp":
+        effective = int(value["max_tokens"])
+        reserve = 128 if effective >= 512 else max(1, effective // 4)
+        maximum_thinking = min(384, max(0, effective - reserve))
+        client_budgets: list[int] = []
+        for key in ("reasoning_budget_tokens", "thinking_budget_tokens"):
+            client_budget = value.get(key)
+            if client_budget is None or client_budget == -1:
+                continue
+            if (
+                isinstance(client_budget, bool) or not isinstance(client_budget, int)
+                or client_budget < 0
+            ):
+                raise ValueError(f"invalid {key}")
+            client_budgets.append(client_budget)
+        value["reasoning_budget_tokens"] = min(
+            [maximum_thinking, *client_budgets]
+        )
+        value["reasoning_budget_message"] = LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE
+        value.pop("thinking_budget_tokens", None)
     if value.get("stream") is True:
         stream_options = value.get("stream_options")
         if stream_options is None:
@@ -932,7 +976,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if not self.control_authorised():
                 self.send_json_error(HTTPStatus.UNAUTHORIZED, "Invalid controller key")
                 return
-            self.send_json(HTTPStatus.OK, self.scheduler.snapshot(self.registry.public()))
+            status = self.scheduler.snapshot(self.registry.public())
+            if self.config.get("backend") == "llamacpp":
+                status["reasoningReservePolicy"] = {
+                    "version": 1,
+                    "finalAnswerReserveTokens": 128,
+                    "smallRequestReserve": "25%",
+                    "maximumAutomaticThinkingTokens": 384,
+                    "preservesStricterClientBudget": True,
+                }
+            self.send_json(HTTPStatus.OK, status)
             return
         self.forward()
 

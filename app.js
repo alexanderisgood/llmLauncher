@@ -14,6 +14,7 @@ const state = {
   modelLibrary: null, modelLibraryRoots: [], modelLibraryLoading: false,
   modelLibraryQuery: "", modelLibraryEngine: "all", modelLibrarySurface: "all",
   modelLibraryState: "all",
+  modelVerificationTimer: null, modelVerificationLoading: false,
   acquisitionPhase: "idle", acquisitionStatus: null, acquisitionPlan: null,
   acquisitionRoots: [], acquisitionSearchResults: [], acquisitionSearching: false,
   acquisitionInspecting: false, acquisitionGeneration: 0,
@@ -873,6 +874,15 @@ function reasoningChoices(client = state.client) {
   return capability?.[client === "codex" ? "codexReasoning" : "agentReasoning"] || ["auto"];
 }
 
+function normalizeReasoningSelection(client = state.client) {
+  const allowed = reasoningChoices(client);
+  const select = $("reasoningSelect");
+  if (!allowed.includes(select.value)) {
+    select.value = allowed.includes("auto") ? "auto" : (allowed[0] || "auto");
+  }
+  return select.value;
+}
+
 function adapterDescriptor(collection, id) {
   return (state.adapters?.[collection] || []).find(adapter => adapter.id === id);
 }
@@ -883,6 +893,11 @@ function llamaCppPleCapabilityQualified(capability) {
   return capability?.runnable === true
     && capability?.llamacppPle === true
     && capability?.atomicPle?.ready === true
+    && capability?.currentProcessVerified === true
+    && capability?.atomicPle?.currentProcessVerified === true
+    && Number.isInteger(capability?.verificationGeneration)
+    && capability.verificationGeneration > 0
+    && capability.atomicPle.verificationGeneration === capability.verificationGeneration
     && typeof capability?.receiptFingerprint === "string"
     && /^[0-9a-f]{64}$/.test(capability.receiptFingerprint)
     && contextWindows.length === 1 && contextWindows[0] === 8192;
@@ -894,6 +909,65 @@ function llamaCppPleQualified(model) {
 
 function llamaCppPleModel() {
   return state.models.find(llamaCppPleQualified) || null;
+}
+
+function llamaCppPleCheckingModel() {
+  return state.models.find(model => (
+    model?.verificationState === "checking"
+    && model?.backends?.llamacpp?.verificationState === "checking"
+    && model?.backends?.llamacpp?.currentProcessVerified !== true
+  )) || null;
+}
+
+const LLAMACPP_PLE_QUALIFICATION_CONTEXT = 8192;
+const LLAMACPP_PLE_QUALIFICATION_MEMORY_LIMIT_BYTES = 44 * 1024 ** 3;
+const LLAMACPP_PLE_QUALIFICATION_SUITE = "route-qualification-8k";
+const LLAMACPP_PLE_QUALIFICATION_CONTRACT_ID = "atomicchat-llamacpp-ssd-ple-8k-v1";
+const LLAMACPP_PLE_QUALIFICATION_CONTRACT_VERSION = 1;
+const LLAMACPP_PLE_QUALIFICATION_SCENARIOS = Object.freeze([
+  "cold", "warmPrefix", "toolIngest", "steadyTurn",
+]);
+const LLAMACPP_PLE_QUALIFICATION_SAMPLE_MAX_TOKENS = 512;
+const LLAMACPP_PLE_QUALIFICATION_ANSWER_RESERVE_TOKENS = 128;
+const LLAMACPP_PLE_QUALIFICATION_THINKING_TOKENS = 384;
+const LLAMACPP_PLE_QUALIFICATION_MINIMUM_TPS = 15;
+const LLAMACPP_PLE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS = 128;
+const LLAMACPP_PLE_QUALIFICATION_REASONING_BOUNDARY_ID = "atomicchat-budget-zero-boundary-v1";
+const LLAMACPP_PLE_QUALIFICATION_REASONING_MESSAGE_SHA256 = "04dbe3b430e5be6b5f2f130343e8a0b55872538b1ca53c775e7d8afd9b4acb5a";
+
+function controllerRouteQualificationBackend(plan = {}) {
+  if (plan?.routeQualification !== true) return "";
+  const explicit = [
+    plan.qualificationBackend,
+    plan.qualifiedBackend,
+    plan.qualificationRoute?.backend,
+    plan.request?.backend,
+  ].map(value => String(value || "")).find(Boolean);
+  if (explicit) return explicit;
+  const eligible = (plan.engines || [])
+    .filter(engine => engine?.eligible === true)
+    .map(engine => String(engine.backend || engine.id || ""))
+    .filter(Boolean);
+  return eligible.length === 1 ? eligible[0] : "";
+}
+
+function selectedRouteQualificationBackend() {
+  const model = selectedModel();
+  if (state.backend === "omlx" && model?.qwen4Ple?.supported === true) return "omlx";
+  if (state.backend === "llamacpp" && llamaCppPleQualified(model)) return "llamacpp";
+  return "";
+}
+
+function performanceReceiptQualificationBackend(receipt = null) {
+  const explicitQualification = receipt?.routeQualification === true
+    || receipt?.kind === "route-qualification"
+    || receipt?.evidenceTier === "local-route-qualification"
+    || receipt?.tier === "local-route-qualification";
+  if (!explicitQualification) return "";
+  const qualifiedBackend = String(receipt?.qualifiedBackend || "").trim();
+  const receiptBackend = String(receipt?.backend || "").trim();
+  if (qualifiedBackend && receiptBackend && qualifiedBackend !== receiptBackend) return "";
+  return qualifiedBackend || receiptBackend;
 }
 
 function clientName(client) {
@@ -1497,6 +1571,7 @@ function updateWorkSurface() {
 function refreshLaunchability() {
   const selected = selectedModel();
   const allowedReasoning = reasoningChoices();
+  normalizeReasoningSelection();
   [...$("reasoningSelect").options].forEach(option => { option.disabled = !allowedReasoning.includes(option.value); });
   document.querySelectorAll("[data-backend]").forEach(button => {
     if (!uiEngineVisible(button.dataset.backend)) {
@@ -1510,16 +1585,20 @@ function refreshLaunchability() {
     const key = button.dataset.backend === "lmstudio" ? "lms" : button.dataset.backend;
     const installed = Boolean(state.binaries?.[key]?.installed);
     const connectable = button.dataset.backend === "freetoken";
-    const qualifiedPle = button.dataset.backend !== "llamacpp" || Boolean(llamaCppPleModel());
+    const verifyingPle = button.dataset.backend === "llamacpp" && Boolean(llamaCppPleCheckingModel());
+    const qualifiedPle = button.dataset.backend !== "llamacpp"
+      || Boolean(llamaCppPleModel()) || verifyingPle;
     const unavailable = (!installed && !connectable) || !qualifiedPle || state.applyingOptimal;
     button.disabled = unavailable;
     button.setAttribute("aria-disabled", String(unavailable));
     button.setAttribute("aria-pressed", String(button.dataset.backend === state.backend));
     button.classList.toggle("disabled", unavailable);
     button.classList.toggle("disconnected", connectable && !installed);
-    if (button.dataset.backend === "llamacpp") button.title = qualifiedPle
-      ? "Qualified pinned Qwen3.8 Flash-Next route · fixed 8K context"
-      : "No controller-qualified 8K Flash-Next route is available";
+    if (button.dataset.backend === "llamacpp") button.title = verifyingPle
+      ? "Pinned Qwen3.8 Flash-Next is being SHA-256 verified in this controller"
+      : qualifiedPle
+      ? "Pinned Qwen3.8 Flash-Next route ready · fixed 8K context"
+      : "No pinned verified artifact route is available";
     if (connectable) button.title = installed
       ? state.freeToken?.connected && state.freeToken?.native?.installed
         ? "Native FreeToken and a connected server are available"
@@ -1648,6 +1727,7 @@ function updateBackend(preserveOptimization = false) {
   const whallmReady = Boolean(state.binaries?.whallm?.installed);
   const llamaCppReady = Boolean(state.binaries?.llamacpp?.installed);
   const llamaCppModel = llamaCppPleModel();
+  const llamaCppChecking = llamaCppPleCheckingModel();
   const whallmModel = state.models.find(model => model.sharedServer === true && model.backends?.whallm?.runnable);
   const whallmRoute = whallmModel ? routeCapabilityPresentation(whallmModel.backends.whallm, {
     backend:"whallm", modelName:whallmModel.name, modelReady:whallmModel.ready,
@@ -1655,10 +1735,12 @@ function updateBackend(preserveOptimization = false) {
   const whallmModelReady = whallmRoute?.tone === "good";
   $("ssdRuntimeStatus").textContent = state.backend === "llamacpp"
     ? llamaCppModel
-      ? "Qualified pinned Flash-Next route · fixed 8K context."
+      ? "Pinned verified artifact route ready · fixed 8K context."
+      : llamaCppChecking
+        ? `Verifying the pinned artifact in this controller · ${formatNumber(llamaCppChecking.verificationProgress?.completed || 0)}/${formatNumber(llamaCppChecking.verificationProgress?.total || 28)} shards.`
       : llamaCppReady
-        ? "Runtime found; waiting for the controller's qualified 8K Flash-Next model route."
-        : "The qualified route is advertised, but its pinned runtime is not installed."
+        ? "Runtime found; no pinned verified artifact route is available yet."
+        : "The verified artifact route is advertised, but its pinned runtime is not installed."
     : whallmRoute?.attention
     ? `${whallmRoute.label}. ${whallmRoute.detail || "Whallm can be selected explicitly, but it is not automatically preferred on this Mac."}`
     : whallmModelReady
@@ -1812,6 +1894,10 @@ function modelChanged() {
 }
 
 async function loadModels(userTriggered = false) {
+  if (state.modelVerificationLoading) return;
+  state.modelVerificationLoading = true;
+  if (state.modelVerificationTimer) clearTimeout(state.modelVerificationTimer);
+  state.modelVerificationTimer = null;
   if (userTriggered) cancelOptimization("Model capabilities were rescanned; reapply the current speed preset.");
   $("refreshModels").disabled = true;
   $("refreshModels").querySelector("strong").textContent = "Scanning models…";
@@ -1823,12 +1909,24 @@ async function loadModels(userTriggered = false) {
     const incompleteOrnith = state.models.find(model => /ornith/i.test(model.name) && !model.ready);
     state.catalogNotice = incompleteOrnith ? `${incompleteOrnith.name} is detected but still downloading. It becomes selectable after every weight shard finishes.` : "";
     renderModelOptions();
-    if (state.quickStartLoaded) void loadQuickStart(true);
+    const checking = state.models.find(model => model.verificationState === "checking");
+    if (state.quickStartLoaded && !checking) void loadQuickStart(true);
+    if (checking) {
+      const completed = Number(checking.verificationProgress?.completed || 0);
+      const total = Number(checking.verificationProgress?.total || 28);
+      $("refreshModels").querySelector("strong").textContent = "Verifying pinned model…";
+      $("refreshModels").querySelector("small").textContent = `${formatNumber(completed)} / ${formatNumber(total)} shards checked in this controller.`;
+      state.modelVerificationTimer = setTimeout(() => { void loadModels(false); }, 700);
+    }
   } catch (error) { showNotice(error.message, true); }
   finally {
-    $("refreshModels").disabled = false;
-    $("refreshModels").querySelector("strong").textContent = "Rescan models";
-    $("refreshModels").querySelector("small").textContent = "Refresh configured model folders.";
+    state.modelVerificationLoading = false;
+    const checking = state.models.some(model => model.verificationState === "checking");
+    $("refreshModels").disabled = checking;
+    if (!checking) {
+      $("refreshModels").querySelector("strong").textContent = "Rescan models";
+      $("refreshModels").querySelector("small").textContent = "Refresh configured model folders.";
+    }
   }
 }
 
@@ -7259,10 +7357,18 @@ function scheduleBenchmarkHistory(force = false) {
 }
 
 function performanceReceiptSuite() {
+  const qualificationBackend = selectedRouteQualificationBackend();
+  if (qualificationBackend === "llamacpp") {
+    return LLAMACPP_PLE_QUALIFICATION_SUITE;
+  }
   return CalibrationDecision.receiptSuite(
     state.client,
-    state.backend === "omlx" && selectedModel()?.qwen4Ple?.supported === true,
+    qualificationBackend === "omlx",
   );
+}
+
+function calibrationSuiteControlValue(suite) {
+  return suite === LLAMACPP_PLE_QUALIFICATION_SUITE ? "agentic" : suite;
 }
 
 function performanceReceiptSuiteOrder(request = {}, routeQualification = false) {
@@ -7286,6 +7392,7 @@ function performanceReceiptSuiteLabel(receipt = {}) {
   if (explicit) return explicit;
   const labels = {
     agentic:"Agentic Route Lab",
+    [LLAMACPP_PLE_QUALIFICATION_SUITE]:"SSD PLE Route Qualification",
     standard:"Standard",
     thorough:"Thorough",
     quick:"Quick",
@@ -7330,8 +7437,13 @@ function performanceReceiptAge(receipt) {
 
 function performanceReceiptView(receipt) {
   const focused = activeDetail() === "focused";
-  const qwenPleQualification = state.backend === "omlx"
-    && selectedModel()?.qwen4Ple?.supported === true;
+  const qualificationBackend = performanceReceiptQualificationBackend(receipt);
+  const routeQualification = Boolean(qualificationBackend);
+  const pendingQualificationBackend = ["missing", "incomplete"].includes(receipt?.state)
+    ? selectedRouteQualificationBackend() : "";
+  const qualificationContextBackend = qualificationBackend || pendingQualificationBackend;
+  const qualificationNeeded = Boolean(qualificationContextBackend);
+  const llamaQualification = qualificationContextBackend === "llamacpp";
   const suite = performanceReceiptSuiteLabel(receipt);
   const eligible = Array.isArray(receipt?.eligibleBackends)
     ? receipt.eligibleBackends.filter(uiEngineVisible) : [];
@@ -7354,32 +7466,39 @@ function performanceReceiptView(receipt) {
   const measuredTitle = [receipt?.backendLabel, receipt?.modeLabel].filter(Boolean).join(" · ");
   const fullSummary = [receipt?.summary, measured].filter(Boolean).join(" ");
   if (["trusted-engine", "trusted-route"].includes(receipt?.state)) {
+    const engineReceipt = receipt.state === "trusted-engine" && !routeQualification;
+    const focusedTitle = routeQualification
+      ? `Qualified route · ${receipt.modeLabel || "verified route"}`
+      : engineReceipt
+        ? `Best measured · ${receipt.backendLabel || "engine"}`
+        : `Measured route · ${receipt.modeLabel || "verified route"}`;
     if (receipt.fresh && (reasoningNormalized || contextNormalized)) return {
       state:"trusted", icon:"◆",
-      title:focused
-        ? (receipt.state === "trusted-engine" ? `Best measured · ${receipt.backendLabel || "engine"}` : `Best setting · ${receipt.modeLabel || "verified route"}`)
-        : `Measured · ${measuredTitle || "verified route"}`,
+      title:focused ? focusedTitle : `Measured · ${measuredTitle || "verified route"}`,
       detail:focused
-        ? [receipt.state === "trusted-engine" ? receipt.modeLabel : receipt.backendLabel, suite, receipt.workloadDisplay, reasoningLabel, contextLabel, age].filter(Boolean).join(" · ")
+        ? [engineReceipt ? receipt.modeLabel : receipt.backendLabel, suite, receipt.workloadDisplay, reasoningLabel, contextLabel, age].filter(Boolean).join(" · ")
         : [measured, reasoningLabel, contextLabel, "review before applying"].filter(Boolean).join(" · "),
       action:"Review", actionId:"review-normalized", titleText:fullSummary,
     };
     if (receipt.fresh) return {
       state:"trusted", icon:"◆",
-      title:focused
-        ? (receipt.state === "trusted-engine" ? `Best measured · ${receipt.backendLabel || "engine"}` : `Best setting · ${receipt.modeLabel || "verified route"}`)
-        : `Measured · ${measuredTitle || "verified route"}`,
+      title:focused ? focusedTitle
+        : routeQualification
+          ? `Qualified · ${measuredTitle || "verified route"}`
+          : `Measured · ${measuredTitle || "verified route"}`,
       detail:focused
-        ? [receipt.state === "trusted-engine" ? receipt.modeLabel : receipt.backendLabel, suite, receipt.workloadDisplay, age].filter(Boolean).join(" · ")
+        ? [engineReceipt ? receipt.modeLabel : receipt.backendLabel, suite, receipt.workloadDisplay, age].filter(Boolean).join(" · ")
         : measured || `${suite} exact-contract evidence`,
-      action:"Apply", actionId:receipt.state === "trusted-engine" ? "apply-engine" : "apply-route",
+      action:"Apply", actionId:engineReceipt ? "apply-engine" : "apply-route",
       titleText:fullSummary,
     };
     return {
       state:"stale", icon:"◇",
-      title:focused ? "Saved result needs rechecking" : `Saved · ${measuredTitle || "verified route"}`,
+      title:focused
+        ? routeQualification ? "Saved route qualification needs rechecking" : "Saved result needs rechecking"
+        : `Saved · ${measuredTitle || "verified route"}`,
       detail:focused ? [measuredTitle, suite, age].filter(Boolean).join(" · ") : `${suite} · ${age} · rerun before relying on current conditions`,
-      action:"Rerun", actionId:qwenPleQualification ? "measure-qualification" : "rerun-lab", titleText:fullSummary,
+      action:"Rerun", actionId:routeQualification ? "measure-qualification" : "rerun-lab", titleText:fullSummary,
     };
   }
   if (receipt?.state === "tie") {
@@ -7410,13 +7529,34 @@ function performanceReceiptView(receipt) {
     };
   }
   if (receipt?.state === "incomplete") return {
-    state:"incomplete", icon:"!", title:focused ? "Finish the engine comparison" : "Measurement incomplete",
-    detail:focused
-      ? `${suite} · ${eligible.length} compatible engine${eligible.length === 1 ? "" : "s"} still need a complete run`
-      : `${suite} · ${eligible.length} compatible engine${eligible.length === 1 ? "" : "s"} · no winner promoted`,
-    action:"Measure", actionId:qwenPleQualification
+    state:"incomplete", icon:"!",
+    title:focused
+      ? qualificationNeeded ? "Finish this route qualification" : "Finish the engine comparison"
+      : qualificationNeeded ? "Route qualification incomplete" : "Measurement incomplete",
+    detail:qualificationNeeded
+      ? llamaQualification
+        ? `${suite} · fixed-8K llama.cpp SSD PLE evidence is not complete`
+        : `${suite} · this exact route still needs a complete run`
+      : focused
+        ? `${suite} · ${eligible.length} compatible engine${eligible.length === 1 ? "" : "s"} still need a complete run`
+        : `${suite} · ${eligible.length} compatible engine${eligible.length === 1 ? "" : "s"} · no winner promoted`,
+    action:"Measure", actionId:qualificationNeeded
       ? "measure-qualification" : eligible.length >= 2 ? "measure-engine" : "measure-route",
     titleText:fullSummary,
+  };
+  if (qualificationNeeded) return {
+    state:"missing", icon:"◇",
+    title:focused
+      ? llamaQualification ? "Qualify this pinned SSD PLE route" : "Qualify this SSD-backed PLE route"
+      : "Route qualification needed",
+    detail:focused
+      ? llamaQualification
+        ? "Fixed 8K · runtime-controlled reasoning · exact 44 GiB ceiling"
+        : "Measure reasoning TPS and final-answer reliability on this Mac"
+      : llamaQualification
+        ? "Pinned llama.cpp SSD PLE · fixed 8K · not qualified yet"
+        : "Exact oMLX AR + N-gram PLE mmap route · not qualified yet",
+    action:"Qualify", actionId:"measure-qualification", titleText:fullSummary,
   };
   const routeModes = benchmarkCandidates(selectedModel()?.backends?.[state.backend] || {}).length;
   if (receipt?.scope === "engine" && eligible.length >= 2) return {
@@ -7431,14 +7571,6 @@ function performanceReceiptView(receipt) {
       : `${benchmarkCandidates(selectedModel()?.backends?.[state.backend] || {}).map(item => item.label).join(" vs ")} · ${suite}`,
     action:"Measure", actionId:"measure-route", titleText:fullSummary,
   };
-  if (qwenPleQualification) return {
-    state:"missing", icon:"◇",
-    title:focused ? "Qualify this SSD-backed PLE route" : "Route qualification needed",
-    detail:focused
-      ? "Measure reasoning TPS and final-answer reliability on this Mac"
-      : "Exact oMLX AR + N-gram PLE mmap route · not qualified yet",
-    action:"Qualify", actionId:"measure-qualification", titleText:fullSummary,
-  };
   return {
     state:"missing", icon:"○", title:focused ? "One verified route" : "No measured accelerator",
     detail:focused ? "No acceleration comparison is available for this engine and model" : "AR is the only verified route for this engine and model",
@@ -7448,6 +7580,7 @@ function performanceReceiptView(receipt) {
 
 function renderEngineEvidenceChoices(receipt) {
   const winner = receipt?.state === "trusted-engine" && receipt?.fresh
+    && !performanceReceiptQualificationBackend(receipt)
     ? String(receipt.backend || "")
     : receipt?.state === "tie" && receipt?.fresh && receipt?.currentInLeadingBand === false
       ? String(receipt.recommendedBackend || "") : "";
@@ -7520,8 +7653,7 @@ async function loadPerformanceReceipt(force = false, prepared = null) {
   state.performanceReceipt = null;
   renderPerformanceReceipt();
   try {
-    const routeQualification = request.backend === "omlx"
-      && selectedModel()?.qwen4Ple?.supported === true;
+    const routeQualification = Boolean(selectedRouteQualificationBackend());
     const suites = performanceReceiptSuiteOrder(request, routeQualification);
     let preferredReceipt = null;
     let firstIncomplete = null;
@@ -7590,7 +7722,9 @@ function schedulePerformanceReceipt(force = false) {
 }
 
 async function openPerformanceBenchmarkLab(receipt = state.performanceReceipt) {
-  $("benchmarkSuiteSelect").value = receipt?.suite || performanceReceiptSuite();
+  $("benchmarkSuiteSelect").value = calibrationSuiteControlValue(
+    receipt?.suite || performanceReceiptSuite(),
+  );
   $("benchmarkPreferenceSelect").value = "throughput";
   await openBenchmarkLab();
 }
@@ -7897,13 +8031,221 @@ function calibrationOperationBlocked() {
     || state.profileBusy;
 }
 
+function calibrationQualificationProfile(plan = state.calibrationPlan || {}) {
+  let backend = controllerRouteQualificationBackend(plan);
+  if (!backend && plan?.qualificationPreparation?.kind === "qwen-ple-safe-qualification-v1") {
+    backend = "omlx";
+  }
+  const llama = backend === "llamacpp";
+  return {
+    backend,
+    llama,
+    routeLabel:llama ? "llama.cpp SSD PLE" : backend === "omlx" ? "oMLX Qwen PLE" : "the exact route",
+    subtitle:llama
+      ? "Qualify the exact pinned llama.cpp SSD PLE route at fixed 8K under the exact 44 GiB ceiling."
+      : "Measure and qualify the exact oMLX Qwen PLE route without inventing a second engine.",
+    reasoningLabel:llama ? "Runtime-controlled" : null,
+    startMessage:llama
+      ? "Pinned llama.cpp SSD PLE qualification accepted. Loading the exact fixed-8K route…"
+      : "Route qualification accepted. Preparing the exact oMLX AR + PLE mmap route…",
+  };
+}
+
+function llamaQualificationContractExact(plan = state.calibrationPlan || {}) {
+  if (controllerRouteQualificationBackend(plan) !== "llamacpp") return false;
+  const model = selectedModel();
+  const capability = model?.backends?.llamacpp || {};
+  const contract = plan.qualificationContract;
+  const route = plan.routeSpec;
+  const reasoning = plan.reasoningContract || {};
+  const receiptFingerprint = String(capability.receiptFingerprint || "");
+  const runtimeVersion = String(capability.runtimeVersion || "");
+  const scenariosExact = Array.isArray(contract?.scenarioContract)
+    && contract.scenarioContract.length === LLAMACPP_PLE_QUALIFICATION_SCENARIOS.length
+    && contract.scenarioContract.every(
+      (scenario, index) => scenario === LLAMACPP_PLE_QUALIFICATION_SCENARIOS[index],
+    );
+  return llamaCppPleQualified(model)
+    && plan.routeQualification === true
+    && String(plan.model?.id || "") === String(model?.id || "")
+    && String(plan.request?.modelId || "") === String(model?.id || "")
+    && plan.request?.backend === "llamacpp"
+    && plan.request?.context === LLAMACPP_PLE_QUALIFICATION_CONTEXT
+    && plan.request?.reasoning === "auto"
+    && capability.memoryCeilingBytes === LLAMACPP_PLE_QUALIFICATION_MEMORY_LIMIT_BYTES
+    && /^[0-9a-f]{64}$/.test(receiptFingerprint)
+    && runtimeVersion.length > 0
+    && contract?.id === LLAMACPP_PLE_QUALIFICATION_CONTRACT_ID
+    && contract.version === LLAMACPP_PLE_QUALIFICATION_CONTRACT_VERSION
+    && contract.scope === "route"
+    && contract.clientAgnostic === true
+    && contract.backend === "llamacpp"
+    && contract.exactContext === LLAMACPP_PLE_QUALIFICATION_CONTEXT
+    && contract.configuredOutputLimit === plan.request?.output
+    && contract.measuredRequestMaxTokens === LLAMACPP_PLE_QUALIFICATION_SAMPLE_MAX_TOKENS
+    && scenariosExact
+    && contract.sampleMaxTokens === LLAMACPP_PLE_QUALIFICATION_SAMPLE_MAX_TOKENS
+    && contract.answerReserveTokens === LLAMACPP_PLE_QUALIFICATION_ANSWER_RESERVE_TOKENS
+    && contract.thinkingBudgetTokens === LLAMACPP_PLE_QUALIFICATION_THINKING_TOKENS
+    && contract.minimumDecodeTokensPerSecond === LLAMACPP_PLE_QUALIFICATION_MINIMUM_TPS
+    && contract.minimumCompletionTokens === LLAMACPP_PLE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS
+    && contract.reasoningBoundaryContractId === LLAMACPP_PLE_QUALIFICATION_REASONING_BOUNDARY_ID
+    && contract.reasoningBudgetMessageSha256 === LLAMACPP_PLE_QUALIFICATION_REASONING_MESSAGE_SHA256
+    && contract.reasoningPolicy === "runtime-fixed-on"
+    && contract.toolProbeRequired === true
+    && contract.memoryProofRequired === true
+    && contract.memoryCeilingBytes === LLAMACPP_PLE_QUALIFICATION_MEMORY_LIMIT_BYTES
+    && contract.receiptFingerprint === receiptFingerprint
+    && contract.runtimeVersion === runtimeVersion
+    && route?.id === LLAMACPP_PLE_QUALIFICATION_CONTRACT_ID
+    && route.version === LLAMACPP_PLE_QUALIFICATION_CONTRACT_VERSION
+    && route.scope === "route"
+    && route.clientAgnostic === true
+    && route.backend === "llamacpp"
+    && route.suite === LLAMACPP_PLE_QUALIFICATION_SUITE
+    && route.context === LLAMACPP_PLE_QUALIFICATION_CONTEXT
+    && route.reasoningPolicy === "runtime-fixed-on"
+    && route.toolProbeRequired === true
+    && route.memoryProofRequired === true
+    && route.memoryCeilingBytes === LLAMACPP_PLE_QUALIFICATION_MEMORY_LIMIT_BYTES
+    && reasoning.runtimeControlled === true
+    && reasoning.reasoningEnabled === true
+    && reasoning.policy === "runtime-fixed-reasoning-on"
+    && reasoning.measured === "auto";
+}
+
+function firstQualificationMetric(...values) {
+  for (const value of values) {
+    const metric = finiteMetric(value);
+    if (metric !== null && metric >= 0) return metric;
+  }
+  return null;
+}
+
+function firstQualificationCheck(...values) {
+  const explicit = values.find(value => typeof value === "boolean");
+  return typeof explicit === "boolean" ? explicit : null;
+}
+
+function routeQualificationResultMetrics(route = {}, result = {}) {
+  const routeQualification = route.qualification || {};
+  const resultQualification = result.qualification || {};
+  const metrics = route.metrics || routeQualification.metrics
+    || result.qualificationMetrics || resultQualification.metrics || {};
+  const sampleCount = firstQualificationMetric(
+    route.sampleCount, metrics.sampleCount, result.sampleCount,
+  );
+  const reasoningTurns = firstQualificationMetric(
+    route.reasoningTurns, metrics.reasoningTurns, result.reasoningTurns,
+  );
+  const answerTurns = firstQualificationMetric(
+    route.answerTurns, metrics.answerTurns, result.answerTurns,
+  );
+  const countVerified = sampleCount !== null && sampleCount > 0
+    && reasoningTurns === sampleCount && answerTurns === sampleCount;
+  const reasoningFinal = firstQualificationCheck(
+    route.reasoningFinalVerified,
+    route.checks?.reasoningFinalAnswer,
+    routeQualification.reasoningFinalVerified,
+    result.reasoningFinalVerified,
+    result.checks?.reasoningFinalAnswer,
+    resultQualification.reasoningFinalVerified,
+    route.reasoningObserved === true && route.answerObserved === true ? true : undefined,
+    routeQualification.reasoningObserved === true && routeQualification.answerObserved === true ? true : undefined,
+    resultQualification.reasoningObserved === true && resultQualification.answerObserved === true ? true : undefined,
+    countVerified ? true : undefined,
+  );
+  return {
+    tps:firstQualificationMetric(
+      route.decodeTokensPerSecond, route.medianDecodeTokensPerSecond,
+      metrics.medianDecodeTokensPerSecond, result.decodeTokensPerSecond,
+    ),
+    minimumTps:firstQualificationMetric(
+      route.minimumDecodeTokensPerSecond,
+      metrics.minimumDecodeTokensPerSecond,
+      result.minimumDecodeTokensPerSecond,
+      resultQualification.minimumDecodeTokensPerSecond,
+    ),
+    ttft:firstQualificationMetric(
+      route.firstTokenSeconds, route.medianTTFTSeconds,
+      metrics.medianTTFTSeconds, result.firstTokenSeconds,
+    ),
+    peakMemory:firstQualificationMetric(
+      route.peakMemoryBytes,
+      route.peakProcessPhysicalFootprintBytes,
+      route.resourceTelemetry?.peakProcessPhysicalFootprintBytes,
+      metrics.peakMemoryBytes,
+      result.peakMemoryBytes,
+      result.peakProcessPhysicalFootprintBytes,
+      result.resourceTelemetry?.peakProcessPhysicalFootprintBytes,
+    ),
+    reasoningFinal,
+    reasoningBoundary:firstQualificationCheck(
+      route.reasoningBoundaryVerified,
+      route.checks?.reasoningBoundary,
+      routeQualification.reasoningBoundaryVerified,
+      result.reasoningBoundaryVerified,
+      result.checks?.reasoningBoundary,
+      resultQualification.reasoningBoundaryVerified,
+    ),
+    jinjaTool:firstQualificationCheck(
+      route.jinjaToolVerified,
+      route.toolContractVerified,
+      route.checks?.jinjaTool,
+      routeQualification.jinjaToolVerified,
+      result.jinjaToolVerified,
+      result.toolContractVerified,
+      result.checks?.jinjaTool,
+      resultQualification.jinjaToolVerified,
+    ),
+    cleanUnload:firstQualificationCheck(
+      route.cleanUnloadVerified,
+      route.unloadVerified,
+      route.checks?.cleanUnload,
+      routeQualification.cleanUnloadVerified,
+      result.cleanUnloadVerified,
+      result.unloadVerified,
+      result.checks?.cleanUnload,
+      resultQualification.cleanUnloadVerified,
+    ),
+    correctness:firstQualificationCheck(
+      route.correctnessVerified,
+      route.checks?.correctness,
+      routeQualification.correctnessVerified,
+      result.correctnessVerified,
+      result.checks?.correctness,
+      resultQualification.correctnessVerified,
+    ),
+  };
+}
+
+function routeQualificationFactsMarkup(route = {}, result = {}, backend = "") {
+  const metrics = routeQualificationResultMetrics(route, result);
+  const check = value => value === true ? "Passed" : value === false ? "Failed" : "Not reported";
+  const tps = metrics.tps === null ? "Not reported" : `${metrics.tps.toFixed(1)} tok/s`;
+  const minimumTps = metrics.minimumTps === null
+    ? "Not reported"
+    : `${metrics.minimumTps.toFixed(1)} tok/s`;
+  const ttft = metrics.ttft === null ? "Not reported" : `${metrics.ttft.toFixed(2)}s`;
+  if (backend !== "llamacpp") {
+    return `<small class="calibration-result-tps">Generation TPS · ${esc(tps)}</small><small class="calibration-result-settings">TTFT · ${esc(ttft)} · Reasoning + final answer · ${esc(check(metrics.reasoningFinal))}</small>`;
+  }
+  const peak = metrics.peakMemory === null
+    ? "Not reported"
+    : `${(metrics.peakMemory / (1024 ** 3)).toFixed(1)} GiB / ${LLAMACPP_PLE_QUALIFICATION_MEMORY_LIMIT_BYTES / (1024 ** 3)} GiB`;
+  return `<small class="calibration-result-tps">Generation TPS · ${esc(tps)}</small><small class="calibration-result-settings">Slowest turn · ${esc(minimumTps)} · target ≥${LLAMACPP_PLE_QUALIFICATION_MINIMUM_TPS}</small><small class="calibration-result-settings">TTFT · ${esc(ttft)} · Peak memory · ${esc(peak)}</small><small class="calibration-result-settings">Reasoning + final answer · ${esc(check(metrics.reasoningFinal))} · Clean forced handoff · ${esc(check(metrics.reasoningBoundary))}</small><small class="calibration-result-settings">Correctness check · ${esc(check(metrics.correctness))} · Jinja tool check · ${esc(check(metrics.jinjaTool))} · Clean unload · ${esc(check(metrics.cleanUnload))}</small>`;
+}
+
 function updateCalibrationHelp() {
   const suite = $("calibrationSuiteSelect").value;
   const preference = $("calibrationPreferenceSelect").value;
   const cooling = $("calibrationCoolingSelect").value;
   const routeQualification = state.calibrationPlan?.routeQualification === true;
+  const qualification = calibrationQualificationProfile();
   $("calibrationSuiteHelp").textContent = routeQualification
-    ? "Uses four bounded generated turns to verify cold load, prefix reuse, tool ingestion, reasoning, and final answers."
+    ? qualification.llama
+      ? "Uses four bounded generated turns at fixed 8K to verify reasoning, final answers, Jinja tool calling, and clean unload."
+      : "Uses four bounded generated turns to verify cold load, prefix reuse, tool ingestion, reasoning, and final answers."
     : ({
     agentic:"Measures cold prefill, prefix reuse, tool ingestion, and a warm follow-up.",
     standard:"Measures repeated 2K and 8K prompt routes for general chat throughput.",
@@ -7947,15 +8289,22 @@ function renderCalibrationEntry() {
   if (!entry) return;
   const next = entry.decision?.engineNextAction || {};
   const preferenceLabel = enginePreferenceLabels[entry.preference] || "Best engine";
+  const qualificationBackend = selectedRouteQualificationBackend();
   const missing = (next.missingEngines || [])
     .filter(item => uiEngineVisible(item.backend || item.id))
     .map(item => item.label).filter(Boolean);
-  $("calibrationOriginTitle").textContent = entry.source === "optimizer-result"
-    ? `${preferenceLabel} needs a local measurement`
-    : `Measure before choosing ${preferenceLabel.toLowerCase()}`;
-  $("calibrationOriginDetail").textContent = next.reason || (missing.length
-    ? `Matching evidence is missing for ${missing.join(", ")}.`
-    : "Review the exact engines, workload, reload count, and request count before anything runs.");
+  $("calibrationOriginTitle").textContent = qualificationBackend
+    ? "This route needs a local qualification"
+    : entry.source === "optimizer-result"
+      ? `${preferenceLabel} needs a local measurement`
+      : `Measure before choosing ${preferenceLabel.toLowerCase()}`;
+  $("calibrationOriginDetail").textContent = next.reason || (qualificationBackend === "llamacpp"
+    ? "Qualify this one pinned fixed-8K SSD PLE route; no engine winner is chosen."
+    : qualificationBackend
+      ? "Qualify this exact route; no engine winner is chosen."
+      : missing.length
+        ? `Matching evidence is missing for ${missing.join(", ")}.`
+        : "Review the exact engines, workload, reload count, and request count before anything runs.");
 }
 
 function completedCalibrationDecision(status = state.benchmarkStatus || {}) {
@@ -7967,12 +8316,25 @@ function completedCalibrationDecision(status = state.benchmarkStatus || {}) {
   return {result, decision};
 }
 
+function completedCalibrationEvidenceBinding(result = {}, decision = {}) {
+  const binding = [
+    decision.evidenceBinding,
+    decision.engineEvidenceBinding,
+    result.evidenceBinding,
+    result.evidence?.evidenceBinding,
+    result.receipt?.evidenceBinding,
+    result.persistence?.evidenceBinding,
+  ].find(item => item && typeof item === "object" && !Array.isArray(item));
+  return binding ? JSON.parse(JSON.stringify(binding)) : null;
+}
+
 function promoteCompletedCalibrationResult(status = state.benchmarkStatus || {}) {
   const completed = completedCalibrationDecision(status);
   if (!completed || !state.calibrationPlan) return false;
   const {result, decision} = completed;
   const backend = String(decision.backend || "");
   const backendLabel = decision.label || backendName(backend);
+  const evidenceBinding = completedCalibrationEvidenceBinding(result, decision);
   state.calibrationPlan = {
     ...state.calibrationPlan,
     action:"apply-existing",
@@ -7993,6 +8355,7 @@ function promoteCompletedCalibrationResult(status = state.benchmarkStatus || {})
       comparedEngines:decision.comparedEngines || (result.qualified ? [] : result.engines) || [],
       qualified:Boolean(decision.qualified || result.qualified),
       qualifiedRoutes:decision.qualifiedRoutes || result.qualifiedRoutes || [],
+      ...(evidenceBinding ? {evidenceBinding} : {}),
     },
   };
   return true;
@@ -8072,19 +8435,22 @@ function renderCalibrationPlan() {
   ) plan = state.calibrationPlan;
   const routeQualification = plan?.routeQualification === true;
   const qualificationPreparation = plan?.qualificationPreparation || null;
+  const qualification = calibrationQualificationProfile(plan || {});
   const qualificationFlow = routeQualification
     || qualificationPreparation?.kind === "qwen-ple-safe-qualification-v1";
   $("calibrationDialog").classList.toggle("route-qualification", qualificationFlow);
   $("calibrationDialogTitle").textContent = qualificationFlow ? "Route Qualification" : "Calibration Assistant";
   $("calibrationDialogSubtitle").textContent = qualificationFlow
-    ? "Measure and qualify the exact oMLX Qwen PLE route without inventing a second engine."
+    ? qualification.subtitle
     : "Find the best installed engine for the exact model and work you selected.";
   $("calibrationPreferenceLabel").textContent = qualificationFlow ? "Result metric" : "Decision goal";
   $("calibrationEnginesTitle").textContent = qualificationFlow ? "Route being qualified" : "Included engines";
   const active = calibrationBenchmarkActive();
   const controlsLocked = state.calibrationLoading || state.calibrationStarting
     || active || state.calibrationApplying;
-  if (routeQualification && plan?.suite?.id) $("calibrationSuiteSelect").value = plan.suite.id;
+  if (routeQualification && plan?.suite?.id) {
+    $("calibrationSuiteSelect").value = calibrationSuiteControlValue(plan.suite.id);
+  }
   $("calibrationSuiteSelect").disabled = controlsLocked || routeQualification;
   $("calibrationPreferenceSelect").disabled = controlsLocked;
   $("calibrationCoolingSelect").disabled = controlsLocked;
@@ -8120,20 +8486,35 @@ function renderCalibrationPlan() {
   const request = plan.request || {};
   const reasoningContract = plan.reasoningContract || {};
   const normalizedReasoning = reasoningContract.normalized === true;
+  const qualificationContractExact = !qualification.llama
+    || llamaQualificationContractExact(plan);
   const kv = request.options?.kv && request.options.kv !== "off" ? String(request.options.kv).toUpperCase() : "Full precision";
-  calibrationStateBadge("calibrationContractState", "Locked", "ready");
+  calibrationStateBadge(
+    "calibrationContractState",
+    qualificationContractExact ? "Locked" : "Contract mismatch",
+    qualificationContractExact ? "ready" : "blocked",
+  );
   const contextAdjustment = plan.contextAdjustment?.reason ? ` ${plan.contextAdjustment.reason}` : "";
-  $("calibrationContract").textContent = (normalizedReasoning
-    ? `${plan.model.name} · ${plan.clientLabel} · ${formatNumber(request.context)} context · ${formatNumber(request.output)} max response. ${reasoningContract.detail} Your launch setting changes only if you apply the result.`
-    : `${plan.model.name} · ${plan.clientLabel} · ${formatNumber(request.context)} context · ${formatNumber(request.output)} max response. The model, quantisation, reasoning, sampling, prompt contract, and KV precision stay fixed.`) + contextAdjustment;
-  $("calibrationPlanFacts").innerHTML = [
+  $("calibrationContract").textContent = qualification.llama
+    ? `${plan.model.name} · exact route · fixed ${formatNumber(LLAMACPP_PLE_QUALIFICATION_CONTEXT)} context · ${formatNumber(request.output)} configured max response. Generated qualification probes are capped at ${formatNumber(LLAMACPP_PLE_QUALIFICATION_SAMPLE_MAX_TOKENS)} tokens, so longer outputs remain configured rather than measured. Reasoning is runtime-controlled and stays on. This route-level receipt can be reused by compatible work surfaces with the same sampling contract. Qualification is valid only below the exact 44 GiB Metal ceiling; model, quantisation, sampling, prompt contract, full-precision KV, and one request lane stay fixed.`
+    : (normalizedReasoning
+      ? `${plan.model.name} · ${plan.clientLabel} · ${formatNumber(request.context)} context · ${formatNumber(request.output)} max response. ${reasoningContract.detail} Your launch setting changes only if you apply the result.`
+      : `${plan.model.name} · ${plan.clientLabel} · ${formatNumber(request.context)} context · ${formatNumber(request.output)} max response. The model, quantisation, reasoning, sampling, prompt contract, and KV precision stay fixed.`) + contextAdjustment;
+  const planFacts = qualification.llama ? [
+    ["Workload", plan.suite.label], ["Route", "Pinned SSD PLE"],
+    ["Context", "Fixed 8K"], ["Reasoning", qualification.reasoningLabel],
+    ["Memory ceiling", "44 GiB exact"], ["KV precision", kv],
+    ["Measured turns", "4 bounded"], ["Cooling", plan.calibrationCoolingLabel || "Automatic"],
+  ] : [
     ["Workload", plan.suite.label], ["Goal", plan.preferenceLabel],
     ...(plan.ssdStreaming ? [["Route type", "SSD-streamed MoE"]] : []),
     ["Reasoning", normalizedReasoning ? `Model default (from ${reasoningContract.requested})` : request.reasoning], ["KV precision", kv],
     [plan.countsAreMaximum ? "Max model reloads" : "Model reloads", String(plan.modelReloadCount)],
     [plan.countsAreMaximum ? "Max measured requests" : "Measured requests", String(plan.measuredRequestCount)],
     [routeQualification ? "Qualified routes" : "Compared engines", String(plan.eligibleEngineCount)], ["Cooling", plan.calibrationCoolingLabel || "Automatic"],
-  ].map(([label,value]) => `<span><small>${esc(label)}</small><b title="${esc(value)}">${esc(value)}</b></span>`).join("");
+  ];
+  $("calibrationPlanFacts").innerHTML = planFacts
+    .map(([label,value]) => `<span><small>${esc(label)}</small><b title="${esc(value)}">${esc(value)}</b></span>`).join("");
   calibrationStateBadge(
     "calibrationEngineState",
     plan.ready
@@ -8158,6 +8539,8 @@ function renderCalibrationPlan() {
     && ["cross-engine-local-benchmark","cross-engine-leading-band","cross-engine-noise-floor","local-route-qualification"].includes(completedDecision?.evidenceTier),
   );
   const resultPending = Boolean(completedDecisionReady && !evidenceReady);
+  const completedEvidenceBinding = completedResult && completedDecision
+    ? completedCalibrationEvidenceBinding(completedResult, completedDecision) : null;
   const shownEvidence = resultPending ? {
     trusted:Boolean(completedDecision.trustedWinner),
     label:CalibrationDecision.summary(completedDecision),
@@ -8171,6 +8554,7 @@ function renderCalibrationPlan() {
     comparedEngines:completedDecision.comparedEngines || (completedResult.qualified ? [] : completedResult.engines) || [],
     qualified:Boolean(completedDecision.qualified || completedResult.qualified),
     qualifiedRoutes:completedDecision.qualifiedRoutes || completedResult.qualifiedRoutes || [],
+    ...(completedEvidenceBinding ? {evidenceBinding:completedEvidenceBinding} : {}),
   } : evidence;
   const resultReady = evidenceReady || resultPending;
   const preparationAvailable = Boolean(
@@ -8181,8 +8565,11 @@ function renderCalibrationPlan() {
   );
   calibrationStateBadge(
     "calibrationEvidenceState",
-    resultReady ? (routeQualification ? "Route qualified" : shownEvidence.trusted ? "Winner ready" : "Result ready") : (plan.ready ? routeQualification ? "Ready to qualify" : "Ready to test" : preparationAvailable ? "Prepare settings" : "Blocked"),
-    resultReady ? "ready" : (plan.ready || preparationAvailable ? "" : "blocked"),
+    !qualificationContractExact ? "Contract mismatch"
+      : resultReady ? (routeQualification ? "Route qualified" : shownEvidence.trusted ? "Winner ready" : "Result ready")
+        : (plan.ready ? routeQualification ? "Ready to qualify" : "Ready to test" : preparationAvailable ? "Prepare settings" : "Blocked"),
+    !qualificationContractExact ? "blocked"
+      : resultReady ? "ready" : (plan.ready || preparationAvailable ? "" : "blocked"),
   );
   const blockers = (plan.blockers || []).join(" ");
   const routePreview = calibrationRoutePreview(plan);
@@ -8190,14 +8577,18 @@ function renderCalibrationPlan() {
   const memoryBlocker = plan.memoryAdmission || {};
   const systemSettingBlocked = routeQualification
     && memoryBlocker.decision === "system-setting";
+  const runtimeConflictBlocked = routeQualification
+    && memoryBlocker.decision === "runtime-conflict";
   const requiredMetalLimitBytes = Number(
-    memoryBlocker.estimate?.requiredMetalWiredLimitBytes || 0,
+    memoryBlocker.estimate?.requiredMetalWiredLimitBytes
+      || memoryBlocker.estimate?.memoryCeilingBytes
+      || 0,
   );
   const requiredMetalLimitGiB = requiredMetalLimitBytes > 0
     ? Math.ceil(requiredMetalLimitBytes / (1024 ** 3)) : null;
   const metalApprovalLabel = requiredMetalLimitGiB
-    ? `${requiredMetalLimitGiB} GiB Metal approval required`
-    : "Temporary Metal approval required";
+    ? `Set exact ${requiredMetalLimitGiB} GiB Metal limit`
+    : "Set the required Metal memory limit";
   const preparationDetail = preparationAvailable
     ? [
         qualificationPreparation.summary,
@@ -8205,18 +8596,26 @@ function renderCalibrationPlan() {
         "This changes only the visible launcher settings; macOS is not changed.",
       ].filter(Boolean).join(" ")
     : "";
-  const evidenceDetail = resultReady
+  const evidenceDetail = !qualificationContractExact
+    ? "The controller did not preserve the pinned llama.cpp fixed-8K, runtime-controlled reasoning, exact-44-GiB contract. Refresh models before qualifying or applying it."
+    : resultReady
     ? [shownEvidence.detail, shownEvidence.outputWarning].filter(Boolean).join(" ")
     : preparationAvailable ? preparationDetail
     : plan.ready
       ? routeQualification
-        ? `One exact oMLX AR + PLE mmap load will run four generated reasoning turns. Authoritative usage, generation TPS, time to first output, memory pressure, and thermal state are recorded; every turn must expose separate reasoning and a final answer.${routePreview ? ` Route: ${routePreview}.` : ""}`
+        ? qualification.llama
+          ? `One exact pinned llama.cpp SSD PLE load will run four generated reasoning turns at fixed 8K. Every turn must expose separate reasoning and a final answer; authoritative TPS and TTFT, peak memory below the exact 44 GiB ceiling, one valid Jinja tool call, and a clean unload are required.${routePreview ? ` Route: ${routePreview}.` : ""}`
+          : `One exact oMLX AR + PLE mmap load will run four generated reasoning turns. Authoritative usage, generation TPS, time to first output, memory pressure, and thermal state are recorded; every turn must expose separate reasoning and a final answer.${routePreview ? ` Route: ${routePreview}.` : ""}`
         : plan.ssdStreaming
         ? `${plan.eligibleEngineCount} SSD runtimes will be tested one at a time using generated prompts. First-turn and warm-prefix TPS, time to first output, memory pressure, and thermal state are recorded. The OS file cache is observed rather than forcibly purged.${routePreview ? ` Routes: ${routePreview}.` : ""}`
         : `${plan.eligibleEngineCount} engines will be tested one at a time using generated prompts.${routePreview ? ` Routes: ${routePreview}.` : ""}`
-      : blockers;
-  $("calibrationEvidence").className = `calibration-evidence${resultReady ? " trusted" : plan.ready || preparationAvailable ? "" : " blocked"}`;
-  $("calibrationEvidence").innerHTML = `<i aria-hidden="true">${resultReady ? "◆" : plan.ready || preparationAvailable ? "◇" : "×"}</i><span><strong>${esc(resultReady ? shownEvidence.label : plan.ready ? routeQualification ? "Ready to qualify this route" : "Ready to test the engines" : preparationAvailable ? "Prepare this route safely" : systemSettingBlocked ? metalApprovalLabel : "This setup cannot be tested yet")}</strong><small>${esc(evidenceDetail)}</small></span>`;
+      : systemSettingBlocked
+        ? `${metalApprovalLabel}. Unlock this Mac, run sudo /usr/sbin/sysctl -w iogpu.wired_limit_mb=45056 in Terminal, then choose Recheck limit. The launcher will only accept an exact readback and will not raise it further.`
+        : runtimeConflictBlocked
+          ? memoryBlocker.detail
+        : blockers;
+  $("calibrationEvidence").className = `calibration-evidence${!qualificationContractExact ? " blocked" : resultReady ? " trusted" : plan.ready || preparationAvailable ? "" : " blocked"}`;
+  $("calibrationEvidence").innerHTML = `<i aria-hidden="true">${!qualificationContractExact ? "×" : resultReady ? "◆" : plan.ready || preparationAvailable ? "◇" : "×"}</i><span><strong>${esc(!qualificationContractExact ? "Exact qualification contract unavailable" : resultReady ? shownEvidence.label : plan.ready ? routeQualification ? "Ready to qualify this route" : "Ready to test the engines" : preparationAvailable ? "Prepare this route safely" : systemSettingBlocked ? metalApprovalLabel : runtimeConflictBlocked ? memoryBlocker.label : "This setup cannot be tested yet")}</strong><small>${esc(evidenceDetail)}</small></span>`;
   $("calibrationPhase").closest(".calibration-progress")?.classList.toggle(
     "hidden", !active && !resultReady && !plan.ready,
   );
@@ -8253,29 +8652,38 @@ function renderCalibrationPlan() {
       : testedModes.length > 1
       ? `Tested ${testedRoutes.join(" + ")}`
       : `Tested AR only · ${engine.accelerationReason || "no verified accelerator in this artifact"}`;
-    const exactRoute = engine.routeSettingsLabel || mode;
+    const exactRoute = engine.routeSettingsLabel
+      || (qualification.llama ? "SSD PLE · exact 8K" : mode);
     const modeLabel = routeQualification ? exactRoute : plan.ssdStreaming ? exactRoute : testedModes.length > 1 ? `Winner: ${exactRoute}` : "AR only";
     const decodeTps = finiteMetric(engine.decodeTokensPerSecond);
     const parityRejectionNote = calibrationParityRejectionNote(engine);
     const badge = CalibrationDecision.resultBadge(routeQualification ? {...measuredDecision, qualified:true} : measuredDecision, engine, index);
-    return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${engine.settingsLabel ? `<small class="calibration-result-settings">Setup · ${esc(engine.settingsLabel)}</small>` : ""}${parityRejectionNote ? `<small class="calibration-result-settings">${esc(parityRejectionNote)}</small>` : ""}${decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`}<em>${esc(badge)}</em></article>`;
+    const qualificationFacts = routeQualification
+      ? routeQualificationFactsMarkup(engine, completedResult || {}, qualification.backend)
+      : decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`;
+    return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${engine.settingsLabel ? `<small class="calibration-result-settings">Setup · ${esc(engine.settingsLabel)}</small>` : ""}${parityRejectionNote ? `<small class="calibration-result-settings">${esc(parityRejectionNote)}</small>` : ""}${qualificationFacts}<em>${esc(badge)}</em></article>`;
   }).join("")}</div>` : "";
   if (state.calibrationProfileContractId !== plan.contractId) {
     state.calibrationProfileContractId = plan.contractId;
     $("calibrationProfileName").value = plan.suggestedProfileName || "Quick Launch";
   }
   const canMeasure = ["measure", "apply-existing"].includes(plan.action)
-    && plan.ready && !resultPending && !calibrationOperationBlocked();
-  const canRefreshResult = resultPending && !calibrationOperationBlocked();
+    && plan.ready && qualificationContractExact
+    && !resultPending && !calibrationOperationBlocked();
+  const canRefreshResult = resultPending && qualificationContractExact
+    && !calibrationOperationBlocked();
   const canPrepare = preparationAvailable && !calibrationOperationBlocked();
+  const canRecheckSystemSetting = systemSettingBlocked && !calibrationOperationBlocked();
+  const canRecheckRuntimeConflict = runtimeConflictBlocked && !calibrationOperationBlocked();
   $("calibrationConsent").disabled = true;
   $("calibrationConsent").checked = false;
   $("calibrationConsentPanel").classList.add("hidden");
   $("calibrationConsentCopy").textContent = plan.ready
     ? `${routeQualification ? "1 exact route" : `${plan.eligibleEngineCount} engines`} · ${plan.countsAreMaximum ? "up to " : ""}${plan.modelReloadCount} isolated reloads · ${plan.countsAreMaximum ? "up to " : ""}${plan.measuredRequestCount} generated local requests · ${plan.calibrationCoolingLabel || "Automatic"} cooling · up to ${Math.round(plan.resourceCooldownMaxSecondsPerRoute)} seconds of cancellable settling before each route.`
     : blockers || "Resolve the engine blockers before measurement.";
-  $("calibrationStartButton").disabled = !(canMeasure || canRefreshResult || canPrepare);
-  $("calibrationStartButton").dataset.action = canPrepare ? "prepare" : "measure";
+  $("calibrationStartButton").disabled = !(canMeasure || canRefreshResult || canPrepare || canRecheckSystemSetting || canRecheckRuntimeConflict);
+  $("calibrationStartButton").dataset.action = canPrepare
+    ? "prepare" : canRecheckSystemSetting ? "recheck-limit" : canRecheckRuntimeConflict ? "recheck-conflict" : "measure";
   let measurementAction = evidenceReady
     ? "Retest engines" : resultPending ? "Use saved result" : "Test engines";
   let measurementDetail = evidenceReady
@@ -8289,26 +8697,52 @@ function renderCalibrationPlan() {
     measurementDetail = evidenceReady
       ? "Replace this saved qualification"
       : resultPending ? "The qualification is complete — this will not run it again"
-      : plan.ready ? "1 route · 4 bounded reasoning turns"
-        : systemSettingBlocked ? metalApprovalLabel : "Resolve the blockers above";
+      : !qualificationContractExact ? "Refresh the exact controller contract"
+      : plan.ready ? qualification.llama
+        ? "1 route · fixed 8K · exact 44 GiB ceiling"
+        : "1 route · 4 bounded reasoning turns"
+        : systemSettingBlocked ? metalApprovalLabel
+          : runtimeConflictBlocked ? memoryBlocker.label : "Resolve the blockers above";
   }
   if (canPrepare) {
     measurementAction = "Prepare safe test";
     measurementDetail = "Visible settings only · does not change macOS";
+  } else if (canRecheckSystemSetting) {
+    measurementAction = "Recheck limit";
+    measurementDetail = requiredMetalLimitGiB
+      ? `Requires the exact ${requiredMetalLimitGiB} GiB Metal limit · does not change macOS`
+      : "Recheck the required Metal limit · does not change macOS";
+  } else if (canRecheckRuntimeConflict) {
+    measurementAction = "Recheck Whallm";
+    measurementDetail = "Unload or close Whallm, then recheck · the launcher will not stop it";
   }
   $("calibrationStartButton").querySelector("strong").textContent = measurementAction;
   $("calibrationStartLabel").textContent = measurementDetail;
-  const canApply = evidenceReady && !calibrationOperationBlocked();
+  const routeEvidenceQualified = !routeQualification || shownEvidence.qualified === true;
+  const canApply = evidenceReady && Boolean(evidence.evidenceBinding)
+    && routeEvidenceQualified && qualificationContractExact
+    && !calibrationOperationBlocked();
   $("calibrationApplyButton").disabled = !canApply;
-  $("calibrationApplyButton").className = evidenceReady ? "primary" : "secondary";
+  $("calibrationApplyButton").className = canApply ? "primary" : "secondary";
   $("calibrationStartButton").className = evidenceReady ? "secondary" : "primary";
-  $("calibrationApplyButton").textContent = CalibrationDecision.applyLabel(evidence);
-  $("calibrationApplyButton").title = normalizedReasoning
-    ? routeQualification
-      ? `Apply the qualified oMLX route at ${reasoningContract.measured} reasoning.`
-      : "Apply the measured engine and its model-default reasoning contract."
-    : "Apply the measured engine and settings to the launcher.";
-  $("calibrationProfilePanel").classList.toggle("hidden", !evidenceReady || active);
+  $("calibrationApplyButton").textContent = routeQualification
+    ? "Apply qualified route" : CalibrationDecision.applyLabel(evidence);
+  $("calibrationApplyButton").title = routeQualification
+    ? canApply
+      ? `Apply the qualified ${qualification.routeLabel} without running the test again.`
+      : !qualificationContractExact
+        ? "The exact qualification contract no longer matches. Refresh before applying."
+        : !routeEvidenceQualified
+          ? "This route did not pass qualification, so it cannot be applied."
+          : !evidenceReady
+            ? "Complete the route qualification before applying it."
+            : !evidence.evidenceBinding
+              ? "The completed qualification has no immutable apply reference yet. Refresh it before applying."
+              : "Wait for the current launcher operation to finish before applying."
+    : normalizedReasoning
+      ? "Apply the measured engine and its model-default reasoning contract."
+      : "Apply the measured engine and settings to the launcher.";
+  $("calibrationProfilePanel").classList.toggle("hidden", !canApply || active);
   $("calibrationSaveButton").disabled = !canApply || !$("calibrationProfileName").value.trim();
 }
 
@@ -8326,7 +8760,7 @@ function renderCalibrationBenchmark(status = state.benchmarkStatus || {}) {
   const showLiveTps = Boolean(active && owns);
   $("calibrationLiveTps").classList.toggle("hidden", !showLiveTps);
   $("calibrationLiveTps").textContent = showLiveTps
-    ? liveTps === null ? "Generation TPS: measuring…" : `Generation TPS: ${liveTps.toFixed(1)}`
+    ? liveTps === null ? "Measuring…" : `Last completed turn · ${liveTps.toFixed(1)} tok/s`
     : "";
   $("calibrationLiveTps").title = showLiveTps
     ? [status.liveMetric?.backendLabel, status.liveMetric?.modeLabel, status.liveMetric?.stageLabel]
@@ -8359,7 +8793,14 @@ function renderCalibrationBenchmark(status = state.benchmarkStatus || {}) {
     $("calibrationProgressBar").parentElement.setAttribute("aria-valuenow", "100");
     const result = status.result || {};
     const decision = result.profiles?.[$("calibrationPreferenceSelect").value] || result.decision || {};
-    const saved = result.persistence?.saved === true ? " Saved locally; no second test is needed." : " You can use the result without testing again.";
+    const immutableBinding = completedCalibrationEvidenceBinding(result, decision);
+    const saved = result.persistence?.saved === true && immutableBinding
+      ? " Saved locally; no second test is needed."
+      : result.persistence?.saved === true
+        ? " Saved locally; refresh the result before applying it."
+        : immutableBinding
+          ? " You can use the result without testing again."
+          : " Refresh the result before applying it.";
     $("calibrationStatus").textContent = result.kind === "route-qualification"
       ? `${decision.recommendation || "The exact route is qualified."}${saved}`
       : decision.trustedWinner
@@ -8458,7 +8899,7 @@ async function openCalibrationAssistant(options = {}) {
   } : null;
   state.calibrationDetailsOpen = false;
   closeOptimizerMenu();
-  $("calibrationSuiteSelect").value = recommendedSuite;
+  $("calibrationSuiteSelect").value = calibrationSuiteControlValue(recommendedSuite);
   $("calibrationPreferenceSelect").value = preference;
   state.calibrationGeneration += 1;
   state.calibrationLoading = true;
@@ -8596,7 +9037,7 @@ async function startCalibration() {
     renderBenchmarkStatus({
       phase:"queued", progress:0,
       message:plan.routeQualification
-        ? "Route qualification accepted. Preparing the exact oMLX AR + PLE mmap route…"
+        ? calibrationQualificationProfile(plan).startMessage
         : `Calibration accepted. Preparing ${backendName(data.benchmark.executionOrder?.[0])} first in this rotated run…`,
       job:data.benchmark, modes:{}, engines,
     });
@@ -8615,9 +9056,23 @@ async function stopCalibration() {
   await stopBenchmark();
 }
 
+function calibrationRouteEvidenceApplyReady(plan = state.calibrationPlan || {}) {
+  if (plan.routeQualification !== true) return true;
+  const qualification = calibrationQualificationProfile(plan);
+  return (!qualification.llama || llamaQualificationContractExact(plan))
+    && plan.evidence?.qualified === true
+    && Boolean(plan.evidence?.evidenceBinding);
+}
+
 async function applyCalibrationResult(saveProfile = false) {
   const plan = state.calibrationPlan;
   if (!plan || plan.action !== "apply-existing" || calibrationOperationBlocked()) return;
+  const evidenceBinding = plan.evidence?.evidenceBinding;
+  const routeQualification = plan.routeQualification === true;
+  if (routeQualification && !calibrationRouteEvidenceApplyReady(plan)) {
+    $("calibrationStatus").textContent = "The exact qualified route and its immutable apply reference are no longer available. Refresh Calibration before applying.";
+    return;
+  }
   const reasoningContract = plan.reasoningContract || {};
   const previousReasoning = $("reasoningSelect").value;
   const previousCooling = $("fanSelect").value;
@@ -8633,7 +9088,9 @@ async function applyCalibrationResult(saveProfile = false) {
   }
   state.calibrationApplying = true;
   renderCalibration();
-  $("calibrationStatus").textContent = "Rechecking and applying the measured engine decision to the visible controls…";
+  $("calibrationStatus").textContent = plan.routeQualification
+    ? "Rechecking the immutable qualification and applying this exact route…"
+    : "Rechecking and applying the measured engine decision to the visible controls…";
   try {
     const measuredContext = Number(plan.request?.context);
     if (Number.isInteger(measuredContext) && measuredContext > 0 && String(measuredContext) !== previousContext) {
@@ -8655,7 +9112,6 @@ async function applyCalibrationResult(saveProfile = false) {
     $("fanSelect").value = measuredCooling;
     coolingChanged = measuredCooling !== previousCooling;
     const applyScope = plan.routeQualification ? "current" : "engine";
-    const evidenceBinding = plan.evidence?.evidenceBinding;
     if (!evidenceBinding) {
       throw new Error("The saved result has no exact apply reference. Refresh Calibration before applying it.");
     }
@@ -8676,7 +9132,9 @@ async function applyCalibrationResult(saveProfile = false) {
       showNotice(`Applied ${state.optimalLabel || "the calibrated route"}${reasoningChanged ? ` at ${plan.routeQualification ? reasoningContract.measured : "model-default"} reasoning` : ""}${contextChanged ? ` at ${formatNumber(measuredContext)} context` : ""} and saved “${name}” as an auto-measured Quick Launch profile.`);
     } else {
       const contextNote = contextChanged ? ` Context is now ${formatNumber(measuredContext)}, the common fixed SSD window shown in Calibration.` : "";
-      showNotice((reasoningChanged
+      showNotice((plan.routeQualification && calibrationQualificationProfile(plan).llama
+        ? `Applied the qualified llama.cpp SSD PLE route at fixed 8K with runtime-controlled reasoning and the exact 44 GiB qualification ceiling.`
+        : reasoningChanged
         ? plan.routeQualification
           ? `Applied ${state.optimalLabel || "the qualified route"}. Reasoning changed from ${previousReasoning} to ${reasoningContract.measured} so the route matches its completed qualification; cooling is ${plan.calibrationCoolingLabel || "Automatic"}.`
           : `Applied ${state.optimalLabel || "the calibrated route"}. Reasoning changed from ${previousReasoning} to model default so the measured engine result remains like-for-like; cooling is ${plan.calibrationCoolingLabel || "Automatic"}.`
@@ -9105,6 +9563,7 @@ function renderSessionDashboard() {
     ? "Reuse the loaded route"
     : admission.estimate?.remoteEngine ? "Connected server route"
     : admission.estimate?.sharedEngine ? "Shared local engine route"
+    : admission.estimate?.ssdPle ? "Measured qualified-route capacity"
     : "Full-context capacity estimate";
   $("sessionAdmissionState").textContent = warmReady ? "Warm route available" : admission.label || "Unavailable";
   $("sessionAdmissionState").className = decisionClass;
@@ -9143,6 +9602,23 @@ function renderSessionDashboard() {
       ["Launcher stop", "Bridge only"],
     ].map(([label,value]) => `<span><small>${esc(label)}</small><b title="${esc(value)}">${esc(value)}</b></span>`).join("");
     $("sessionEstimateBar").innerHTML = "";
+    $("sessionEstimateBasis").textContent = estimate.basis;
+  } else if (estimate?.ssdPle) {
+    const measuredPeak = Number(estimate.measuredProcessGroupPeakBytes || 0);
+    const required = Number(estimate.requiredHeadroomBytes || 0);
+    $("sessionEstimateFacts").innerHTML = [
+      ["Route proof", estimate.qualifiedRoute ? "Fresh local qualification" : "Qualification needed"],
+      ["Measured process peak", measuredPeak > 0 ? formatBytes(measuredPeak) : "Not measured"],
+      ["Available now", resource.memoryAvailable ? formatBytes(resource.headroomBytes) : "Unknown"],
+      ["Required before load", required > 0 ? formatBytes(required) : "Unavailable"],
+      ["Strict Metal ceiling", formatBytes(estimate.memoryCeilingBytes)],
+      ["Protected for macOS", formatBytes(estimate.osReserveBytes)],
+    ].map(([label,value]) => `<span><small>${esc(label)}</small><b title="${esc(value)}">${esc(value)}</b></span>`).join("");
+    const denominator = Math.max(Number(resource.totalMemoryBytes || 0), measuredPeak + Number(estimate.osReserveBytes || 0), 1);
+    $("sessionEstimateBar").innerHTML = [
+      ["weights", measuredPeak, "Measured route peak"],
+      ["reserve", Number(estimate.osReserveBytes || 0), "Protected macOS reserve"],
+    ].filter(item => item[1] > 0).map(([kind,value,label]) => `<span class="${kind}" style="width:${Math.max(.4, value / denominator * 100).toFixed(2)}%" title="${esc(`${label}: ${formatBytes(value)}`)}"></span>`).join("");
     $("sessionEstimateBasis").textContent = estimate.basis;
   } else if (estimate) {
     const companion = estimate.companionLabels?.length ? `${formatBytes(estimate.companionBytes)} · ${estimate.companionLabels.join(" + ")}` : formatBytes(estimate.companionBytes);
@@ -12154,6 +12630,8 @@ $("calibrationProfileName").addEventListener("input", renderCalibrationPlan);
 $("calibrationStartButton").addEventListener("click", () => {
   if ($("calibrationStartButton").dataset.action === "prepare") {
     void prepareQwenRouteQualification();
+  } else if (["recheck-limit", "recheck-conflict"].includes($("calibrationStartButton").dataset.action)) {
+    void loadCalibrationPlan(true);
   } else void startCalibration();
 });
 $("calibrationStopButton").addEventListener("click", stopCalibration);

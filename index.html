@@ -81,6 +81,7 @@
                 <button type="button" class="choice selected" data-backend="mtplx" aria-pressed="true"><span class="choice-icon mtplx" aria-hidden="true">M</span><span><strong>MTPLX</strong><small>MTP specialist</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                 <button type="button" class="choice" data-backend="omlx" aria-pressed="false"><span class="choice-icon omlx" aria-hidden="true">O</span><span><strong>oMLX</strong><small>Flexible MLX</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                 <button type="button" class="choice" data-backend="lmstudio" aria-pressed="false"><span class="choice-icon lms" aria-hidden="true">LM</span><span><strong>LM Studio</strong><small>Desktop runtime</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                <button type="button" class="choice" data-backend="uzu" aria-pressed="false"><span class="choice-icon uzu" aria-hidden="true">U</span><span><strong>Uzu · Mirai</strong><small>DFlash + Weaver · Chat first</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                 <button type="button" class="choice" data-backend="freetoken" data-ui-feature="freetoken" aria-pressed="false" hidden disabled><span class="choice-icon freetoken" aria-hidden="true">FT</span><span><strong>FreeToken</strong><small>Native or remote MoE</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
               </div>
               <details id="ssdRuntimeDisclosure" class="ssd-runtime-disclosure">
@@ -223,6 +224,10 @@
                     <small id="mtpMinContinueProbabilityHelp">Stops extending a draft below this probability; 0 disables early cutoff.</small>
                   </label>
                 </div>
+              </div>
+              <div id="uzuControls" class="backend-controls hidden">
+                <div class="fixed-runtime-intro"><span aria-hidden="true">U</span><div><strong id="uzuAccelerationLabel">DFlash + Weaver</strong><small>Built into the Mirai checkpoint and managed by Uzu.</small></div><em>Fixed</em></div>
+                <div id="uzuRouteSummary" class="uzu-route-summary" role="note" aria-label="Uzu route limits"><span><strong>BF16 KV</strong><small>Runtime fixed · no Q8/Q4</small></span><span><strong>Chat only</strong><small>Initial qualification</small></span></div>
               </div>
               <div id="freetokenControls" class="backend-controls freetoken-controls hidden" data-ui-feature="freetoken" hidden>
                 <div id="freeTokenRemoteControls">
@@ -580,7 +585,7 @@
     <div class="model-library-safety"><i aria-hidden="true">✓</i><p><strong>Opening and refreshing this library are read-only.</strong><span>It scans known model folders and installed commands. It does not load a model, start an engine, use the network, download weights, or remove files.</span></p></div>
     <div class="model-library-filters" role="search" aria-label="Filter detected models">
       <label class="model-library-search"><span aria-hidden="true">⌕</span><span class="sr-only">Search models</span><input id="modelLibrarySearch" type="search" maxlength="160" autocomplete="off" placeholder="Search name, format, architecture, folder…"></label>
-      <label><span>Engine</span><select id="modelLibraryEngineFilter"><option value="all">All engines</option><option value="omlx">oMLX</option><option value="lmstudio">LM Studio</option><option value="mtplx">MTPLX</option><option value="swiftlm">SwiftLM · SSD</option><option value="mference">Mference · SSD</option><option value="whallm">Whallm · SSD</option><option value="freetoken" data-ui-feature="freetoken" hidden disabled>FreeToken</option></select></label>
+      <label><span>Engine</span><select id="modelLibraryEngineFilter"><option value="all">All engines</option><option value="omlx">oMLX</option><option value="lmstudio">LM Studio</option><option value="mtplx">MTPLX</option><option value="uzu">Uzu · Mirai</option><option value="swiftlm">SwiftLM · SSD</option><option value="mference">Mference · SSD</option><option value="whallm">Whallm · SSD</option><option value="freetoken" data-ui-feature="freetoken" hidden disabled>FreeToken</option></select></label>
       <label><span>Work surface</span><select id="modelLibrarySurfaceFilter"><option value="all">All surfaces</option><option value="pi">Pi</option><option value="opencode">OpenCode</option><option value="codex">Codex</option><option value="chat">Chat</option></select></label>
       <label><span>Doctor state</span><select id="modelLibraryStateFilter"><option value="all">All states</option><option value="ready">Ready</option><option value="attention">Review</option><option value="blocked">Blocked</option></select></label>
     </div>

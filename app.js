@@ -344,7 +344,7 @@ function selectedModel() { return state.models.find(model => model.id === $("mod
 
 function routeRuntimeInstalled(backend) {
   if (!uiEngineVisible(backend)) return false;
-  const key = backend === "lmstudio" ? "lms" : backend;
+  const key = backendBinaryKey(backend);
   return Boolean(state.binaries?.[key]?.installed);
 }
 
@@ -357,7 +357,7 @@ function orderedRouteIds(collection, fallback) {
 }
 
 function visibleRouteCatalog() {
-  const backends = orderedRouteIds("engines", ["omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"])
+  const backends = orderedRouteIds("engines", ["omlx", "lmstudio", "mtplx", "uzu", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"])
     .filter(uiEngineVisible);
   const clients = orderedRouteIds("workSurfaces", ["pi", "opencode", "codex", "chat"]);
   const routes = [];
@@ -486,7 +486,7 @@ function runtimeKvValue(backend = state.backend) {
 }
 
 function setRuntimeKvValue(backend, value) {
-  if (["lmstudio", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"].includes(backend)) return value === "off";
+  if (["lmstudio", "uzu", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"].includes(backend)) return value === "off";
   const control = backend === "omlx" ? $("omlxKv") : $("mtplxKv");
   const option = [...control.options].find(item => item.value === String(value));
   if (!option) return false;
@@ -519,7 +519,7 @@ function gatherOptions() {
       queueLimit:Number($("mferenceQueueLimit").value),
     };
   }
-  if (["whallm", "llamacpp"].includes(state.backend)) {
+  if (["uzu", "whallm", "llamacpp"].includes(state.backend)) {
     return {acceleration:"off", depth:1, kv:"off"};
   }
   return {
@@ -934,6 +934,35 @@ const LLAMACPP_PLE_QUALIFICATION_MINIMUM_TPS = 15;
 const LLAMACPP_PLE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS = 128;
 const LLAMACPP_PLE_QUALIFICATION_REASONING_BOUNDARY_ID = "atomicchat-budget-zero-boundary-v1";
 const LLAMACPP_PLE_QUALIFICATION_REASONING_MESSAGE_SHA256 = "04dbe3b430e5be6b5f2f130343e8a0b55872538b1ca53c775e7d8afd9b4acb5a";
+const UZU_QUALIFICATION_CONTEXTS = Object.freeze([16_384, 32_768]);
+const UZU_QUALIFICATION_SUITES = Object.freeze({
+  16_384:"route-qualification-uzu-16k",
+  32_768:"route-qualification-uzu-32k",
+});
+const UZU_QUALIFICATION_MEMORY_LIMIT_BYTES = 36 * 1024 ** 3;
+const UZU_QUALIFICATION_OS_RESERVE_MINIMUM_BYTES = 4 * 1024 ** 3;
+const UZU_QUALIFICATION_CONTRACT_VERSION = 1;
+const UZU_QUALIFICATION_SCENARIOS = Object.freeze([
+  "cold", "warmPrefix", "toolIngest", "steadyTurn",
+]);
+const UZU_QUALIFICATION_SAMPLE_MAX_TOKENS = 512;
+const UZU_QUALIFICATION_ANSWER_RESERVE_TOKENS = 128;
+const UZU_QUALIFICATION_MINIMUM_TPS = 15;
+const UZU_QUALIFICATION_MINIMUM_COMPLETION_TOKENS = 128;
+
+function uzuQualificationSuite(context) {
+  return UZU_QUALIFICATION_SUITES[Number(context)] || "";
+}
+
+function uzuQualificationContractId(context) {
+  const exact = Number(context);
+  return UZU_QUALIFICATION_CONTEXTS.includes(exact)
+    ? `qwen36-uzu-dflash-weaver-${exact / 1024}k-v1` : "";
+}
+
+function isUzuQualificationSuite(suite) {
+  return Object.values(UZU_QUALIFICATION_SUITES).includes(String(suite || ""));
+}
 
 function controllerRouteQualificationBackend(plan = {}) {
   if (plan?.routeQualification !== true) return "";
@@ -955,6 +984,11 @@ function selectedRouteQualificationBackend() {
   const model = selectedModel();
   if (state.backend === "omlx" && model?.qwen4Ple?.supported === true) return "omlx";
   if (state.backend === "llamacpp" && llamaCppPleQualified(model)) return "llamacpp";
+  const uzu = model?.backends?.uzu || {};
+  if (
+    state.backend === "uzu" && model?.ready === true && model?.uzuNative === true
+    && uzu.runnable === true && uzu.runtimeManagedAcceleration === "DFlash + Weaver"
+  ) return "uzu";
   return "";
 }
 
@@ -1045,6 +1079,36 @@ function limitError() {
   if (context - output < 1024) return "Leave at least 1,024 context tokens for instructions and history.";
   if (state.client === "codex" && output < 1024) return "Codex local sessions need at least 1,024 response tokens.";
   return "";
+}
+
+function compactNativeContext(value) {
+  const number = Number(value || 0);
+  return number >= 100_000 ? `${Math.round(number / 1000)}K` : formatNumber(number);
+}
+
+function exactContextTier(value) {
+  const number = Number(value || 0);
+  return Number.isInteger(number) && number > 0 && number % 1024 === 0
+    ? `${number / 1024}K` : formatNumber(number);
+}
+
+function isUzuModel(model = {}, capability = {}) {
+  return model?.uzuNative === true || model?.modelType === "qwen3.6-uzu"
+    || capability?.runtimeManagedAcceleration === "DFlash + Weaver"
+    || (model?.engines || []).some(engine => engine?.id === "uzu" && engine?.artifactCompatible === true);
+}
+
+function modelContextLabel(model, capability = {}) {
+  const native = Number(model?.nativeContext || 0);
+  if (isUzuModel(model, capability) && Number.isInteger(native) && native > 0) {
+    return `${compactNativeContext(native)} native · qualify ${UZU_QUALIFICATION_CONTEXTS.map(exactContextTier).join(" or ")}`;
+  }
+  const qualified = Number(capability?.contextMaximum || 0);
+  if (Number.isInteger(native) && native > 0
+    && Number.isInteger(qualified) && qualified > 0 && qualified < native) {
+    return `${formatNumber(native)} native · ${formatNumber(qualified)} qualified cap`;
+  }
+  return `${formatNumber(native)} context`;
 }
 
 const rangeOutputIds = {
@@ -1140,12 +1204,18 @@ function renderAneReadiness(cap = {}) {
 
 function backendName(backend) {
   return adapterDescriptor("engines", backend)?.label
-    || ({omlx:"oMLX", lmstudio:"LM Studio", mtplx:"MTPLX", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm", llamacpp:"llama.cpp · SSD PLE"})[backend]
+    || ({omlx:"oMLX", lmstudio:"LM Studio", mtplx:"MTPLX", uzu:"Uzu · Mirai", mirai:"Uzu · Mirai", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm", llamacpp:"llama.cpp · SSD PLE"})[backend]
     || backend;
 }
 
 function backendMark(backend) {
-  return ({omlx:"O", lmstudio:"LM", mtplx:"M", freetoken:"FT", swiftlm:"S", mference:"MF", whallm:"W", llamacpp:"LC", lms:"LM"})[backend] || "?";
+  return ({omlx:"O", lmstudio:"LM", mtplx:"M", uzu:"U", mirai:"U", freetoken:"FT", swiftlm:"S", mference:"MF", whallm:"W", llamacpp:"LC", lms:"LM"})[backend] || "?";
+}
+
+function backendBinaryKey(backend) {
+  return adapterDescriptor("engines", backend)?.binaryKey
+    || ({omlx:"omlx", lmstudio:"lms", mtplx:"mtplx", uzu:"mirai", freetoken:"freetoken", swiftlm:"swiftlm", mference:"mference", whallm:"whallm", llamacpp:"llamacpp"})[backend]
+    || backend;
 }
 
 function routeCapabilityPresentation(capability = {}, {backend = "", modelName = "", modelReady = true} = {}) {
@@ -1205,6 +1275,12 @@ function benchmarkCandidates(cap = {}, backend = state.backend) {
   if (backend === "llamacpp") return [{
     id:"ar", label:"SSD PLE", available:llamaCppPleCapabilityQualified(cap),
   }];
+  if (backend === "uzu") return [{
+    id:"ar",
+    label:typeof cap.runtimeManagedAcceleration === "string" && cap.runtimeManagedAcceleration.trim()
+      ? cap.runtimeManagedAcceleration.trim() : "DFlash + Weaver",
+    available:Boolean(cap.runnable),
+  }];
   if (["swiftlm", "mference", "whallm"].includes(backend)) return [{
     id:"ar", label:"Exact SSD stream", available:Boolean(cap.runnable),
   }];
@@ -1221,7 +1297,7 @@ function engineShootoutRoutes(model = selectedModel()) {
   const binaryKeys = Object.fromEntries(
     visibleEngineAdapters().map(adapter => [adapter.id, adapter.binaryKey]),
   );
-  const kvChoices = {omlx:["off","q8","q6","q4"], lmstudio:["off"], mtplx:["off","q8","q4"], freetoken:["off"], swiftlm:["off"], mference:["off"], whallm:["off"], llamacpp:["off"]};
+  const kvChoices = {omlx:["off","q8","q6","q4"], lmstudio:["off"], mtplx:["off","q8","q4"], uzu:["off"], freetoken:["off"], swiftlm:["off"], mference:["off"], whallm:["off"], llamacpp:["off"]};
   const ssdLane = model.ssdStreaming?.recommended === true;
   const ssdBackends = model.ssdStreaming?.calibration?.engines || ["swiftlm", "mference"];
   const backends = visibleEngineAdapters().map(adapter => adapter.id)
@@ -1233,7 +1309,7 @@ function engineShootoutRoutes(model = selectedModel()) {
     const routeReasoning = cap[state.client === "codex" ? "codexReasoning" : "agentReasoning"] || ["auto"];
     const benchmarkReasoning = cap.agentReasoning || ["auto"];
     let reason = "";
-    const binaryKey = binaryKeys[backend] || ({omlx:"omlx", lmstudio:"lms", mtplx:"mtplx", freetoken:"freetoken", swiftlm:"swiftlm", mference:"mference", whallm:"whallm", llamacpp:"llamacpp"})[backend];
+    const binaryKey = binaryKeys[backend] || backendBinaryKey(backend);
     if (!state.binaries?.[binaryKey]?.installed) reason = "Runtime not installed";
     else if (!model.ready || !cap.runnable) reason = cap.reason || "Model is not runnable";
     else if (!support?.supported) reason = support?.reason || "Work surface unsupported";
@@ -1255,7 +1331,7 @@ function engineShootoutRoutes(model = selectedModel()) {
 }
 
 function benchmarkWinnerLabel(winner) {
-  return ({ar:"AR", mtp:"MTP", dflash2:"DFlash 2"})[winner] || winner || "Unknown";
+  return ({ar:"AR", mtp:"MTP", dflash2:"DFlash 2", "dflash-weaver":"DFlash + Weaver"})[winner] || winner || "Unknown";
 }
 
 function renderBenchmarkCard() {
@@ -1291,6 +1367,9 @@ function renderBenchmarkCard() {
   } else if (candidates.length > 1) {
     badge.textContent = "Ready";
     $("benchmarkCardSummary").textContent = `${candidates.map(mode => mode.label).join(" vs ")} can be measured on this exact runtime/model route.`;
+  } else if (state.backend === "uzu") {
+    badge.textContent = "Fixed route";
+    $("benchmarkCardSummary").textContent = `${candidates[0]?.label || "DFlash + Weaver"} is bundled with this checkpoint and measured as one complete Uzu route.`;
   } else {
     badge.textContent = "AR only";
     $("benchmarkCardSummary").textContent = "No verified acceleration competitor is available for this exact route yet.";
@@ -1393,6 +1472,9 @@ function renderBenchmarkSetup() {
 
 function updateAccelerationState() {
   const cap = selectedModel()?.backends?.[state.backend] || {};
+  const managedLabel = typeof cap.runtimeManagedAcceleration === "string"
+    ? cap.runtimeManagedAcceleration.trim() : "";
+  $("uzuAccelerationLabel").textContent = managedLabel || "DFlash + Weaver";
   const mode = $("accelerationSelect").value;
   const relevant = (mode === "mtp" && cap.mtp) || (mode === "dflash" && cap.dflash);
   $("depthInput").disabled = !relevant;
@@ -1582,7 +1664,7 @@ function refreshLaunchability() {
       return;
     }
     button.hidden = false;
-    const key = button.dataset.backend === "lmstudio" ? "lms" : button.dataset.backend;
+    const key = backendBinaryKey(button.dataset.backend);
     const installed = Boolean(state.binaries?.[key]?.installed);
     const connectable = button.dataset.backend === "freetoken";
     const verifyingPle = button.dataset.backend === "llamacpp" && Boolean(llamaCppPleCheckingModel());
@@ -1619,7 +1701,7 @@ function refreshLaunchability() {
   });
   const model = selected;
   const client = clientAvailability();
-  const runtimeKey = state.backend === "lmstudio" ? "lms" : state.backend;
+  const runtimeKey = backendBinaryKey(state.backend);
   const runtimeReady = Boolean(state.binaries?.[runtimeKey]?.installed);
   const limits = limitError();
   const chatError = chatSettingsError();
@@ -1658,14 +1740,17 @@ function refreshLaunchability() {
   const unsupported = supportEntries
     .filter(([name, support]) => !support.supported || !clientInstalled(name))
     .map(([name, support]) => `${clientName(name)} unavailable: ${clientInstalled(name) ? support.reason : "not installed"}`);
-  const selectedReason = resolvedClientSupport(state.backend, state.client, selected).reason || "Compatible local route";
+  const selectedSupportReason = resolvedClientSupport(state.backend, state.client, selected).reason || "Compatible local route";
+  const selectedReason = state.backend === "uzu"
+    ? `Chat only for initial qualification · ${selectedSupportReason}`
+    : selectedSupportReason;
   const compatibilityDetail = [selectedReason, ...unsupported].join(" · ");
   $("compatibilityLine").textContent = activeDetail() === "detailed" ? compatibilityDetail : selectedReason;
   $("compatibilityLine").title = compatibilityDetail;
   let blocker = "";
   if (!runtimeReady) blocker = state.backend === "freetoken"
     ? "Install the native FreeToken port or connect a server."
-    : `${state.backend === "lmstudio" ? "LM Studio" : state.backend} is not installed.`;
+    : `${backendName(state.backend)} is not installed.`;
   else if (!model) blocker = state.backend === "freetoken" && state.freeToken?.native?.installed
     ? "Native FreeToken is installed, but no compatible local Qwen3-MoE checkpoint passed preflight."
     : "No ready model is available for this runtime.";
@@ -1709,14 +1794,16 @@ function updateBackend(preserveOptimization = false) {
   $("mtplxControls").classList.toggle("hidden", state.backend !== "mtplx");
   $("omlxControls").classList.toggle("hidden", state.backend !== "omlx");
   $("lmstudioControls").classList.toggle("hidden", state.backend !== "lmstudio");
+  $("uzuControls").classList.toggle("hidden", state.backend !== "uzu");
   $("freetokenControls").classList.toggle("hidden", state.backend !== "freetoken");
   $("swiftlmControls").classList.toggle("hidden", state.backend !== "swiftlm");
   $("mferenceControls").classList.toggle("hidden", state.backend !== "mference");
   $("whallmControls").classList.toggle("hidden", state.backend !== "whallm");
   $("llamacppControls").classList.toggle("hidden", state.backend !== "llamacpp");
-  $("sharedRuntimeControls").classList.toggle("hidden", ["freetoken", "swiftlm", "mference", "whallm", "llamacpp"].includes(state.backend));
+  $("sharedRuntimeControls").classList.toggle("hidden", ["uzu", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"].includes(state.backend));
   $("advancedSummary").textContent = ({
     mtplx:"MTPLX controls", omlx:"oMLX controls", lmstudio:"LM Studio controls",
+    uzu:"Uzu · Mirai · fixed acceleration",
     freetoken:"FreeToken route controls", swiftlm:"SwiftLM SSD controls",
     mference:"Mference SSD controls", whallm:"Whallm SSD route",
     llamacpp:"llama.cpp · SSD PLE route",
@@ -1845,7 +1932,7 @@ function modelChanged() {
   const ssdChip = model.ssdStreaming?.recommended === true
     ? `<span>SSD streaming recommended</span>`
     : model.ssdStreaming?.candidate === true ? `<span>SSD streaming optional</span>` : "";
-  card.innerHTML = `<div class="model-title"><strong>${esc(model.name)}</strong><span class="badge ${statusClass}"${statusTitle}>${esc(statusLabel)}</span></div><div class="model-meta"><span>${esc(model.format.toUpperCase())}</span><span>${esc(model.quantization)}</span><span>${esc(model.sizeLabel)}</span><span>${formatNumber(model.nativeContext || 0)} context</span>${pleChip}${ssdChip}<span>${esc(model.origins.join(" + "))}</span><span>${esc(cap.reason)}</span></div>`;
+  card.innerHTML = `<div class="model-title"><strong>${esc(model.name)}</strong><span class="badge ${statusClass}"${statusTitle}>${esc(statusLabel)}</span></div><div class="model-meta"><span>${esc(model.format.toUpperCase())}</span><span>${esc(model.quantization)}</span><span>${esc(model.sizeLabel)}</span><span>${esc(modelContextLabel(model, cap))}</span>${pleChip}${ssdChip}<span>${esc(model.origins.join(" + "))}</span><span>${esc(cap.reason)}</span></div>`;
   const nativeTopK = Number(cap.nativeExpertTopK || 0);
   $("swiftlmTopK").value = String(Number.isInteger(nativeTopK) && nativeTopK > 0 ? nativeTopK : 0);
   $("swiftlmTopKHelp").textContent = nativeTopK > 0
@@ -7361,6 +7448,13 @@ function performanceReceiptSuite() {
   if (qualificationBackend === "llamacpp") {
     return LLAMACPP_PLE_QUALIFICATION_SUITE;
   }
+  if (qualificationBackend === "uzu") {
+    const suite = uzuQualificationSuite(Number($("contextInput").value));
+    if (!suite) {
+      throw new Error("Uzu qualification is available only at the exact 16K or 32K context tier.");
+    }
+    return suite;
+  }
   return CalibrationDecision.receiptSuite(
     state.client,
     qualificationBackend === "omlx",
@@ -7368,6 +7462,7 @@ function performanceReceiptSuite() {
 }
 
 function calibrationSuiteControlValue(suite) {
+  if (isUzuQualificationSuite(suite)) return "agentic";
   return suite === LLAMACPP_PLE_QUALIFICATION_SUITE ? "agentic" : suite;
 }
 
@@ -7393,6 +7488,8 @@ function performanceReceiptSuiteLabel(receipt = {}) {
   const labels = {
     agentic:"Agentic Route Lab",
     [LLAMACPP_PLE_QUALIFICATION_SUITE]:"SSD PLE Route Qualification",
+    "route-qualification-uzu-16k":"Uzu Route Qualification · 16K",
+    "route-qualification-uzu-32k":"Uzu Route Qualification · 32K",
     standard:"Standard",
     thorough:"Thorough",
     quick:"Quick",
@@ -7444,6 +7541,7 @@ function performanceReceiptView(receipt) {
   const qualificationContextBackend = qualificationBackend || pendingQualificationBackend;
   const qualificationNeeded = Boolean(qualificationContextBackend);
   const llamaQualification = qualificationContextBackend === "llamacpp";
+  const uzuQualification = qualificationContextBackend === "uzu";
   const suite = performanceReceiptSuiteLabel(receipt);
   const eligible = Array.isArray(receipt?.eligibleBackends)
     ? receipt.eligibleBackends.filter(uiEngineVisible) : [];
@@ -7536,6 +7634,8 @@ function performanceReceiptView(receipt) {
     detail:qualificationNeeded
       ? llamaQualification
         ? `${suite} · fixed-8K llama.cpp SSD PLE evidence is not complete`
+        : uzuQualification
+          ? `${suite} · the exact DFlash + Weaver context still needs a complete run`
         : `${suite} · this exact route still needs a complete run`
       : focused
         ? `${suite} · ${eligible.length} compatible engine${eligible.length === 1 ? "" : "s"} still need a complete run`
@@ -7547,14 +7647,20 @@ function performanceReceiptView(receipt) {
   if (qualificationNeeded) return {
     state:"missing", icon:"◇",
     title:focused
-      ? llamaQualification ? "Qualify this pinned SSD PLE route" : "Qualify this SSD-backed PLE route"
+      ? llamaQualification ? "Qualify this pinned SSD PLE route"
+        : uzuQualification ? "Qualify this Uzu route"
+          : "Qualify this SSD-backed PLE route"
       : "Route qualification needed",
     detail:focused
       ? llamaQualification
         ? "Fixed 8K · runtime-controlled reasoning · exact 44 GiB ceiling"
+        : uzuQualification
+          ? `${exactContextTier(Number($("contextInput").value))} · DFlash + Weaver · BF16 KV · Chat`
         : "Measure reasoning TPS and final-answer reliability on this Mac"
       : llamaQualification
         ? "Pinned llama.cpp SSD PLE · fixed 8K · not qualified yet"
+        : uzuQualification
+          ? `Uzu DFlash + Weaver · exact ${exactContextTier(Number($("contextInput").value))} · not qualified yet`
         : "Exact oMLX AR + N-gram PLE mmap route · not qualified yet",
     action:"Qualify", actionId:"measure-qualification", titleText:fullSummary,
   };
@@ -8037,17 +8143,27 @@ function calibrationQualificationProfile(plan = state.calibrationPlan || {}) {
     backend = "omlx";
   }
   const llama = backend === "llamacpp";
+  const uzu = backend === "uzu";
   return {
     backend,
     llama,
-    routeLabel:llama ? "llama.cpp SSD PLE" : backend === "omlx" ? "oMLX Qwen PLE" : "the exact route",
+    uzu,
+    routeLabel:llama ? "llama.cpp SSD PLE" : uzu ? "Uzu DFlash + Weaver" : backend === "omlx" ? "oMLX Qwen PLE" : "the exact route",
     subtitle:llama
       ? "Qualify the exact pinned llama.cpp SSD PLE route at fixed 8K under the exact 44 GiB ceiling."
-      : "Measure and qualify the exact oMLX Qwen PLE route without inventing a second engine.",
-    reasoningLabel:llama ? "Runtime-controlled" : null,
+      : uzu
+        ? "Qualify Uzu's fixed DFlash + Weaver route for this exact context on built-in Chat."
+        : backend === "omlx"
+          ? "Measure and qualify the exact oMLX Qwen PLE route without inventing a second engine."
+          : "Measure and qualify this exact route.",
+    reasoningLabel:llama ? "Runtime-controlled" : uzu ? "Model default · on" : null,
     startMessage:llama
       ? "Pinned llama.cpp SSD PLE qualification accepted. Loading the exact fixed-8K route…"
-      : "Route qualification accepted. Preparing the exact oMLX AR + PLE mmap route…",
+      : uzu
+        ? "Uzu qualification accepted. Loading the fixed DFlash + Weaver route…"
+        : backend === "omlx"
+          ? "Route qualification accepted. Preparing the exact oMLX AR + PLE mmap route…"
+          : "Route qualification accepted. Preparing the exact route…",
   };
 }
 
@@ -8112,6 +8228,127 @@ function llamaQualificationContractExact(plan = state.calibrationPlan || {}) {
     && reasoning.reasoningEnabled === true
     && reasoning.policy === "runtime-fixed-reasoning-on"
     && reasoning.measured === "auto";
+}
+
+function uzuQualificationContractExact(plan = state.calibrationPlan || {}) {
+  if (controllerRouteQualificationBackend(plan) !== "uzu") return false;
+  const model = selectedModel();
+  const capability = model?.backends?.uzu || {};
+  const contract = plan.qualificationContract;
+  const route = plan.routeSpec;
+  const reasoning = plan.reasoningContract || {};
+  const context = Number(plan.request?.context);
+  const expectedSuite = uzuQualificationSuite(context);
+  const expectedId = uzuQualificationContractId(context);
+  const receiptFingerprint = String(capability.benchmarkModelFingerprint || "");
+  const runtimeVersion = String(capability.runtimeVersion || "");
+  const runtimeSha = String(capability.runtimeIdentity?.binary?.sha256 || "");
+  const systemContract = capability.qualificationSystemContract || {};
+  const expectedOsReserveBytes = Number(systemContract.osReserveBytes);
+  const expectedSandboxProfileSha256 = String(systemContract.sandboxProfileSha256 || "");
+  const expectedRawListenerProtected = systemContract.rawListenerProtected === true;
+  const osReserveBytes = Number(contract?.osReserveBytes);
+  const contextWindows = Array.isArray(capability.contextWindows)
+    ? capability.contextWindows.map(Number) : [];
+  const scenariosExact = Array.isArray(contract?.scenarioContract)
+    && contract.scenarioContract.length === UZU_QUALIFICATION_SCENARIOS.length
+    && contract.scenarioContract.every(
+      (scenario, index) => scenario === UZU_QUALIFICATION_SCENARIOS[index],
+    );
+  return model?.ready === true && model?.uzuNative === true
+    && capability.runnable === true
+    && capability.runtimeManagedAcceleration === "DFlash + Weaver"
+    && contextWindows.length === UZU_QUALIFICATION_CONTEXTS.length
+    && UZU_QUALIFICATION_CONTEXTS.every((value, index) => contextWindows[index] === value)
+    && capability.contextMaximum === UZU_QUALIFICATION_CONTEXTS.at(-1)
+    && plan.routeQualification === true
+    && String(plan.model?.id || "") === String(model?.id || "")
+    && String(plan.request?.modelId || "") === String(model?.id || "")
+    && plan.request?.backend === "uzu"
+    && plan.request?.client === "chat"
+    && plan.request?.reasoning === "auto"
+    && plan.request?.options?.acceleration === "off"
+    && plan.request?.options?.depth === 1
+    && plan.request?.options?.kv === "off"
+    && Number.isInteger(plan.request?.output)
+    && plan.request.output >= UZU_QUALIFICATION_SAMPLE_MAX_TOKENS
+    && Boolean(expectedSuite) && Boolean(expectedId)
+    && plan.suite?.id === expectedSuite
+    && /^[0-9a-f]{64}$/.test(receiptFingerprint)
+    && runtimeVersion.length > 0
+    && /^[0-9a-f]{64}$/.test(runtimeSha)
+    && contract?.id === expectedId
+    && contract.version === UZU_QUALIFICATION_CONTRACT_VERSION
+    && contract.scope === "route"
+    && contract.clientAgnostic === false
+    && contract.client === "chat"
+    && contract.backend === "uzu"
+    && contract.exactContext === context
+    && contract.configuredOutputLimit === plan.request?.output
+    && contract.measuredRequestMaxTokens === UZU_QUALIFICATION_SAMPLE_MAX_TOKENS
+    && scenariosExact
+    && contract.sampleMaxTokens === UZU_QUALIFICATION_SAMPLE_MAX_TOKENS
+    && contract.answerReserveTokens === UZU_QUALIFICATION_ANSWER_RESERVE_TOKENS
+    && contract.thinkingBudgetTokens == null
+    && contract.minimumDecodeTokensPerSecond === UZU_QUALIFICATION_MINIMUM_TPS
+    && contract.minimumCompletionTokens === UZU_QUALIFICATION_MINIMUM_COMPLETION_TOKENS
+    && contract.reasoningPolicy === "runtime-default-on"
+    && contract.toolProbeRequired === false
+    && contract.memoryProofRequired === true
+    && contract.memoryCeilingBytes === UZU_QUALIFICATION_MEMORY_LIMIT_BYTES
+    && contract.fixedAcceleration === "DFlash + Weaver"
+    && contract.kvStateDataType === "BF16"
+    && contract.prefixCache === true
+    && contract.osReservePolicy === "max-4gib-or-10-percent-total-v1"
+    && contract.osReserveMinimumBytes === UZU_QUALIFICATION_OS_RESERVE_MINIMUM_BYTES
+    && Number.isSafeInteger(expectedOsReserveBytes)
+    && expectedOsReserveBytes >= UZU_QUALIFICATION_OS_RESERVE_MINIMUM_BYTES
+    && osReserveBytes === expectedOsReserveBytes
+    && contract.receiptFingerprint === receiptFingerprint
+    && contract.modelFingerprint === receiptFingerprint
+    && contract.modelRegistryId === capability.modelRegistryId
+    && contract.modelCommit === capability.modelCommit
+    && contract.modelToolchainVersion === capability.modelToolchainVersion
+    && contract.runtimeBinarySha256 === runtimeSha
+    && /^[0-9a-f]{64}$/.test(expectedSandboxProfileSha256)
+    && contract.sandboxProfileSha256 === expectedSandboxProfileSha256
+    && expectedRawListenerProtected
+    && contract.rawListenerProtected === true
+    && contract.runtimeVersion === runtimeVersion
+    && capability.runtimeIdentity?.ready === true
+    && capability.runtimeIdentity?.networkSandbox === true
+    && capability.runtimeIdentity?.memorySafetyBlocked === false
+    && capability.runtimeIdentity?.listenerIsolationBlocked === false
+    && (
+      capability.runtimeIdentity?.rawListenerAuthenticated === true
+      || capability.runtimeIdentity?.rawListenerIsolated === true
+    )
+    && route?.id === expectedId
+    && route.version === UZU_QUALIFICATION_CONTRACT_VERSION
+    && route.scope === "route"
+    && route.clientAgnostic === false
+    && route.client === "chat"
+    && route.backend === "uzu"
+    && route.mode === "ar"
+    && route.modeLabel === "Fixed DFlash + Weaver"
+    && route.suite === expectedSuite
+    && route.context === context
+    && route.reasoningPolicy === "runtime-default-on"
+    && route.toolProbeRequired === false
+    && route.memoryProofRequired === true
+    && route.memoryCeilingBytes === UZU_QUALIFICATION_MEMORY_LIMIT_BYTES
+    && reasoning.runtimeControlled === true
+    && reasoning.reasoningEnabled === true
+    && reasoning.policy === "runtime-default-reasoning-on"
+    && reasoning.requested === "auto"
+    && reasoning.measured === "auto";
+}
+
+function routeQualificationContractExact(plan = state.calibrationPlan || {}) {
+  const backend = controllerRouteQualificationBackend(plan);
+  if (backend === "llamacpp") return llamaQualificationContractExact(plan);
+  if (backend === "uzu") return uzuQualificationContractExact(plan);
+  return backend === "omlx" || plan.routeQualification !== true;
 }
 
 function firstQualificationMetric(...values) {
@@ -8227,6 +8464,12 @@ function routeQualificationFactsMarkup(route = {}, result = {}, backend = "") {
     ? "Not reported"
     : `${metrics.minimumTps.toFixed(1)} tok/s`;
   const ttft = metrics.ttft === null ? "Not reported" : `${metrics.ttft.toFixed(2)}s`;
+  if (backend === "uzu") {
+    const peak = metrics.peakMemory === null
+      ? "Not reported"
+      : `${(metrics.peakMemory / (1024 ** 3)).toFixed(1)} GiB / ${UZU_QUALIFICATION_MEMORY_LIMIT_BYTES / (1024 ** 3)} GiB`;
+    return `<small class="calibration-result-tps">Generation TPS · ${esc(tps)}</small><small class="calibration-result-settings">Slowest turn · ${esc(minimumTps)} · target ≥${UZU_QUALIFICATION_MINIMUM_TPS}</small><small class="calibration-result-settings">BF16 KV · runtime fixed · Peak memory · ${esc(peak)} · TTFT · ${esc(ttft)}</small><small class="calibration-result-settings">Reasoning + final answer · ${esc(check(metrics.reasoningFinal))} · Correctness · ${esc(check(metrics.correctness))} · Clean unload · ${esc(check(metrics.cleanUnload))}</small>`;
+  }
   if (backend !== "llamacpp") {
     return `<small class="calibration-result-tps">Generation TPS · ${esc(tps)}</small><small class="calibration-result-settings">TTFT · ${esc(ttft)} · Reasoning + final answer · ${esc(check(metrics.reasoningFinal))}</small>`;
   }
@@ -8242,6 +8485,7 @@ function updateCalibrationHelp() {
   const cooling = $("calibrationCoolingSelect").value;
   const routeQualification = state.calibrationPlan?.routeQualification === true;
   const qualification = calibrationQualificationProfile();
+  const coolingLocked = state.calibrationPlan?.calibrationCoolingLocked === true;
   $("calibrationSuiteHelp").textContent = routeQualification
     ? qualification.llama
       ? "Uses four bounded generated turns at fixed 8K to verify reasoning, final answers, Jinja tool calling, and clean unload."
@@ -8261,9 +8505,11 @@ function updateCalibrationHelp() {
     memory:"Uses system-wide unified-memory headroom and requires at least a 512 MB advantage.",
     thermal:"Requires comparable starting conditions, then ranks worst public macOS thermal state and speed.",
   })[preference] || "Uses matching local evidence only.";
-  $("calibrationCoolingHelp").textContent = cooling === "max"
-    ? "Maximum fans is an explicit loud-mode choice for MTPLX routes in this measurement."
-    : "The launcher will not force maximum fans. macOS may still increase cooling under sustained load.";
+  $("calibrationCoolingHelp").textContent = coolingLocked
+    ? `${state.calibrationPlan.calibrationCoolingReason || "This runtime exposes no fan control; macOS controls cooling."} The launcher's independent memory guard remains active.`
+    : cooling === "max"
+      ? "Maximum fans is an explicit loud-mode choice for MTPLX routes in this measurement."
+      : "The launcher will not force maximum fans. macOS may still increase cooling under sustained load.";
 }
 
 function calibrationPlanRequest() {
@@ -8451,9 +8697,13 @@ function renderCalibrationPlan() {
   if (routeQualification && plan?.suite?.id) {
     $("calibrationSuiteSelect").value = calibrationSuiteControlValue(plan.suite.id);
   }
+  const coolingLocked = plan?.calibrationCoolingLocked === true;
+  if (coolingLocked) {
+    $("calibrationCoolingSelect").value = plan.calibrationCooling || "default";
+  }
   $("calibrationSuiteSelect").disabled = controlsLocked || routeQualification;
   $("calibrationPreferenceSelect").disabled = controlsLocked;
-  $("calibrationCoolingSelect").disabled = controlsLocked;
+  $("calibrationCoolingSelect").disabled = controlsLocked || coolingLocked;
   if (!plan) {
     $("calibrationPhase").closest(".calibration-progress")?.classList.remove("hidden");
     calibrationStateBadge("calibrationContractState", state.calibrationLoading ? "Checking" : "Unavailable", state.calibrationLoading ? "" : "blocked");
@@ -8486,9 +8736,10 @@ function renderCalibrationPlan() {
   const request = plan.request || {};
   const reasoningContract = plan.reasoningContract || {};
   const normalizedReasoning = reasoningContract.normalized === true;
-  const qualificationContractExact = !qualification.llama
-    || llamaQualificationContractExact(plan);
-  const kv = request.options?.kv && request.options.kv !== "off" ? String(request.options.kv).toUpperCase() : "Full precision";
+  const qualificationContractExact = routeQualificationContractExact(plan);
+  const kv = qualification.uzu
+    ? "BF16 · runtime fixed"
+    : request.options?.kv && request.options.kv !== "off" ? String(request.options.kv).toUpperCase() : "Full precision";
   calibrationStateBadge(
     "calibrationContractState",
     qualificationContractExact ? "Locked" : "Contract mismatch",
@@ -8497,6 +8748,8 @@ function renderCalibrationPlan() {
   const contextAdjustment = plan.contextAdjustment?.reason ? ` ${plan.contextAdjustment.reason}` : "";
   $("calibrationContract").textContent = qualification.llama
     ? `${plan.model.name} · exact route · fixed ${formatNumber(LLAMACPP_PLE_QUALIFICATION_CONTEXT)} context · ${formatNumber(request.output)} configured max response. Generated qualification probes are capped at ${formatNumber(LLAMACPP_PLE_QUALIFICATION_SAMPLE_MAX_TOKENS)} tokens, so longer outputs remain configured rather than measured. Reasoning is runtime-controlled and stays on. This route-level receipt can be reused by compatible work surfaces with the same sampling contract. Qualification is valid only below the exact 44 GiB Metal ceiling; model, quantisation, sampling, prompt contract, full-precision KV, and one request lane stay fixed.`
+    : qualification.uzu
+      ? `${plan.model.name} · built-in Chat · exact ${exactContextTier(request.context)} context · ${formatNumber(request.output)} max response. DFlash + Weaver, packaged sampling, model-default reasoning, and BF16 KV stay fixed for this qualification.`
     : (normalizedReasoning
       ? `${plan.model.name} · ${plan.clientLabel} · ${formatNumber(request.context)} context · ${formatNumber(request.output)} max response. ${reasoningContract.detail} Your launch setting changes only if you apply the result.`
       : `${plan.model.name} · ${plan.clientLabel} · ${formatNumber(request.context)} context · ${formatNumber(request.output)} max response. The model, quantisation, reasoning, sampling, prompt contract, and KV precision stay fixed.`) + contextAdjustment;
@@ -8505,6 +8758,11 @@ function renderCalibrationPlan() {
     ["Context", "Fixed 8K"], ["Reasoning", qualification.reasoningLabel],
     ["Memory ceiling", "44 GiB exact"], ["KV precision", kv],
     ["Measured turns", "4 bounded"], ["Cooling", plan.calibrationCoolingLabel || "Automatic"],
+  ] : qualification.uzu ? [
+    ["Route", "DFlash + Weaver"], ["Context", `Exact ${exactContextTier(request.context)}`],
+    ["Work surface", "Built-in Chat"], ["Reasoning", qualification.reasoningLabel],
+    ["KV cache", kv], ["Memory ceiling", "36 GiB"],
+    ["Measured turns", "4 bounded"], ["Minimum speed", `≥${UZU_QUALIFICATION_MINIMUM_TPS} tok/s each`],
   ] : [
     ["Workload", plan.suite.label], ["Goal", plan.preferenceLabel],
     ...(plan.ssdStreaming ? [["Route type", "SSD-streamed MoE"]] : []),
@@ -8597,7 +8855,11 @@ function renderCalibrationPlan() {
       ].filter(Boolean).join(" ")
     : "";
   const evidenceDetail = !qualificationContractExact
-    ? "The controller did not preserve the pinned llama.cpp fixed-8K, runtime-controlled reasoning, exact-44-GiB contract. Refresh models before qualifying or applying it."
+    ? qualification.uzu
+      ? "The controller did not preserve this exact Uzu context, DFlash + Weaver, BF16 KV, Chat, and memory-safety contract. Refresh models before qualifying or applying it."
+      : qualification.llama
+        ? "The controller did not preserve the pinned llama.cpp fixed-8K, runtime-controlled reasoning, exact-44-GiB contract. Refresh models before qualifying or applying it."
+        : "The controller did not preserve this exact qualification contract. Refresh models before qualifying or applying it."
     : resultReady
     ? [shownEvidence.detail, shownEvidence.outputWarning].filter(Boolean).join(" ")
     : preparationAvailable ? preparationDetail
@@ -8605,6 +8867,8 @@ function renderCalibrationPlan() {
       ? routeQualification
         ? qualification.llama
           ? `One exact pinned llama.cpp SSD PLE load will run four generated reasoning turns at fixed 8K. Every turn must expose separate reasoning and a final answer; authoritative TPS and TTFT, peak memory below the exact 44 GiB ceiling, one valid Jinja tool call, and a clean unload are required.${routePreview ? ` Route: ${routePreview}.` : ""}`
+          : qualification.uzu
+            ? `One exact Uzu DFlash + Weaver load will run four generated Chat turns at ${exactContextTier(request.context)}. Every turn must reach at least ${UZU_QUALIFICATION_MINIMUM_TPS} tok/s with reasoning and a final answer; BF16 KV memory, correctness, and clean unload are checked.${routePreview ? ` Route: ${routePreview}.` : ""}`
           : `One exact oMLX AR + PLE mmap load will run four generated reasoning turns. Authoritative usage, generation TPS, time to first output, memory pressure, and thermal state are recorded; every turn must expose separate reasoning and a final answer.${routePreview ? ` Route: ${routePreview}.` : ""}`
         : plan.ssdStreaming
         ? `${plan.eligibleEngineCount} SSD runtimes will be tested one at a time using generated prompts. First-turn and warm-prefix TPS, time to first output, memory pressure, and thermal state are recorded. The OS file cache is observed rather than forcibly purged.${routePreview ? ` Routes: ${routePreview}.` : ""}`
@@ -8630,7 +8894,8 @@ function renderCalibrationPlan() {
   $("calibrationResults").classList.toggle("hidden", measuredEngines.length === 0);
   $("calibrationResults").innerHTML = measuredEngines.length ? `<strong>${routeQualification ? "Route qualification result" : "Measured engine results"}</strong><div>${measuredEngines.map((engine, index) => {
     const selected = measuredDecisionReady && engine.backend === (measuredDecision.backend || shownEvidence.backend);
-    const mode = engine.mode === "dflash2" ? "DFlash 2" : engine.mode === "mtp" ? "MTP" : plan.ssdStreaming ? "SSD stream" : "AR";
+    const mode = qualification.uzu ? "DFlash + Weaver"
+      : engine.mode === "dflash2" ? "DFlash 2" : engine.mode === "mtp" ? "MTP" : plan.ssdStreaming ? "SSD stream" : "AR";
     const testedModes = Array.isArray(engine.testedModes) && engine.testedModes.length
       ? engine.testedModes : [engine.mode || "ar"];
     const depthCandidates = Array.isArray(engine.mtpDepthSweep?.depthCandidates)
@@ -8653,7 +8918,8 @@ function renderCalibrationPlan() {
       ? `Tested ${testedRoutes.join(" + ")}`
       : `Tested AR only · ${engine.accelerationReason || "no verified accelerator in this artifact"}`;
     const exactRoute = engine.routeSettingsLabel
-      || (qualification.llama ? "SSD PLE · exact 8K" : mode);
+      || (qualification.llama ? "SSD PLE · exact 8K"
+        : qualification.uzu ? `DFlash + Weaver · exact ${exactContextTier(request.context)}` : mode);
     const modeLabel = routeQualification ? exactRoute : plan.ssdStreaming ? exactRoute : testedModes.length > 1 ? `Winner: ${exactRoute}` : "AR only";
     const decodeTps = finiteMetric(engine.decodeTokensPerSecond);
     const parityRejectionNote = calibrationParityRejectionNote(engine);
@@ -8700,7 +8966,9 @@ function renderCalibrationPlan() {
       : !qualificationContractExact ? "Refresh the exact controller contract"
       : plan.ready ? qualification.llama
         ? "1 route · fixed 8K · exact 44 GiB ceiling"
-        : "1 route · 4 bounded reasoning turns"
+        : qualification.uzu
+          ? `1 route · exact ${exactContextTier(request.context)} · 4 bounded Chat turns`
+          : "1 route · 4 bounded reasoning turns"
         : systemSettingBlocked ? metalApprovalLabel
           : runtimeConflictBlocked ? memoryBlocker.label : "Resolve the blockers above";
   }
@@ -9059,7 +9327,10 @@ async function stopCalibration() {
 function calibrationRouteEvidenceApplyReady(plan = state.calibrationPlan || {}) {
   if (plan.routeQualification !== true) return true;
   const qualification = calibrationQualificationProfile(plan);
-  return (!qualification.llama || llamaQualificationContractExact(plan))
+  const exactContract = qualification.uzu
+    ? uzuQualificationContractExact(plan)
+    : qualification.llama ? llamaQualificationContractExact(plan) : true;
+  return exactContract
     && plan.evidence?.qualified === true
     && Boolean(plan.evidence?.evidenceBinding);
 }
@@ -9134,6 +9405,8 @@ async function applyCalibrationResult(saveProfile = false) {
       const contextNote = contextChanged ? ` Context is now ${formatNumber(measuredContext)}, the common fixed SSD window shown in Calibration.` : "";
       showNotice((plan.routeQualification && calibrationQualificationProfile(plan).llama
         ? `Applied the qualified llama.cpp SSD PLE route at fixed 8K with runtime-controlled reasoning and the exact 44 GiB qualification ceiling.`
+        : plan.routeQualification && calibrationQualificationProfile(plan).uzu
+          ? `Applied the qualified Uzu DFlash + Weaver route at exact ${exactContextTier(measuredContext)} with runtime-fixed BF16 KV.`
         : reasoningChanged
         ? plan.routeQualification
           ? `Applied ${state.optimalLabel || "the qualified route"}. Reasoning changed from ${previousReasoning} to ${reasoningContract.measured} so the route matches its completed qualification; cooling is ${plan.calibrationCoolingLabel || "Automatic"}.`
@@ -11190,7 +11463,7 @@ function applyBootstrapData(boot, setProject = false) {
   const binaries = Object.entries(state.binaries).filter(([name]) => (
     uiFeatureEnabled("freetoken") || !String(name).startsWith("freetoken")
   ));
-  const binaryLabels = {lms:"LM Studio", hf:"Model downloader", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm", llamacpp:"llama.cpp · SSD PLE"};
+  const binaryLabels = {lms:"LM Studio", mirai:"Uzu · Mirai", hf:"Model downloader", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm", llamacpp:"llama.cpp · SSD PLE"};
   $("toolCount").textContent = `${binaries.filter(([,value]) => value.installed).length}/${binaries.length} ready`;
   $("binaryList").innerHTML = binaries.map(([name, value]) => `<div class="binary ${value.installed ? "" : "missing"}"><div><strong>${esc(binaryLabels[name] || name)}</strong><span title="${esc(value.path || "")}">${esc(value.version)}</span></div><em>${value.installed ? "Ready" : "Missing"}</em><i aria-hidden="true"></i></div>`).join("");
   if (setProject && !$("projectPath").value) {
@@ -11216,6 +11489,27 @@ function modelLibraryEnginePresentation(model = {}, engine = {}) {
   });
 }
 
+function modelLibraryEngineModes(model = {}, engine = {}) {
+  if (engine?.id === "uzu" && isUzuModel(model)) {
+    return [{
+      id:"dflash-weaver", label:"DFlash + Weaver",
+      available:engine.runnable === true,
+      detail:"Fixed runtime-managed acceleration with the bundled draft and Weaver tree",
+    }];
+  }
+  return (engine?.modes || []).filter(mode => mode.available);
+}
+
+function modelLibraryChecks(model = {}) {
+  const checks = Array.isArray(model?.doctor?.checks) ? model.doctor.checks : [];
+  if (!isUzuModel(model)) return checks;
+  return checks.map(check => check?.id === "acceleration" ? {
+    ...check,
+    label:"Fixed acceleration",
+    detail:"DFlash + Weaver is built into this Uzu artifact; local qualification measures the complete fixed route.",
+  } : check);
+}
+
 function visibleModelLibraryOverview(model = {}) {
   const engines = visibleModelLibraryEngines(model);
   const runnable = engines.filter(engine => engine.runnable);
@@ -11223,8 +11517,8 @@ function visibleModelLibraryOverview(model = {}) {
   const experimental = runnable.filter(engine => modelLibraryEnginePresentation(model, engine).attention);
   const routes = engines.reduce((total, engine) => total + (engine.surfaces || [])
     .filter(surface => surface.supported).length, 0);
-  const accelerators = engines.reduce((total, engine) => total + (engine.modes || [])
-    .filter(mode => mode.available && mode.id !== "ar").length, 0);
+  const accelerators = engines.reduce((total, engine) => total + modelLibraryEngineModes(model, engine)
+    .filter(mode => mode.id !== "ar").length, 0);
   const evidenceRuns = engines.reduce((total, engine) => (
     total + Number(engine.evidence?.savedRuns || 0)
   ), 0);
@@ -11235,17 +11529,18 @@ function visibleModelLibraryOverview(model = {}) {
 }
 
 function modelLibraryEngineMarkup(model, engine) {
-  const modes = (engine.modes || []).filter(mode => mode.available);
+  const modes = modelLibraryEngineModes(model, engine);
   const surfaces = (engine.surfaces || []).map(surface => `<span class="model-library-surface ${surface.supported ? "supported" : "unavailable"}" title="${esc(surface.reason)}">${esc(surface.label)}</span>`).join("");
   const presentation = modelLibraryEnginePresentation(model, engine);
   const performanceEvidence = presentation.performanceEvidence || {};
   const hostSupport = presentation.hostSupport || {};
   const evidenceTier = String(performanceEvidence.tier || "").toLowerCase();
   const latest = engine.evidence?.latest;
+  const latestModeLabel = engine.id === "uzu" && latest ? "DFlash + Weaver" : latest?.winnerLabel;
   const evidence = presentation.attention
     ? `<div class="model-library-evidence experimental"><strong>${esc(String(hostSupport.state || hostSupport.tier || "").toLowerCase() === "experimental" ? (hostSupport.label || "Experimental on this Mac") : performanceEvidence.label || "Local qualification needed")}</strong><span>${esc(presentation.detail || "This route can be selected explicitly, but it is not used as an automatic speed recommendation.")}</span><small>${esc(evidenceTier === "upstream-measured" ? `Upstream evidence${performanceEvidence.sourceHardware ? ` · ${performanceEvidence.sourceHardware}` : ""} · not verified on this Mac` : "Not automatically preferred")}</small></div>`
     : latest
-    ? `<div class="model-library-evidence"><strong>${esc(latest.winnerLabel || "Measured route")} won the last saved ${esc(latest.suite || "local")} run</strong><span>${esc(latest.recommendation || "Matching local benchmark evidence is saved for this model and runtime.")}</span><small>${esc(latest.createdAt ? new Date(latest.createdAt).toLocaleString([], {dateStyle:"medium", timeStyle:"short"}) : "Saved locally")} · ${formatNumber(engine.evidence.savedRuns)} matching run${Number(engine.evidence.savedRuns) === 1 ? "" : "s"}</small></div>`
+    ? `<div class="model-library-evidence"><strong>${esc(latestModeLabel || "Measured route")} ${engine.id === "uzu" ? "was measured in" : "won"} the last saved ${esc(latest.suite || "local")} run</strong><span>${esc(latest.recommendation || "Matching local benchmark evidence is saved for this model and runtime.")}</span><small>${esc(latest.createdAt ? new Date(latest.createdAt).toLocaleString([], {dateStyle:"medium", timeStyle:"short"}) : "Saved locally")} · ${formatNumber(engine.evidence.savedRuns)} matching run${Number(engine.evidence.savedRuns) === 1 ? "" : "s"}</small></div>`
     : `<div class="model-library-evidence empty"><strong>No matching saved route evidence</strong><span>Availability is not a speed claim. Use Benchmark Lab before automatically preferring an accelerator.</span></div>`;
   const engineState = engine.status === "runtime-missing" ? "Missing" : presentation.label;
   const actionLabel = presentation.attention ? "Select route explicitly" : presentation.available ? `Use with ${esc(engine.label)}` : "Route unavailable";
@@ -11274,7 +11569,7 @@ function modelLibraryCardMarkup(model) {
     ? (scopedEngine.surfaces || []).filter(surface => surface.supported).length
     : overview.routes;
   const scopedModes = scopedEngine
-    ? (scopedEngine.modes || []).filter(mode => mode.available).length
+    ? modelLibraryEngineModes(model, scopedEngine).length
     : overview.accelerators;
   const cardState = engineScoped
     ? (scopedPresentation?.attention ? "attention" : scopedPresentation?.available ? "ready" : "blocked")
@@ -11305,11 +11600,11 @@ function modelLibraryCardMarkup(model) {
     : `${formatNumber(overview.runnable.length)} engines · ${formatNumber(overview.accelerators)} accelerators · ${formatNumber(overview.evidenceRuns)} evidence runs`;
   return `<article class="model-library-card ${esc(cardState)}">
     <header><div><span class="model-library-format" aria-hidden="true">${esc(String(model.format || "?").slice(0, 4).toUpperCase())}</span><span><strong>${esc(model.name)}</strong><small>${esc(model.architecture)} · ${esc(model.origins?.join(" + ") || "Detected locally")}</small></span></div><em>${esc(stateLabel)}</em></header>
-    <div class="model-library-meta"><span>${esc(String(model.format || "unknown").toUpperCase())}</span><span>${esc(model.quantization)}</span><span>${esc(model.sizeLabel)}</span><span>${model.nativeContext ? `${formatNumber(model.nativeContext)} context` : "Context unknown"}</span><span>${formatNumber(scopedRoutes)} available route${scopedRoutes === 1 ? "" : "s"}</span></div>
+    <div class="model-library-meta"><span>${esc(String(model.format || "unknown").toUpperCase())}</span><span>${esc(model.quantization)}</span><span>${esc(model.sizeLabel)}</span><span>${model.nativeContext ? esc(modelContextLabel(model)) : "Context unknown"}</span><span>${formatNumber(scopedRoutes)} available route${scopedRoutes === 1 ? "" : "s"}</span></div>
     <code class="model-library-path" title="${esc(model.path)}">${esc(model.path)}</code>
     <div class="model-library-diagnosis"><i aria-hidden="true">${cardState === "ready" ? "✓" : cardState === "attention" ? "!" : "×"}</i><p><strong>${esc(diagnosisHeadline)}</strong><span>${esc(diagnosisDetail)}</span></p></div>
     <details class="model-library-details" ${isSelected ? "open" : ""}><summary><span>${engineScoped ? `${esc(scopedEngine?.label || backendName(state.modelLibraryEngine))} details` : "Compatibility details"}</span><small>${detailSummary}</small></summary><div>
-      <div class="model-library-checks">${(doctor.checks || []).map(modelLibraryCheckMarkup).join("")}</div>
+      <div class="model-library-checks">${modelLibraryChecks(model).map(modelLibraryCheckMarkup).join("")}</div>
       <div class="model-library-engines">${visibleEngines.map(engine => modelLibraryEngineMarkup(model, engine)).join("")}</div>
     </div></details>
   </article>`;
@@ -12312,7 +12607,7 @@ async function selectRuntime(runtime, candidateId, button) {
     const boot = await api("/api/bootstrap");
     applyBootstrapData(boot);
     await loadModels(false);
-    $("runtimeManagerStatus").textContent = `${({omlx:"oMLX", lms:"LM Studio", mtplx:"MTPLX"})[runtime] || runtime} selection updated for new sessions. No software was installed or removed.`;
+    $("runtimeManagerStatus").textContent = `${({omlx:"oMLX", lms:"LM Studio", mtplx:"MTPLX", mirai:"Uzu · Mirai", uzu:"Uzu · Mirai"})[runtime] || runtime} selection updated for new sessions. No software was installed or removed.`;
   } catch (error) {
     $("runtimeManagerStatus").textContent = error.message;
     if (button) button.disabled = false;

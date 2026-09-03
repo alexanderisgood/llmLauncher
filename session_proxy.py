@@ -44,8 +44,9 @@ CLIENTS = {"chat", "pi", "opencode", "codex"}
 CLIENT_LABELS = {"chat": "Chat", "pi": "Pi", "opencode": "OpenCode", "codex": "Codex"}
 SUPPORTED_BACKENDS = {
     "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
-    "llamacpp",
+    "llamacpp", "uzu",
 }
+UZU_CONTEXT_WINDOWS = frozenset({16_384, 32_768})
 CHAT_REASONING_LEVELS = frozenset({
     "auto", "off", "minimal", "low", "medium", "high", "xhigh", "max",
 })
@@ -123,6 +124,13 @@ def load_config(path: Path) -> dict[str, Any]:
         fail("unexpected reasoning boundary message")
     if value.get("reasoning") not in CHAT_REASONING_LEVELS:
         fail("invalid reasoning effort")
+    if value.get("backend") == "uzu":
+        if value.get("reasoning") not in {"auto", "off"}:
+            fail("Uzu Qwen3.6 reasoning must be auto or off")
+        if value.get("contextLimit") not in UZU_CONTEXT_WINDOWS:
+            fail("invalid Uzu context limit")
+    elif value.get("contextLimit") not in {None, 0}:
+        fail("unexpected context limit")
     if not all(_valid_secret(value.get(key)) for key in ("controlKey", "upstreamKey")):
         fail("invalid relay secret")
     if not isinstance(value.get("servedModel"), str) or not value["servedModel"]:
@@ -856,14 +864,30 @@ def transform_chat_request(body: bytes, config: dict[str, Any]) -> bytes:
     if reasoning not in CHAT_REASONING_LEVELS:
         raise ValueError("invalid reasoning effort")
     backend = str(config.get("backend") or "")
-    if backend in {"whallm", "omlx"}:
+    if backend in {"whallm", "omlx", "uzu"}:
         value.pop("thinking_mode", None)
         value.pop("reasoning_effort", None)
+        value.pop("enable_thinking", None)
+        value.pop("chat_template_kwargs", None)
     if backend == "whallm" and reasoning != "auto":
         if reasoning == "off":
             value.update({"thinking_mode": "chat", "reasoning_effort": "none"})
         else:
             value.update({"thinking_mode": "thinking", "reasoning_effort": reasoning})
+    elif backend == "uzu":
+        if reasoning not in {"auto", "off"}:
+            raise ValueError("Uzu Qwen3.6 reasoning must be auto or off")
+        unexpected_sampling = {
+            "temperature", "top_p", "top_k", "min_p", "seed",
+            "presence_penalty", "frequency_penalty", "repetition_penalty",
+        }.intersection(value)
+        if unexpected_sampling:
+            raise ValueError(
+                "This Uzu route is pinned to the packaged model sampling defaults."
+            )
+        # Qwen3.6 exposes a toggle through Uzu. All named non-disabled levels
+        # normalize to Default, so send the one canonical request control.
+        value["reasoning_effort"] = "disabled" if reasoning == "off" else "default"
     limit = int(config["outputLimit"])
     requested = value.get("max_tokens")
     if backend == "llamacpp":
@@ -881,6 +905,17 @@ def transform_chat_request(body: bytes, config: dict[str, Any]) -> bytes:
             requested_limits.append(candidate)
         value["max_tokens"] = min([limit, *requested_limits])
         value.pop("max_completion_tokens", None)
+    elif backend == "uzu":
+        requested_limits: list[int] = []
+        for key in ("max_tokens", "max_completion_tokens"):
+            candidate = value.get(key)
+            if candidate is None:
+                continue
+            if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate <= 0:
+                raise ValueError(f"invalid {key}")
+            requested_limits.append(candidate)
+        value["max_completion_tokens"] = min([limit, *requested_limits])
+        value.pop("max_tokens", None)
     elif requested is None:
         value["max_tokens"] = limit
     elif isinstance(requested, bool) or not isinstance(requested, int) or requested <= 0:
@@ -907,6 +942,22 @@ def transform_chat_request(body: bytes, config: dict[str, Any]) -> bytes:
         )
         value["reasoning_budget_message"] = LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE
         value.pop("thinking_budget_tokens", None)
+    if backend == "uzu":
+        context_limit = config.get("contextLimit")
+        if context_limit not in UZU_CONTEXT_WINDOWS:
+            raise ValueError("invalid Uzu context limit")
+        messages = value.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError("invalid Uzu messages")
+        # A byte is a conservative upper bound for one byte-fallback tokenizer
+        # token. Reserve template/control tokens per message as well. This is
+        # intentionally cautious until Uzu's CLI exposes ChatConfig::Custom.
+        prompt_token_upper_bound = len(body) + 1_024 + 32 * len(messages)
+        if prompt_token_upper_bound + int(value["max_completion_tokens"]) > context_limit:
+            raise ValueError(
+                "This request plus its response limit exceeds the selected Uzu context window. "
+                "Shorten the chat, lower Maximum response, or choose 32K context."
+            )
     if value.get("stream") is True:
         stream_options = value.get("stream_options")
         if stream_options is None:
@@ -914,6 +965,9 @@ def transform_chat_request(body: bytes, config: dict[str, Any]) -> bytes:
         if not isinstance(stream_options, dict):
             raise ValueError("invalid stream_options")
         value["stream_options"] = {**stream_options, "include_usage": True}
+        if backend == "uzu":
+            # Uzu always emits terminal usage and ignores stream_options.
+            value.pop("stream_options", None)
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -1097,7 +1151,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 else:
                     body = transform_chat_request(body, self.config)
                     protocol = "chat-completions"
-                    request_output_limit = int(json.loads(body)["max_tokens"])
+                    transformed = json.loads(body)
+                    request_output_limit = int(
+                        transformed.get("max_completion_tokens", transformed.get("max_tokens"))
+                    )
             except (ValueError, TypeError, json.JSONDecodeError) as error:
                 self.send_json_error(
                     HTTPStatus.BAD_REQUEST,

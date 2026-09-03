@@ -237,7 +237,7 @@ qualified.backends.llamacpp.runtimeVersion = "different runtime";
 assert.equal(modelContext.llamaQualificationContractExact(exactPlan), false, "capability runtime");
 qualified.backends.llamacpp.runtimeVersion = "llama.cpp b10740 qualification runtime";
 
-assert.match(app, /if \(\["whallm", "llamacpp"\]\.includes\(state\.backend\)\) \{\s*return \{acceleration:"off", depth:1, kv:"off"\};/);
+assert.match(app, /if \(\["uzu", "whallm", "llamacpp"\]\.includes\(state\.backend\)\) \{\s*return \{acceleration:"off", depth:1, kv:"off"\};/);
 assert.match(app, /const verifyingPle = button\.dataset\.backend === "llamacpp"[^]*const qualifiedPle = button\.dataset\.backend !== "llamacpp"[^]*Boolean\(llamaCppPleModel\(\)\) \|\| verifyingPle/);
 assert.match(app, /filter\(backend => backend !== "llamacpp"\)/);
 assert.match(app, /if \(backend === "llamacpp"\) return \[\{\s*id:"ar", label:"SSD PLE", available:llamaCppPleCapabilityQualified\(cap\)/);

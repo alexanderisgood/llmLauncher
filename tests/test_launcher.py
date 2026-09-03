@@ -1325,6 +1325,7 @@ class LauncherTests(unittest.TestCase):
                     launcher, "llamacpp_runtime_contract",
                     return_value={"ready": False, "version": "Not installed"},
                 ),
+                mock.patch.object(launcher, "_uzu_model_cache_contract", return_value=None),
             ):
                 return launcher.scan_models()
 
@@ -2348,6 +2349,7 @@ class LauncherTests(unittest.TestCase):
         with (
             mock.patch.object(launcher, "model_roots", return_value=[]),
             mock.patch.object(launcher, "omlx_qwen_kernel_status", return_value={"ready": False}),
+            mock.patch.object(launcher, "_uzu_model_cache_contract", return_value=None),
         ):
             models = launcher.scan_models()
         self.assertEqual({model["name"] for model in models}, set(probe["models"]))
@@ -2866,7 +2868,7 @@ class LauncherTests(unittest.TestCase):
             set(engines),
             {
                 "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm",
-                "mference", "whallm", "llamacpp",
+                "mference", "whallm", "llamacpp", "uzu",
             },
         )
         for engine in (engines[item] for item in {"omlx", "lmstudio", "mtplx"}):
@@ -16285,7 +16287,7 @@ for line in sys.stdin:
         self.assertIn(':root[data-detail="focused"] .app-workspace{grid-template-columns:minmax(0,1fr)}', styles)
         self.assertIn(':root[data-detail="focused"] .focused-run-status{display:grid}', styles)
         self.assertIn(':root[data-detail="focused"] .inspector{display:none}', styles)
-        self.assertIn(':root[data-detail="focused"] #backendChoices{grid-template-columns:repeat(3,minmax(0,1fr))}', styles)
+        self.assertIn(':root[data-detail="focused"] #backendChoices{grid-template-columns:repeat(4,minmax(0,1fr))}', styles)
         self.assertIn(':root[data-detail="focused"] #backendChoices{grid-template-columns:repeat(2,minmax(0,1fr))}', styles)
         self.assertIn('class="chat-history-more"', script)
         self.assertIn('id="chatResumeContract" class="chat-resume-contract"', script)

@@ -42,7 +42,7 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -158,6 +158,72 @@ def controller_source_is_current() -> bool:
 RUNTIME_PREFERENCES_VERSION = 1
 RUNTIME_PREFERENCES_FILE = STATE_DIR / "runtime-preferences.json"
 MANAGED_RUNTIMES_DIR = STATE_DIR / "runtimes"
+UZU_RUNTIME_TAG = "0.5.22"
+UZU_RUNTIME_DIR = MANAGED_RUNTIMES_DIR / f"uzu-{UZU_RUNTIME_TAG}"
+UZU_RUNTIME_PATH = UZU_RUNTIME_DIR / "mirai"
+UZU_RUNTIME_ARCHIVE_SHA256 = "cf85742abf801ccd6fedefb5859c154d72dea634616b6a7ac2604b8674555608"
+UZU_RUNTIME_RELEASE_BINARY_SHA256 = "82edefd796e69d07fa2ad7e8dc424ad8a06167c8a6f95cd316fea179be19f559"
+UZU_RUNTIME_RELEASE_URL = "https://github.com/trymirai/uzu/releases/tag/0.5.22"
+UZU_MEMORY_HOTFIX_URL = "https://github.com/trymirai/uzu/pull/794"
+UZU_PUBLISHER_TEAM_IDENTIFIER = "C39GZ239GY"
+UZU_RELEASE_CODE_DIRECTORY_HASH = "4edaa211f5c01dc5baaf103eefd2610472957f84"
+UZU_MODEL_PAGE_URL = "https://trymirai.com/local-models/alibaba-qwen3-6-27b-mirai-mirai-m-4"
+UZU_MODEL_REGISTRY_PATH = Path.home() / ".cache" / "mirai" / "registry.json"
+UZU_MODEL_CACHE_ROOT = Path.home() / ".cache" / "mirai" / "models" / "mirai"
+UZU_MODEL_REGISTRY_MAX_BYTES = 4 * 1024 * 1024
+UZU_MODEL_REGISTRY_MAX_ENTRIES = 512
+UZU_MODEL_MANIFEST_MAX_FILES = 64
+UZU_MODEL_MANIFEST_MAX_BYTES = 128 * 1024**3
+UZU_SANDBOX_EXECUTABLE = Path("/usr/bin/sandbox-exec")
+UZU_NETWORK_SANDBOX_PROFILE = "(version 1)(allow default)(deny network-outbound)"
+UZU_SAFE_CONTEXT_WINDOWS = (16_384, 32_768)
+UZU_UPSTREAM_OUTPUT_TPS = 105.0
+UZU_UPSTREAM_HARDWARE = "Apple M5 Max · 128 GB"
+UZU_PROCESS_MEMORY_CEILING_BYTES = 36 * 1024**3
+UZU_QUALIFICATION_MINIMUM_DECODE_TPS = 15.0
+UZU_DRAFT_FULL_ATTENTION_BYTES_PER_TOKEN = 4 * 1024
+UZU_DRAFT_SLIDING_CACHE_BYTES = 64 * 1024**2
+UZU_SANDBOX_PROFILE_SHA256 = hashlib.sha256(
+    UZU_NETWORK_SANDBOX_PROFILE.encode("utf-8")
+).hexdigest()
+UZU_MODEL_REGISTRY_ID = "alibaba:qwen3.6:27b:mirai:mirai-m:4"
+UZU_MODEL_TOOLCHAIN_VERSION = "0.15.0"
+UZU_MODEL_REPOSITORY = "trymirai/Qwen3.6-27B-M"
+UZU_MODEL_COMMIT = "f5648cedf15def1c14b49e978d6d533a6ca9664a"
+UZU_MODEL_FILE_MANIFEST = (
+    ("config.json", 181_772, "Vg2ORA=="),
+    ("model.safetensors", 14_532_822_104, "wSepXQ=="),
+    ("speculator/config.json", 19_043, "EGGDsg=="),
+    ("speculator/model.safetensors", 998_365_376, "XCsDAA=="),
+    ("speculator/shapes.json", 721, "Lm4ESw=="),
+    ("tokenizer.json", 19_989_343, "Agb5rQ=="),
+)
+# SHA-256 values for the exact Mirai 0.15.0 payload pinned above. The three
+# large Xet objects match Hugging Face's immutable f5648ced revision; the
+# remaining small Mirai-packaged files were independently streamed after all
+# six files matched the catalog's CRC32C values. Completion receipts remain a
+# useful download-state signal, but they never substitute for hashing bytes.
+UZU_MODEL_FILE_SHA256 = {
+    "config.json": "47bbc5c6e67d880db2eb9342f8c26b6e830fe66aeb6e9f851e8a0cde32fbe552",
+    "model.safetensors": "56a8c171802b386de72f6907fd169503a74abdfc1f7c9da37dc748c855e0b63e",
+    "speculator/config.json": "6f1b35873d4689e731940102b7bcaa7ef80d70ef577cdcf88d07f5df606a0ffc",
+    "speculator/model.safetensors": "612fb2afc047de7877733cec47c8229ccb326a49f203ff6fd3ac581966df09ff",
+    "speculator/shapes.json": "7f8faa1fccc6d0a48bb9fbe7687a347aea0f0875581d7a2ebd04ba434f3fd51c",
+    "tokenizer.json": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4",
+}
+UZU_MODEL_REGISTRY_OPERATIONAL_CONTRACT = {
+    "encoding": {"name": "qwen3.5", "type": "hanashi"},
+    "family": {"id": "alibaba:qwen3.6", "vendor": "alibaba"},
+    "properties": {"id": "27b", "size": 27_000_000_000, "version": None},
+    "quantization": {
+        "bits_per_weight": 4,
+        "id": "mirai:mirai-m:4",
+        "method": "mirai-m",
+        "vendor": "mirai",
+    },
+    "registry": "mirai",
+    "specializations": [{"type": "chat"}],
+}
 LLAMACPP_RUNTIME_TAG = "b10740"
 LLAMACPP_RUNTIME_COMMIT = "fe2120bc9db242c4349a6f71810af1cd52ee8580"
 LLAMACPP_RUNTIME_DIR = MANAGED_RUNTIMES_DIR / f"llama.cpp-{LLAMACPP_RUNTIME_TAG}"
@@ -437,6 +503,8 @@ ROUTE_QUALIFICATION_THINKING_TOKENS = (
 ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS = 128
 LLAMACPP_QUALIFICATION_CORRECTNESS_ID = "atomicchat-arithmetic-nonce-v1"
 LLAMACPP_QUALIFICATION_CORRECTNESS_EXPECTED = "RQ-8K-742"
+UZU_QUALIFICATION_CORRECTNESS_ID = "uzu-arithmetic-nonce-v1"
+UZU_QUALIFICATION_CORRECTNESS_EXPECTED = "RQ-UZU-742"
 LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID = "atomicchat-budget-zero-boundary-v1"
 # Qwen's documented transition sentence is forced immediately before the
 # auto-detected closing thinking tag when llama.cpp exhausts a per-request
@@ -448,6 +516,14 @@ LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE = (
 )
 ROUTE_QUALIFICATION_SCENARIOS = ["cold", "warmPrefix", "toolIngest", "steadyTurn"]
 ROUTE_QUALIFICATION_8K_SUITE = "route-qualification-8k"
+ROUTE_QUALIFICATION_UZU_16K_SUITE = "route-qualification-uzu-16k"
+ROUTE_QUALIFICATION_UZU_32K_SUITE = "route-qualification-uzu-32k"
+ROUTE_QUALIFICATION_AGENTIC_SUITES = frozenset({
+    "agentic",
+    ROUTE_QUALIFICATION_8K_SUITE,
+    ROUTE_QUALIFICATION_UZU_16K_SUITE,
+    ROUTE_QUALIFICATION_UZU_32K_SUITE,
+})
 QWEN_PLE_QUALIFICATION_CONTEXT = 16_384
 QWEN_PLE_QUALIFICATION_OUTPUT = 8_192
 QWEN_PLE_QUALIFICATION_REASONING = "medium"
@@ -649,6 +725,22 @@ BENCHMARK_SUITES = {
         "scenarios": list(ROUTE_QUALIFICATION_SCENARIOS),
         "internal": True,
     },
+    ROUTE_QUALIFICATION_UZU_16K_SUITE: {
+        "label": "16K Uzu Route Qualification", "kind": "agentic",
+        "promptTokens": [8_192, 12_288], "maxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+        "repetitions": 1, "prefixTokens": 8_192, "toolTokens": 4_096,
+        "requiredContext": 16_384,
+        "scenarios": list(ROUTE_QUALIFICATION_SCENARIOS),
+        "internal": True,
+    },
+    ROUTE_QUALIFICATION_UZU_32K_SUITE: {
+        "label": "32K Uzu Route Qualification", "kind": "agentic",
+        "promptTokens": [20_480, 28_672], "maxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+        "repetitions": 1, "prefixTokens": 20_480, "toolTokens": 8_192,
+        "requiredContext": 32_768,
+        "scenarios": list(ROUTE_QUALIFICATION_SCENARIOS),
+        "internal": True,
+    },
 }
 DFLASH2_MINIMUM_RUNTIME = "0.6.3rc1"
 DFLASH2_RECOMMENDED_RUNTIME = "0.6.4"
@@ -818,6 +910,7 @@ OPTIMIZER_KEYS = {
     "mference": ("promptCacheMode", "queueLimit"),
     "whallm": (),
     "llamacpp": (),
+    "uzu": (),
 }
 BENCHMARK_ENGINE_SETTING_KEYS = {
     "omlx": ("burst", "anePrefill", "memoryGuard"),
@@ -828,6 +921,7 @@ BENCHMARK_ENGINE_SETTING_KEYS = {
     "mference": ("promptCacheMode", "queueLimit", "ssdCacheState"),
     "whallm": ("ssdCacheState",),
     "llamacpp": (),
+    "uzu": (),
 }
 
 
@@ -1435,6 +1529,13 @@ RUNTIME_CANDIDATE_SPECS: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("homebrew", "/opt/homebrew/bin/mtplx", "Homebrew CLI"),
         ("path", "mtplx", "Shell PATH"),
     ),
+    # Uzu is deliberately restricted to the launcher-owned, versioned copy.
+    # Mirai's app CLI auto-updates independently and the 0.5.22 release has no
+    # telemetry/offline switch, so every launch is additionally wrapped in the
+    # outbound-deny sandbox below.
+    "mirai": (
+        ("launcher-managed", str(UZU_RUNTIME_PATH), f"Launcher-managed Uzu {UZU_RUNTIME_TAG}"),
+    ),
     "swiftlm": (
         ("user-cli", "~/.local/bin/SwiftLM", "User CLI"),
         ("homebrew", "/opt/homebrew/bin/SwiftLM", "Homebrew CLI"),
@@ -1563,6 +1664,105 @@ def runtime_executable_revision(path_value: Any) -> dict[str, Any]:
     return identity
 
 
+def uzu_runtime_contract(path_value: Any) -> dict[str, Any]:
+    """Verify the exact launcher-owned Uzu release without executing it."""
+    result: dict[str, Any] = {
+        "ready": False,
+        "version": f"Uzu {UZU_RUNTIME_TAG}",
+        "releaseUrl": UZU_RUNTIME_RELEASE_URL,
+        "archiveSha256": UZU_RUNTIME_ARCHIVE_SHA256,
+        "expectedBinarySha256": UZU_RUNTIME_RELEASE_BINARY_SHA256,
+        "networkSandbox": False,
+        # These exact pinned bytes were independently verified outside the
+        # launcher's restricted process sandbox.  The Developer ID chain and
+        # Apple notarization both pass; do not re-run trust services from the
+        # sandbox and mistake their blocked network access for a bad signature.
+        "publisherSignatureValid": False,
+        "publisherTeamIdentifier": UZU_PUBLISHER_TEAM_IDENTIFIER,
+        "codeDirectoryHash": UZU_RELEASE_CODE_DIRECTORY_HASH,
+        "notarizationVerified": False,
+        "memorySafetyBlocked": True,
+        "rawListenerAuthenticated": False,
+        "rawListenerIsolated": False,
+        "listenerIsolationBlocked": True,
+        "boundedContextReady": True,
+        "memoryHotfixUrl": UZU_MEMORY_HOTFIX_URL,
+    }
+    try:
+        requested = Path(str(path_value or "")).expanduser()
+        details = requested.lstat()
+        if requested.is_symlink():
+            result["reason"] = "The launcher-managed Uzu executable must not be a symbolic link."
+            return result
+        expected = UZU_RUNTIME_PATH.expanduser().resolve(strict=False)
+        path = requested.resolve(strict=True)
+    except OSError:
+        result["reason"] = "The launcher-managed Uzu executable is not installed."
+        return result
+    if path != expected:
+        result["reason"] = "Only the launcher-managed Uzu 0.5.22 executable is accepted."
+        return result
+    if not stat.S_ISREG(details.st_mode) or details.st_uid != os.geteuid():
+        result["reason"] = "The launcher-managed Uzu executable is not an owner-controlled regular file."
+        return result
+    if details.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        result["reason"] = "The launcher-managed Uzu executable is writable by another account."
+        return result
+    try:
+        revision = runtime_executable_revision(path)
+    except ValueError as error:
+        result["reason"] = str(error)
+        return result
+    result["binary"] = revision
+    if revision.get("sha256") != UZU_RUNTIME_RELEASE_BINARY_SHA256:
+        result["reason"] = "The Uzu executable no longer matches the pinned official 0.5.22 release bytes."
+        return result
+    # The signature/notarization proof is bound to these exact immutable bytes.
+    result["publisherSignatureValid"] = True
+    result["notarizationVerified"] = True
+    sandbox_ready = (
+        sys.platform == "darwin"
+        and platform.machine().lower() in {"arm64", "aarch64"}
+        and UZU_SANDBOX_EXECUTABLE.is_file()
+        and os.access(UZU_SANDBOX_EXECUTABLE, os.X_OK)
+    )
+    result["networkSandbox"] = sandbox_ready
+    if not sandbox_ready:
+        result["reason"] = "Uzu requires Apple Silicon and the macOS outbound-network sandbox."
+        return result
+    # PR #794 fixes decode-step allocation retention in the generic language
+    # model stream after 0.5.22. That defect is especially unsafe on this
+    # launcher's 48 GB qualification host. Keep the signed, notarized runtime
+    # and downloaded model reusable, but never execute this release. The
+    # A future containing release still needs a protected raw listener before
+    # the authenticated relay can enforce the selected 16K/32K boundary. The
+    # upstream CLI has neither a context flag nor bearer authentication.
+    result["reason"] = (
+        "Uzu 0.5.22 is installed but disabled: upstream's post-release memory "
+        "hotfix is required before this 48 GB Mac may load it, and the stock "
+        "server's unauthenticated raw listener must be isolated before its "
+        "16K/32K request boundary can be trusted. The installed binary is "
+        "Apple-signed and notarized; a fixed release alone does not bypass "
+        "either launch gate."
+    )
+    result["localOnly"] = True
+    result["telemetryBlocked"] = True
+    result["automaticDownloadsBlocked"] = True
+    return result
+
+
+def uzu_listener_protection_ready(runtime: Any) -> bool:
+    """Require positive proof that clients cannot bypass the Uzu relay."""
+    return bool(
+        isinstance(runtime, dict)
+        and runtime.get("listenerIsolationBlocked") is False
+        and (
+            runtime.get("rawListenerAuthenticated") is True
+            or runtime.get("rawListenerIsolated") is True
+        )
+    )
+
+
 def preferred_runtime_binary(runtime: str) -> str | None:
     candidates = runtime_candidates(runtime)
     preferences = read_json(RUNTIME_PREFERENCES_FILE)
@@ -1620,6 +1820,7 @@ BINARIES = {
     "omlx": _SELECTED_OMLX_BINARY,
     "lms": preferred_runtime_binary("lms"),
     "mtplx": preferred_runtime_binary("mtplx"),
+    "mirai": preferred_runtime_binary("mirai"),
     "swiftlm": preferred_runtime_binary("swiftlm"),
     "mference": preferred_runtime_binary("mference"),
     "whallm": preferred_runtime_binary("whallm"),
@@ -1684,6 +1885,9 @@ ENGINE_ADAPTERS: dict[str, AdapterDescriptor] = {
     ),
     "mtplx": AdapterDescriptor(
         "mtplx", "MTPLX", "engine", "mtplx", "openai-compatible",
+    ),
+    "uzu": AdapterDescriptor(
+        "uzu", "Uzu · Mirai", "engine", "mirai", "openai-compatible-speculative",
     ),
     "freetoken": AdapterDescriptor(
         "freetoken", "FreeToken", "engine", "freetoken", "native-or-remote-openai-compatible",
@@ -1752,6 +1956,24 @@ CLIENT_SUPPORT: dict[str, dict[str, dict[str, Any]]] = {
             "reason": "Launcher Responses bridge over MTPLX Chat Completions; function tools and Codex namespaces are preserved",
         },
         "chat": {"supported": True, "reason": "Built-in streaming Chat Completions"},
+    },
+    "uzu": {
+        "pi": {
+            "supported": False,
+            "reason": "Uzu tool streaming has not yet passed the launcher's live Pi contract check; use built-in Chat for this first qualification.",
+        },
+        "opencode": {
+            "supported": False,
+            "reason": "Uzu tool streaming has not yet passed the launcher's live OpenCode contract check; use built-in Chat for this first qualification.",
+        },
+        "codex": {
+            "supported": False,
+            "reason": "Uzu exposes Chat Completions, not the Responses API required by Codex.",
+        },
+        "chat": {
+            "supported": True,
+            "reason": "Built-in streaming Chat Completions with runtime-managed DFlash + Weaver",
+        },
     },
     "freetoken": {
         "pi": {"supported": True, "reason": "FreeToken OpenAI Chat Completions through a private LAN bridge"},
@@ -1829,6 +2051,20 @@ def _is_managed_llamacpp_path(path: str | None) -> bool:
 def command_version(path: str | None) -> str:
     if not path:
         return "Not installed"
+    try:
+        is_managed_uzu = (
+            Path(path).expanduser().resolve(strict=False)
+            == UZU_RUNTIME_PATH.expanduser().resolve(strict=False)
+        )
+    except OSError:
+        is_managed_uzu = False
+    if is_managed_uzu:
+        contract = uzu_runtime_contract(path)
+        return (
+            str(contract["version"])
+            if contract.get("binary", {}).get("sha256") == UZU_RUNTIME_RELEASE_BINARY_SHA256
+            else "Installed (unverified managed runtime)"
+        )
     if _is_managed_llamacpp_path(path):
         contract = llamacpp_runtime_contract(path)
         return (
@@ -2831,11 +3067,19 @@ def runtime_candidate_details(runtime: str) -> list[dict[str, Any]]:
             llamacpp_runtime_contract(candidate["path"])
             if runtime == "llamacpp" else None
         )
+        uzu_contract = (
+            uzu_runtime_contract(candidate["path"])
+            if runtime == "mirai" else None
+        )
         version = (
             str(llamacpp_contract["version"])
             if isinstance(llamacpp_contract, dict) and llamacpp_contract.get("ready") is True else
             "Installed (unverified managed runtime)"
             if runtime == "llamacpp" else
+            str(uzu_contract["version"])
+            if isinstance(uzu_contract, dict) and uzu_contract.get("binary") else
+            "Installed (unverified managed runtime)"
+            if runtime == "mirai" else
             command_version(candidate["path"])
         )
         detail: dict[str, Any] = {
@@ -2857,6 +3101,8 @@ def runtime_candidate_details(runtime: str) -> list[dict[str, Any]]:
             detail["mtpLoadReady"] = lmstudio_mtp_load_supported(candidate["path"])
         elif runtime == "llamacpp":
             detail["pleContract"] = llamacpp_contract
+        elif runtime == "mirai":
+            detail["uzuContract"] = uzu_contract
         result.append(detail)
     return result
 
@@ -3073,6 +3319,73 @@ def runtime_inventory() -> dict[str, Any]:
             },
         },
     ]
+    uzu_candidates = runtime_candidate_details("mirai")
+    uzu_selected = next((item for item in uzu_candidates if item["selected"]), None)
+    uzu_contract = (
+        copy.deepcopy(uzu_selected.get("uzuContract"))
+        if isinstance(uzu_selected, dict) and isinstance(uzu_selected.get("uzuContract"), dict)
+        else uzu_runtime_contract(BINARIES.get("mirai"))
+    )
+    uzu_ready = uzu_contract.get("ready") is True
+    runtimes.append({
+        "id": "mirai",
+        "label": "Uzu · Mirai",
+        "level": "ready" if uzu_ready else "blocked",
+        "headline": (
+            "The pinned Uzu runtime is ready for local-only DFlash + Weaver inference."
+            if uzu_ready else
+            str(uzu_contract.get("reason") or "A verified memory-safe Uzu runtime is required.")
+        ),
+        "selected": uzu_selected,
+        "candidates": uzu_candidates,
+        "release": None,
+        "checks": [
+            {
+                "label": "Pinned and Apple-verified",
+                "ready": bool(
+                    uzu_contract.get("binary")
+                    and uzu_contract.get("publisherSignatureValid") is True
+                    and uzu_contract.get("notarizationVerified") is True
+                ),
+                "detail": (
+                    f"{command_version(BINARIES.get('mirai'))} · Developer ID team "
+                    f"{UZU_PUBLISHER_TEAM_IDENTIFIER}"
+                ),
+            },
+            {
+                "label": "Post-0.5.22 memory fix",
+                "ready": uzu_contract.get("memorySafetyBlocked") is False,
+                "detail": str(uzu_contract.get("reason") or "Memory-safe release verified."),
+            },
+            {
+                "label": "Bounded local-only route",
+                "ready": bool(
+                    uzu_contract.get("networkSandbox") is True
+                    and uzu_contract.get("boundedContextReady") is True
+                    and uzu_listener_protection_ready(uzu_contract)
+                ),
+                "detail": (
+                    "The raw listener is protected, the private relay enforces 16K/32K "
+                    "request capacity, and the macOS sandbox denies outbound traffic."
+                    if uzu_listener_protection_ready(uzu_contract) else
+                    "Blocked until direct access to Uzu's unauthenticated raw loopback listener is prevented."
+                ),
+            },
+        ],
+        "update": {
+            "mode": "manual-review", "automatic": False,
+            "headline": "Wait for and verify the release containing Uzu PR #794.",
+            "detail": (
+                "The model download is reusable. The launcher will not execute 0.5.22 because its "
+                "generic decode loop can retain allocations. Its pinned macOS binary is validly signed and notarized."
+            ),
+            "primaryUrl": UZU_MEMORY_HOTFIX_URL,
+            "primaryLabel": "Open upstream memory hotfix",
+            "docsUrl": UZU_MODEL_PAGE_URL,
+            "release": None,
+            "rollback": "The blocked 0.5.22 file stays isolated in its versioned launcher directory and is never placed on PATH.",
+        },
+    })
     for runtime_id, label, minimum, detail in (
         (
             "swiftlm", "SwiftLM", "macOS 14 · Apple Silicon",
@@ -5683,9 +5996,14 @@ class BenchmarkTelemetrySampler:
             "sampleCount": len(samples),
             "memoryAvailable": bool(memory),
             "memorySource": "memory_pressure -Q" if memory else None,
+            "memorySampleCount": len(memory),
             "totalMemoryBytes": total if total > 0 else None,
             "baselineHeadroomPercent": round(baseline_free, 3) if baseline_free is not None else None,
             "minimumHeadroomPercent": round(minimum_free, 3) if minimum_free is not None else None,
+            "minimumHeadroomBytes": (
+                round(total * minimum_free / 100)
+                if total > 0 and minimum_free is not None else None
+            ),
             "peakPressureDeltaPercent": round(pressure_delta, 3) if pressure_delta is not None else None,
             "peakPressureDeltaBytes": (
                 round(total * pressure_delta / 100)
@@ -6394,7 +6712,7 @@ def benchmark_record_identity(record: dict[str, Any]) -> tuple[Any, ...]:
         record.get("measuredRequestMaxTokens"),
     ) if (
         record.get("kind") == "route-qualification"
-        and record.get("backend") == "llamacpp"
+        and record.get("backend") in {"llamacpp", "uzu"}
     ) else (None, None)
     return (
         record.get("backend"), record.get("modelFingerprint"),
@@ -6623,7 +6941,7 @@ def _agentic_benchmark_contract_verified(
         return True
     if (
         workload != "agentic"
-        or benchmark.get("suite") not in {"agentic", ROUTE_QUALIFICATION_8K_SUITE}
+        or benchmark.get("suite") not in ROUTE_QUALIFICATION_AGENTIC_SUITES
         or benchmark.get("scenarioContract")
         != ROUTE_QUALIFICATION_SCENARIOS
     ):
@@ -7303,7 +7621,7 @@ def benchmark_record_output_contract_verified(
         return False
     if (
         benchmark.get("kind") == "route-qualification"
-        and benchmark.get("backend") == "llamacpp"
+        and benchmark.get("backend") in {"llamacpp", "uzu"}
     ):
         contract = benchmark.get("qualificationContract")
         return bool(
@@ -7460,6 +7778,32 @@ def _local_benchmark_record_verified(
             or contract.get("memoryCeilingBytes") != LLAMACPP_PLE_MEMORY_CEILING_BYTES
         ):
             return False
+        if backend == "uzu":
+            runtime_identity = capability.get("runtimeIdentity")
+            runtime_binary = (
+                runtime_identity.get("binary")
+                if isinstance(runtime_identity, dict) else None
+            )
+            if (
+                capability.get("runnable") is not True
+                or capability.get("runtimeManagedAcceleration") != "DFlash + Weaver"
+                or capability.get("modelRegistryId") != UZU_MODEL_REGISTRY_ID
+                or capability.get("modelCommit") != UZU_MODEL_COMMIT
+                or capability.get("modelToolchainVersion") != UZU_MODEL_TOOLCHAIN_VERSION
+                or not isinstance(contract, dict)
+                or contract.get("receiptFingerprint")
+                != capability.get("benchmarkModelFingerprint")
+                or contract.get("modelFingerprint")
+                != capability.get("benchmarkModelFingerprint")
+                or contract.get("runtimeVersion") != capability.get("runtimeVersion")
+                or not isinstance(runtime_binary, dict)
+                or contract.get("runtimeBinarySha256") != runtime_binary.get("sha256")
+                or contract.get("sandboxProfileSha256") != UZU_SANDBOX_PROFILE_SHA256
+                or contract.get("rawListenerProtected") is not True
+                or not uzu_listener_protection_ready(runtime_identity)
+                or contract.get("memoryCeilingBytes") != UZU_PROCESS_MEMORY_CEILING_BYTES
+            ):
+                return False
     if winner == "ar":
         return True
     try:
@@ -7558,6 +7902,24 @@ def route_performance_evidence(
             "source": str(DFLASH2_UPSTREAM_PERFORMANCE_EVIDENCE["source"]),
             "sourceUrl": str(DFLASH2_UPSTREAM_PERFORMANCE_EVIDENCE["sourceUrl"]),
             "sourceHardware": str(DFLASH2_UPSTREAM_PERFORMANCE_EVIDENCE["sourceHardware"]),
+            "recordId": None,
+            "createdAt": None,
+            "automaticEligible": False,
+        }
+
+    if backend == "uzu" and capability.get("modelRegistryId") == UZU_MODEL_REGISTRY_ID:
+        return {
+            "version": ROUTE_EVIDENCE_SCHEMA_VERSION,
+            "tier": "upstream-measured",
+            "label": "Upstream measured",
+            "detail": (
+                f"Mirai reports {UZU_UPSTREAM_OUTPUT_TPS:.0f} output tok/s for this Uzu "
+                f"DFlash + Weaver artifact on {UZU_UPSTREAM_HARDWARE}. That is not a "
+                "measurement for this 48 GB Mac and cannot select the fastest route automatically."
+            ),
+            "source": "mirai-upstream",
+            "sourceUrl": UZU_MODEL_PAGE_URL,
+            "sourceHardware": UZU_UPSTREAM_HARDWARE,
             "recordId": None,
             "createdAt": None,
             "automaticEligible": False,
@@ -9072,6 +9434,531 @@ def lmstudio_model_load_key_index(
     return result
 
 
+def _uzu_registry_operational_contract(entry: Any) -> dict[str, Any]:
+    """Extract only registry fields that can change model/runtime interpretation."""
+    if not isinstance(entry, dict):
+        return {}
+    encoding = entry.get("encoding")
+    family = entry.get("family")
+    family_vendor = family.get("vendor") if isinstance(family, dict) else None
+    properties = entry.get("properties")
+    quantization = entry.get("quantization")
+    quantization_vendor = (
+        quantization.get("vendor") if isinstance(quantization, dict) else None
+    )
+    registry = entry.get("registry")
+    specializations = entry.get("specializations")
+    return {
+        "encoding": {
+            "name": encoding.get("name"), "type": encoding.get("type"),
+        } if isinstance(encoding, dict) else None,
+        "family": {
+            "id": family.get("id"),
+            "vendor": family_vendor.get("id") if isinstance(family_vendor, dict) else None,
+        } if isinstance(family, dict) else None,
+        "properties": {
+            "id": properties.get("id"), "size": properties.get("size"),
+            "version": properties.get("version"),
+        } if isinstance(properties, dict) else None,
+        "quantization": {
+            "bits_per_weight": quantization.get("bits_per_weight"),
+            "id": quantization.get("id"), "method": quantization.get("method"),
+            "vendor": (
+                quantization_vendor.get("id")
+                if isinstance(quantization_vendor, dict) else None
+            ),
+        } if isinstance(quantization, dict) else None,
+        "registry": registry.get("id") if isinstance(registry, dict) else None,
+        "specializations": copy.deepcopy(specializations),
+    }
+
+
+def _uzu_registry_entry() -> tuple[dict[str, Any] | None, str | None]:
+    """Read only the pinned Mirai catalog entry from a bounded local registry."""
+    path = UZU_MODEL_REGISTRY_PATH.expanduser()
+    try:
+        details = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(details.st_mode):
+            return None, "Mirai's local registry must be a regular file."
+        if not 0 < details.st_size <= UZU_MODEL_REGISTRY_MAX_BYTES:
+            return None, "Mirai's local registry exceeds the launcher's metadata limit."
+        value = json.loads(path.read_bytes())
+    except (OSError, ValueError, UnicodeError):
+        return None, "Mirai's local registry is missing or invalid."
+    if not isinstance(value, list) or len(value) > UZU_MODEL_REGISTRY_MAX_ENTRIES:
+        return None, "Mirai's local registry has an unsupported shape."
+    matches = [
+        item for item in value
+        if isinstance(item, dict) and item.get("id") == UZU_MODEL_REGISTRY_ID
+    ]
+    if len(matches) != 1:
+        return None, "The pinned Qwen3.6 Uzu entry is missing or duplicated in Mirai's registry."
+    entry = matches[0]
+    accessibility = entry.get("accessibility")
+    reference = accessibility.get("reference") if isinstance(accessibility, dict) else None
+    repository = reference.get("repository") if isinstance(reference, dict) else None
+    backends = entry.get("backends")
+    uzu_backends = [
+        item for item in backends
+        if isinstance(item, dict) and item.get("id") == "uzu"
+    ] if isinstance(backends, list) else []
+    uzu_backend = uzu_backends[0] if len(uzu_backends) == 1 else None
+    if (
+        not isinstance(accessibility, dict)
+        or accessibility.get("type") != "local"
+        or not isinstance(reference, dict)
+        or reference.get("type") != "mirai"
+        or reference.get("toolchain_version") != UZU_MODEL_TOOLCHAIN_VERSION
+        or not isinstance(repository, dict)
+        or repository.get("identifier") != UZU_MODEL_REPOSITORY
+        or repository.get("commit_hash") != UZU_MODEL_COMMIT
+        or repository.get("paths") is not None
+        or not isinstance(backends, list)
+        or len(backends) != 1
+        or not isinstance(uzu_backend, dict)
+        or uzu_backend.get("version") != UZU_MODEL_TOOLCHAIN_VERSION
+    ):
+        return None, "The installed Mirai catalog entry no longer matches the pinned Uzu model contract."
+    if _uzu_registry_operational_contract(entry) != UZU_MODEL_REGISTRY_OPERATIONAL_CONTRACT:
+        return None, (
+            "The installed Mirai catalog changed the pinned model's encoding, "
+            "quantization, family, size, registry, or chat specialization."
+        )
+    files = reference.get("files")
+    if not isinstance(files, list) or not 0 < len(files) <= UZU_MODEL_MANIFEST_MAX_FILES:
+        return None, "The pinned Mirai model manifest has an unsupported file list."
+    expected = {
+        name: {"size": size, "crc": crc}
+        for name, size, crc in UZU_MODEL_FILE_MANIFEST
+    }
+    observed: dict[str, dict[str, Any]] = {}
+    total = 0
+    for item in files:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            return None, "The pinned Mirai model manifest contains invalid file metadata."
+        name = item["name"]
+        relative = PurePosixPath(name)
+        if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+            return None, "The pinned Mirai model manifest contains an unsafe file path."
+        size = item.get("size")
+        hashes = item.get("hashes")
+        crc_values = [
+            value.get("value") for value in hashes
+            if isinstance(value, dict) and value.get("method") == "crc32c"
+        ] if isinstance(hashes, list) else []
+        url = str(item.get("url") or "")
+        if (
+            name in observed
+            or isinstance(size, bool) or not isinstance(size, int) or size <= 0
+            or len(crc_values) != 1 or not isinstance(crc_values[0], str)
+            or not url.startswith("https://assets.trymirai.com/")
+        ):
+            return None, "The pinned Mirai model manifest contains invalid size, hash, or source metadata."
+        total += size
+        observed[name] = {"size": size, "crc": crc_values[0]}
+    if observed != expected or total > UZU_MODEL_MANIFEST_MAX_BYTES:
+        return None, "The installed Mirai manifest differs from the launcher's pinned Qwen3.6 file set."
+    return copy.deepcopy(entry), None
+
+
+def _uzu_model_cache_contract() -> dict[str, Any] | None:
+    """Validate Mirai's receipts and pinned file bytes without loading model code."""
+    model_root = UZU_MODEL_CACHE_ROOT.expanduser()
+    model_identifier_path = model_root / UZU_MODEL_REGISTRY_ID.replace(":", "-")
+    model_path = model_identifier_path / UZU_MODEL_TOOLCHAIN_VERSION
+    try:
+        if not model_path.exists():
+            return None
+        root_details = model_root.lstat()
+        identifier_details = model_identifier_path.lstat()
+        model_details = model_path.lstat()
+        if (
+            model_root.is_symlink() or model_identifier_path.is_symlink() or model_path.is_symlink()
+            or not stat.S_ISDIR(root_details.st_mode)
+            or not stat.S_ISDIR(identifier_details.st_mode)
+            or not stat.S_ISDIR(model_details.st_mode)
+        ):
+            return {
+                "present": True, "ready": False, "path": str(model_path),
+                "reason": "The Mirai model cache must use ordinary local directories.",
+            }
+        resolved_root = model_root.resolve(strict=True)
+        resolved_model = model_path.resolve(strict=True)
+        resolved_model.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return {
+            "present": True, "ready": False, "path": str(model_path),
+            "reason": "The Mirai model cache moved outside its expected local directory.",
+        }
+
+    entry, registry_error = _uzu_registry_entry()
+    if registry_error:
+        return {
+            "present": True, "ready": False, "path": str(resolved_model),
+            "reason": registry_error,
+        }
+
+    completed_bytes = 0
+    total_bytes = sum(size for _name, size, _crc in UZU_MODEL_FILE_MANIFEST)
+    file_identity: list[dict[str, Any]] = []
+    problems: list[str] = []
+    for name, expected_size, expected_crc in UZU_MODEL_FILE_MANIFEST:
+        relative = PurePosixPath(name)
+        file_path = resolved_model.joinpath(*relative.parts)
+        receipt_path = Path(str(file_path) + ".crc")
+        try:
+            resolved_file = file_path.resolve(strict=False)
+            resolved_receipt = receipt_path.resolve(strict=False)
+            resolved_file.relative_to(resolved_model)
+            resolved_receipt.relative_to(resolved_model)
+            parent = resolved_model
+            for part in relative.parts[:-1]:
+                parent = parent / part
+                parent_details = parent.lstat()
+                if parent.is_symlink() or not stat.S_ISDIR(parent_details.st_mode):
+                    raise OSError("unsafe model subdirectory")
+            details = file_path.lstat()
+            if file_path.is_symlink() or not stat.S_ISREG(details.st_mode):
+                raise OSError("not a regular file")
+            if details.st_size != expected_size:
+                problems.append(f"{name} has an unexpected size")
+                continue
+            receipt_details = receipt_path.lstat()
+            if (
+                receipt_path.is_symlink() or not stat.S_ISREG(receipt_details.st_mode)
+                or not 0 < receipt_details.st_size <= 4_096
+            ):
+                raise OSError("invalid receipt")
+            receipt = json.loads(receipt_path.read_bytes())
+            if (
+                not isinstance(receipt, dict)
+                or receipt.get("version") != 1
+                or receipt.get("file_size") != expected_size
+                or receipt.get("crc") != expected_crc
+            ):
+                problems.append(f"{name} has an invalid completion receipt")
+                continue
+            expected_sha256 = UZU_MODEL_FILE_SHA256.get(name)
+            if (
+                not isinstance(expected_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+                or not _cached_regular_file_sha256_matches(file_path, expected_sha256)
+            ):
+                problems.append(f"{name} failed its pinned SHA-256 check")
+                continue
+            completed_bytes += expected_size
+            file_identity.append({
+                "name": name,
+                "size": expected_size,
+                "crc32c": expected_crc,
+                "sha256": expected_sha256,
+                "device": int(details.st_dev),
+                "inode": int(details.st_ino),
+                "modified": int(details.st_mtime_ns),
+                "changed": int(details.st_ctime_ns),
+            })
+        except (OSError, ValueError, UnicodeError):
+            partial = file_path.with_suffix(".part")
+            try:
+                partial_details = partial.lstat()
+                if not partial.is_symlink() and stat.S_ISREG(partial_details.st_mode):
+                    completed_bytes += min(expected_size, max(0, int(partial_details.st_size)))
+            except OSError:
+                pass
+            problems.append(f"{name} is incomplete")
+
+    active_markers: list[str] = []
+    try:
+        for root, directories, filenames in os.walk(resolved_model, followlinks=False):
+            directories[:] = [
+                name for name in directories
+                if not (Path(root) / name).is_symlink()
+            ]
+            for filename in filenames:
+                if filename.endswith((".part", ".lock")):
+                    active_markers.append(str((Path(root) / filename).relative_to(resolved_model)))
+    except OSError:
+        problems.append("the model cache cannot be inspected completely")
+    if active_markers:
+        problems.append("the Mirai downloader is still writing this model")
+
+    ready = not problems and completed_bytes == total_bytes
+    config: dict[str, Any] = {}
+    if ready:
+        try:
+            config_value = json.loads((resolved_model / "config.json").read_bytes())
+            if not isinstance(config_value, dict):
+                raise ValueError("config must be an object")
+            config = config_value
+        except (OSError, ValueError, UnicodeError):
+            ready = False
+            problems.append("config.json is invalid")
+
+    manifest_identity = {
+        "schema": 2,
+        "registryId": UZU_MODEL_REGISTRY_ID,
+        "repository": UZU_MODEL_REPOSITORY,
+        "commit": UZU_MODEL_COMMIT,
+        "toolchain": UZU_MODEL_TOOLCHAIN_VERSION,
+        "registryOperationalContract": _uzu_registry_operational_contract(entry),
+        "files": file_identity if ready else [],
+    }
+    fingerprint = (
+        hashlib.sha256(json.dumps(
+            manifest_identity, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        if ready else ""
+    )
+    progress = min(100.0, max(0.0, completed_bytes * 100.0 / total_bytes))
+    reason = (
+        "Pinned Mirai catalog files passed receipt and SHA-256 verification."
+        if ready else
+        ("Downloading Qwen3.6 Uzu files" if active_markers else problems[0])
+    )
+    return {
+        "present": True,
+        "ready": ready,
+        "path": str(resolved_model),
+        "reason": reason,
+        "problems": problems[:16],
+        "activeMarkers": active_markers[:16],
+        "completedBytes": completed_bytes,
+        "totalBytes": total_bytes,
+        "progressPercent": round(progress, 1),
+        "fingerprint": fingerprint,
+        "manifestIdentity": manifest_identity,
+        "registryEntry": entry,
+        "config": config,
+    }
+
+
+def _uzu_model_geometry(config: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    decoder = config.get("decoder_config") if isinstance(config, dict) else None
+    transformer = decoder.get("transformer_config") if isinstance(decoder, dict) else None
+    layers = transformer.get("layer_configs") if isinstance(transformer, dict) else None
+    if not isinstance(layers, list) or not layers or len(layers) > 512:
+        return {"ready": False, "layerSource": "uzu-config-invalid"}, 0
+    attention: list[dict[str, Any]] = []
+    native_context = 0
+    for layer in layers:
+        if not isinstance(layer, dict):
+            return {"ready": False, "layerSource": "uzu-config-invalid"}, 0
+        mixer = layer.get("mixer_config")
+        if not isinstance(mixer, dict):
+            return {"ready": False, "layerSource": "uzu-config-invalid"}, 0
+        if mixer.get("type") == "AttentionConfig":
+            attention.append(mixer)
+            rope = layer.get("rope_config")
+            value = rope.get("max_sequence_length") if isinstance(rope, dict) else None
+            if isinstance(value, int) and not isinstance(value, bool):
+                native_context = max(native_context, value)
+    if not attention:
+        return {"ready": False, "layerSource": "uzu-config-invalid"}, native_context
+    first = attention[0]
+    kv_heads = first.get("num_groups")
+    head_dim = first.get("head_dim")
+    attention_heads = first.get("num_heads")
+    consistent = all(
+        item.get("num_groups") == kv_heads
+        and item.get("head_dim") == head_dim
+        and item.get("num_heads") == attention_heads
+        for item in attention
+    )
+    ready = bool(
+        consistent
+        and isinstance(kv_heads, int) and not isinstance(kv_heads, bool) and kv_heads > 0
+        and isinstance(head_dim, int) and not isinstance(head_dim, bool) and head_dim > 0
+        and isinstance(attention_heads, int) and not isinstance(attention_heads, bool) and attention_heads > 0
+    )
+    return {
+        "ready": ready,
+        "layers": len(layers),
+        "fullAttentionLayers": len(attention),
+        "attentionHeads": attention_heads if ready else None,
+        "kvHeads": kv_heads if ready else None,
+        "headDimension": head_dim if ready else None,
+        "layerSource": "uzu-layer-configs",
+    }, native_context
+
+
+def uzu_model_records(
+    benchmark_records: list[dict[str, Any]], machine_fingerprint: str | None = None,
+) -> list[dict[str, Any]]:
+    """Expose only locally present, receipt-complete Uzu catalog artifacts."""
+    cache = _uzu_model_cache_contract()
+    if cache is None:
+        return []
+    runtime = uzu_runtime_contract(BINARIES.get("mirai"))
+    model_ready = cache.get("ready") is True
+    runtime_ready = runtime.get("ready") is True
+    config = cache.get("config") if isinstance(cache.get("config"), dict) else {}
+    geometry, architecture_context = _uzu_model_geometry(config)
+    generation = config.get("generation_config") if isinstance(config, dict) else None
+    generation = generation if isinstance(generation, dict) else {}
+    default_sampling = {
+        key: generation[key]
+        for key in ("temperature", "top_p", "top_k", "presence_penalty", "frequency_penalty")
+        if isinstance(generation.get(key), (int, float)) and not isinstance(generation.get(key), bool)
+    }
+    listener_protected = uzu_listener_protection_ready(runtime)
+    qualification_system_contract = {
+        "osReserveBytes": max(
+            SESSION_OS_RESERVE_MIN_BYTES,
+            round(physical_memory_bytes() * SESSION_OS_RESERVE_FRACTION),
+        ),
+        "sandboxProfileSha256": UZU_SANDBOX_PROFILE_SHA256,
+        "rawListenerProtected": listener_protected,
+    }
+    fingerprint = str(cache.get("fingerprint") or "")
+    runtime_version = command_version(BINARIES.get("mirai"))
+    runnable = bool(
+        model_ready and runtime_ready and listener_protected
+        and geometry.get("ready") is True
+    )
+    if not model_ready:
+        route_reason = str(cache.get("reason") or "The Uzu model download is incomplete.")
+    elif not runtime_ready:
+        route_reason = str(runtime.get("reason") or "A verified memory-safe Uzu runtime is required.")
+    elif not listener_protected:
+        route_reason = (
+            "Direct access to Uzu's unauthenticated raw loopback listener is not isolated."
+        )
+    elif geometry.get("ready") is not True:
+        route_reason = "The Uzu config does not expose a complete bounded attention geometry."
+    else:
+        route_reason = "Pinned local Qwen3.6 target and bundled DFlash draft are ready for Uzu Weaver decoding."
+    uzu_capability: dict[str, Any] = {
+        "runnable": runnable,
+        "reason": route_reason,
+        "mtp": False,
+        "mtpReason": "Uzu owns its bundled DFlash draft and Weaver verification tree; no MTP toggle is exposed.",
+        "dflash": False,
+        "dflashVersion": None,
+        "dflashReason": "DFlash + Weaver is fixed inside this Uzu artifact rather than exposed as a launcher toggle.",
+        "runtimeManagedAcceleration": "DFlash + Weaver",
+        "runtimeManagedAccelerationReady": runnable,
+        "preferredAcceleration": "off",
+        "fallbackAcceleration": "off",
+        "depth": 1,
+        "depthMax": 1,
+        "kv": False,
+        # This first qualified launcher route requires the packaged reasoning
+        # path. Keep the lower-level relay's disabled spelling available for a
+        # future separately qualified contract, but do not advertise it here.
+        "agentReasoning": ["auto"],
+        "codexReasoning": ["auto"],
+        # The current Uzu server accepts only a subset of the launcher's
+        # sampling contract and silently ignores seed and penalty controls.
+        # Expose model defaults rather than pretending all visible controls
+        # can be preserved end to end.
+        "customSampling": False,
+        "samplingReason": (
+            "This Uzu server can preserve the packaged model defaults, but not "
+            "the launcher's complete custom sampling contract."
+        ),
+        "contextWindows": list(UZU_SAFE_CONTEXT_WINDOWS),
+        "contextMaximum": max(UZU_SAFE_CONTEXT_WINDOWS),
+        "runtimeVersion": runtime_version,
+        "runtimeIdentity": copy.deepcopy(runtime),
+        "qualificationSystemContract": qualification_system_contract,
+        "modelRegistryId": UZU_MODEL_REGISTRY_ID,
+        "modelRepository": UZU_MODEL_REPOSITORY,
+        "modelCommit": UZU_MODEL_COMMIT,
+        "modelToolchainVersion": UZU_MODEL_TOOLCHAIN_VERSION,
+        "modelCacheContract": {
+            key: copy.deepcopy(cache.get(key))
+            for key in (
+                "ready", "path", "reason", "problems", "completedBytes",
+                "totalBytes", "progressPercent", "fingerprint", "manifestIdentity",
+            )
+        },
+        "benchmarkModelFingerprint": fingerprint,
+        "localBenchmark": None,
+        "localBenchmarks": [],
+        "benchmarkHistoryCount": 0,
+    }
+    if model_ready and fingerprint:
+        history = matching_benchmark_records(
+            benchmark_records, "uzu", fingerprint, runtime_version,
+            uzu_capability, machine_fingerprint or None,
+        )
+        benchmarks = latest_benchmark_records_by_identity(history)
+        uzu_capability["localBenchmarks"] = benchmarks
+        uzu_capability["benchmarkHistoryCount"] = len(history)
+        if benchmarks:
+            uzu_capability["localBenchmark"] = benchmarks[-1]
+            uzu_capability["preferredAccelerationSource"] = "local-benchmark"
+
+    unavailable: dict[str, dict[str, Any]] = {}
+    for backend_id, descriptor in ENGINE_ADAPTERS.items():
+        if backend_id == "uzu":
+            unavailable[backend_id] = uzu_capability
+            continue
+        unavailable[backend_id] = {
+            "runnable": False,
+            "reason": f"This is a Mirai/Uzu-native artifact, not a {descriptor.label} model folder.",
+            "mtp": False, "mtpReason": "No equivalent artifact is asserted.",
+            "dflash": False, "dflashVersion": None,
+            "dflashReason": "No equivalent artifact is asserted.",
+            "kv": False, "preferredAcceleration": "off", "fallbackAcceleration": "off",
+            "depth": 1, "depthMax": 1,
+            "agentReasoning": ["auto"], "codexReasoning": ["auto"],
+            "runtimeVersion": "Not applicable",
+            "benchmarkModelFingerprint": fingerprint,
+            "localBenchmark": None, "localBenchmarks": [], "benchmarkHistoryCount": 0,
+        }
+
+    total_weights = sum(
+        size for name, size, _crc in UZU_MODEL_FILE_MANIFEST
+        if name.endswith("model.safetensors")
+    )
+    progress = float(cache.get("progressPercent") or 0.0)
+    if model_ready and not runtime_ready:
+        status = "Downloaded · safe Uzu update required"
+    elif model_ready:
+        status = "Ready"
+    elif cache.get("activeMarkers"):
+        status = f"Downloading · {progress:.1f}%"
+    else:
+        status = str(cache.get("reason") or "Incomplete")
+    model_id = "uzu-" + hashlib.sha256(
+        UZU_MODEL_REGISTRY_ID.encode("utf-8")
+    ).hexdigest()[:24]
+    return [{
+        "id": model_id,
+        "name": "Qwen3.6 27B · Uzu DFlash + Weaver",
+        "path": str(cache.get("path") or ""),
+        "artifact": str(cache.get("path") or ""),
+        "origins": ["Mirai local catalog"],
+        "format": "Uzu · Mirai-M",
+        "architecture": "Qwen3.6 27B · hybrid DeltaNet/attention",
+        "modelType": "qwen3.6-uzu",
+        "rootModelType": "qwen3.6-uzu",
+        "textModelType": "qwen3.6-uzu",
+        # Preserve the architecture's advertised capacity in the catalog while
+        # keeping the independently enforced first-run choices in
+        # capability.contextWindows.  Conflating those two values makes a
+        # safety cap look like a limitation of the model itself.
+        "nativeContext": architecture_context or 262_144,
+        "architectureNativeContext": architecture_context or 262_144,
+        "contextWindows": list(UZU_SAFE_CONTEXT_WINDOWS),
+        "quantization": "Mirai-M 4-bit",
+        "size": total_weights,
+        "sizeLabel": display_size(total_weights),
+        "memoryGeometry": geometry,
+        "mtpSidecarSize": 0,
+        "ready": model_ready,
+        "status": status,
+        "mtp": {"declared": False, "integrated": False, "sidecar": False},
+        "templateReasoningEfforts": [],
+        "defaultSampling": default_sampling,
+        "lmKey": UZU_MODEL_REGISTRY_ID,
+        "uzuNative": True,
+        "uzuModelCache": copy.deepcopy(uzu_capability["modelCacheContract"]),
+        "backends": unavailable,
+    }]
+
+
 def scan_models() -> list[dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
     roots = model_roots()
@@ -9081,6 +9968,10 @@ def scan_models() -> list[dict[str, Any]]:
     ane_tuning_records = load_ane_tuning_records()
     machine_fingerprint = hardware_fingerprint() if benchmark_records or ane_tuning_records else ""
     installed_memory = physical_memory_bytes()
+    for uzu_model in uzu_model_records(
+        benchmark_records, machine_fingerprint or None,
+    ):
+        records[f"uzu:{uzu_model['id']}"] = uzu_model
     discovered: dict[tuple[int, int], dict[str, Any]] = {}
     for origin, root in roots:
         scanned_root = root.expanduser().absolute()
@@ -10142,6 +11033,15 @@ def public_binary_status() -> dict[str, dict[str, Any]]:
                 ),
                 "pleContract": contract,
             }
+        elif name == "mirai":
+            contract = uzu_runtime_contract(path)
+            result[name] = {
+                "installed": bool(path),
+                "launchReady": contract.get("ready") is True,
+                "path": path,
+                "version": command_version(path),
+                "uzuContract": contract,
+            }
         else:
             result[name] = {
                 "installed": bool(path), "path": path, "version": command_version(path),
@@ -10252,11 +11152,24 @@ def model_library_inventory(models: list[dict[str, Any]]) -> dict[str, Any]:
                 engine_status = "experimental" if experimental else "ready"
                 engine_reason = str(capability.get("reason") or "Ready")
 
+            fixed_uzu_route = bool(
+                engine_id == "uzu"
+                and capability.get("runtimeManagedAcceleration") == "DFlash + Weaver"
+            )
             modes = [{
-                "id": "ar", "label": "AR", "kind": "baseline",
+                "id": "ar",
+                "label": benchmark_public_mode_label(engine_id, "ar"),
+                "kind": "fixed-route" if fixed_uzu_route else "baseline",
                 "available": artifact_compatible,
-                "detail": "Standard autoregressive decoding",
+                "detail": (
+                    "Runtime-managed bundled DFlash draft and Weaver verification tree"
+                    if fixed_uzu_route else "Standard autoregressive decoding"
+                ),
             }]
+            if model.get("uzuNative") is True and engine_id != "uzu":
+                modes = []
+            if fixed_uzu_route and artifact_compatible:
+                accelerator_count += 1
             if capability.get("mtp") is True:
                 modes.append({
                     "id": "mtp", "label": "MTP", "kind": "accelerator",
@@ -10330,8 +11243,8 @@ def model_library_inventory(models: list[dict[str, Any]]) -> dict[str, Any]:
                 "savedRuns": history_count,
                 "latest": None if not benchmark else {
                     "winner": str(benchmark.get("winner") or ""),
-                    "winnerLabel": BenchmarkManager._mode_label(
-                        str(benchmark.get("winner") or "ar")
+                    "winnerLabel": benchmark_public_mode_label(
+                        engine_id, str(benchmark.get("winner") or "ar")
                     ),
                     "suite": str(benchmark.get("suite") or ""),
                     "createdAt": str(benchmark.get("createdAt") or ""),
@@ -10402,7 +11315,11 @@ def model_library_inventory(models: list[dict[str, Any]]) -> dict[str, Any]:
             checks.append({
                 "id": "acceleration", "label": "Acceleration evidence",
                 "state": "advisory",
-                "detail": "No verified speculative accelerator is available; standard AR remains valid.",
+                "detail": (
+                    "The fixed DFlash + Weaver route is not currently runnable."
+                    if model.get("uzuNative") is True else
+                    "No verified speculative accelerator is available; standard AR remains valid."
+                ),
             })
         elif evidence_count == 0:
             checks.append({
@@ -10434,6 +11351,8 @@ def model_library_inventory(models: list[dict[str, Any]]) -> dict[str, Any]:
             next_action = (
                 "Run Benchmark Lab before preferring an accelerator automatically."
                 if accelerator_count else
+                "Use the fixed DFlash + Weaver route after its runtime checks pass."
+                if model.get("uzuNative") is True else
                 "Use standard AR; no speculative speedup is claimed for this artifact."
             )
         else:
@@ -10514,6 +11433,32 @@ def fastest_safe_options(
     options = dict(current_options or {})
     before = dict(options)
     rationale: list[str] = []
+
+    if backend == "uzu":
+        options.update({"acceleration": "off", "depth": 1, "kv": "off"})
+        local_benchmark = verified_local_benchmark(capability, evidence)
+        local_verified = local_benchmark is not None
+        return {
+            "options": options,
+            "changedKeys": [],
+            "appliedKeys": [],
+            "preservedKeys": [
+                "model", "quantisation", "context", "output", "reasoning",
+                "sampling", "prompts", "tools",
+            ],
+            "evidenceTier": (
+                "local-benchmark" if local_verified else "pinned-uzu-speculative-route"
+            ),
+            "evidenceLabel": (
+                "Locally measured Uzu route" if local_verified else
+                "Pinned Uzu DFlash + Weaver route"
+            ),
+            "rationale": [
+                "Use the artifact's bundled DFlash draft and runtime-managed Weaver verification tree.",
+                "Keep prefix caching enabled while preserving model, reasoning, sampling, and full-precision KV semantics.",
+            ],
+            "dflashStatus": "DFlash + Weaver is fixed and owned by this Uzu artifact.",
+        }
 
     preferred = capability.get("preferredAcceleration")
     local_benchmark = verified_local_benchmark(capability, evidence)
@@ -10828,6 +11773,7 @@ def validate_runtime_context(backend: str, context: int) -> None:
         MFERENCE_CONTEXT_WINDOWS if backend == "mference" else
         WHALLM_CONTEXT_WINDOWS if backend == "whallm" else
         (LLAMACPP_PLE_CONTEXT,) if backend == "llamacpp" else
+        UZU_SAFE_CONTEXT_WINDOWS if backend == "uzu" else
         None
     )
     if choices_for_backend is None:
@@ -11886,7 +12832,7 @@ def optimal_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> di
         raise ValueError("An engine comparison cannot be applied as a current-route result.")
     backend = str(payload.get("backend", ""))
     if backend not in ENGINE_ADAPTERS or backend not in OPTIMIZER_KEYS:
-        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, Whallm, or llama.cpp SSD PLE.")
+        raise ValueError("Choose oMLX, LM Studio, MTPLX, Uzu, FreeToken, SwiftLM, Mference, Whallm, or llama.cpp SSD PLE.")
     client = str(payload.get("client", ""))
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose Pi, OpenCode, Codex, or Chat.")
@@ -12004,6 +12950,7 @@ def optimizer_backend_eligibility(
         "omlx": {"off", "q8", "q6", "q4"},
         "lmstudio": {"off"},
         "mtplx": {"off", "q8", "q4"},
+        "uzu": {"off"},
         "freetoken": {"off"},
         "swiftlm": {"off"},
         "mference": {"off"},
@@ -12158,6 +13105,7 @@ def _llamacpp_route_qualification_capability(
 
 def route_qualification_spec(
     model: dict[str, Any], backend: str | None = None,
+    context: int | None = None,
 ) -> dict[str, Any] | None:
     """Describe one exact single-route qualification without inventing peers."""
     selected = str(backend or "")
@@ -12188,6 +13136,35 @@ def route_qualification_spec(
             "memoryCeilingBytes": LLAMACPP_PLE_MEMORY_CEILING_BYTES,
             "routeLabel": "llama.cpp SSD-PLE 8K route",
         }
+    if selected in {"", "uzu"} and model.get("uzuNative") is True:
+        capability = model.get("backends", {}).get("uzu", {})
+        exact_context = (
+            int(context)
+            if isinstance(context, int) and not isinstance(context, bool)
+            else UZU_SAFE_CONTEXT_WINDOWS[0]
+        )
+        suites = {
+            16_384: ROUTE_QUALIFICATION_UZU_16K_SUITE,
+            32_768: ROUTE_QUALIFICATION_UZU_32K_SUITE,
+        }
+        if (
+            capability.get("runnable") is True
+            and capability.get("runtimeManagedAcceleration") == "DFlash + Weaver"
+            and exact_context in suites
+        ):
+            context_k = exact_context // 1024
+            return {
+                "id": f"qwen36-uzu-dflash-weaver-{context_k}k-v1",
+                "version": 1, "scope": "route",
+                "clientAgnostic": False, "client": "chat",
+                "backend": "uzu", "mode": "ar",
+                "modeLabel": "Fixed DFlash + Weaver",
+                "suite": suites[exact_context], "context": exact_context,
+                "reasoningPolicy": "runtime-default-on",
+                "toolProbeRequired": False, "memoryProofRequired": True,
+                "memoryCeilingBytes": UZU_PROCESS_MEMORY_CEILING_BYTES,
+                "routeLabel": f"Uzu DFlash + Weaver {context_k}K route",
+            }
     return None
 
 
@@ -12207,6 +13184,24 @@ def route_qualification_reasoning_contract(
             ),
             "changesVisibleSettingWhenApplied": False,
             "reasoningEnabled": True, "runtimeControlled": True,
+        }
+    if spec["reasoningPolicy"] == "runtime-default-on":
+        requested = str(payload.get("reasoning") or "auto")
+        enabled = requested == "auto"
+        return {
+            "policy": "runtime-default-reasoning-on",
+            "requested": requested, "measured": "auto",
+            "normalized": False,
+            "normalizedFor": [], "normalizedForLabels": [],
+            "label": "Model default · reasoning on",
+            "detail": (
+                "This first Uzu launcher route exposes only the artifact's packaged "
+                "reasoning path; Auto measures that exact model-default behavior."
+                if enabled else
+                "Turn reasoning on (Auto) before qualifying this Uzu route."
+            ),
+            "changesVisibleSettingWhenApplied": False,
+            "reasoningEnabled": enabled, "runtimeControlled": True,
         }
     return qwen_ple_route_qualification_reasoning_contract(payload, model)
 
@@ -12284,6 +13279,94 @@ def apply_route_qualification_budget(job: dict[str, Any]) -> None:
 
 # Compatibility name for older callers and tests while both route specs share the budget.
 apply_qwen_ple_route_qualification_budget = apply_route_qualification_budget
+
+
+def build_route_qualification_contract(
+    spec: dict[str, Any], request: dict[str, Any], capability: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind a qualification receipt to the exact runtime, artifact, and route."""
+    backend = str(spec["backend"])
+    contract: dict[str, Any] = {
+        "id": spec["id"], "version": spec["version"], "backend": backend,
+        "exactContext": int(request["context"]),
+        "scenarioContract": list(ROUTE_QUALIFICATION_SCENARIOS),
+        "sampleMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+        "answerReserveTokens": ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS,
+        "minimumDecodeTokensPerSecond": (
+            LLAMACPP_PLE_MINIMUM_DECODE_TPS if backend == "llamacpp" else
+            UZU_QUALIFICATION_MINIMUM_DECODE_TPS if backend == "uzu" else None
+        ),
+        "thinkingBudgetTokens": (
+            ROUTE_QUALIFICATION_THINKING_TOKENS if backend == "llamacpp" else None
+        ),
+        "reasoningPolicy": spec["reasoningPolicy"],
+        "toolProbeRequired": spec["toolProbeRequired"],
+        "memoryProofRequired": spec["memoryProofRequired"],
+        "memoryCeilingBytes": spec.get("memoryCeilingBytes"),
+        "receiptFingerprint": capability.get("receiptFingerprint"),
+        "runtimeVersion": capability.get("runtimeVersion"),
+    }
+    if backend == "llamacpp":
+        contract.update({
+            "scope": "route",
+            "clientAgnostic": True,
+            "minimumCompletionTokens": ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS,
+            "configuredOutputLimit": int(request["output"]),
+            "measuredRequestMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+            "reasoningBoundaryContractId": LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID,
+            "reasoningBudgetMessageSha256": hashlib.sha256(
+                LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
+            ).hexdigest(),
+        })
+    elif backend == "uzu":
+        runtime_identity = capability.get("runtimeIdentity")
+        binary = (
+            runtime_identity.get("binary")
+            if isinstance(runtime_identity, dict) else None
+        )
+        runtime_sha = binary.get("sha256") if isinstance(binary, dict) else None
+        model_fingerprint = capability.get("benchmarkModelFingerprint")
+        if (
+            not isinstance(runtime_sha, str)
+            or re.fullmatch(r"[0-9a-f]{64}", runtime_sha) is None
+            or not isinstance(model_fingerprint, str)
+            or re.fullmatch(r"[0-9a-f]{64}", model_fingerprint) is None
+            or capability.get("modelRegistryId") != UZU_MODEL_REGISTRY_ID
+            or capability.get("modelCommit") != UZU_MODEL_COMMIT
+            or capability.get("modelToolchainVersion") != UZU_MODEL_TOOLCHAIN_VERSION
+            or not uzu_listener_protection_ready(runtime_identity)
+            or capability.get("qualificationSystemContract", {}).get(
+                "rawListenerProtected"
+            ) is not True
+        ):
+            raise ValueError(
+                "The Uzu route no longer has a complete runtime and model receipt. Refresh models."
+            )
+        contract.update({
+            "scope": "route", "clientAgnostic": False, "client": "chat",
+            "minimumCompletionTokens": ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS,
+            "configuredOutputLimit": int(request["output"]),
+            "measuredRequestMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+            "modelFingerprint": model_fingerprint,
+            "modelRegistryId": UZU_MODEL_REGISTRY_ID,
+            "modelCommit": UZU_MODEL_COMMIT,
+            "modelToolchainVersion": UZU_MODEL_TOOLCHAIN_VERSION,
+            "runtimeBinarySha256": runtime_sha,
+            "sandboxProfileSha256": UZU_SANDBOX_PROFILE_SHA256,
+            "rawListenerProtected": True,
+            "fixedAcceleration": "DFlash + Weaver",
+            "kvStateDataType": "BF16",
+            "prefixCache": True,
+            "osReservePolicy": "max-4gib-or-10-percent-total-v1",
+            "osReserveMinimumBytes": SESSION_OS_RESERVE_MIN_BYTES,
+            "osReserveBytes": max(
+                SESSION_OS_RESERVE_MIN_BYTES,
+                round(physical_memory_bytes() * SESSION_OS_RESERVE_FRACTION),
+            ),
+        })
+        # For Uzu the model manifest itself is the receipt fingerprint.
+        contract["receiptFingerprint"] = model_fingerprint
+    return contract
 
 
 def cross_engine_benchmark_measurement(
@@ -12912,6 +13995,7 @@ def _optimizer_with_forced_record(
 def engine_selection_next_action(
     action: str, preference: str, backend: str, client: str, reason: str,
     missing_engines: list[dict[str, Any]] | None = None,
+    recommended_suite: str | None = None,
 ) -> dict[str, Any]:
     """Return a stable UI handoff without performing the suggested action."""
     if action not in {"apply", "keep-current", "calibrate"}:
@@ -12932,9 +14016,32 @@ def engine_selection_next_action(
         "requiresCalibration": action == "calibrate",
         "requiresConsent": False,
         "requiresReview": action == "calibrate",
-        "recommendedSuite": "standard" if client == "chat" else "agentic",
+        "recommendedSuite": recommended_suite or (
+            "standard" if client == "chat" else "agentic"
+        ),
         "missingEngines": copy.deepcopy(missing_engines or []),
     }
+
+
+def benchmark_public_mode_label(backend: str, mode: Any) -> str:
+    """Name an internal measurement lane without mislabelling fixed routes."""
+    route = str(mode or "ar")
+    if backend == "uzu" and route == "ar":
+        return "Fixed DFlash + Weaver"
+    return BenchmarkManager._mode_label(route)
+
+
+def route_qualification_engine_reason(backend: str) -> str:
+    """Describe the one route being qualified without exposing its internal lane id."""
+    if backend == "uzu":
+        return (
+            "Runs the exact fixed DFlash + Weaver route with packaged reasoning and "
+            "requires both reasoning and final-answer output."
+        )
+    return (
+        "Runs the exact PLE mmap AR route with explicit reasoning and requires both "
+        "reasoning and final-answer output."
+    )
 
 
 def benchmark_mode_summary(
@@ -12943,6 +14050,11 @@ def benchmark_mode_summary(
     """Explain which verified routes an exact model artifact can actually compare."""
     capability = model.get("backends", {}).get(backend, {})
     tested = [str(mode) for mode in modes if str(mode) in {"ar", "mtp", "dflash2"}]
+    if backend == "uzu":
+        return (
+            "Measures Uzu's one fixed DFlash + Weaver route with its bundled draft and prefix cache. "
+            "The internal speculative controls stay runtime-owned so calibration measures the real published path."
+        )
     if backend in SSD_STREAMING_BACKENDS:
         return (
             "Runs exact native expert routing through SSD streaming. The fresh-process first turn, "
@@ -12973,6 +14085,8 @@ def benchmark_acceleration_reason(
 ) -> str:
     """Return a compact, truthful reason when an engine can measure only AR."""
     tested = {str(mode) for mode in modes}
+    if backend == "uzu":
+        return "Runtime-managed DFlash + Weaver with bundled draft and prefix cache"
     if tested.intersection({"mtp", "dflash2"}):
         return ""
     capability = model.get("backends", {}).get(backend, {})
@@ -13025,6 +14139,8 @@ def benchmark_engine_settings_label(backend: str, settings: Any) -> str:
         return f"Verified .gturbo streaming · {cache} · queue {queue}"
     if backend == "whallm":
         return "Full 512-expert SSD stream · Whallm-owned MXFP4"
+    if backend == "uzu":
+        return "Bundled DFlash draft · Weaver tree verification · prefix cache"
     return ""
 
 
@@ -13034,6 +14150,8 @@ def benchmark_route_settings_label(
     """Describe the exact winning accelerator controls without exposing raw JSON."""
     route = str(mode or "ar")
     values = settings if isinstance(settings, dict) else {}
+    if backend == "uzu" and route == "ar":
+        return "Fixed DFlash + Weaver"
     if route == "mtp":
         depth = values.get("depth")
         if isinstance(depth, int) and not isinstance(depth, bool):
@@ -13344,7 +14462,7 @@ def route_qualification_metrics(
     if (
         record.get("kind") != "route-qualification"
         or record.get("qualificationVersion") != ROUTE_QUALIFICATION_VERSION
-        or backend not in {"omlx", "llamacpp"}
+        or backend not in {"omlx", "llamacpp", "uzu"}
         or record.get("winner") != "ar"
         or record.get("comparedModes") != ["ar"]
     ):
@@ -13580,6 +14698,186 @@ def route_qualification_metrics(
             "reasoningBoundaryVerified": True,
             "reasoningBoundaryContractId": LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID,
         })
+    elif backend == "uzu":
+        telemetry = route.get("resourceTelemetry") if isinstance(route, dict) else None
+        unload = record.get("unloadEvidence")
+        correctness = record.get("correctnessContract")
+        exact_context = contract.get("exactContext") if isinstance(contract, dict) else None
+        suites = {
+            16_384: ROUTE_QUALIFICATION_UZU_16K_SUITE,
+            32_768: ROUTE_QUALIFICATION_UZU_32K_SUITE,
+        }
+        expected_id = (
+            f"qwen36-uzu-dflash-weaver-{int(exact_context) // 1024}k-v1"
+            if isinstance(exact_context, int) and not isinstance(exact_context, bool)
+            and exact_context in suites else ""
+        )
+        expected_correctness_hash = hashlib.sha256(
+            UZU_QUALIFICATION_CORRECTNESS_EXPECTED.encode("utf-8")
+        ).hexdigest()
+        checked_ports = unload.get("checkedPorts") if isinstance(unload, dict) else None
+        closed_ports = unload.get("closedPorts") if isinstance(unload, dict) else None
+        valid_checked_ports = bool(
+            isinstance(checked_ports, list)
+            and checked_ports
+            and len(checked_ports) == len(set(checked_ports))
+            and all(
+                isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65_535
+                for port in checked_ports
+            )
+        )
+        sample_count = telemetry.get("sampleCount") if isinstance(telemetry, dict) else None
+        memory_count = telemetry.get("memorySampleCount") if isinstance(telemetry, dict) else None
+        total_memory = telemetry.get("totalMemoryBytes") if isinstance(telemetry, dict) else None
+        minimum_percent = telemetry.get("minimumHeadroomPercent") if isinstance(telemetry, dict) else None
+        minimum_headroom = telemetry.get("minimumHeadroomBytes") if isinstance(telemetry, dict) else None
+        if (
+            minimum_headroom is None
+            and isinstance(total_memory, int) and not isinstance(total_memory, bool)
+            and isinstance(minimum_percent, (int, float)) and not isinstance(minimum_percent, bool)
+        ):
+            minimum_headroom = round(total_memory * float(minimum_percent) / 100)
+        required_reserve = (
+            max(
+                SESSION_OS_RESERVE_MIN_BYTES,
+                round(int(total_memory) * SESSION_OS_RESERVE_FRACTION),
+            )
+            if isinstance(total_memory, int) and not isinstance(total_memory, bool)
+            and total_memory > 0 else None
+        )
+        group_peak = (
+            telemetry.get("peakProcessGroupPhysicalFootprintBytes")
+            if isinstance(telemetry, dict) else None
+        )
+        runtime_sha = contract.get("runtimeBinarySha256") if isinstance(contract, dict) else None
+        model_fingerprint = contract.get("modelFingerprint") if isinstance(contract, dict) else None
+        if (
+            not isinstance(contract, dict)
+            or not expected_id
+            or contract.get("id") != expected_id
+            or contract.get("version") != 1
+            or contract.get("scope") != "route"
+            or contract.get("clientAgnostic") is not False
+            or contract.get("client") != "chat"
+            or contract.get("backend") != "uzu"
+            or record.get("client") != "chat"
+            or record.get("reasoning") != "auto"
+            or record.get("targetKV") != "off"
+            or record.get("suite") != suites.get(exact_context)
+            or record.get("contextMin") != exact_context
+            or record.get("contextMax") != exact_context
+            or record.get("scenarioContract") != ROUTE_QUALIFICATION_SCENARIOS
+            or isinstance(contract.get("configuredOutputLimit"), bool)
+            or not isinstance(contract.get("configuredOutputLimit"), int)
+            or contract.get("configuredOutputLimit") < ROUTE_QUALIFICATION_MAX_TOKENS
+            or record.get("configuredOutputLimit") != contract.get("configuredOutputLimit")
+            or record.get("measuredRequestMaxTokens") != ROUTE_QUALIFICATION_MAX_TOKENS
+            or record.get("outputMin") != ROUTE_QUALIFICATION_MAX_TOKENS
+            or record.get("outputMax") != ROUTE_QUALIFICATION_MAX_TOKENS
+            or contract.get("measuredRequestMaxTokens") != ROUTE_QUALIFICATION_MAX_TOKENS
+            or contract.get("scenarioContract") != ROUTE_QUALIFICATION_SCENARIOS
+            or contract.get("sampleMaxTokens") != ROUTE_QUALIFICATION_MAX_TOKENS
+            or contract.get("answerReserveTokens") != ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS
+            or contract.get("minimumCompletionTokens")
+            != ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS
+            or contract.get("minimumDecodeTokensPerSecond")
+            != UZU_QUALIFICATION_MINIMUM_DECODE_TPS
+            or contract.get("thinkingBudgetTokens") is not None
+            or contract.get("reasoningPolicy") != "runtime-default-on"
+            or contract.get("toolProbeRequired") is not False
+            or contract.get("memoryProofRequired") is not True
+            or contract.get("memoryCeilingBytes") != UZU_PROCESS_MEMORY_CEILING_BYTES
+            or contract.get("osReservePolicy") != "max-4gib-or-10-percent-total-v1"
+            or contract.get("osReserveMinimumBytes") != SESSION_OS_RESERVE_MIN_BYTES
+            or required_reserve is None
+            or contract.get("osReserveBytes") != required_reserve
+            or not isinstance(model_fingerprint, str)
+            or re.fullmatch(r"[0-9a-f]{64}", model_fingerprint) is None
+            or contract.get("receiptFingerprint") != model_fingerprint
+            or record.get("modelFingerprint") != model_fingerprint
+            or contract.get("modelRegistryId") != UZU_MODEL_REGISTRY_ID
+            or contract.get("modelCommit") != UZU_MODEL_COMMIT
+            or contract.get("modelToolchainVersion") != UZU_MODEL_TOOLCHAIN_VERSION
+            or not isinstance(runtime_sha, str)
+            or re.fullmatch(r"[0-9a-f]{64}", runtime_sha) is None
+            or contract.get("sandboxProfileSha256") != UZU_SANDBOX_PROFILE_SHA256
+            or contract.get("rawListenerProtected") is not True
+            or contract.get("fixedAcceleration") != "DFlash + Weaver"
+            or contract.get("kvStateDataType") != "BF16"
+            or contract.get("prefixCache") is not True
+            or not isinstance(contract.get("runtimeVersion"), str)
+            or not contract["runtimeVersion"].strip()
+            or contract.get("runtimeVersion") != record.get("runtimeVersion")
+            or not isinstance(telemetry, dict)
+            or telemetry.get("samplingComplete") is not True
+            or not isinstance(sample_count, int) or isinstance(sample_count, bool)
+            or sample_count <= 0
+            or telemetry.get("memoryAvailable") is not True
+            or telemetry.get("memorySource") != "memory_pressure -Q"
+            or memory_count != sample_count
+            or not isinstance(minimum_percent, (int, float))
+            or isinstance(minimum_percent, bool)
+            or not math.isfinite(float(minimum_percent))
+            or not 0 <= float(minimum_percent) <= 100
+            or not isinstance(minimum_headroom, int) or isinstance(minimum_headroom, bool)
+            or minimum_headroom < required_reserve
+            or telemetry.get("processFootprintAvailable") is not True
+            or telemetry.get("processFootprintSource") != "proc_pid_rusage RUSAGE_INFO_V4"
+            or telemetry.get("processGroupFootprintAvailable") is not True
+            or not isinstance(telemetry.get("processAliveSampleCount"), int)
+            or isinstance(telemetry.get("processAliveSampleCount"), bool)
+            or telemetry.get("processAliveSampleCount") <= 0
+            or telemetry.get("processAliveSampleCount")
+            != telemetry.get("processFootprintSampleCount")
+            or telemetry.get("processAliveSampleCount")
+            != telemetry.get("processGroupFootprintSampleCount")
+            or not isinstance(telemetry.get("processGroupMemberCountMinimum"), int)
+            or isinstance(telemetry.get("processGroupMemberCountMinimum"), bool)
+            or telemetry.get("processGroupMemberCountMinimum") < 1
+            or not isinstance(telemetry.get("processGroupMemberCountMaximum"), int)
+            or isinstance(telemetry.get("processGroupMemberCountMaximum"), bool)
+            or telemetry.get("processGroupMemberCountMaximum")
+            < telemetry.get("processGroupMemberCountMinimum")
+            or not isinstance(group_peak, int) or isinstance(group_peak, bool)
+            or not 0 < group_peak < UZU_PROCESS_MEMORY_CEILING_BYTES
+            or reasoning_turns != len(ROUTE_QUALIFICATION_SCENARIOS)
+            or answer_turns != len(ROUTE_QUALIFICATION_SCENARIOS)
+            or any(speed < UZU_QUALIFICATION_MINIMUM_DECODE_TPS for speed in decode)
+            or any(
+                sample.get("requestedMaxTokens") != ROUTE_QUALIFICATION_MAX_TOKENS
+                or int(sample["completionTokens"]) < ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS
+                or int(sample["completionTokens"]) > ROUTE_QUALIFICATION_MAX_TOKENS
+                or int(sample["promptTokens"]) + ROUTE_QUALIFICATION_MAX_TOKENS
+                > int(exact_context)
+                for sample in samples
+            )
+            or not isinstance(correctness, dict)
+            or correctness.get("id") != UZU_QUALIFICATION_CORRECTNESS_ID
+            or correctness.get("expectedAnswerSha256") != expected_correctness_hash
+            or correctness.get("observedAnswerSha256") != expected_correctness_hash
+            or correctness.get("exact") is not True
+            or correctness.get("terminalComplete") is not True
+            or correctness.get("authoritativeUsage") is not True
+            or not isinstance(unload, dict) or unload.get("clean") is not True
+            or unload.get("processExited") is not True
+            or unload.get("processGroupExited") is not True
+            or unload.get("managerIdle") is not True
+            or unload.get("portsClosed") is not True
+            or not valid_checked_ports
+            or closed_ports != checked_ports
+        ):
+            return None
+        result.update({
+            "peakMemoryBytes": group_peak,
+            "minimumSystemHeadroomBytes": minimum_headroom,
+            "systemReserveBytes": required_reserve,
+            "toolContractVerified": False,
+            "cleanUnloadVerified": True,
+            "correctnessVerified": True,
+            "correctnessContractId": UZU_QUALIFICATION_CORRECTNESS_ID,
+            "reasoningBoundaryVerified": False,
+            "reasoningBoundaryContractId": None,
+        })
     return result
 
 
@@ -13587,7 +14885,13 @@ def verified_route_qualification(
     model: dict[str, Any], backend: str, evidence: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Return only a complete local receipt-bound single-route qualification."""
-    spec = route_qualification_spec(model, backend)
+    requested_context = (evidence or {}).get("context")
+    spec = route_qualification_spec(
+        model, backend,
+        requested_context
+        if isinstance(requested_context, int) and not isinstance(requested_context, bool)
+        else None,
+    )
     if spec is None:
         return None
     capability = model.get("backends", {}).get(backend, {})
@@ -13628,7 +14932,13 @@ def public_route_qualification_result(
 ) -> dict[str, Any]:
     """Expose one qualified route without presenting it as a competition winner."""
     backend = str(record.get("backend") or "")
-    spec = route_qualification_spec(model, backend)
+    record_context = record.get("contextMin")
+    spec = route_qualification_spec(
+        model, backend,
+        record_context
+        if isinstance(record_context, int) and not isinstance(record_context, bool)
+        else None,
+    )
     measurement = cross_engine_benchmark_measurement(record)
     metrics = route_qualification_metrics(record, spec) if spec else None
     if measurement is None or metrics is None:
@@ -13638,18 +14948,26 @@ def public_route_qualification_result(
     )
     return {
         "backend": backend, "label": BACKEND_LABELS[backend],
-        "qualified": True, "mode": "ar", "modeLabel": "AR",
+        "qualified": True, "mode": "ar",
+        "modeLabel": "Fixed DFlash + Weaver" if backend == "uzu" else "AR",
         "testedModes": ["ar"],
         "modeDetail": (
             "Qualified the exact receipt-bound llama.cpp SSD-PLE 8K route with a clean forced-"
             "reasoning handoff, final-answer output, Jinja tools, bounded memory, and clean unload."
             if backend == "llamacpp" else
+            "Qualified the exact Uzu DFlash + Weaver route at this context with packaged "
+            "reasoning, authoritative usage, bounded memory, and clean unload."
+            if backend == "uzu" else
             "Qualified the exact Qwen PLE mmap autoregressive route with separate reasoning and final-answer output."
         ),
         "settingsLabel": benchmark_engine_settings_label(
             backend, record.get("engineSettings"),
         ),
-        "routeSettingsLabel": "SSD PLE · exact 8K" if backend == "llamacpp" else "AR · PLE mmap",
+        "routeSettingsLabel": (
+            "SSD PLE · exact 8K" if backend == "llamacpp" else
+            f"Fixed DFlash + Weaver · exact {int(record.get('contextMin') or 0) // 1024}K"
+            if backend == "uzu" else "AR · PLE mmap"
+        ),
         "display": measurement["display"],
         "profileDisplay": profile_display if value is not None else measurement["display"],
         "firstTokenSeconds": measurement.get("firstTokenSeconds"),
@@ -13715,7 +15033,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
     eligible: list[str] = []
     excluded: list[dict[str, str]] = []
     ssd_profile = model.get("ssdStreaming") if isinstance(model.get("ssdStreaming"), dict) else {}
-    selected_spec = route_qualification_spec(model, current_backend)
+    selected_spec = route_qualification_spec(model, current_backend, context)
     candidate_backends = (
         (current_backend,) if selected_spec is not None else
         ssd_profile_candidate_backends(ssd_profile)
@@ -13816,6 +15134,9 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
                 "enginePreference": preference,
                 "engineNextAction": engine_selection_next_action(
                     "keep-current", preference, current_backend, client, reason,
+                    recommended_suite=(
+                        str(selected_spec["suite"]) if selected_spec else None
+                    ),
                 ),
                 "settingsEvidenceTier": result.get("evidenceTier"),
                 "settingsEvidenceLabel": result.get("evidenceLabel"),
@@ -13824,7 +15145,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             })
             result["rationale"] = result["engineRationale"] + list(result.get("rationale") or [])
             return result
-        route_spec = route_qualification_spec(model, current_backend)
+        route_spec = route_qualification_spec(model, current_backend, context)
         route_qualification_needed = route_spec is not None
         reason = (
             f"{route_spec['routeLabel']} is the only honest route for this exact checkpoint. "
@@ -13851,6 +15172,9 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             "engineNextAction": engine_selection_next_action(
                 "calibrate" if route_qualification_needed else "keep-current",
                 preference, current_backend, client, reason,
+                recommended_suite=(
+                    str(route_spec["suite"]) if route_spec else None
+                ),
             ),
         })
         current["rationale"] = current["engineRationale"] + list(current.get("rationale") or [])
@@ -14451,6 +15775,21 @@ def validated_profile_options(
             "profile": _profile_choice(raw, "profile", str(capability.get("profile") or "sustained"), {"stable", "performance-cold", "sustained", "turbo", "exact"}, "MTPLX runtime profile"),
             "fan": _profile_choice(raw, "fan", "smart", {"default", "smart", "max"}, "MTPLX cooling mode"),
         }
+    if backend == "uzu":
+        acceleration = _profile_choice(
+            raw, "acceleration", "off", {"off"}, "Uzu acceleration",
+        )
+        depth = _profile_integer(raw.get("depth"), 1, 1, 1, "Uzu draft depth")
+        kv = _profile_choice(raw, "kv", "off", {"off"}, "Uzu KV precision")
+        forbidden = {
+            "dflashVerify", "dflashDraftQuant", "draftModel", "mtp",
+            "weaverWidth", "weaverDepth", "speculatorPath",
+        }
+        if any(key in raw and raw.get(key) not in (None, False, "", "off") for key in forbidden):
+            raise ValueError(
+                "This Uzu artifact owns its bundled DFlash draft and Weaver tree; those controls are not safely overrideable."
+            )
+        return {"acceleration": acceleration, "depth": depth, "kv": kv}
     if backend == "freetoken":
         return validated_freetoken_options(
             capability, raw, require_experimental_consent=False,
@@ -15246,7 +16585,9 @@ def benchmark_history_request(
                 "backend": item["backend"], "label": BACKEND_LABELS[item["backend"]],
                 "recordId": str(item["record"].get("id") or ""),
                 "mode": str(item["record"].get("winner") or "ar"),
-                "modeLabel": BenchmarkManager._mode_label(str(item["record"].get("winner") or "ar")),
+                "modeLabel": benchmark_public_mode_label(
+                    str(item["backend"]), str(item["record"].get("winner") or "ar")
+                ),
                 "value": value, "valueDisplay": value_display,
                 "lowerIsBetter": lower_is_better,
                 "workloadDisplay": item["display"],
@@ -15324,7 +16665,9 @@ def benchmark_history_request(
             "id": record.get("id"), "createdAt": record.get("createdAt"),
             "backend": backend, "backendLabel": BACKEND_LABELS[backend],
             "winner": record.get("winner"),
-            "winnerLabel": BenchmarkManager._mode_label(str(record.get("winner") or "ar")),
+            "winnerLabel": benchmark_public_mode_label(
+                backend, str(record.get("winner") or "ar")
+            ),
             "display": measurement["display"],
             "firstTokenSeconds": measurement.get("firstTokenSeconds"),
             "peakPressureDeltaBytes": measurement.get("peakPressureDeltaBytes"),
@@ -16491,7 +17834,7 @@ def normalized_request(
     client = str(payload.get("client", ""))
     mode = str(payload.get("mode", "custom"))
     if backend not in ENGINE_ADAPTERS:
-        raise ValueError("Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, Whallm, or llama.cpp SSD PLE.")
+        raise ValueError("Choose oMLX, LM Studio, MTPLX, Uzu, FreeToken, SwiftLM, Mference, Whallm, or llama.cpp SSD PLE.")
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose Pi, OpenCode, Codex, or Chat.")
     if client == "chat":
@@ -16565,7 +17908,7 @@ def normalized_request(
         port = free_port(preferred)
     run_id = str(uuid.uuid4())
     options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
-    if backend == "llamacpp" and purpose in {"session", "route-check"}:
+    if backend in {"llamacpp", "uzu"} and purpose in {"session", "route-check"}:
         qualification_evidence = optimizer_evidence(
             model, context, output, client, reasoning,
             str(options.get("kv") or "off"), chat,
@@ -16574,6 +17917,11 @@ def normalized_request(
             qualification_evidence, model, options, [backend],
         )
         if verified_route_qualification(model, backend, qualification_evidence) is None:
+            if backend == "uzu":
+                raise ValueError(
+                    "This exact Uzu DFlash + Weaver context needs a fresh successful local "
+                    "qualification before ordinary inference can start."
+                )
             raise ValueError(
                 "This exact llama.cpp SSD-PLE route needs a fresh successful local qualification "
                 "before ordinary inference can start."
@@ -17034,6 +18382,103 @@ def build_mtplx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
         plan.engine_env["MTPLX_THINKING_BUDGET"] = str(effective_budget)
         if effective_budget < THINKING_BUDGETS[reasoning_effort]:
             plan.warnings.append("The selected response ceiling is too small for the full reasoning budget; half is reserved for the answer/tool call.")
+
+
+def _uzu_engine_argv(plan: LaunchPlan, binary: Path) -> list[str]:
+    return [
+        str(UZU_SANDBOX_EXECUTABLE),
+        "-p", UZU_NETWORK_SANDBOX_PROFILE,
+        str(binary),
+        "server",
+        "--model", UZU_MODEL_REGISTRY_ID,
+        "--host", "127.0.0.1",
+        "--port", str(plan.port),
+        "--prefix-cache",
+    ]
+
+
+def _validated_uzu_route(
+    plan: LaunchPlan, cap: dict[str, Any], *, verify_argv: bool = False,
+) -> tuple[Path, dict[str, Any], dict[str, Any], tuple[str, str]]:
+    """Rebind launch to the exact model receipts and safe runtime bytes."""
+    if plan.model.get("uzuNative") is not True:
+        raise ValueError("This model is not a pinned Uzu-native artifact.")
+    binary_value = plan.runtime_binary or BINARIES.get("mirai")
+    runtime = uzu_runtime_contract(binary_value)
+    if runtime.get("ready") is not True:
+        raise ValueError(str(runtime.get("reason") or "A verified memory-safe Uzu runtime is required."))
+    if not uzu_listener_protection_ready(runtime):
+        raise ValueError(
+            "Direct access to Uzu's raw loopback listener is not protected; "
+            "the bounded launcher relay cannot be trusted."
+        )
+    try:
+        binary = Path(str(binary_value)).expanduser().resolve(strict=True)
+        model_path = Path(str(plan.model.get("path") or "")).expanduser().resolve(strict=True)
+    except OSError as error:
+        raise ValueError("The Uzu executable or model cache moved after the model scan.") from error
+    cache = _uzu_model_cache_contract()
+    if cache is None or cache.get("ready") is not True:
+        raise ValueError(str((cache or {}).get("reason") or "The pinned Uzu model is incomplete."))
+    try:
+        current_model_path = Path(str(cache["path"])).resolve(strict=True)
+    except OSError as error:
+        raise ValueError("The pinned Uzu model cache moved after validation.") from error
+    scanned_fingerprint = str(cap.get("benchmarkModelFingerprint") or "")
+    current_fingerprint = str(cache.get("fingerprint") or "")
+    if (
+        model_path != current_model_path
+        or not scanned_fingerprint
+        or not current_fingerprint
+        or not secrets.compare_digest(scanned_fingerprint, current_fingerprint)
+        or cap.get("modelRegistryId") != UZU_MODEL_REGISTRY_ID
+        or cap.get("modelCommit") != UZU_MODEL_COMMIT
+        or cap.get("modelToolchainVersion") != UZU_MODEL_TOOLCHAIN_VERSION
+    ):
+        raise ValueError("The pinned Uzu model files or catalog receipt changed. Rescan models.")
+    if plan.context not in UZU_SAFE_CONTEXT_WINDOWS:
+        choices = ", ".join(f"{value:,}" for value in UZU_SAFE_CONTEXT_WINDOWS)
+        raise ValueError(f"The first Uzu qualification permits only these bounded contexts: {choices}.")
+    options = validated_profile_options("uzu", plan.model, cap, plan.options)
+    expected = _uzu_engine_argv(plan, binary)
+    if verify_argv and (
+        plan.engine_argv != expected
+        or plan.engine_env
+        or any(key.startswith("DYLD_") for key in plan.engine_env)
+    ):
+        raise ValueError("The fixed local-only Uzu launch contract changed after validation.")
+    binary_sha = str(runtime.get("binary", {}).get("sha256") or "")
+    return binary, runtime, cache, (binary_sha, current_fingerprint)
+
+
+def build_uzu(plan: LaunchPlan, cap: dict[str, Any]) -> None:
+    binary, _runtime, _cache, _identities = _validated_uzu_route(plan, cap)
+    options = validated_profile_options("uzu", plan.model, cap, plan.options)
+    plan.options.update(options)
+    plan.model["servedId"] = UZU_MODEL_REGISTRY_ID
+    plan.engine_argv = _uzu_engine_argv(plan, binary)
+    plan.engine_env = {}
+    plan.warnings.extend([
+        "Uzu owns the bundled DFlash draft and Weaver verification tree; the launcher does not replace them with an AR label or expose unsafe speculative overrides.",
+        "The Uzu process is wrapped in a macOS sandbox that denies every outbound connection, including telemetry and automatic downloads; only loopback serving remains available.",
+        f"The protected raw listener and authenticated relay conservatively enforce the selected 16K/32K request boundary, and the engine has a {UZU_PROCESS_MEMORY_CEILING_BYTES / 1024**3:.0f} GiB process-group safety ceiling.",
+    ])
+
+
+def validate_uzu_launch_boundary(plan: LaunchPlan) -> tuple[str, str]:
+    cap = plan.model.get("backends", {}).get("uzu")
+    if not isinstance(cap, dict):
+        raise ValueError("The Uzu launch capability is missing. Rescan models.")
+    _binary, _runtime, _cache, identities = _validated_uzu_route(
+        plan, cap, verify_argv=True,
+    )
+    return identities
+
+
+def confirm_uzu_launch_identities(plan: LaunchPlan, expected: tuple[str, str]) -> None:
+    current = validate_uzu_launch_boundary(plan)
+    if not expected or current != expected:
+        raise ValueError("The Uzu executable or model receipts changed before launch.")
 
 
 def _verified_ssd_model_path(plan: LaunchPlan, cap: dict[str, Any]) -> Path:
@@ -17638,6 +19083,7 @@ ENGINE_BUILDERS = {
     "omlx": build_omlx,
     "lmstudio": build_lmstudio,
     "mtplx": build_mtplx,
+    "uzu": build_uzu,
     "freetoken": build_freetoken,
     "swiftlm": build_swiftlm,
     "mference": build_mference,
@@ -17856,7 +19302,7 @@ def apply_chat_reasoning_contract(
     """Pin request-level thinking controls without merging reasoning into content."""
     if reasoning not in CHAT_REASONING_LEVELS:
         raise ValueError("Unknown reasoning level.")
-    if backend not in {"whallm", "omlx"}:
+    if backend not in {"whallm", "omlx", "uzu"}:
         return body
 
     # These top-level controls belong to Whallm. oMLX pins the same visible
@@ -17864,6 +19310,13 @@ def apply_chat_reasoning_contract(
     # agent controls rather than letting them contradict that server contract.
     body.pop("thinking_mode", None)
     body.pop("reasoning_effort", None)
+    body.pop("enable_thinking", None)
+    body.pop("chat_template_kwargs", None)
+    if backend == "uzu":
+        if reasoning not in {"auto", "off"}:
+            raise ValueError("This Qwen3.6 Uzu artifact supports reasoning on or off, not effort levels.")
+        body["reasoning_effort"] = "disabled" if reasoning == "off" else "default"
+        return body
     if backend == "omlx" or reasoning == "auto":
         return body
     if reasoning == "off":
@@ -18089,7 +19542,7 @@ def validated_benchmark_request(
     client = str(payload.get("client") or "")
     if backend not in ENGINE_ADAPTERS:
         raise ValueError(
-            "Choose oMLX, LM Studio, MTPLX, FreeToken, SwiftLM, Mference, Whallm, or llama.cpp SSD PLE before benchmarking."
+            "Choose oMLX, LM Studio, MTPLX, Uzu, FreeToken, SwiftLM, Mference, Whallm, or llama.cpp SSD PLE before benchmarking."
         )
     if client not in CLIENT_ADAPTERS:
         raise ValueError("Choose the work surface whose contract should own this benchmark.")
@@ -18148,7 +19601,7 @@ def validated_benchmark_request(
         modes.append("mtp")
     if backend == "omlx" and capability.get("dflash") is True:
         modes.append("dflash2")
-    if len(modes) < 2 and not allow_baseline_only:
+    if len(modes) < 2 and not (allow_baseline_only or backend == "uzu"):
         raise ValueError("This exact runtime/model route has no verified acceleration path to compare with AR.")
     evidence = optimizer_evidence(
         model, context, output, client, reasoning, str(options.get("kv") or "off"), chat,
@@ -18207,7 +19660,8 @@ def benchmark_job_measurement_routes(job: dict[str, Any]) -> list[dict[str, Any]
                 })
             continue
         routes.append({
-            "mode": str(mode), "label": BenchmarkManager._mode_label(str(mode)),
+            "mode": str(mode),
+            "label": benchmark_public_mode_label(str(job.get("backend") or ""), mode),
             "stateKey": str(mode), "settings": {},
         })
     return routes
@@ -18225,7 +19679,7 @@ def benchmark_job_public_modes(job: dict[str, Any]) -> list[dict[str, str]]:
     """Keep calibration route disclosure compact while showing an MTPLX depth search."""
     modes: list[dict[str, str]] = []
     for mode in job.get("modes") or []:
-        label = BenchmarkManager._mode_label(str(mode))
+        label = benchmark_public_mode_label(str(job.get("backend") or ""), mode)
         if mode == "ar" and job.get("backend") in SSD_STREAMING_BACKENDS:
             label = "Exact SSD stream"
         elif (
@@ -18457,7 +19911,7 @@ def validated_route_qualification_request(
         raise ValueError("Choose a supported route-qualification metric.")
     visible = validated_launch_profile_request(payload, models)
     backend = str(visible.get("backend") or "")
-    spec = route_qualification_spec(model, backend)
+    spec = route_qualification_spec(model, backend, int(visible.get("context") or 0))
     if spec is None:
         raise ValueError("This exact controller-scanned route has no dedicated qualification contract.")
     if backend == "omlx" and visible.get("options", {}).get("memoryGuard") != "high":
@@ -18472,6 +19926,19 @@ def validated_route_qualification_request(
         if int(visible.get("output") or 0) < ROUTE_QUALIFICATION_MAX_TOKENS:
             raise ValueError(
                 "The llama.cpp SSD-PLE qualification requires at least 512 visible response tokens."
+            )
+    if backend == "uzu":
+        if visible.get("client") != "chat":
+            raise ValueError(
+                "The first Uzu qualification is limited to the built-in Chat surface."
+            )
+        if int(visible.get("context") or 0) != int(spec["context"]):
+            raise ValueError(
+                f"This Uzu qualification is fixed to exactly {int(spec['context']):,} context tokens."
+            )
+        if int(visible.get("output") or 0) < ROUTE_QUALIFICATION_MAX_TOKENS:
+            raise ValueError(
+                "The Uzu qualification requires at least 512 visible response tokens."
             )
     reasoning_contract = route_qualification_reasoning_contract(visible, model, spec)
     if reasoning_contract.get("reasoningEnabled") is not True:
@@ -18492,7 +19959,7 @@ def validated_route_qualification_request(
     excluded: list[dict[str, str]] = []
     kv = str(request.get("options", {}).get("kv") or "off")
     chat = request.get("chat") if isinstance(request.get("chat"), dict) else None
-    if backend == "llamacpp":
+    if backend in {"llamacpp", "uzu"}:
         eligible = [backend]
         excluded = [
             {"backend": candidate, "label": BACKEND_LABELS[candidate],
@@ -18515,37 +19982,9 @@ def validated_route_qualification_request(
             "Single-route qualification is available only while the selected route is the sole exact-artifact route."
         )
     capability = model["backends"][backend]
-    qualification_contract = {
-        "id": spec["id"], "version": spec["version"], "backend": backend,
-        "exactContext": int(request["context"]),
-        "scenarioContract": list(ROUTE_QUALIFICATION_SCENARIOS),
-        "sampleMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
-        "answerReserveTokens": ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS,
-        "minimumDecodeTokensPerSecond": (
-            LLAMACPP_PLE_MINIMUM_DECODE_TPS if backend == "llamacpp" else None
-        ),
-        "thinkingBudgetTokens": (
-            ROUTE_QUALIFICATION_THINKING_TOKENS if backend == "llamacpp" else None
-        ),
-        "reasoningPolicy": spec["reasoningPolicy"],
-        "toolProbeRequired": spec["toolProbeRequired"],
-        "memoryProofRequired": spec["memoryProofRequired"],
-        "memoryCeilingBytes": spec.get("memoryCeilingBytes"),
-        "receiptFingerprint": capability.get("receiptFingerprint"),
-        "runtimeVersion": capability.get("runtimeVersion"),
-    }
-    if backend == "llamacpp":
-        qualification_contract.update({
-            "scope": "route",
-            "clientAgnostic": True,
-            "minimumCompletionTokens": ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS,
-            "configuredOutputLimit": int(request["output"]),
-            "measuredRequestMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
-            "reasoningBoundaryContractId": LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID,
-            "reasoningBudgetMessageSha256": hashlib.sha256(
-                LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
-            ).hexdigest(),
-        })
+    qualification_contract = build_route_qualification_contract(
+        spec, request, capability,
+    )
     job.update({
         "kind": "route-qualification",
         "routeQualification": True,
@@ -18823,8 +20262,18 @@ def calibration_plan(
     model = next(item for item in models if item.get("id") == visible_request["modelId"])
     route_spec = route_qualification_spec(
         model, str(visible_request.get("backend") or ""),
+        int(visible_request.get("context") or 0),
     )
     route_qualification_candidate = route_spec is not None
+    # Uzu owns its fixed DFlash + Weaver route and exposes no fan-control
+    # surface.  Collapse every otherwise-valid UI cooling choice to the one
+    # truthful contract before building jobs or looking up saved evidence, so
+    # a cosmetic Smart/Maximum selection cannot fragment qualification receipts.
+    uzu_system_cooling = bool(
+        route_spec is not None and route_spec.get("backend") == "uzu"
+    )
+    if uzu_system_cooling:
+        calibration_cooling = "default"
     requested_suite_name = str(
         payload.get("suite")
         or ("standard" if visible_request["client"] == "chat" else "agentic")
@@ -18872,7 +20321,9 @@ def calibration_plan(
                 candidate_option_source = copy.deepcopy(raw_options)
                 candidate_option_source.update({
                     "acceleration": (
-                        "off" if route_spec and backend == "llamacpp" else "auto"
+                        "off"
+                        if route_spec and backend in {"llamacpp", "uzu"}
+                        else "auto"
                     ), "kv": kv,
                     "fan": calibration_cooling,
                 })
@@ -18895,38 +20346,9 @@ def calibration_plan(
                     and job.get("modes") == ["ar"]
                 ):
                     capability = model["backends"][backend]
-                    qualification_contract = {
-                        "id": route_spec["id"], "version": route_spec["version"],
-                        "backend": backend,
-                        "exactContext": int(request["context"]),
-                        "scenarioContract": list(ROUTE_QUALIFICATION_SCENARIOS),
-                        "sampleMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
-                        "answerReserveTokens": ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS,
-                        "minimumDecodeTokensPerSecond": (
-                            LLAMACPP_PLE_MINIMUM_DECODE_TPS if backend == "llamacpp" else None
-                        ),
-                        "thinkingBudgetTokens": (
-                            ROUTE_QUALIFICATION_THINKING_TOKENS if backend == "llamacpp" else None
-                        ),
-                        "reasoningPolicy": route_spec["reasoningPolicy"],
-                        "toolProbeRequired": route_spec["toolProbeRequired"],
-                        "memoryProofRequired": route_spec["memoryProofRequired"],
-                        "memoryCeilingBytes": route_spec.get("memoryCeilingBytes"),
-                        "receiptFingerprint": capability.get("receiptFingerprint"),
-                        "runtimeVersion": capability.get("runtimeVersion"),
-                    }
-                    if backend == "llamacpp":
-                        qualification_contract.update({
-                            "scope": "route",
-                            "clientAgnostic": True,
-                            "minimumCompletionTokens": ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS,
-                            "configuredOutputLimit": int(request["output"]),
-                            "measuredRequestMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
-                            "reasoningBoundaryContractId": LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID,
-                            "reasoningBudgetMessageSha256": hashlib.sha256(
-                                LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.encode("utf-8")
-                            ).hexdigest(),
-                        })
+                    qualification_contract = build_route_qualification_contract(
+                        route_spec, request, capability,
+                    )
                     job.update({
                         "kind": "route-qualification",
                         "routeQualification": True,
@@ -19004,7 +20426,7 @@ def calibration_plan(
             "label": BACKEND_LABELS[backend],
             "eligible": bool(job is not None),
             "reason": (
-                "Runs the exact PLE mmap AR route with explicit reasoning and requires both reasoning and final-answer output."
+                route_qualification_engine_reason(backend)
                 if job is not None and job.get("routeQualification") is True else
                 (
                     "Uses model-default reasoning so every included engine shares the same "
@@ -19284,6 +20706,11 @@ def calibration_plan(
             "smart": "Automatic",
             "max": "Maximum fans",
         }[calibration_cooling],
+        "calibrationCoolingLocked": uzu_system_cooling,
+        "calibrationCoolingReason": (
+            "Uzu does not expose fan control; macOS controls cooling for this fixed route."
+            if uzu_system_cooling else ""
+        ),
         "engines": engines,
         "eligibleEngineCount": len(jobs),
         "routeCount": route_count,
@@ -19448,6 +20875,62 @@ def launch_memory_estimate(
             },
             "nativeFreeToken": True,
             "basis": "Native FreeToken schema v1 weight and per-token KV sizing at the full selected context, plus a conservative launcher runtime and macOS reserve.",
+        }
+    if backend == "uzu" and model.get("uzuNative") is True:
+        geometry = model.get("memoryGeometry") if isinstance(model.get("memoryGeometry"), dict) else {}
+        geometry_ready = bool(geometry.get("ready") is True)
+        kv_bytes = 0
+        if geometry_ready and context > 0:
+            target_kv_bytes = round(
+                2 * int(geometry["fullAttentionLayers"]) * context
+                * int(geometry["kvHeads"]) * int(geometry["headDimension"]) * 2.0
+            )
+            kv_bytes = (
+                target_kv_bytes
+                + context * UZU_DRAFT_FULL_ATTENTION_BYTES_PER_TOKEN
+                + UZU_DRAFT_SLIDING_CACHE_BYTES
+            )
+        target_bytes = next(
+            size for name, size, _crc in UZU_MODEL_FILE_MANIFEST
+            if name == "model.safetensors"
+        )
+        draft_bytes = next(
+            size for name, size, _crc in UZU_MODEL_FILE_MANIFEST
+            if name == "speculator/model.safetensors"
+        )
+        total_weights = target_bytes + draft_bytes
+        runtime_reserve = SESSION_RUNTIME_BASE_RESERVE_BYTES + round(total_weights * 0.08)
+        working_set = total_weights + kv_bytes + runtime_reserve
+        total = int(resource.get("totalMemoryBytes") or 0)
+        os_reserve = max(
+            SESSION_OS_RESERVE_MIN_BYTES,
+            round(total * SESSION_OS_RESERVE_FRACTION) if total > 0 else 0,
+        )
+        return {
+            "version": SESSION_MEMORY_ESTIMATE_VERSION,
+            "modelBytes": target_bytes,
+            "companionBytes": draft_bytes,
+            "companionLabels": ["bundled DFlash draft"],
+            "kvCacheBytes": kv_bytes,
+            "kvPrecision": "BF16 · runtime fixed",
+            "kvScalarBytes": 2.0,
+            "contextTokens": context,
+            "parallelLanes": 1,
+            "runtimeReserveBytes": runtime_reserve,
+            "estimatedWorkingSetBytes": working_set,
+            "osReserveBytes": os_reserve,
+            "requiredHeadroomBytes": working_set + os_reserve,
+            "processMemoryCeilingBytes": UZU_PROCESS_MEMORY_CEILING_BYTES,
+            "geometryReady": geometry_ready,
+            "geometry": copy.deepcopy(geometry),
+            "uzuSpeculative": True,
+            "estimateIsConservative": True,
+            "basis": (
+                "Pinned Uzu target plus bundled DFlash draft, runtime-fixed BF16 target and draft "
+                "KV at the selected 16K/32K context (including the draft sliding window), runtime "
+                "workspace, and protected macOS reserve. A separate live process-group and whole-Mac "
+                "headroom guard stop growth before it can consume the host."
+            ),
         }
     qwen4_ple = model.get("qwen4Ple") if isinstance(model.get("qwen4Ple"), dict) else {}
     if backend == "omlx" and qwen4_ple.get("supported") is True:
@@ -19706,6 +21189,27 @@ def _llamacpp_qualified_session_capacity(
     return record, metrics, estimate
 
 
+def _uzu_qualified_session_record(
+    request: dict[str, Any], model: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Resolve only a fresh Uzu receipt matching this exact visible context."""
+    try:
+        evidence = optimizer_evidence(
+            model, int(request["context"]), int(request["output"]),
+            str(request["client"]), str(request["reasoning"]),
+            str(request.get("options", {}).get("kv") or "off"),
+            request.get("chat") if isinstance(request.get("chat"), dict) else None,
+        )
+        add_benchmark_engine_evidence(
+            evidence, model,
+            request.get("options") if isinstance(request.get("options"), dict) else {},
+            ["uzu"],
+        )
+        return verified_route_qualification(model, "uzu", evidence)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def session_memory_admission(
     payload: dict[str, Any], models: list[dict[str, Any]],
     resource: dict[str, Any], hub: dict[str, Any], operation: dict[str, Any],
@@ -19714,6 +21218,7 @@ def session_memory_admission(
     request = validated_launch_profile_request(payload, models)
     model = next(item for item in models if item.get("id") == request["modelId"])
     llama_route = request.get("backend") == "llamacpp"
+    uzu_route = request.get("backend") == "uzu"
     llama_record: dict[str, Any] | None = None
     llama_metrics: dict[str, Any] | None = None
     if llama_route:
@@ -19722,6 +21227,7 @@ def session_memory_admission(
         )
     else:
         estimate = launch_memory_estimate(request, model, resource)
+    uzu_record = _uzu_qualified_session_record(request, model) if uzu_route else None
     phase = str(hub.get("phase") or "idle")
     operation_active = bool(operation.get("active"))
     qwen4_ple_route = bool(
@@ -19759,6 +21265,47 @@ def session_memory_admission(
         launchable = True
         label = "Whallm route is already loaded"
         detail = "Whallm already owns the model and SSD cache; this launch adds only a private loopback bridge and the selected work surface. The 48 GB host remains an experimental upstream configuration."
+    elif uzu_route and uzu_record is None:
+        decision = "qualification"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Qualify this exact Uzu context once"
+        detail = (
+            "No fresh successful Uzu qualification matches this runtime, model receipt, "
+            "context, response limit, reasoning, packaged sampling, and fixed DFlash + Weaver "
+            "route. Run the bounded qualification; it cannot be bypassed by a checkbox."
+        )
+    elif uzu_route and resource.get("memoryAvailable") is not True:
+        decision = "unknown"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Memory headroom unavailable"
+        detail = "Uzu is blocked until macOS can report current unified-memory headroom; this route cannot be approved through an acknowledgement."
+    elif uzu_route and estimate.get("geometryReady") is not True:
+        decision = "unknown"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Uzu KV capacity unavailable"
+        detail = "Uzu is blocked because the pinned config no longer exposes the exact attention geometry required for a full-context estimate."
+    elif uzu_route and int(resource.get("headroomBytes") or 0) < int(estimate["requiredHeadroomBytes"]):
+        decision = "pressure"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Free memory before Uzu launch"
+        detail = (
+            f"This bounded Uzu route needs about {int(estimate['requiredHeadroomBytes']) / 1024**3:.1f} GiB "
+            f"including the protected macOS reserve; current headroom is {int(resource.get('headroomBytes') or 0) / 1024**3:.1f} GiB. "
+            "Close memory-heavy apps and refresh capacity."
+        )
+    elif uzu_route:
+        decision = "ready"
+        requires_acknowledgement = False
+        launchable = True
+        label = "Bounded Uzu route ready"
+        detail = (
+            f"The pinned model receipts, safe runtime, selected context, current headroom, and "
+            f"{UZU_PROCESS_MEMORY_CEILING_BYTES / 1024**3:.0f} GiB live process ceiling all pass."
+        )
     elif llama_route and (llama_record is None or llama_metrics is None):
         decision = "qualification"
         requires_acknowledgement = False
@@ -19981,7 +21528,9 @@ def route_qualification_memory_admission(
     )
     visible = validated_launch_profile_request(request, models)
     model = next(item for item in models if item.get("id") == visible["modelId"])
-    spec = route_qualification_spec(model, str(visible.get("backend") or ""))
+    spec = route_qualification_spec(
+        model, str(visible.get("backend") or ""), int(visible.get("context") or 0),
+    )
     if spec is not None and spec["backend"] == "llamacpp":
         resource = public_session_resource(snapshot)
         phase = str(current_hub.get("phase") or "idle")
@@ -20038,6 +21587,67 @@ def route_qualification_memory_admission(
                 "changesExternalState": False,
             },
         }
+    if spec is not None and spec["backend"] == "uzu":
+        resource = public_session_resource(snapshot)
+        phase = str(current_hub.get("phase") or "idle")
+        busy = phase in {"preflight", "starting", "running", "stopping"} or bool(
+            current_operation.get("active")
+        )
+        estimate = launch_memory_estimate(visible, model, resource)
+        headroom = resource.get("headroomBytes")
+        required = estimate.get("requiredHeadroomBytes")
+        memory_ready = bool(
+            resource.get("memoryAvailable") is True
+            and estimate.get("geometryReady") is True
+            and isinstance(headroom, int) and not isinstance(headroom, bool)
+            and isinstance(required, int) and not isinstance(required, bool)
+            and headroom >= required
+        )
+        if busy:
+            decision, label = "busy", "Another local operation is active"
+            detail = str(
+                current_operation.get("detail")
+                or current_hub.get("message")
+                or "Stop it before qualification."
+            )
+        elif not memory_ready:
+            decision, label = "pressure", "Free memory before Uzu qualification"
+            detail = (
+                "The exact context must fit the pinned target, bundled draft, BF16 cache, "
+                "runtime workspace, and protected macOS reserve before Uzu can load."
+            )
+        else:
+            decision, label = "ready", f"{spec['routeLabel']} ready to qualify"
+            detail = (
+                f"The pinned receipts, exact {int(visible['context']):,}-token context, "
+                f"current headroom, and {UZU_PROCESS_MEMORY_CEILING_BYTES / 1024**3:.0f} GiB "
+                "live process-group ceiling passed the pre-load gate."
+            )
+        return {
+            "contractId": hashlib.sha256(json.dumps(
+                {"request": visible, "qualification": spec["id"]},
+                sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()[:16],
+            "decision": decision, "label": label, "detail": detail,
+            "launchable": decision == "ready", "requiresAcknowledgement": False,
+            "request": visible,
+            "route": {
+                "backend": "uzu", "backendLabel": BACKEND_LABELS["uzu"],
+                "client": "chat", "modelId": visible["modelId"],
+                "model": str(model.get("name") or visible["modelId"]),
+                "context": int(visible["context"]), "kv": "off",
+            },
+            "estimate": estimate,
+            "projectedHeadroomBytes": (
+                int(headroom) - int(required)
+                if isinstance(headroom, int) and isinstance(required, int) else None
+            ),
+            "privacy": {
+                "startsRuntime": False, "allocatesPort": False,
+                "createsRunFiles": False, "usesProjectData": False,
+                "changesExternalState": False,
+            },
+        }
     return session_memory_admission(
         request, models, public_session_resource(snapshot),
         current_hub, current_operation,
@@ -20075,9 +21685,15 @@ def build_benchmark_completion_request(
         "model": plan.model["servedId"],
         "messages": messages,
         "stream": True,
-        "stream_options": {"include_usage": True},
-        "max_tokens": max_tokens,
     }
+    if plan.backend == "uzu":
+        # Uzu always emits final usage, ignores stream_options, and its current
+        # server does not preserve the launcher's full sampling contract.
+        # Qualification therefore measures the packaged model defaults only.
+        body["max_completion_tokens"] = max_tokens
+    else:
+        body["stream_options"] = {"include_usage": True}
+        body["max_tokens"] = max_tokens
     qualification_budget = (
         reasoning_budget_tokens
         if reasoning_budget_tokens is not None else
@@ -20100,13 +21716,14 @@ def build_benchmark_completion_request(
     ):
         body["reasoning_budget_tokens"] = qualification_budget
         body["reasoning_budget_message"] = LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE
-    for key in (
-        "temperature", "top_p", "top_k", "presence_penalty",
-        "frequency_penalty", "seed",
-    ):
-        value = sampling.get(key)
-        if value is not None:
-            body[key] = value
+    if plan.backend != "uzu":
+        for key in (
+            "temperature", "top_p", "top_k", "presence_penalty",
+            "frequency_penalty", "seed",
+        ):
+            value = sampling.get(key)
+            if value is not None:
+                body[key] = value
     apply_chat_reasoning_contract(body, plan.backend, plan.reasoning)
     return urllib.request.Request(
         f"http://127.0.0.1:{plan.port}/v1/chat/completions",
@@ -20194,7 +21811,7 @@ def run_benchmark_completion(
     usage: dict[str, Any] = {}
     finish_reasons: set[str] = set()
     strict_qualification_stream = (
-        plan.backend == "llamacpp"
+        plan.backend in {"llamacpp", "uzu"}
         and plan.options.get("_qualificationThinkingBudgetTokens")
         == ROUTE_QUALIFICATION_THINKING_TOKENS
     )
@@ -20356,13 +21973,17 @@ def run_benchmark_completion(
         "outputHash": hashlib.sha256(output_identity).hexdigest(),
     }
     if correctness_expected is not None:
+        uzu_correctness = plan.backend == "uzu"
         tag_leak = re.search(r"<\s*/?\s*(?:think|thinking)\b", answer_text, re.IGNORECASE)
         transition_leak = (
             LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE.strip().casefold()
             in answer_text.casefold()
         )
         result["correctnessContract"] = {
-            "id": LLAMACPP_QUALIFICATION_CORRECTNESS_ID,
+            "id": (
+                UZU_QUALIFICATION_CORRECTNESS_ID
+                if uzu_correctness else LLAMACPP_QUALIFICATION_CORRECTNESS_ID
+            ),
             "expectedAnswerSha256": hashlib.sha256(
                 correctness_expected.encode("utf-8")
             ).hexdigest(),
@@ -20370,13 +21991,16 @@ def run_benchmark_completion(
             "exact": answer_text == correctness_expected,
             "terminalComplete": terminal_state == "complete",
             "authoritativeUsage": True,
-            "reasoningBoundaryContractId": LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID,
+            "reasoningBoundaryContractId": (
+                None if uzu_correctness else LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID
+            ),
             "reasoningBudgetTokensRequested": requested_reasoning_budget,
             "reasoningBudgetMessageSha256": result["reasoningBudgetMessageSha256"],
             "reasoningTagLeakDetected": tag_leak is not None,
             "transitionMessageLeakDetected": transition_leak,
             "reasoningBoundaryClean": bool(
-                requested_reasoning_budget == 0
+                not uzu_correctness
+                and requested_reasoning_budget == 0
                 and answer_text == correctness_expected
                 and terminal_state == "complete"
                 and tag_leak is None
@@ -23392,7 +25016,7 @@ class RunManager:
             log_path = plan.run_dir / "engine.log"
             env = os.environ.copy()
             env.update(plan.engine_env)
-            if plan.backend == "llamacpp":
+            if plan.backend in {"llamacpp", "uzu"}:
                 env = _environment_without_dyld(env)
             # Reserve the agent-facing route before an expensive model load.
             # No client can reach it until its selected work surface opens
@@ -23405,11 +25029,15 @@ class RunManager:
             elif plan.client == "codex":
                 self._start_codex_proxy(plan, log_path, cancel_event)
             llamacpp_identities: tuple[tuple[Any, ...], ...] | None = None
+            uzu_identities: tuple[str, str] | None = None
             if plan.backend == "llamacpp":
                 # This is deliberately after any proxy setup and immediately
                 # before the process boundary: never rely only on scan/build
                 # time provenance for an executable or an 80 GB artifact.
                 llamacpp_identities = validate_llamacpp_launch_boundary(plan)
+                env = _environment_without_dyld(env)
+            elif plan.backend == "uzu":
+                uzu_identities = validate_uzu_launch_boundary(plan)
                 env = _environment_without_dyld(env)
             if plan.backend == "lmstudio":
                 self._start_lmstudio(plan, log_path, env, cancel_event)
@@ -23421,6 +25049,10 @@ class RunManager:
                         assert llamacpp_identities is not None
                         confirm_llamacpp_launch_identities(plan, llamacpp_identities)
                         env = _environment_without_dyld(env)
+                    elif plan.backend == "uzu":
+                        assert uzu_identities is not None
+                        confirm_uzu_launch_identities(plan, uzu_identities)
+                        env = _environment_without_dyld(env)
                     process = subprocess.Popen(
                         plan.engine_argv, cwd=plan.project, env=env, text=True,
                         stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True,
@@ -23429,6 +25061,13 @@ class RunManager:
                     if plan.backend == "llamacpp":
                         guard = threading.Thread(
                             target=self._guard_llamacpp_memory,
+                            args=(plan, process, cancel_event), daemon=True,
+                        )
+                        self.llamacpp_guard_thread = guard
+                        guard.start()
+                    elif plan.backend == "uzu":
+                        guard = threading.Thread(
+                            target=self._guard_uzu_memory,
                             args=(plan, process, cancel_event), daemon=True,
                         )
                         self.llamacpp_guard_thread = guard
@@ -23678,6 +25317,99 @@ class RunManager:
                             "Whallm became active while the llama.cpp route was loaded; "
                             "the route was stopped before combined memory residency became unsafe."
                         )
+                if not reason:
+                    if cancel_event.wait(0.25):
+                        return
+                    continue
+                with self.lock:
+                    if self.plan is not plan or self.process is not process:
+                        return
+                    self.state["phase"] = "failed"
+                    self.state["message"] = reason
+                    self.state["events"] = (
+                        self.state.get("events", [])
+                        + [{"time": time.strftime("%H:%M:%S"), "level": "error", "message": reason}]
+                    )[-80:]
+                    self.llamacpp_safety_violation = reason
+                cancel_event.set()
+                self._stop_owned(plan)
+                return
+        finally:
+            with self.lock:
+                if self.llamacpp_guard_thread is threading.current_thread():
+                    self.llamacpp_guard_thread = None
+
+    def _guard_uzu_memory(
+        self, plan: LaunchPlan, process: subprocess.Popen[str],
+        cancel_event: threading.Event,
+    ) -> None:
+        """Stop Uzu before one process group can starve this 48 GB Mac."""
+        missing_samples = 0
+        missing_system_samples = 0
+        low_system_samples = 0
+        last_system_check = -math.inf
+        try:
+            while not cancel_event.is_set() and process.poll() is None:
+                try:
+                    pgid = os.getpgid(process.pid)
+                except (OSError, ProcessLookupError):
+                    pgid = 0
+                group = darwin_process_group_physical_footprint(pgid)
+                current = group.get("processGroupPhysicalFootprintBytes")
+                peak = group.get("processGroupLifetimePeakPhysicalFootprintBytes")
+                complete = bool(
+                    group.get("processGroupFootprintAvailable") is True
+                    and isinstance(current, int) and not isinstance(current, bool)
+                    and isinstance(peak, int) and not isinstance(peak, bool)
+                    and int(group.get("processGroupMemberCount") or 0) >= 1
+                )
+                reason = ""
+                if complete:
+                    missing_samples = 0
+                    if max(int(current), int(peak)) >= UZU_PROCESS_MEMORY_CEILING_BYTES:
+                        reason = (
+                            f"Uzu reached the launcher's {UZU_PROCESS_MEMORY_CEILING_BYTES / 1024**3:.0f} GiB "
+                            "process-group safety ceiling and was stopped before macOS lost its reserve."
+                        )
+                else:
+                    missing_samples += 1
+                    if missing_samples >= 12:
+                        reason = (
+                            "Uzu process-group memory could not be verified continuously, so the route was stopped fail-closed."
+                        )
+                now = time.monotonic()
+                if not reason and now - last_system_check >= 1.0:
+                    last_system_check = now
+                    memory = apple_memory_pressure_state()
+                    total = memory.get("totalBytes")
+                    free = memory.get("freePercent")
+                    readable = bool(
+                        memory.get("memoryAvailable") is True
+                        and isinstance(total, int) and not isinstance(total, bool) and total > 0
+                        and isinstance(free, (int, float)) and not isinstance(free, bool)
+                        and math.isfinite(float(free)) and 0 <= float(free) <= 100
+                    )
+                    if readable:
+                        missing_system_samples = 0
+                        reserve = max(
+                            SESSION_OS_RESERVE_MIN_BYTES,
+                            round(int(total) * SESSION_OS_RESERVE_FRACTION),
+                        )
+                        headroom = round(int(total) * float(free) / 100)
+                        low_system_samples = low_system_samples + 1 if headroom < reserve else 0
+                        if low_system_samples >= 2:
+                            reason = (
+                                "System-wide memory pressure left less than the protected macOS "
+                                "reserve, so Uzu was stopped before the computer became unresponsive."
+                            )
+                    else:
+                        missing_system_samples += 1
+                        low_system_samples = 0
+                        if missing_system_samples >= 3:
+                            reason = (
+                                "System-wide memory pressure could not be verified continuously, "
+                                "so Uzu was stopped fail-closed."
+                            )
                 if not reason:
                     if cancel_event.wait(0.25):
                         return
@@ -24466,6 +26198,7 @@ class RunManager:
             "controlKey": control_key,
             "lanes": session_request_lanes(plan),
             "outputLimit": plan.output,
+            "contextLimit": plan.context if plan.backend == "uzu" else None,
             "reasoning": plan.reasoning,
             "backend": plan.backend,
             "reasoningBudgetMessage": (
@@ -25845,9 +27578,13 @@ class BenchmarkManager:
         *, display_label: str | None = None, state_key: str | None = None,
     ) -> tuple[dict[str, Any], int]:
         label = display_label or self._mode_label(mode)
-        if job["backend"] == "llamacpp" and job.get("routeQualification") is not True:
+        if (
+            job["backend"] in {"llamacpp", "uzu"}
+            and job.get("routeQualification") is not True
+        ):
             raise RuntimeError(
-                "The Atomic llama.cpp route can load for Benchmark Lab only through its dedicated qualification."
+                f"The {BACKEND_LABELS[job['backend']]} route can load for Benchmark Lab only "
+                "through its dedicated qualification."
             )
         shootout = bool(job.get("shootoutId"))
         grouped = shootout or job.get("routeQualification") is True
@@ -25892,10 +27629,14 @@ class BenchmarkManager:
         strict_llama = bool(
             job.get("routeQualification") is True and job["backend"] == "llamacpp"
         )
+        strict_uzu = bool(
+            job.get("routeQualification") is True and job["backend"] == "uzu"
+        )
+        uzu_memory_samples = {"missing": 0, "low": 0}
 
         def live_invariant(value: dict[str, Any]) -> None:
             process = self.run_manager.process
-            if not strict_llama or process is None or process.poll() is not None:
+            if not (strict_llama or strict_uzu) or process is None or process.poll() is not None:
                 return
             def abort(message: str) -> None:
                 with self.lock:
@@ -25903,21 +27644,62 @@ class BenchmarkManager:
                 threading.Thread(target=self.run_manager.stop, daemon=True).start()
                 raise QualificationSafetyFailure(message)
 
-            if value.get("metalWiredLimitBytes") != LLAMACPP_PLE_MEMORY_CEILING_BYTES:
+            if strict_llama and value.get("metalWiredLimitBytes") != LLAMACPP_PLE_MEMORY_CEILING_BYTES:
                 abort("The 44 GiB Metal wired-memory limit changed during qualification.")
+            if strict_uzu:
+                total = value.get("totalBytes")
+                free = value.get("freePercent")
+                memory_readable = bool(
+                    value.get("memoryAvailable") is True
+                    and isinstance(total, int) and not isinstance(total, bool) and total > 0
+                    and isinstance(free, (int, float)) and not isinstance(free, bool)
+                    and math.isfinite(float(free)) and 0 <= float(free) <= 100
+                )
+                if memory_readable:
+                    uzu_memory_samples["missing"] = 0
+                    reserve = max(
+                        SESSION_OS_RESERVE_MIN_BYTES,
+                        round(int(total) * SESSION_OS_RESERVE_FRACTION),
+                    )
+                    headroom = round(int(total) * float(free) / 100)
+                    uzu_memory_samples["low"] = (
+                        uzu_memory_samples["low"] + 1 if headroom < reserve else 0
+                    )
+                    if uzu_memory_samples["low"] >= 2:
+                        abort(
+                            "System-wide memory headroom fell below the protected macOS reserve "
+                            "during Uzu qualification."
+                        )
+                else:
+                    uzu_memory_samples["missing"] += 1
+                    uzu_memory_samples["low"] = 0
+                    if uzu_memory_samples["missing"] >= 3:
+                        abort(
+                            "System-wide memory headroom became unreadable during Uzu qualification."
+                        )
             footprint = value.get("processGroupPhysicalFootprintBytes")
             lifetime_peak = value.get("processGroupLifetimePeakPhysicalFootprintBytes")
             if (
                 value.get("processFootprintAvailable") is not True
                 or
                 value.get("processGroupFootprintAvailable") is not True
-                or value.get("processGroupMemberCount") != 1
+                or not isinstance(value.get("processGroupMemberCount"), int)
+                or isinstance(value.get("processGroupMemberCount"), bool)
+                or int(value.get("processGroupMemberCount")) < 1
+                or (strict_llama and value.get("processGroupMemberCount") != 1)
                 or not isinstance(footprint, int) or isinstance(footprint, bool)
                 or not isinstance(lifetime_peak, int) or isinstance(lifetime_peak, bool)
             ):
                 abort("The owned process-group physical footprint became unreadable during qualification.")
-            if max(footprint, lifetime_peak) >= LLAMACPP_PLE_MEMORY_CEILING_BYTES:
-                abort("The owned process group reached the strict 44 GiB qualification ceiling.")
+            ceiling = (
+                LLAMACPP_PLE_MEMORY_CEILING_BYTES
+                if strict_llama else UZU_PROCESS_MEMORY_CEILING_BYTES
+            )
+            if max(footprint, lifetime_peak) >= ceiling:
+                abort(
+                    f"The owned process group reached the strict {ceiling / 1024**3:.0f} GiB "
+                    "qualification ceiling."
+                )
 
         telemetry = BenchmarkTelemetrySampler(
             process_provider=lambda: self.run_manager.process,
@@ -25970,6 +27752,10 @@ class BenchmarkManager:
             llama_qualification = bool(
                 job.get("routeQualification") is True and job["backend"] == "llamacpp"
             )
+            uzu_qualification = bool(
+                job.get("routeQualification") is True and job["backend"] == "uzu"
+            )
+            reliability_qualification = llama_qualification or uzu_qualification
             correctness_prompt: str | list[dict[str, str]] = (
                 [
                     {
@@ -25981,19 +27767,24 @@ class BenchmarkManager:
                     },
                     {
                         "role": "user",
-                        "content": "Compute (37 * 19) + 39. Reply exactly as RQ-8K-<integer>.",
+                        "content": (
+                            "Compute (37 * 19) + 39. Reply exactly as "
+                            + ("RQ-8K-<integer>." if llama_qualification else "RQ-UZU-<integer>.")
+                        ),
                     },
                 ]
-                if llama_qualification else benchmark_prompt(256, 71_771)
+                if reliability_qualification else benchmark_prompt(256, 71_771)
             )
             quality = measured_completion(
                 plan, correctness_prompt,
-                ROUTE_QUALIFICATION_MAX_TOKENS if llama_qualification else 64,
+                ROUTE_QUALIFICATION_MAX_TOKENS if reliability_qualification else 64,
                 {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "seed": 17},
                 self.cancel_event,
                 correctness_expected=(
                     LLAMACPP_QUALIFICATION_CORRECTNESS_EXPECTED
-                    if llama_qualification else None
+                    if llama_qualification else
+                    UZU_QUALIFICATION_CORRECTNESS_EXPECTED
+                    if uzu_qualification else None
                 ),
                 reasoning_budget_tokens=(0 if llama_qualification else None),
             )
@@ -26033,14 +27824,19 @@ class BenchmarkManager:
                         "cacheExpected": case["cacheExpected"],
                         "targetPromptTokens": case["targetPromptTokens"], "repetition": 1,
                     })
+                    qualification_context = job.get("qualificationContract", {}).get(
+                        "exactContext"
+                    )
                     if (
-                        job.get("qualificationContract", {}).get("id")
-                        == "atomicchat-llamacpp-ssd-ple-8k-v1"
+                        job.get("routeQualification") is True
+                        and isinstance(qualification_context, int)
+                        and not isinstance(qualification_context, bool)
                         and int(sample["promptTokens"]) + int(job["suite"]["maxTokens"])
-                        > LLAMACPP_PLE_CONTEXT
+                        > qualification_context
                     ):
                         raise RuntimeError(
-                            "The authoritative prompt usage plus bounded answer reserve exceeded the exact 8K route."
+                            "The authoritative prompt usage plus bounded answer reserve exceeded "
+                            "the exact qualified context."
                         )
                     samples.append(sample)
                     completed += 1
@@ -26245,13 +28041,13 @@ class BenchmarkManager:
                 and results[winner]["qualityCompletionTokens"] == baseline["qualityCompletionTokens"]
             )
         )
-        bounded_llamacpp_qualification = bool(
+        bounded_route_qualification = bool(
             job.get("routeQualification") is True
-            and job.get("backend") == "llamacpp"
+            and job.get("backend") in {"llamacpp", "uzu"}
         )
         measured_output_limit = (
             int(job["suite"]["maxTokens"])
-            if bounded_llamacpp_qualification else int(job["output"])
+            if bounded_route_qualification else int(job["output"])
         )
         record = {
             "id": job["id"], "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -26308,7 +28104,7 @@ class BenchmarkManager:
                 )
             ),
         }
-        if bounded_llamacpp_qualification:
+        if bounded_route_qualification:
             record.update({
                 "configuredOutputLimit": int(job["output"]),
                 "measuredRequestMaxTokens": measured_output_limit,
@@ -26999,7 +28795,9 @@ class BenchmarkManager:
                 "backend": record["backend"],
                 "label": BACKEND_LABELS[record["backend"]],
                 "mode": record["winner"],
-                "modeLabel": self._mode_label(str(record["winner"])),
+                "modeLabel": benchmark_public_mode_label(
+                    str(record["backend"]), str(record["winner"])
+                ),
                 "testedModes": copy.deepcopy(record.get("comparedModes") or ["ar"]),
                 "modeDetail": benchmark_mode_summary(
                     next(

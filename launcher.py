@@ -7,7 +7,9 @@ import argparse
 import base64
 import copy
 import ctypes
+import errno
 import fcntl
+import functools
 import hashlib
 import html
 import ipaddress
@@ -30,6 +32,7 @@ import subprocess
 import sys
 import threading
 import termios
+import tty
 import time
 import urllib.error
 import urllib.parse
@@ -43,11 +46,64 @@ from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
+from agent_console_transport import ConsoleTransport
+from log_tail import read_log_tail
+from mtplx_reasoning import preserved_qwopus_template
+from model_modalities import pi_model_inputs, prepare_mtplx_image_processor
+import whallm_runtime
+import whallm_telemetry
+import dflash_budget_patch
+
+from sampling_contract import (
+    SAMPLING_CONTRACT_SCHEMA_VERSION,
+    SUPPORTED_SAMPLING_FIELDS,
+    SamplingContractError,
+    build_sampling_contract,
+    canonicalize_sampling,
+    load_sampling_contract,
+    rewrite_chat_completions_request,
+    rewrite_responses_request,
+    sampling_fingerprint,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
 CONTROLLER_SOURCE_PATH = Path(__file__).resolve()
+CONTROLLER_SAMPLING_SOURCE_PATH = (APP_DIR / "sampling_contract.py").resolve()
+CONTROLLER_SOURCE_PATHS = (
+    CONTROLLER_SOURCE_PATH,
+    CONTROLLER_SAMPLING_SOURCE_PATH,
+    APP_DIR / "omlx_hub_runtime.py",
+    APP_DIR / "omlx_admission.py",
+    APP_DIR / "hub_fans.py",
+    APP_DIR / "hub_fans_runtime.py",
+    APP_DIR / "mtplx_hub_runtime.py",
+    APP_DIR / "runtime_patches/mtplx/2.11.2/admission.json",
+    APP_DIR / "dflash_budget_patch.py",
+    APP_DIR / "dflash_thinking_budget.py",
+    APP_DIR / "dflash_snapshot.py",
+    APP_DIR / "dflash_quantized_kv.py",
+    APP_DIR / "runtime_patches/omlx/0.6.4/dflash-thinking-budget.json",
+    APP_DIR / "runtime_patches/omlx/0.6.4/dflash-thinking-budget.patch",
+    APP_DIR / "pi-hub-commands.js",
+    APP_DIR / "pi-context-policy.js",
+    APP_DIR / "pi-provider.js",
+    APP_DIR / "pi-workflow.js",
+    APP_DIR / "pi_delivery_progress.js",
+    APP_DIR / "pi-browser.js",
+    APP_DIR / "pi_context_recovery.js",
+    APP_DIR / "mtplx_reasoning.py",
+    APP_DIR / "model_modalities.py",
+    APP_DIR / "whallm_runtime.py",
+    APP_DIR / "whallm_telemetry.py",
+    APP_DIR / "session_proxy.py",
+    APP_DIR / "codex_proxy.py",
+    APP_DIR / "sse_framing.py",
+    APP_DIR / "agent_console_transport.py",
+    APP_DIR / "log_tail.py",
+    APP_DIR / "relay_transport.py",
+)
 STATE_DIR = Path.home() / "Library" / "Application Support" / "LLM Launcher"
 RUNS_DIR = STATE_DIR / "runs"
 LOGS_DIR = STATE_DIR / "logs"
@@ -88,6 +144,7 @@ CHAT_CONTINUE_INSTRUCTION = (
 DEFAULT_CONTEXT = 131_072
 DEFAULT_OUTPUT = 16_384
 VERSION = "1.67.0-alpha.1"
+SAMPLING_EVIDENCE_SCHEMA_VERSION = 1
 ADAPTER_SCHEMA_VERSION = 1
 MODEL_LIBRARY_SCHEMA_VERSION = 2
 ROUTE_EVIDENCE_SCHEMA_VERSION = 1
@@ -137,38 +194,64 @@ CONTROLLER_RESTART_MESSAGE = (
 )
 
 
-def controller_source_stamp(path: Path = CONTROLLER_SOURCE_PATH) -> tuple[int, int] | None:
-    """Return a cheap immutable-enough stamp for detecting an edited controller."""
-    try:
-        source = path.stat()
-    except OSError:
-        return None
-    return source.st_mtime_ns, source.st_size
+def controller_source_fingerprint(
+    paths: tuple[Path, ...] = CONTROLLER_SOURCE_PATHS,
+) -> str | None:
+    """Hash every Python source file whose code is imported by the controller."""
+    digest = hashlib.sha256()
+    for index, path in enumerate(paths):
+        try:
+            name = path.name.encode("utf-8")
+            with path.open("rb") as source:
+                digest.update(index.to_bytes(4, "big"))
+                digest.update(len(name).to_bytes(4, "big"))
+                digest.update(name)
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+        except OSError:
+            return None
+    return digest.hexdigest()
 
 
-CONTROLLER_SOURCE_STAMP = controller_source_stamp()
+CONTROLLER_SOURCE_FINGERPRINT = controller_source_fingerprint()
 
 
 def controller_source_is_current() -> bool:
     """Fail closed before starting new work when this process runs older source."""
-    current = controller_source_stamp(CONTROLLER_SOURCE_PATH)
-    return current is not None and current == CONTROLLER_SOURCE_STAMP
+    current = controller_source_fingerprint(CONTROLLER_SOURCE_PATHS)
+    return bool(
+        CONTROLLER_SOURCE_FINGERPRINT
+        and current
+        and secrets.compare_digest(current, CONTROLLER_SOURCE_FINGERPRINT)
+    )
 
 
 RUNTIME_PREFERENCES_VERSION = 1
 RUNTIME_PREFERENCES_FILE = STATE_DIR / "runtime-preferences.json"
 MANAGED_RUNTIMES_DIR = STATE_DIR / "runtimes"
-UZU_RUNTIME_TAG = "0.5.22"
+UZU_RUNTIME_UPSTREAM_TAG = "0.5.23"
+# Retain the exact measured build identifier; installing identical bytes must
+# not rewrite the version/identity recorded by its 64K and 128K qualifications.
+UZU_RUNTIME_TAG = "0.5.23-llm-launcher.prefill-experiment.1"
 UZU_RUNTIME_DIR = MANAGED_RUNTIMES_DIR / f"uzu-{UZU_RUNTIME_TAG}"
 UZU_RUNTIME_PATH = UZU_RUNTIME_DIR / "mirai"
-UZU_RUNTIME_ARCHIVE_SHA256 = "cf85742abf801ccd6fedefb5859c154d72dea634616b6a7ac2604b8674555608"
-UZU_RUNTIME_RELEASE_BINARY_SHA256 = "82edefd796e69d07fa2ad7e8dc424ad8a06167c8a6f95cd316fea179be19f559"
-UZU_RUNTIME_RELEASE_URL = "https://github.com/trymirai/uzu/releases/tag/0.5.22"
+UZU_RUNTIME_UPSTREAM_COMMIT = "115609b6ef7ce5a94fc761bf395780f032b09f9b"
+UZU_RUNTIME_SOURCE_PATCHES = (
+    "llm-launcher-hardening.patch",
+    "experimental-bounded-prefill.patch",
+    "experimental-quiet-build.patch",
+)
+# SHA-256 of the patch bytes concatenated in the order above.
+UZU_RUNTIME_SOURCE_PATCH_SHA256 = "680e2d72f0ba7a63fc822543022c6a1fc9b2895276fb7252a8049219de58692f"
+UZU_RUNTIME_RELEASE_BINARY_SHA256 = "efe7fc98a8e063c30103a27badb4f308b8cb782708134a7805178f9e16caa0ce"
+UZU_RUNTIME_RELEASE_BINARY_SIZE = 65_079_520
+UZU_RUNTIME_DIRECTORY_MODE = 0o700
+UZU_RUNTIME_BINARY_MODE = 0o500
+UZU_RUNTIME_RELEASE_URL = f"https://github.com/trymirai/uzu/releases/tag/{UZU_RUNTIME_UPSTREAM_TAG}"
 UZU_MEMORY_HOTFIX_URL = "https://github.com/trymirai/uzu/pull/794"
-UZU_PUBLISHER_TEAM_IDENTIFIER = "C39GZ239GY"
-UZU_RELEASE_CODE_DIRECTORY_HASH = "4edaa211f5c01dc5baaf103eefd2610472957f84"
 UZU_MODEL_PAGE_URL = "https://trymirai.com/local-models/alibaba-qwen3-6-27b-mirai-mirai-m-4"
 UZU_MODEL_REGISTRY_PATH = Path.home() / ".cache" / "mirai" / "registry.json"
+UZU_RESOLVED_MODELS_PATH = Path.home() / ".cache" / "mirai" / "resolved-models.json"
 UZU_MODEL_CACHE_ROOT = Path.home() / ".cache" / "mirai" / "models" / "mirai"
 UZU_MODEL_REGISTRY_MAX_BYTES = 4 * 1024 * 1024
 UZU_MODEL_REGISTRY_MAX_ENTRIES = 512
@@ -176,13 +259,37 @@ UZU_MODEL_MANIFEST_MAX_FILES = 64
 UZU_MODEL_MANIFEST_MAX_BYTES = 128 * 1024**3
 UZU_SANDBOX_EXECUTABLE = Path("/usr/bin/sandbox-exec")
 UZU_NETWORK_SANDBOX_PROFILE = "(version 1)(allow default)(deny network-outbound)"
-UZU_SAFE_CONTEXT_WINDOWS = (16_384, 32_768)
+UZU_SAFE_CONTEXT_WINDOWS = (16_384, 32_768, 65_536, 131_072)
 UZU_UPSTREAM_OUTPUT_TPS = 105.0
 UZU_UPSTREAM_HARDWARE = "Apple M5 Max · 128 GB"
-UZU_PROCESS_MEMORY_CEILING_BYTES = 36 * 1024**3
+UZU_PROCESS_MEMORY_CEILING_BYTES = 38 * 1024**3
 UZU_QUALIFICATION_MINIMUM_DECODE_TPS = 15.0
+UZU_QUALIFICATION_CONTRACT_VERSION = 5
+UZU_QUALIFICATION_SAMPLE_MAX_TOKENS = 8_192
+UZU_QUALIFICATION_SAMPLE_MIN_TOKENS = 2_048
+UZU_QUALIFICATION_OUTPUT_POLICY_ID = "uzu-remaining-context-output-v1"
+UZU_QUALIFICATION_PROMPT_RESERVE_TOKENS = 512
+UZU_NATIVE_BOUNDARY_CONTRACT_ID = "uzu-native-auth-context-output-v1"
+UZU_API_KEY_FILE_NAME = "uzu-api-key"
+UZU_PRIVATE_BEARER_FILE_NAMES = (
+    UZU_API_KEY_FILE_NAME,
+    "session-proxy.json",
+    "codex-proxy.json",
+)
 UZU_DRAFT_FULL_ATTENTION_BYTES_PER_TOKEN = 4 * 1024
 UZU_DRAFT_SLIDING_CACHE_BYTES = 64 * 1024**2
+# Long-context prefill can temporarily need more workspace than steady-state
+# KV sizing exposes.  Keep an explicit, context-scaled reserve in admission;
+# the independent live process and whole-system guards remain authoritative.
+UZU_LONG_CONTEXT_PREFILL_RESERVE_STEP_TOKENS = 65_536
+UZU_LONG_CONTEXT_PREFILL_RESERVE_STEP_BYTES = 1 * 1024**3
+UZU_PROCESS_CEILING_ADMISSION_MARGIN_BYTES = 2 * 1024**3
+UZU_QUALIFICATION_NEAR_TIER_POLICY_ID = "uzu-near-tier-authoritative-prompt-v4-conversation"
+UZU_QUALIFICATION_NEAR_TIER_MINIMUM_CONTEXT = 65_536
+UZU_QUALIFICATION_NEAR_TIER_FRACTION = 0.90
+UZU_QUALIFICATION_NEAR_TIER_SCENARIOS = ("toolIngest", "steadyTurn")
+UZU_QUALIFICATION_PROMPT_TOLERANCE_FRACTION = 0.05
+UZU_QUALIFICATION_PROMPT_TOLERANCE_MIN_TOKENS = 1_024
 UZU_SANDBOX_PROFILE_SHA256 = hashlib.sha256(
     UZU_NETWORK_SANDBOX_PROFILE.encode("utf-8")
 ).hexdigest()
@@ -357,7 +464,7 @@ RUNTIME_UPDATE_CATALOG: dict[str, dict[str, Any]] = {
     },
 }
 RUNTIME_RELEASE_CATALOG_VERSION = 1
-RUNTIME_RELEASE_CATALOG_AUDITED_AT = "2026-08-31"
+RUNTIME_RELEASE_CATALOG_AUDITED_AT = "2026-09-07"
 RUNTIME_RELEASE_CATALOG: dict[str, dict[str, Any]] = {
     "omlx": {
         "version": "0.6.4", "displayVersion": "0.6.4",
@@ -390,19 +497,30 @@ RUNTIME_RELEASE_CATALOG: dict[str, dict[str, Any]] = {
         ],
     },
     "mtplx": {
-        "version": "2.10.1", "displayVersion": "2.10.1",
-        "channel": "stable", "releasedAt": "2026-08-30T10:43:56Z",
-        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.10.1",
+        "version": "2.11.2", "displayVersion": "2.11.2",
+        "channel": "stable", "releasedAt": "2026-09-06T14:04:18Z",
+        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.11.2",
+        "commit": "21be78b3f51820eecef020e5e4855c0715eaf9a5",
         "summary": (
-            "Flash-Next gains sparse long-prefill acceleration, reasoning-only agent turns "
-            "no longer return empty answers, and M2/M3/96 GB compatibility is repaired."
+            "Hardware-gated Qwen 27B attention, repaired long-session cache reuse, "
+            "and corrected memory and timing accounting."
         ),
         "highlights": [
-            {"value": "−35%", "label": "reported 98K Flash prefill"},
-            {"value": "Visible answer", "label": "reasoning-only turns"},
-            {"value": "96 GB", "label": "Flash-Next admission"},
+            {"value": "M1–M4", "label": "27B attention corrected"},
+            {"value": "Session bank", "label": "later conversations cache again"},
+            {"value": "Local checks", "label": "speed requires measurement"},
         ],
         "advisories": [
+            {
+                "affectedVersion": "2.11.1",
+                "headline": "Update for attention and long-session correctness",
+                "detail": (
+                    "2.11.1's Turbo 27B flash verifier can produce incorrect attention on "
+                    "M1–M4 GPUs above 8,192 context tokens. 2.11.2 gates it to supported "
+                    "M5 hardware and fixes session-bank reuse and later-conversation admission. "
+                    "The M1–M4 defect is not evidence of an M5 failure."
+                ),
+            },
             {
                 "affectedVersion": "2.9.0",
                 "headline": "Re-test Turbo after updating",
@@ -413,17 +531,42 @@ RUNTIME_RELEASE_CATALOG: dict[str, dict[str, Any]] = {
             },
             {
                 "affectedVersion": "2.10.0",
-                "headline": "Use 2.10.1 for agent and Flash-Next fixes",
+                "headline": "Use 2.11.2 for agent and Flash-Next fixes",
                 "detail": (
-                    "MTPLX 2.10.1 fixes tool-enabled turns that ended in reasoning and returned "
-                    "an empty answer, plus Flash-Next memory and compatibility defects."
+                    "MTPLX 2.11.2 includes the intervening visible-answer, memory-admission, "
+                    "stream-diagnostics, agent-session, and Flash-Next fixes."
+                ),
+            },
+            {
+                "affectedVersion": "2.10.1",
+                "headline": "Use 2.11.2 for memory and agent-session safety",
+                "detail": (
+                    "MTPLX 2.11.2 includes the later memory guard, SessionBank, postcommit, "
+                    "forced-tool, and warm-agent fixes."
+                ),
+            },
+            {
+                "affectedVersion": "2.10.2",
+                "headline": "Use 2.11.2 for the current agent and decode fixes",
+                "detail": (
+                    "MTPLX 2.11.2 repairs warm agent turns and forced-tool session restores, "
+                    "and adds the audited dense-27B and Flash-Next decode work."
+                ),
+            },
+            {
+                "affectedVersion": "2.11.0",
+                "headline": "The 2.11.0 upload was retracted",
+                "detail": (
+                    "MTPLX says 2.11.0 was a mis-stamped PyPI upload containing nothing beyond "
+                    "2.10.2. It was retracted; update a surviving copy to 2.11.2."
                 ),
             },
         ],
         "workflow": [
-            "Keep valid older evidence as history, but never reuse it as proof for the changed 2.10.1 runtime.",
+            "Keep valid older evidence as history, but never reuse it as proof for the changed 2.11.2 runtime.",
             "Update the app-managed engine through MTPLX's signed app updater or official DMG.",
-            "Run mtplx models --check, then repeat the same local benchmark on 2.10.1 before preferring it for TPS.",
+            "Keep swap overcommit and unmeasured context-specific operator settings disabled.",
+            "Run mtplx models --check, then repeat the same local benchmark on 2.11.2 before preferring it for TPS.",
         ],
     },
     "swiftlm": {
@@ -441,33 +584,41 @@ RUNTIME_RELEASE_CATALOG: dict[str, dict[str, Any]] = {
         ],
     },
     "whallm": {
-        "version": "1.1.2", "displayVersion": "1.1.2",
-        "channel": "stable", "releasedAt": "2026-08-28T18:42:00Z",
-        "releaseUrl": "https://github.com/yanun0323/Whallm/releases/tag/v1.1.2",
+        "version": "1.1.4", "displayVersion": "1.1.4",
+        "channel": "stable", "releasedAt": "2026-09-03T17:49:37Z",
+        "releaseUrl": "https://github.com/yanun0323/Whallm/releases/tag/v1.1.4",
         "summary": (
-            "Experimental Apple-Silicon app with a pinned Qwen3.8 Flash-Next MXFP4 "
-            "download, full 512-expert SSD streaming, Chat Completions, and Responses APIs."
+            "Current experimental Apple-Silicon app with repaired Qwen/Codex tool replies, "
+            "prompt-cache snapshots, ANE prefill, and full 512-expert SSD streaming."
         ),
         "highlights": [
-            {"value": "15–19 GiB", "label": "measured M5 Pro peak"},
+            {"value": "20.9–22.8 GiB", "label": "M5 Pro MLX active memory"},
             {"value": "512", "label": "experts preserved"},
-            {"value": "8 tok/s", "label": "measured decode range"},
+            {"value": "9.7–10.4 tok/s", "label": "measured decode range"},
         ],
         "advisories": [
             {
                 "affectedVersion": "1.1.2",
-                "headline": "48 GB remains outside the published support floor",
+                "headline": "Update for Qwen/Codex reliability fixes",
                 "detail": (
-                    "Whallm measures Qwen below 19 GiB on an M5 Pro and caps automatic Qwen "
-                    "memory at 48 GiB, but its public requirements still say 64 GiB or more. "
+                    "Whallm 1.1.4 fixes blank Codex replies caused by conflicting tool-call "
+                    "stream parsers and rejects affected mutable prompt-cache snapshots."
+                ),
+            },
+            {
+                "affectedVersion": "1.1.4",
+                "headline": "48 GiB remains outside the published support floor",
+                "detail": (
+                    "Whallm measures Qwen at up to 22.75 GiB of MLX active memory on an M5 Pro and caps automatic "
+                    "Qwen memory at 48 GiB, but its public requirements still say 64 GiB or more. "
                     "The launcher therefore labels this Mac route experimental rather than guaranteed."
                 ),
             },
         ],
         "workflow": [
-            "Install the signed arm64 app from the official release.",
+            "Install the signed 1.1.4 arm64 app from the official release.",
             "Download the app's pinned Qwen model, then start its loopback server.",
-            "Rescan the launcher; it accepts only the exact advertised Qwen model ID and never stops Whallm's shared server.",
+            "Rescan the launcher; upstream figures remain reference-only until this Mac completes a matching local measurement.",
         ],
     },
 }
@@ -492,6 +643,10 @@ BENCHMARK_HISTORY_VISIBLE_RUNS = 8
 BENCHMARK_HISTORY_FRESH_DAYS = 30
 BENCHMARK_MINIMUM_SPEEDUP = 1.03
 BENCHMARK_COMPARISON_CONTRACT_VERSION = 4
+BENCHMARK_PROBE_CONTRACT = {
+    "version": "fixed-greedy-wire-v1",
+    "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "seed": 17},
+}
 BENCHMARK_REASONING_POLICY_EXACT = "exact"
 BENCHMARK_REASONING_POLICY_ALL_ENGINES = "all-engines-model-default"
 ROUTE_QUALIFICATION_VERSION = 1
@@ -518,26 +673,83 @@ ROUTE_QUALIFICATION_SCENARIOS = ["cold", "warmPrefix", "toolIngest", "steadyTurn
 ROUTE_QUALIFICATION_8K_SUITE = "route-qualification-8k"
 ROUTE_QUALIFICATION_UZU_16K_SUITE = "route-qualification-uzu-16k"
 ROUTE_QUALIFICATION_UZU_32K_SUITE = "route-qualification-uzu-32k"
+ROUTE_QUALIFICATION_UZU_64K_SUITE = "route-qualification-uzu-64k"
+ROUTE_QUALIFICATION_UZU_128K_SUITE = "route-qualification-uzu-128k"
+MTPLX_LONG_CONTEXT_64K_SUITE = "mtplx-dense-27b-long-context-64k"
+ROUTE_QUALIFICATION_UZU_SUITES_BY_CONTEXT = {
+    16_384: ROUTE_QUALIFICATION_UZU_16K_SUITE,
+    32_768: ROUTE_QUALIFICATION_UZU_32K_SUITE,
+    65_536: ROUTE_QUALIFICATION_UZU_64K_SUITE,
+    131_072: ROUTE_QUALIFICATION_UZU_128K_SUITE,
+}
 ROUTE_QUALIFICATION_AGENTIC_SUITES = frozenset({
     "agentic",
     ROUTE_QUALIFICATION_8K_SUITE,
     ROUTE_QUALIFICATION_UZU_16K_SUITE,
     ROUTE_QUALIFICATION_UZU_32K_SUITE,
+    ROUTE_QUALIFICATION_UZU_64K_SUITE,
+    ROUTE_QUALIFICATION_UZU_128K_SUITE,
+    MTPLX_LONG_CONTEXT_64K_SUITE,
 })
 QWEN_PLE_QUALIFICATION_CONTEXT = 16_384
 QWEN_PLE_QUALIFICATION_OUTPUT = 8_192
 QWEN_PLE_QUALIFICATION_REASONING = "medium"
-BENCHMARK_MTP_TUNER_VERSION = 2
-BENCHMARK_MTP_TUNER_READ_VERSIONS = frozenset({1, 2})
+BENCHMARK_MTP_TUNER_VERSION = 3
+BENCHMARK_MTP_TUNER_READ_VERSIONS = frozenset({1, 2, 3})
 BENCHMARK_MTP_TUNER_MAX_CANDIDATES = 10
 BENCHMARK_MTP_TUNER_CUTOFFS = (0.0, 0.25, 0.50, 0.75)
-MTPLX_MTP_DEPTH_SWEEP_VERSION = 1
+MTPLX_MTP_DEPTH_SWEEP_VERSION = 2
 MTPLX_MTP_DEPTH_SWEEP_MAX_CANDIDATES = 8
-BENCHMARK_DFLASH_TUNER_VERSION = 2
-BENCHMARK_DFLASH_TUNER_READ_VERSIONS = frozenset({1, 2})
+MTPLX_LONG_CONTEXT_2111_CONTRACT_VERSION = 1
+MTPLX_LONG_CONTEXT_2111_SWEEP_VERSION = 5
+MTPLX_LONG_CONTEXT_2111_ROUTE = "dense-27b-long-context-2111"
+MTPLX_LONG_CONTEXT_DEFAULT_ROUTE = "default"
+MTPLX_LONG_CONTEXT_MINIMUM = 65_536
+MTPLX_LONG_CONTEXT_TARGET_PROMPT = 61_440
+MTPLX_LONG_CONTEXT_MINIMUM_PROMPT = math.ceil(
+    MTPLX_LONG_CONTEXT_MINIMUM * 0.90
+)
+MTPLX_LONG_CONTEXT_CANDIDATE_ENV = {
+    "MTPLX_CONTEXT_COPY": "0",
+    "MTPLX_LAZY_TARGET_DISTRIBUTIONS": "0",
+    "MTPLX_BATCH_TARGET_ARRAYS": "1",
+}
+MTPLX_LONG_CONTEXT_BASELINE_ENV = {
+    "MTPLX_CONTEXT_COPY": "1",
+    "MTPLX_LAZY_TARGET_DISTRIBUTIONS": "1",
+    "MTPLX_BATCH_TARGET_ARRAYS": "0",
+}
+MTPLX_LONG_CONTEXT_OPERATOR_ENV_KEYS = frozenset(
+    MTPLX_LONG_CONTEXT_CANDIDATE_ENV
+)
+MTPLX_OPERATOR_MEASUREMENT_SAMPLE_KEYS = (
+    "scenario", "targetPromptTokens", "promptTokens", "completionTokens", "requestedMaxTokens",
+    "authoritativeUsage", "cachedPromptTokens", "cacheHitRate",
+    "ttftSeconds", "totalSeconds", "decodeTokensPerSecond",
+    "endToEndTokensPerSecond",
+)
+MTPLX_OPERATOR_MEASUREMENT_RESULT_KEYS = (
+    "medianTTFT", "medianDecodeTokensPerSecond",
+    "medianEndToEndTokensPerSecond", "agenticMetrics",
+    "resourceTelemetry", "resourceCooldown",
+)
+MTPLX_LONG_CONTEXT_DENSE_GEOMETRY = {
+    "num_hidden_layers": 64,
+    "vocab_size": 248_320,
+    "hidden_size": 5_120,
+    "intermediate_size": 17_408,
+}
+BENCHMARK_DFLASH_TUNER_VERSION = 3
+BENCHMARK_DFLASH_TUNER_READ_VERSIONS = frozenset({1, 2, 3})
 BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES = 10
 BENCHMARK_DFLASH_TUNER_VERIFY_MODES = ("adaptive", "dflash", "ddtree")
 BENCHMARK_DFLASH_TUNER_DRAFT_QUANTS = ("native", "q8", "q4", "q2")
+OMLX_DFLASH_TUNED_ANE_EXCLUSION_DETAIL = (
+    "DFlash 2 was not tested because tuned ANE prefill is locked for this comparison."
+)
+ENGINE_SETTINGS_SWEEP_VERSION = 1
+ENGINE_SETTINGS_SWEEP_MAX_MODEL_LOADS = 64
+ENGINE_SETTINGS_SWEEP_MAX_GENERATED_REQUESTS = 512
 SSD_STREAMING_CONTRACT_VERSION = 1
 SSD_STREAMING_MIN_WEIGHT_RATIO = 0.85
 SSD_STREAMING_PREFILL_SIZES = (128, 256, 512, 1_024, 2_048)
@@ -726,18 +938,48 @@ BENCHMARK_SUITES = {
         "internal": True,
     },
     ROUTE_QUALIFICATION_UZU_16K_SUITE: {
+        "uzuTokenBudgetedCorpus": True,
         "label": "16K Uzu Route Qualification", "kind": "agentic",
-        "promptTokens": [8_192, 12_288], "maxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+        "promptTokens": [8_192, 12_288], "maxTokens": UZU_QUALIFICATION_SAMPLE_MAX_TOKENS,
         "repetitions": 1, "prefixTokens": 8_192, "toolTokens": 4_096,
         "requiredContext": 16_384,
         "scenarios": list(ROUTE_QUALIFICATION_SCENARIOS),
         "internal": True,
     },
     ROUTE_QUALIFICATION_UZU_32K_SUITE: {
+        "uzuTokenBudgetedCorpus": True,
         "label": "32K Uzu Route Qualification", "kind": "agentic",
-        "promptTokens": [20_480, 28_672], "maxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+        "promptTokens": [20_480, 28_672], "maxTokens": UZU_QUALIFICATION_SAMPLE_MAX_TOKENS,
         "repetitions": 1, "prefixTokens": 20_480, "toolTokens": 8_192,
         "requiredContext": 32_768,
+        "scenarios": list(ROUTE_QUALIFICATION_SCENARIOS),
+        "internal": True,
+    },
+    ROUTE_QUALIFICATION_UZU_64K_SUITE: {
+        "uzuTokenBudgetedCorpus": True,
+        "label": "64K Uzu Route Qualification", "kind": "agentic",
+        "promptTokens": [49_152, 61_440], "maxTokens": UZU_QUALIFICATION_SAMPLE_MAX_TOKENS,
+        "repetitions": 1, "prefixTokens": 49_152, "toolTokens": 12_288,
+        "requiredContext": 65_536,
+        "scenarios": list(ROUTE_QUALIFICATION_SCENARIOS),
+        "internal": True,
+    },
+    ROUTE_QUALIFICATION_UZU_128K_SUITE: {
+        "uzuTokenBudgetedCorpus": True,
+        "label": "128K Uzu Route Qualification", "kind": "agentic",
+        "promptTokens": [98_304, 122_880], "maxTokens": UZU_QUALIFICATION_SAMPLE_MAX_TOKENS,
+        "repetitions": 1, "prefixTokens": 98_304, "toolTokens": 24_576,
+        "requiredContext": 131_072,
+        "scenarios": list(ROUTE_QUALIFICATION_SCENARIOS),
+        "internal": True,
+    },
+    MTPLX_LONG_CONTEXT_64K_SUITE: {
+        "label": "64K MTPLX dense-27B operator qualification", "kind": "agentic",
+        "qwenTokenBudgetedCorpus": True,
+        "promptTokens": [49_152, MTPLX_LONG_CONTEXT_TARGET_PROMPT],
+        "maxTokens": 256, "repetitions": 1,
+        "prefixTokens": 49_152, "toolTokens": 12_288,
+        "requiredContext": MTPLX_LONG_CONTEXT_MINIMUM,
         "scenarios": list(ROUTE_QUALIFICATION_SCENARIOS),
         "internal": True,
     },
@@ -762,6 +1004,12 @@ DFLASH2_UPSTREAM_PERFORMANCE_EVIDENCE = {
 }
 LMSTUDIO_MTP_MIN_TOKENS_DEFAULT = 0
 LMSTUDIO_MTP_MIN_CONTINUE_PROBABILITY_DEFAULT = 0.0
+LMSTUDIO_ASSISTANT_DRAFTER_MINIMUM_APP = "0.4.22"
+LMSTUDIO_ASSISTANT_DRAFTER_MINIMUM_LLAMA_PACK = "2.29.1"
+LMSTUDIO_ASSISTANT_DRAFTER_RELEASE_URL = (
+    "https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.22"
+)
+LMSTUDIO_ASSISTANT_DRAFTER_FAMILIES = frozenset({"dflash", "dspark", "mtp"})
 SETUP_DOWNLOAD_RESERVE_BYTES = 2 * 1024**3
 ANE_TUNER_STORE_VERSION = 1
 ANE_TUNER_MAX_RECORDS = 32
@@ -778,7 +1026,12 @@ ANE_FP16_CLONE_SOURCE_URL = (
     "https://github.com/jundot/omlx/blob/v0.6.3rc2/tools/clone_mlx_model_fp16.py"
 )
 ANE_FP16_CLONE_HELPER = APP_DIR / "ane_fp16_clone.py"
-SESSION_MEMORY_ESTIMATE_VERSION = 4
+SESSION_MEMORY_ESTIMATE_VERSION = 7
+DFLASH_KV_COMPARISON_REASON = (
+    "DFlash uses affine quantized KV while ordinary oMLX uses TurboQuant. "
+    "Choose Full precision to compare DFlash with other routes at the same precision, "
+    "or keep this manual DFlash route."
+)
 SESSION_DASHBOARD_VERSION = 5
 SURFACE_ATTACHMENT_VERSION = 2
 SURFACE_ATTACHMENT_MAX = 12
@@ -792,7 +1045,7 @@ OMLX_ACTIVITY_MAX_RESPONSE = 512 * 1024
 OMLX_ADMIN_SESSION_MAX = 4_096
 MTPLX_FLIGHT_TELEMETRY_VERSION = 1
 MTPLX_FLIGHT_MINIMUM_RUNTIME = "2.9.1"
-MTPLX_AGENT_RECOMMENDED_RUNTIME = "2.10.1"
+MTPLX_AGENT_RECOMMENDED_RUNTIME = "2.11.2"
 MTPLX_FLIGHT_MAX_RESPONSE = 256 * 1024
 AGENT_CONSOLE_VERSION = 3
 AGENT_CONSOLE_MAX_BUFFER = 2 * 1024 * 1024
@@ -802,6 +1055,20 @@ PI_RPC_MAX_QUEUED_MESSAGES = 32
 PI_RPC_MAX_QUEUED_BYTES = 512 * 1024
 PI_RPC_STATE_PROBE_SECONDS = 2.0
 PI_RPC_MAX_INTERACTIONS = 8
+PI_RPC_TIMELINE_VERSION = 1
+PI_RPC_TIMELINE_MAX_EVENTS = 512
+PI_RPC_TIMELINE_MAX_REPLAY_ITEMS = 512
+PI_RPC_TIMELINE_MAX_TEXT_BYTES = 512 * 1024
+PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES = 64 * 1024
+PI_RPC_TIMELINE_MAX_TRACKED_ITEMS = 256
+PI_RPC_TIMELINE_SNAPSHOT_INTERVAL = 64
+PI_RPC_TRANSIENT_MAX_TEXT_ITEMS = 64
+PI_RPC_MAX_JSON_LINE_BYTES = 2 * 1024 * 1024
+PI_RPC_HISTORY_MAX_JSON_LINE_BYTES = 16 * 1024 * 1024
+PI_RPC_TIMELINE_KINDS = frozenset({
+    "user", "thinking", "answer", "toolCall", "toolResult",
+    "notice", "error", "queue", "summary",
+})
 AGENT_CONSOLE_COLS = (40, 240)
 AGENT_CONSOLE_ROWS = (12, 100)
 SESSION_IDLE_TIMEOUT_CHOICES = {0, 5, 15, 30, 60, 120}
@@ -834,6 +1101,11 @@ OMLX_QWEN4_METAL_WORKSPACE_BYTES = 1024**3
 # that same fail-closed margin instead of treating the kernel limit as wholly
 # available working space.
 OMLX_QWEN4_METAL_PREFILL_SAFE_RATIO = 0.95
+# The installed oMLX Qwen4 compatibility cache reserves QSA storage in
+# 8,192-token chunks and doubles a managed allocation when decode crosses the
+# prefill capacity. Capacity estimates must include that split-dependent high
+# water mark rather than pretending every selected token is allocated exactly.
+OMLX_QWEN4_QSA_ALLOCATION_STEP_TOKENS = 8_192
 OMLX_INSTALL_URL = "https://github.com/jundot/omlx/releases/tag/v0.6.4"
 OMLX_INSTALL_DOCS_URL = "https://github.com/jundot/omlx#install"
 LMSTUDIO_RUNTIME_DOCS_URL = "https://lmstudio.ai/docs/cli/runtime/runtime"
@@ -850,7 +1122,7 @@ WHALLM_ENDPOINT = "http://127.0.0.1:11434"
 WHALLM_MODEL_ID = "qwen3.8-flash-next-fp8"
 WHALLM_CONTEXT_WINDOWS = (4_096, 8_192, 16_384)
 WHALLM_MODEL_BYTES = 125_291_490_955
-WHALLM_MEASURED_PEAK_BYTES = round(18.92 * 1024**3)
+WHALLM_MEASURED_PEAK_BYTES = round(22.75 * 1024**3)
 WHALLM_SUPPORT_FLOOR_BYTES = 64 * 1024**3
 WHALLM_STATUS_MAX_RESPONSE = 64 * 1024
 LLAMACPP_WHALLM_CONFLICT_LABEL = "Unload Whallm temporarily"
@@ -862,7 +1134,7 @@ LLAMACPP_WHALLM_UNKNOWN_DETAIL = (
     "Whallm's fixed loopback server is live, but its loaded-model status could not be "
     "verified. Close or unload Whallm, then recheck; the launcher will not change it."
 )
-WHALLM_RELEASE_URL = "https://github.com/yanun0323/Whallm/releases/tag/v1.1.2"
+WHALLM_RELEASE_URL = "https://github.com/yanun0323/Whallm/releases/tag/v1.1.4"
 WHALLM_DOCS_URL = "https://github.com/yanun0323/Whallm"
 WHALLM_BENCHMARK_URL = "https://github.com/yanun0323/Whallm/blob/master/BENCHMARK.md"
 FREETOKEN_NATIVE_SCHEMA_NAME = "freetoken.native-macos-capabilities"
@@ -904,7 +1176,7 @@ OPTIMIZER_KEYS = {
         "acceleration", "depth", "mtpMinTokens",
         "mtpMinContinueProbability", "gpu", "parallel",
     ),
-    "mtplx": ("acceleration", "depth", "profile", "fan"),
+    "mtplx": ("acceleration", "depth", "profile", "mtplxOperatorRoute", "fan"),
     "freetoken": ("maxBatchSize", "expertCacheSize", "prefixCacheEntries"),
     "swiftlm": ("prefillSize", "nativeExpertTopK"),
     "mference": ("promptCacheMode", "queueLimit"),
@@ -1426,6 +1698,16 @@ def is_qwen4_exp_record(model: dict[str, Any]) -> bool:
     return bool(isinstance(profile, dict) and profile.get("supported") is True)
 
 
+def qwen4_qsa_allocation_high_water_tokens(context: int, step: int) -> int:
+    """Bound the largest QSA capacity reachable by any prefill/decode split."""
+    if context <= 0 or step <= 0:
+        return 0
+    rounded_context = ((context + step - 1) // step) * step
+    largest_managed_capacity_below_context = ((context - 1) // step) * step
+    doubled_capacity = 2 * largest_managed_capacity_below_context
+    return max(step, rounded_context, doubled_capacity)
+
+
 def model_memory_geometry(config: dict[str, Any]) -> dict[str, Any]:
     """Extract the bounded attention geometry needed for a full-context KV estimate."""
     text = config.get("text_config") if isinstance(config.get("text_config"), dict) else config
@@ -1486,15 +1768,36 @@ def model_memory_geometry(config: dict[str, Any]) -> dict[str, Any]:
             and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in sections)
             else 1
         )
-        if indexer_head_dim:
-            fixed_qsa_bytes = int(indexer_head_dim) * 2 + position_channels * 8
+        raw_compress_ratio = text.get("indexer_compress_ratio", 4)
+        indexer_compress_ratio = (
+            int(raw_compress_ratio)
+            if isinstance(raw_compress_ratio, int)
+            and not isinstance(raw_compress_ratio, bool)
+            and 0 < raw_compress_ratio <= OMLX_QWEN4_QSA_ALLOCATION_STEP_TOKENS
+            and OMLX_QWEN4_QSA_ALLOCATION_STEP_TOKENS % raw_compress_ratio == 0
+            and (int(indexer_head_dim or 0) * 2) % raw_compress_ratio == 0
+            else None
+        )
+        if indexer_head_dim and indexer_compress_ratio:
+            raw_qsa_bytes = int(indexer_head_dim) * 2 + position_channels * 8
+            pooled_index_bytes = int(indexer_head_dim) * 2
+            pooled_qsa_bytes = pooled_index_bytes // indexer_compress_ratio
             kv_bytes = 2 * int(kv_heads) * int(head_dim) * 2
             geometry.update({
                 "qwen4Qsa": True,
                 "indexerHeadDimension": int(indexer_head_dim),
+                "indexerCompressRatio": indexer_compress_ratio,
                 "positionChannels": position_channels,
-                "fixedIndexBytesPerTokenPerLayer": fixed_qsa_bytes,
-                "fullBytesPerToken": int(full_attention_layers) * (kv_bytes + fixed_qsa_bytes),
+                "qsaAllocationStepTokens": OMLX_QWEN4_QSA_ALLOCATION_STEP_TOKENS,
+                "rawIndexBytesPerTokenPerLayer": raw_qsa_bytes,
+                "pooledIndexBytesPerBlockPerLayer": pooled_index_bytes,
+                "pooledIndexBytesPerTokenPerLayer": pooled_qsa_bytes,
+                # Keep the legacy field as the complete per-token QSA
+                # auxiliary allocation so older UI consumers become safer.
+                "fixedIndexBytesPerTokenPerLayer": raw_qsa_bytes + pooled_qsa_bytes,
+                "fullBytesPerToken": int(full_attention_layers) * (
+                    kv_bytes + raw_qsa_bytes + pooled_qsa_bytes
+                ),
             })
     return geometry
 
@@ -1529,10 +1832,9 @@ RUNTIME_CANDIDATE_SPECS: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("homebrew", "/opt/homebrew/bin/mtplx", "Homebrew CLI"),
         ("path", "mtplx", "Shell PATH"),
     ),
-    # Uzu is deliberately restricted to the launcher-owned, versioned copy.
-    # Mirai's app CLI auto-updates independently and the 0.5.22 release has no
-    # telemetry/offline switch, so every launch is additionally wrapped in the
-    # outbound-deny sandbox below.
+    # Uzu is deliberately restricted to the launcher-owned, source-pinned
+    # hardened build. Mirai's app CLI auto-updates independently and does not
+    # provide this launcher's native auth/limit boundary, so it is never used.
     "mirai": (
         ("launcher-managed", str(UZU_RUNTIME_PATH), f"Launcher-managed Uzu {UZU_RUNTIME_TAG}"),
     ),
@@ -1634,92 +1936,295 @@ def runtime_candidates(runtime: str) -> list[dict[str, str]]:
     return candidates
 
 
+def _executable_stat_identity(details: os.stat_result) -> tuple[int, ...]:
+    """Return the fields that must remain stable while executable bytes are read."""
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_uid,
+        details.st_gid,
+        details.st_nlink,
+        details.st_size,
+        details.st_mtime_ns,
+        details.st_ctime_ns,
+    )
+
+
+@dataclass
+class OpenExecutableRevision:
+    """An executable revision whose already-verified descriptor remains open."""
+
+    path: Path
+    fd: int
+    identity: dict[str, Any]
+
+    def close(self) -> None:
+        if self.fd < 0:
+            return
+        descriptor, self.fd = self.fd, -1
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _open_executable_revision(
+    path: Path, *, required_owner: int | None = None,
+    required_mode: int | None = None, required_links: int | None = None,
+) -> OpenExecutableRevision:
+    """Hash one non-symlink executable through a stable, retained descriptor."""
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise ValueError("This platform cannot safely open the runtime executable without following links.")
+    flags = os.O_RDONLY | no_follow | getattr(os, "O_CLOEXEC", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        named_before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("The installed runtime executable is not a regular file.")
+        if (before.st_mode & 0o111) == 0:
+            raise ValueError("The installed runtime candidate is no longer executable.")
+        if before.st_size <= 0 or before.st_size > 512 * 1024**2:
+            raise ValueError("The installed runtime executable has an unexpected size.")
+        if required_owner is not None and before.st_uid != required_owner:
+            raise ValueError("The launcher-managed Uzu executable is not owner-controlled.")
+        if required_mode is not None and stat.S_IMODE(before.st_mode) != required_mode:
+            raise ValueError("The launcher-managed Uzu executable must remain owner-executable mode 0500.")
+        if required_links is not None and before.st_nlink != required_links:
+            raise ValueError("The launcher-managed Uzu executable must have exactly one filesystem link.")
+        if (
+            named_before.st_dev != before.st_dev
+            or named_before.st_ino != before.st_ino
+        ):
+            raise ValueError("The installed runtime executable changed before it could be identified.")
+        digest = hashlib.sha256()
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        named_after = path.lstat()
+        if (
+            _executable_stat_identity(before) != _executable_stat_identity(after)
+            or named_after.st_dev != after.st_dev
+            or named_after.st_ino != after.st_ino
+        ):
+            raise ValueError("The installed runtime executable changed while it was being identified.")
+        identity = {
+            "resolvedPath": str(path),
+            "device": after.st_dev,
+            "inode": after.st_ino,
+            "size": after.st_size,
+            "modifiedNs": after.st_mtime_ns,
+            "changedNs": after.st_ctime_ns,
+            "sha256": digest.hexdigest(),
+        }
+        identity["id"] = hashlib.sha256(json.dumps(
+            identity, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:24]
+        return OpenExecutableRevision(path, descriptor, identity)
+    except (OSError, ValueError) as error:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if isinstance(error, ValueError):
+            raise
+        raise ValueError(
+            "The installed runtime executable changed while it was being identified."
+        ) from error
+
+
 def runtime_executable_revision(path_value: Any) -> dict[str, Any]:
-    """Bind promotion evidence to the exact executable bytes and filesystem revision."""
+    """Bind promotion evidence to stable bytes read through an O_NOFOLLOW fd."""
     try:
         path = Path(str(path_value or "")).expanduser().resolve(strict=True)
-        details = path.stat()
     except OSError as error:
         raise ValueError("The installed runtime executable could not be revalidated.") from error
-    if not path.is_file() or not os.access(path, os.X_OK):
-        raise ValueError("The installed runtime candidate is no longer executable.")
-    if details.st_size <= 0 or details.st_size > 512 * 1024**2:
-        raise ValueError("The installed runtime executable has an unexpected size.")
-    digest = hashlib.sha256()
+    opened = _open_executable_revision(path)
     try:
-        with open(path, "rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
+        return copy.deepcopy(opened.identity)
+    finally:
+        opened.close()
+
+
+def _uzu_runtime_path(path_value: Any) -> Path:
+    """Accept only the exact, non-symlink path beneath safe directory ancestors."""
+    raw_path = "" if path_value is None else str(path_value)
+    if not raw_path.strip():
+        raise ValueError("The launcher-managed Uzu executable is not installed.")
+    requested = Path(raw_path).expanduser()
+    try:
+        direct = requested.lstat()
     except OSError as error:
-        raise ValueError("The installed runtime executable changed while it was being identified.") from error
-    identity = {
-        "resolvedPath": str(path),
-        "size": details.st_size,
-        "modifiedNs": details.st_mtime_ns,
-        "sha256": digest.hexdigest(),
-    }
-    identity["id"] = hashlib.sha256(json.dumps(
-        identity, sort_keys=True, separators=(",", ":"),
-    ).encode("utf-8")).hexdigest()[:24]
-    return identity
+        raise ValueError("The launcher-managed Uzu executable is not installed.") from error
+    if stat.S_ISLNK(direct.st_mode):
+        raise ValueError("The launcher-managed Uzu executable must not be a symbolic link.")
+    requested = Path(os.path.abspath(requested))
+    expected = Path(os.path.abspath(UZU_RUNTIME_PATH.expanduser()))
+    if requested != expected:
+        raise ValueError(
+            f"Only the launcher-managed hardened Uzu {UZU_RUNTIME_TAG} executable is accepted."
+        )
+    ancestors = (requested.parent, *requested.parent.parents)
+    for index, ancestor in enumerate(ancestors):
+        try:
+            details = ancestor.lstat()
+        except OSError as error:
+            raise ValueError("The launcher-managed Uzu executable has an unsafe ancestor.") from error
+        if stat.S_ISLNK(details.st_mode):
+            # macOS commonly spells the protected system path /private/var as
+            # the root-owned /var symlink. It is not mutable by this user and
+            # is safe to traverse; user-owned or writable-container symlinks
+            # remain rejected. The canonical target chain is checked below.
+            try:
+                container = ancestor.parent.lstat()
+            except OSError as error:
+                raise ValueError(
+                    "The launcher-managed Uzu executable has an unsafe ancestor."
+                ) from error
+            if (
+                index == 0
+                or details.st_uid != 0
+                or container.st_uid != 0
+                or not stat.S_ISDIR(container.st_mode)
+                or stat.S_IMODE(container.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
+            ):
+                raise ValueError(
+                    "The launcher-managed Uzu executable has a symbolic or non-directory ancestor."
+                )
+            continue
+        if not stat.S_ISDIR(details.st_mode):
+            raise ValueError("The launcher-managed Uzu executable has a non-directory ancestor.")
+        mode = stat.S_IMODE(details.st_mode)
+        if index == 0:
+            if details.st_uid != os.geteuid() or mode != UZU_RUNTIME_DIRECTORY_MODE:
+                raise ValueError(
+                    "The launcher-managed Uzu runtime directory must be owner-only mode 0700."
+                )
+        elif details.st_uid not in {0, os.geteuid()} or mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise ValueError(
+                "The launcher-managed Uzu executable has a writable or untrusted directory ancestor."
+            )
+    try:
+        canonical = requested.resolve(strict=True)
+    except OSError as error:
+        raise ValueError("The launcher-managed Uzu executable has an unsafe ancestor.") from error
+    for ancestor in (canonical.parent, *canonical.parent.parents):
+        details = ancestor.lstat()
+        if (
+            stat.S_ISLNK(details.st_mode)
+            or not stat.S_ISDIR(details.st_mode)
+            or details.st_uid not in {0, os.geteuid()}
+            or stat.S_IMODE(details.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise ValueError(
+                "The launcher-managed Uzu executable has a writable or untrusted directory ancestor."
+            )
+    return canonical
 
 
-def uzu_runtime_contract(path_value: Any) -> dict[str, Any]:
-    """Verify the exact launcher-owned Uzu release without executing it."""
+def _open_uzu_runtime_executable(path_value: Any) -> OpenExecutableRevision:
+    path = _uzu_runtime_path(path_value)
+    return _open_executable_revision(
+        path,
+        required_owner=os.geteuid(),
+        required_mode=UZU_RUNTIME_BINARY_MODE,
+        required_links=1,
+    )
+
+
+def _confirm_open_uzu_executable(opened: OpenExecutableRevision) -> None:
+    """Confirm the managed name still resolves to the retained verified inode."""
+    if opened.fd < 0:
+        raise ValueError("The verified Uzu executable descriptor is already closed.")
+    try:
+        descriptor = os.fstat(opened.fd)
+        named = opened.path.lstat()
+    except OSError as error:
+        raise ValueError("The Uzu executable path changed immediately before launch.") from error
+    identity = opened.identity
+    if (
+        not stat.S_ISREG(descriptor.st_mode)
+        or descriptor.st_uid != os.geteuid()
+        or stat.S_IMODE(descriptor.st_mode) != UZU_RUNTIME_BINARY_MODE
+        or descriptor.st_nlink != 1
+        or descriptor.st_dev != identity.get("device")
+        or descriptor.st_ino != identity.get("inode")
+        or descriptor.st_size != identity.get("size")
+        or descriptor.st_mtime_ns != identity.get("modifiedNs")
+        or descriptor.st_ctime_ns != identity.get("changedNs")
+        or named.st_dev != descriptor.st_dev
+        or named.st_ino != descriptor.st_ino
+    ):
+        raise ValueError("The Uzu executable path changed immediately before launch.")
+
+
+def uzu_runtime_contract(
+    path_value: Any, *, opened_revision: OpenExecutableRevision | None = None,
+) -> dict[str, Any]:
+    """Verify the exact launcher-owned hardened Uzu build without executing it."""
     result: dict[str, Any] = {
         "ready": False,
         "version": f"Uzu {UZU_RUNTIME_TAG}",
         "releaseUrl": UZU_RUNTIME_RELEASE_URL,
-        "archiveSha256": UZU_RUNTIME_ARCHIVE_SHA256,
+        "upstreamCommit": UZU_RUNTIME_UPSTREAM_COMMIT,
+        "sourcePatchSha256": UZU_RUNTIME_SOURCE_PATCH_SHA256,
+        "sourcePatchFiles": list(UZU_RUNTIME_SOURCE_PATCHES),
         "expectedBinarySha256": UZU_RUNTIME_RELEASE_BINARY_SHA256,
+        "expectedBinarySize": UZU_RUNTIME_RELEASE_BINARY_SIZE,
         "networkSandbox": False,
-        # These exact pinned bytes were independently verified outside the
-        # launcher's restricted process sandbox.  The Developer ID chain and
-        # Apple notarization both pass; do not re-run trust services from the
-        # sandbox and mistake their blocked network access for a bad signature.
-        "publisherSignatureValid": False,
-        "publisherTeamIdentifier": UZU_PUBLISHER_TEAM_IDENTIFIER,
-        "codeDirectoryHash": UZU_RELEASE_CODE_DIRECTORY_HASH,
-        "notarizationVerified": False,
+        "sourcePinned": True,
+        "binaryIdentityPinned": False,
         "memorySafetyBlocked": True,
         "rawListenerAuthenticated": False,
         "rawListenerIsolated": False,
         "listenerIsolationBlocked": True,
-        "boundedContextReady": True,
+        "boundedContextReady": False,
+        "nativeBearerAuthentication": False,
+        "oneUseApiKeyFile": False,
+        "nativeContextLimit": False,
+        "nativeOutputLimit": False,
+        "nativeBoundaryContractId": UZU_NATIVE_BOUNDARY_CONTRACT_ID,
         "memoryHotfixUrl": UZU_MEMORY_HOTFIX_URL,
     }
+    owns_descriptor = opened_revision is None
     try:
-        requested = Path(str(path_value or "")).expanduser()
-        details = requested.lstat()
-        if requested.is_symlink():
-            result["reason"] = "The launcher-managed Uzu executable must not be a symbolic link."
-            return result
-        expected = UZU_RUNTIME_PATH.expanduser().resolve(strict=False)
-        path = requested.resolve(strict=True)
-    except OSError:
-        result["reason"] = "The launcher-managed Uzu executable is not installed."
-        return result
-    if path != expected:
-        result["reason"] = "Only the launcher-managed Uzu 0.5.22 executable is accepted."
-        return result
-    if not stat.S_ISREG(details.st_mode) or details.st_uid != os.geteuid():
-        result["reason"] = "The launcher-managed Uzu executable is not an owner-controlled regular file."
-        return result
-    if details.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        result["reason"] = "The launcher-managed Uzu executable is writable by another account."
-        return result
-    try:
-        revision = runtime_executable_revision(path)
+        opened = opened_revision or _open_uzu_runtime_executable(path_value)
+        path = _uzu_runtime_path(path_value)
+        if opened.path != path:
+            raise ValueError("The retained Uzu executable does not match the requested runtime path.")
+        _confirm_open_uzu_executable(opened)
+        revision = copy.deepcopy(opened.identity)
     except ValueError as error:
         result["reason"] = str(error)
         return result
+    finally:
+        if owns_descriptor and "opened" in locals():
+            opened.close()
     result["binary"] = revision
-    if revision.get("sha256") != UZU_RUNTIME_RELEASE_BINARY_SHA256:
-        result["reason"] = "The Uzu executable no longer matches the pinned official 0.5.22 release bytes."
+    expected_sha = str(UZU_RUNTIME_RELEASE_BINARY_SHA256 or "")
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
+        result["reason"] = (
+            "The hardened Uzu build exists, but its final executable SHA-256 has not been "
+            "pinned in this launcher yet."
+        )
         return result
-    # The signature/notarization proof is bound to these exact immutable bytes.
-    result["publisherSignatureValid"] = True
-    result["notarizationVerified"] = True
+    if revision.get("size") != UZU_RUNTIME_RELEASE_BINARY_SIZE:
+        result["reason"] = (
+            f"The hardened Uzu executable size changed; expected "
+            f"{UZU_RUNTIME_RELEASE_BINARY_SIZE:,} bytes."
+        )
+        return result
+    if not secrets.compare_digest(str(revision.get("sha256") or ""), expected_sha):
+        result["reason"] = (
+            f"The Uzu executable no longer matches the pinned hardened {UZU_RUNTIME_TAG} build bytes."
+        )
+        return result
+    result["binaryIdentityPinned"] = True
     sandbox_ready = (
         sys.platform == "darwin"
         and platform.machine().lower() in {"arm64", "aarch64"}
@@ -1730,21 +2235,25 @@ def uzu_runtime_contract(path_value: Any) -> dict[str, Any]:
     if not sandbox_ready:
         result["reason"] = "Uzu requires Apple Silicon and the macOS outbound-network sandbox."
         return result
-    # PR #794 fixes decode-step allocation retention in the generic language
-    # model stream after 0.5.22. That defect is especially unsafe on this
-    # launcher's 48 GB qualification host. Keep the signed, notarized runtime
-    # and downloaded model reusable, but never execute this release. The
-    # A future containing release still needs a protected raw listener before
-    # the authenticated relay can enforce the selected 16K/32K boundary. The
-    # upstream CLI has neither a context flag nor bearer authentication.
-    result["reason"] = (
-        "Uzu 0.5.22 is installed but disabled: upstream's post-release memory "
-        "hotfix is required before this 48 GB Mac may load it, and the stock "
-        "server's unauthenticated raw listener must be isolated before its "
-        "16K/32K request boundary can be trusted. The installed binary is "
-        "Apple-signed and notarized; a fixed release alone does not bypass "
-        "either launch gate."
-    )
+    # This launcher-owned binary is pinned to Uzu 0.5.23 plus the reviewed
+    # ordered source patches. These add bounded prefill allocation lifetimes
+    # to PR #794's fix and native bearer/context/output enforcement. Exact
+    # bytes—not signing status or a reported version—are the trust root.
+    result.update({
+        "ready": True,
+        "memorySafetyBlocked": False,
+        "rawListenerAuthenticated": True,
+        "listenerIsolationBlocked": False,
+        "boundedContextReady": True,
+        "nativeBearerAuthentication": True,
+        "oneUseApiKeyFile": True,
+        "nativeContextLimit": True,
+        "nativeOutputLimit": True,
+        "reason": (
+            f"Exact launcher-managed hardened Uzu {UZU_RUNTIME_TAG} bytes are ready with "
+            "native bearer authentication and native context/output ceilings."
+        ),
+    })
     result["localOnly"] = True
     result["telemetryBlocked"] = True
     result["automaticDownloadsBlocked"] = True
@@ -2008,11 +2517,44 @@ CLIENT_SUPPORT: dict[str, dict[str, dict[str, Any]]] = {
 }
 
 
+UZU_PI_TESTED_VERSION = "0.84.2"
+UZU_PI_TESTED_RUNTIME_SHA256 = "efe7fc98a8e063c30103a27badb4f308b8cb782708134a7805178f9e16caa0ce"
+UZU_PI_BENCHMARK_LIMITATION = (
+    "Pi can launch using the matching Chat capacity qualification, but Pi speed testing is not yet available. "
+    "Choose Chat to test model capacity; repeating that test does not measure Pi agent performance."
+)
+
+
+def uzu_pi_transport_supported(capability: dict[str, Any] | None) -> bool:
+    """Only the pinned runtime/model and locally exercised Pi protocol pair."""
+    cap = capability if isinstance(capability, dict) else {}
+    runtime = cap.get("runtimeIdentity")
+    if not isinstance(runtime, dict) or not isinstance(runtime.get("binary"), dict):
+        return False
+    return bool(
+        cap.get("runnable") is True
+        and cap.get("modelRegistryId") == UZU_MODEL_REGISTRY_ID
+        and cap.get("modelCommit") == UZU_MODEL_COMMIT
+        and runtime.get("binaryIdentityPinned") is True
+        and (runtime.get("binary") or {}).get("sha256") == UZU_PI_TESTED_RUNTIME_SHA256
+        and cap.get("piTransportVersion") == UZU_PI_TESTED_VERSION
+    )
+
+
 def resolved_client_support(
     backend: str, client: str, capability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve a model/runtime-specific surface contract before backend defaults."""
     fallback = CLIENT_SUPPORT.get(backend, {}).get(client, {})
+    if backend == "uzu" and client == "pi":
+        return {
+            "supported": uzu_pi_transport_supported(capability),
+            "reason": (
+                "Pi 0.84.2 tool streaming verified on the pinned Uzu build; uses the same guarded model capacity, not an agent-speed qualification."
+                if uzu_pi_transport_supported(capability) else
+                "Uzu Pi requires the verified pinned runtime and Pi 0.84.2. Rescan after restoring the tested versions."
+            ),
+        }
     overrides = capability.get("clientSupport") if isinstance(capability, dict) else None
     candidate = overrides.get(client) if isinstance(overrides, dict) else None
     if isinstance(candidate, dict) and isinstance(candidate.get("supported"), bool):
@@ -2342,6 +2884,544 @@ def lmstudio_mtp_load_supported(path: str | None) -> bool:
     ))
 
 
+def lmstudio_assistant_drafter_load_supported(path: str | None) -> bool:
+    """Require every CLI flag used to attach a separately registered drafter."""
+    help_text = command_help(path, "load", "--help")
+    return all(re.search(
+        rf"(?<![A-Za-z0-9-]){re.escape(flag)}(?=[\s=<]|$)", help_text,
+    ) is not None for flag in (
+        "--speculative-draft-simple", "--speculative-draft-model",
+        "--speculative-draft-max-tokens", "--speculative-draft-min-tokens",
+        "--speculative-draft-min-continue-probability",
+    ))
+
+
+def _lmstudio_cache_document(path: Path) -> tuple[Any, dict[str, Any]]:
+    """Read one bounded, stable LM Studio cache file without following a link."""
+    try:
+        before = path.lstat()
+        if (
+            path.is_symlink() or not stat.S_ISREG(before.st_mode)
+            or not 0 < before.st_size <= MAX_JSON
+        ):
+            return None, {}
+        raw = path.read_bytes()
+        after = path.lstat()
+        identity = (
+            before.st_dev, before.st_ino, before.st_size,
+            before.st_mtime_ns, before.st_ctime_ns,
+        )
+        if identity != (
+            after.st_dev, after.st_ino, after.st_size,
+            after.st_mtime_ns, after.st_ctime_ns,
+        ):
+            return None, {}
+        value = json.loads(raw)
+    except (OSError, ValueError, UnicodeError):
+        return None, {}
+    return value, {
+        "size": int(before.st_size),
+        "modifiedNs": int(before.st_mtime_ns),
+        "changedNs": int(before.st_ctime_ns),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def lmstudio_backend_preference(path: Path | None = None) -> dict[str, Any]:
+    """Read the one engine pack LM Studio selected for GGUF models."""
+    source = path or (
+        Path.home() / ".lmstudio" / ".internal" / "backend-preferences-v1.json"
+    )
+    value, identity = _lmstudio_cache_document(source)
+    if not isinstance(value, list) or len(value) > 32:
+        return {"ready": False, "reason": "LM Studio has no valid GGUF engine preference."}
+    matches = [
+        item for item in value
+        if isinstance(item, dict) and item.get("model_format") == "gguf"
+    ]
+    if len(matches) != 1:
+        return {"ready": False, "reason": "LM Studio's selected GGUF engine is ambiguous."}
+    selected = matches[0]
+    name = selected.get("name")
+    version = selected.get("version")
+    if (
+        not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,180}", name)
+        or not isinstance(version, str) or semantic_version_key(version) == (-1, -1, -1, -1)
+    ):
+        return {"ready": False, "reason": "LM Studio's selected GGUF engine is invalid."}
+    return {
+        "ready": True, "name": name, "version": version,
+        "sourceFingerprint": identity.get("sha256"),
+    }
+
+
+def lmstudio_assistant_drafter_runtime_contract(
+    cli_path: str | None,
+    cli_version: str,
+    app: dict[str, Any],
+    packs: list[dict[str, Any]],
+    preference: dict[str, Any],
+) -> dict[str, Any]:
+    """Prove the app, selected llama.cpp pack, and CLI can attach a drafter."""
+    app_version = str(app.get("version") or "") if isinstance(app, dict) else ""
+    app_ready = bool(
+        isinstance(app, dict) and app.get("available") is True
+        and app.get("bundleId") == "ai.elementlabs.lmstudio"
+        and semantic_version_key(app_version)
+        >= semantic_version_key(LMSTUDIO_ASSISTANT_DRAFTER_MINIMUM_APP)
+    )
+    cli_ready = lmstudio_assistant_drafter_load_supported(cli_path)
+    selected_pack = next((
+        item for item in packs
+        if (
+            isinstance(item, dict) and preference.get("ready") is True
+            and item.get("kind") == "llama.cpp"
+            and item.get("engineName") == preference.get("name")
+            and item.get("version") == preference.get("version")
+        )
+    ), None)
+    pack_ready = bool(
+        isinstance(selected_pack, dict)
+        and selected_pack.get("manifestContractVerified") is True
+        and isinstance(selected_pack.get("contractFingerprint"), str)
+        and re.fullmatch(
+            r"[0-9a-f]{64}", str(selected_pack.get("contractFingerprint")),
+        ) is not None
+        and isinstance(preference.get("sourceFingerprint"), str)
+        and re.fullmatch(
+            r"[0-9a-f]{64}", str(preference.get("sourceFingerprint")),
+        ) is not None
+        and semantic_version_key(str(selected_pack.get("version") or ""))
+        >= semantic_version_key(LMSTUDIO_ASSISTANT_DRAFTER_MINIMUM_LLAMA_PACK)
+    )
+    ready = bool(app_ready and cli_ready and pack_ready)
+    if not app_ready:
+        reason = (
+            f"LM Studio {LMSTUDIO_ASSISTANT_DRAFTER_MINIMUM_APP}+ is required for "
+            "DFlash, DSpark, and MTP assistant drafters."
+        )
+    elif preference.get("ready") is not True:
+        reason = str(preference.get("reason") or "LM Studio has no selected GGUF engine pack.")
+    elif selected_pack is None:
+        reason = "LM Studio's selected GGUF engine pack is not installed."
+    elif not pack_ready:
+        reason = (
+            f"The selected GGUF pack must be a complete llama.cpp "
+            f"{LMSTUDIO_ASSISTANT_DRAFTER_MINIMUM_LLAMA_PACK}+ engine."
+        )
+    elif not cli_ready:
+        reason = "The selected LM Studio CLI does not expose the complete assistant-drafter load contract."
+    else:
+        reason = "Compatible LM Studio app, selected llama.cpp pack, and CLI flags are installed."
+    identity = {
+        "schema": 1,
+        "cliVersion": str(cli_version or "")[:100],
+        "appVersion": app_version,
+        "selectedPack": {
+            "name": preference.get("name"), "version": preference.get("version"),
+            "contractFingerprint": (
+                selected_pack.get("contractFingerprint")
+                if isinstance(selected_pack, dict) else None
+            ),
+        },
+        "preferenceFingerprint": preference.get("sourceFingerprint"),
+        "cliContract": cli_ready,
+    }
+    return {
+        "ready": ready,
+        "appReady": app_ready,
+        "appVersion": app_version or None,
+        "minimumAppVersion": LMSTUDIO_ASSISTANT_DRAFTER_MINIMUM_APP,
+        "cliReady": cli_ready,
+        "packReady": pack_ready,
+        "selectedPackName": preference.get("name"),
+        "selectedPackVersion": preference.get("version"),
+        "minimumPackVersion": LMSTUDIO_ASSISTANT_DRAFTER_MINIMUM_LLAMA_PACK,
+        "runtimeFingerprint": hashlib.sha256(json.dumps(
+            identity, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest() if ready else None,
+        "releaseUrl": LMSTUDIO_ASSISTANT_DRAFTER_RELEASE_URL,
+        "reason": reason,
+    }
+
+
+def _lmstudio_vocabulary_contract(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    token_count = value.get("tokenCount")
+    start = value.get("startTokenId")
+    maximum_difference = value.get("maxVocabSizeDifference")
+    hashes = value.get("prefixHashes")
+    if (
+        not isinstance(token_count, int) or isinstance(token_count, bool)
+        or not 1 <= token_count <= 2_000_000
+        or not isinstance(start, int) or isinstance(start, bool)
+        or not 0 <= start < token_count
+        or not isinstance(maximum_difference, int) or isinstance(maximum_difference, bool)
+        or not 0 <= maximum_difference <= 4_096
+        or not isinstance(hashes, list) or not 1 <= len(hashes) <= 4_097
+    ):
+        return None
+    expected_start = max(start + 1, token_count - maximum_difference)
+    expected_ends = list(range(expected_start, token_count + 1))
+    normalized: list[dict[str, Any]] = []
+    for item in hashes:
+        end = item.get("endTokenIdExclusive") if isinstance(item, dict) else None
+        digest = item.get("hash") if isinstance(item, dict) else None
+        if (
+            not isinstance(end, int) or isinstance(end, bool)
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            return None
+        normalized.append({"endTokenIdExclusive": end, "hash": digest})
+    if [item["endTokenIdExclusive"] for item in normalized] != expected_ends:
+        return None
+    return {
+        "tokenCount": token_count,
+        "startTokenId": start,
+        "maxVocabSizeDifference": maximum_difference,
+        "prefixHashes": normalized,
+    }
+
+
+def _lmstudio_vocabulary_pair(
+    target: dict[str, Any], draft: dict[str, Any],
+) -> dict[str, Any] | None:
+    if target["startTokenId"] != draft["startTokenId"]:
+        return None
+    difference = abs(int(target["tokenCount"]) - int(draft["tokenCount"]))
+    if difference > min(
+        int(target["maxVocabSizeDifference"]),
+        int(draft["maxVocabSizeDifference"]),
+    ):
+        return None
+    common_end = min(int(target["tokenCount"]), int(draft["tokenCount"]))
+    target_hashes = {
+        int(item["endTokenIdExclusive"]): str(item["hash"])
+        for item in target["prefixHashes"]
+    }
+    draft_hashes = {
+        int(item["endTokenIdExclusive"]): str(item["hash"])
+        for item in draft["prefixHashes"]
+    }
+    if target_hashes.get(common_end) != draft_hashes.get(common_end) or common_end not in target_hashes:
+        return None
+    evidence = {
+        "commonPrefixTokens": common_end,
+        "targetTokenCount": int(target["tokenCount"]),
+        "draftTokenCount": int(draft["tokenCount"]),
+        "commonPrefixHash": target_hashes[common_end],
+    }
+    return {
+        **evidence,
+        "fingerprint": hashlib.sha256(json.dumps(
+            evidence, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest(),
+    }
+
+
+def _lmstudio_assistant_family(architecture: Any) -> str | None:
+    if not isinstance(architecture, str) or not 0 < len(architecture) <= 160:
+        return None
+    normalized = architecture.casefold().replace("-", "_")
+    for family, pattern in (
+        ("dspark", r"(?:^|_)dspark(?:_|$)"),
+        ("dflash", r"(?:^|_)dflash(?:2)?(?:_|$)"),
+        ("mtp", r"(?:^|_)mtp(?:_|$)"),
+    ):
+        if re.search(pattern, normalized):
+            return family
+    return None
+
+
+def lmstudio_gguf_catalog(
+    index_path: Path | None = None, catalog_root: Path | None = None,
+) -> dict[str, Any]:
+    """Return exact registered GGUF artifacts with LM Studio's vocabulary receipts."""
+    root = (catalog_root or (Path.home() / ".lmstudio" / "models")).expanduser().absolute()
+    try:
+        root_details = root.lstat()
+        resolved_root = root.resolve(strict=True)
+        if root.is_symlink() or not stat.S_ISDIR(root_details.st_mode):
+            raise OSError("unsafe catalog root")
+    except (OSError, RuntimeError):
+        return {"entries": [], "sourceFingerprint": None}
+    source = index_path or (
+        Path.home() / ".lmstudio" / ".internal" / "model-index-cache.json"
+    )
+    value, source_identity = _lmstudio_cache_document(source)
+    models = value.get("models") if isinstance(value, dict) else None
+    if not isinstance(models, list) or len(models) > 4_096:
+        return {"entries": [], "sourceFingerprint": None}
+    entries: list[dict[str, Any]] = []
+    for item in models:
+        if (
+            not isinstance(item, dict) or item.get("format") != "gguf"
+            or item.get("domain") != "llm"
+        ):
+            continue
+        load_key = item.get("defaultIdentifier")
+        indexed_id = item.get("indexedModelIdentifier")
+        folder_value = item.get("concreteModelDirAbsolutePath")
+        if not all(
+            isinstance(candidate, str) and 0 < len(candidate) <= 512
+            and "\0" not in candidate and "\n" not in candidate
+            for candidate in (load_key, indexed_id, folder_value)
+        ):
+            continue
+        folder = Path(str(folder_value)).expanduser().absolute()
+        try:
+            folder_details = folder.lstat()
+            resolved_folder = folder.resolve(strict=True)
+            resolved_folder.relative_to(resolved_root)
+            if folder.is_symlink() or not stat.S_ISDIR(folder_details.st_mode):
+                raise OSError("unsafe model directory")
+        except (OSError, RuntimeError, ValueError):
+            continue
+        files = item.get("selfFiles")
+        if not isinstance(files, list) or not 1 <= len(files) <= 128:
+            continue
+        artifact_identities: list[dict[str, Any]] = []
+        valid_files = True
+        for file_value in files:
+            filename = file_value.get("filename") if isinstance(file_value, dict) else None
+            absolute = file_value.get("absPath") if isinstance(file_value, dict) else None
+            expected_size = file_value.get("sizeBytes") if isinstance(file_value, dict) else None
+            if (
+                not isinstance(filename, str) or Path(filename).name != filename
+                or not filename.lower().endswith(".gguf")
+                or not isinstance(absolute, str)
+                or not isinstance(expected_size, int) or isinstance(expected_size, bool)
+                or expected_size <= 1_000_000
+            ):
+                valid_files = False
+                break
+            artifact = folder / filename
+            try:
+                supplied = Path(absolute).expanduser().resolve(strict=True)
+                resolved = artifact.resolve(strict=True)
+                details = artifact.lstat()
+            except (OSError, RuntimeError):
+                valid_files = False
+                break
+            if (
+                supplied != resolved or artifact.is_symlink()
+                or not stat.S_ISREG(details.st_mode) or details.st_size != expected_size
+            ):
+                valid_files = False
+                break
+            artifact_identities.append({
+                "name": filename, "path": str(resolved),
+                "device": int(details.st_dev), "inode": int(details.st_ino),
+                "size": int(details.st_size), "modifiedNs": int(details.st_mtime_ns),
+                "changedNs": int(details.st_ctime_ns),
+            })
+        metadata = item.get("metadata")
+        gguf = metadata.get("gguf") if isinstance(metadata, dict) else None
+        vocabulary = _lmstudio_vocabulary_contract(
+            gguf.get("draftSpeculationVocab") if isinstance(gguf, dict) else None
+        )
+        architecture = gguf.get("arch") if isinstance(gguf, dict) else None
+        declared_size = item.get("sizeBytes")
+        if (
+            not valid_files or not artifact_identities or vocabulary is None
+            or not isinstance(architecture, str) or not architecture
+            or not isinstance(declared_size, int) or isinstance(declared_size, bool)
+            or declared_size != sum(entry["size"] for entry in artifact_identities)
+            or int(source_identity.get("modifiedNs") or 0)
+            < max(entry["changedNs"] for entry in artifact_identities)
+        ):
+            continue
+        identity = {
+            "loadKey": load_key, "indexedIdentifier": indexed_id,
+            "directory": str(resolved_folder), "architecture": architecture,
+            "vocabulary": vocabulary, "artifacts": artifact_identities,
+            "catalogFingerprint": source_identity.get("sha256"),
+        }
+        entries.append({
+            **identity,
+            "assistantFamily": _lmstudio_assistant_family(architecture),
+            "artifactFingerprint": hashlib.sha256(json.dumps(
+                identity, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest(),
+        })
+    return {
+        "entries": entries[:512],
+        "sourceFingerprint": source_identity.get("sha256"),
+    }
+
+
+def lmstudio_draft_compatibility_receipts(
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Read LM Studio's explicit target-to-drafter compatibility decisions."""
+    source = path or (
+        Path.home() / ".lmstudio" / ".internal"
+        / "draft-model-compatibility-cache.json"
+    )
+    value, identity = _lmstudio_cache_document(source)
+    document = value.get("json") if isinstance(value, dict) else None
+    raw_map = document.get("map") if isinstance(document, dict) else None
+    meta = value.get("meta") if isinstance(value, dict) else None
+    meta_values = meta.get("values") if isinstance(meta, dict) else None
+    if (
+        not isinstance(raw_map, list) or len(raw_map) > 4_096
+        or not isinstance(meta_values, dict) or meta_values.get("map") != ["map"]
+    ):
+        return {"pairs": [], "sourceFingerprint": None, "modifiedNs": 0}
+    pairs: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in raw_map:
+        if not isinstance(row, list) or len(row) != 2:
+            continue
+        target, engine_values = row
+        if not isinstance(target, str) or not 0 < len(target) <= 512:
+            continue
+        if not isinstance(engine_values, list) or len(engine_values) > 32:
+            continue
+        for engine in engine_values:
+            if not isinstance(engine, dict) or engine.get("engineType") != "llama.cpp":
+                continue
+            oldest = engine.get("oldestEngineVersion")
+            compatible = engine.get("compatibleDraftModelIdentifiers")
+            if (
+                not isinstance(oldest, str)
+                or semantic_version_key(oldest) == (-1, -1, -1, -1)
+                or not isinstance(compatible, list) or len(compatible) > 512
+            ):
+                continue
+            for draft in compatible:
+                key = (target, draft) if isinstance(draft, str) else (target, "")
+                if (
+                    not isinstance(draft, str) or not 0 < len(draft) <= 512
+                    or key in seen
+                ):
+                    continue
+                seen.add(key)
+                pairs.append({
+                    "target": target, "draft": draft,
+                    "oldestEngineVersion": oldest,
+                })
+    return {
+        "pairs": pairs[:2_048],
+        "sourceFingerprint": identity.get("sha256"),
+        "modifiedNs": int(identity.get("modifiedNs") or 0),
+    }
+
+
+def lmstudio_assistant_drafter_readiness(
+    target_path: Path,
+    catalog: dict[str, Any],
+    receipts: dict[str, Any],
+    runtime: dict[str, Any],
+) -> dict[str, Any]:
+    """Discover exact assistant pairs without making them selectable or preferred."""
+    try:
+        resolved_target = str(target_path.resolve(strict=True))
+    except (OSError, RuntimeError):
+        resolved_target = ""
+    entries = catalog.get("entries") if isinstance(catalog, dict) else None
+    entries = entries if isinstance(entries, list) else []
+    target_matches = [
+        item for item in entries
+        if isinstance(item, dict) and item.get("directory") == resolved_target
+        and item.get("assistantFamily") is None
+    ]
+    target = target_matches[0] if len(target_matches) == 1 else None
+    pair_receipts = receipts.get("pairs") if isinstance(receipts, dict) else None
+    pair_receipts = pair_receipts if isinstance(pair_receipts, list) else []
+    candidates: list[dict[str, Any]] = []
+    if target is not None:
+        for receipt in pair_receipts:
+            if (
+                not isinstance(receipt, dict)
+                or receipt.get("target") != target.get("indexedIdentifier")
+            ):
+                continue
+            draft_matches = [
+                item for item in entries
+                if isinstance(item, dict)
+                and item.get("indexedIdentifier") == receipt.get("draft")
+                and item.get("assistantFamily") in LMSTUDIO_ASSISTANT_DRAFTER_FAMILIES
+            ]
+            if len(draft_matches) != 1:
+                continue
+            draft = draft_matches[0]
+            vocabulary = _lmstudio_vocabulary_pair(
+                target["vocabulary"], draft["vocabulary"],
+            )
+            artifact_changed = max(
+                item["changedNs"]
+                for model in (target, draft) for item in model["artifacts"]
+            )
+            oldest = str(receipt.get("oldestEngineVersion") or "")
+            if (
+                vocabulary is None
+                or int(receipts.get("modifiedNs") or 0) < artifact_changed
+                or semantic_version_key(str(runtime.get("selectedPackVersion") or ""))
+                < semantic_version_key(oldest)
+            ):
+                continue
+            identity = {
+                "schema": 1,
+                "targetFingerprint": target["artifactFingerprint"],
+                "draftFingerprint": draft["artifactFingerprint"],
+                "vocabularyFingerprint": vocabulary["fingerprint"],
+                "compatibilityFingerprint": receipts.get("sourceFingerprint"),
+                "oldestEngineVersion": oldest,
+                "runtimeFingerprint": runtime.get("runtimeFingerprint"),
+            }
+            candidates.append({
+                "family": str(draft["assistantFamily"]),
+                "draftModelKey": str(draft["loadKey"]),
+                "draftIndexedIdentifier": str(draft["indexedIdentifier"]),
+                "draftPath": str(draft["directory"]),
+                "vocabulary": vocabulary,
+                "pairFingerprint": hashlib.sha256(json.dumps(
+                    identity, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest(),
+                "selectable": False,
+                "benchmarkEligible": False,
+                "automaticEligible": False,
+            })
+    candidates.sort(key=lambda item: (
+        item["family"], item["draftIndexedIdentifier"].casefold(),
+    ))
+    pair_ready = bool(candidates)
+    foundation_ready = bool(pair_ready and runtime.get("ready") is True)
+    if target is None:
+        reason = "Assistant drafters require one exact LM Studio-registered GGUF target with current vocabulary metadata."
+    elif not pair_ready:
+        reason = "No current LM Studio compatibility receipt and direct vocabulary hash prove an installed assistant pair."
+    elif runtime.get("ready") is not True:
+        reason = str(runtime.get("reason") or "LM Studio's assistant-drafter runtime contract is not ready.")
+    else:
+        reason = (
+            "Exact assistant pair discovered. Selection and benchmarking remain disabled until "
+            "the launcher can verify LM Studio's applied load receipt after each fresh load."
+        )
+    return {
+        "foundationReady": foundation_ready,
+        "pairReady": pair_ready,
+        "runtimeReady": runtime.get("ready") is True,
+        "targetModelKey": str(target.get("loadKey")) if target is not None else None,
+        "targetIndexedIdentifier": (
+            str(target.get("indexedIdentifier")) if target is not None else None
+        ),
+        "targetArtifactFingerprint": (
+            str(target.get("artifactFingerprint")) if target is not None else None
+        ),
+        "selectable": False,
+        "benchmarkEligible": False,
+        "automaticEligible": False,
+        "receiptRequired": True,
+        "candidates": candidates[:16],
+        "runtime": copy.deepcopy(runtime),
+        "reason": reason,
+    }
+
+
 def lmstudio_runtime_identity(
     cli_version: str, app_version: str | None,
     packs: list[dict[str, str]],
@@ -2570,12 +3650,12 @@ def launch_runtime_advisory(backend: str, model: dict[str, Any]) -> dict[str, An
         return {
             "id": "mtplx-long-agent-update",
             "level": "warning",
-            "title": "Update MTPLX for complete agent answers",
+            "title": "Update MTPLX for safer long agent runs",
             "detail": (
                 f"MTPLX {version_label} is selected. Upstream {MTPLX_AGENT_RECOMMENDED_RUNTIME} "
-                "includes the long-session fixes and now continues a tool-enabled turn that ends "
-                "inside reasoning until it has a visible answer. Open Tools → Runtimes before "
-                "relying on a hard Pi, OpenCode, or Codex task."
+                "includes hardware-gated 27B attention plus warm-turn, postcommit, "
+                "session-bank and memory fixes. Open Tools → Runtimes before relying on a hard Pi, "
+                "OpenCode, or Codex task."
             ),
             "releaseUrl": RUNTIME_RELEASE_CATALOG["mtplx"]["releaseUrl"],
         }
@@ -3035,23 +4115,181 @@ def runtime_update_overview() -> dict[str, Any]:
     }
 
 
-def lmstudio_runtime_packs() -> list[dict[str, str]]:
-    root = Path.home() / ".lmstudio" / "extensions" / "backends"
-    result: list[dict[str, str]] = []
+def _lmstudio_llamacpp_pack_contract(
+    pack: Path, declared_version: str,
+) -> dict[str, Any]:
+    """Verify the installed files LM Studio declares for one llama.cpp pack."""
+    blocked = {"manifestContractVerified": False, "contractFingerprint": None}
     try:
+        pack_details = pack.lstat()
+        resolved_pack = pack.resolve(strict=True)
+        if pack.is_symlink() or not stat.S_ISDIR(pack_details.st_mode):
+            return blocked
+    except (OSError, RuntimeError):
+        return blocked
+    manifest, manifest_identity = _lmstudio_cache_document(
+        resolved_pack / "backend-manifest.json",
+    )
+    inventory, inventory_identity = _lmstudio_cache_document(
+        resolved_pack / "engine-protocol-server-artifacts.json",
+    )
+    protocol = manifest.get("engine_protocol_server") if isinstance(manifest, dict) else None
+    files = inventory.get("files") if isinstance(inventory, dict) else None
+    target_libraries = manifest.get("target_libraries") if isinstance(manifest, dict) else None
+    engine_name = manifest.get("name") if isinstance(manifest, dict) else None
+    executable_value = (
+        protocol.get("executable_relative_path") if isinstance(protocol, dict) else None
+    )
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("engine") != "llama.cpp"
+        or manifest.get("extension_type") != "engine"
+        or manifest.get("version") != declared_version
+        or not isinstance(manifest.get("supported_model_formats"), list)
+        or not 1 <= len(manifest.get("supported_model_formats", [])) <= 32
+        or not all(
+            isinstance(value, str)
+            for value in manifest.get("supported_model_formats", [])
+        )
+        or "gguf" not in manifest.get("supported_model_formats", [])
+        or not isinstance(engine_name, str)
+        or not 0 < len(engine_name) <= 180
+        or pack.name != f"{engine_name}-{declared_version}"
+        or not isinstance(protocol, dict)
+        or protocol.get("runtime_kind") != "llama-server"
+        or not isinstance(executable_value, str)
+        or not isinstance(inventory, dict)
+        or inventory.get("schema_version") != 1
+        or inventory.get("runtime_kind") != "llama-server"
+        or inventory.get("executable_relative_path") != executable_value
+        or not isinstance(files, list) or not 1 <= len(files) <= 128
+        or not isinstance(target_libraries, list) or not 1 <= len(target_libraries) <= 64
+    ):
+        return blocked
+
+    identities: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def admit_file(relative_value: Any, executable: bool) -> bool:
+        if (
+            not isinstance(relative_value, str)
+            or not 0 < len(relative_value) <= 320
+            or "\\" in relative_value or "\0" in relative_value
+        ):
+            return False
+        relative = PurePosixPath(relative_value)
+        if (
+            relative.is_absolute() or not relative.parts
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or relative_value in seen
+        ):
+            return False
+        candidate = resolved_pack.joinpath(*relative.parts)
+        try:
+            details = candidate.lstat()
+            if stat.S_ISLNK(details.st_mode):
+                link_value = os.readlink(candidate)
+                link = PurePosixPath(link_value)
+                if link.is_absolute() or any(part in {"", ".", ".."} for part in link.parts):
+                    return False
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(resolved_pack)
+                target_details = resolved.stat()
+                if not stat.S_ISREG(target_details.st_mode):
+                    return False
+            elif stat.S_ISREG(details.st_mode):
+                resolved = candidate
+                target_details = details
+            else:
+                return False
+            if executable and not os.access(resolved, os.X_OK):
+                return False
+        except (OSError, RuntimeError, ValueError):
+            return False
+        seen.add(relative_value)
+        identities.append({
+            "path": relative_value,
+            "device": int(details.st_dev), "inode": int(details.st_ino),
+            "size": int(details.st_size), "modifiedNs": int(details.st_mtime_ns),
+            "changedNs": int(details.st_ctime_ns),
+            "resolvedDevice": int(target_details.st_dev),
+            "resolvedInode": int(target_details.st_ino),
+            "resolvedSize": int(target_details.st_size),
+            "executable": executable,
+        })
+        return True
+
+    for file_entry in files:
+        if (
+            not isinstance(file_entry, dict)
+            or not isinstance(file_entry.get("executable"), bool)
+            or not admit_file(
+                file_entry.get("relative_path"), bool(file_entry.get("executable")),
+            )
+        ):
+            return blocked
+    if executable_value not in seen:
+        return blocked
+    for library in target_libraries:
+        library_name = library.get("name") if isinstance(library, dict) else None
+        if library_name in seen:
+            continue
+        if not admit_file(library_name, False):
+            return blocked
+
+    _manifest_after, manifest_after = _lmstudio_cache_document(
+        resolved_pack / "backend-manifest.json",
+    )
+    _inventory_after, inventory_after = _lmstudio_cache_document(
+        resolved_pack / "engine-protocol-server-artifacts.json",
+    )
+    if manifest_after != manifest_identity or inventory_after != inventory_identity:
+        return blocked
+    identity = {
+        "schema": 1,
+        "pack": str(resolved_pack),
+        "name": engine_name,
+        "version": declared_version,
+        "manifestFingerprint": manifest_identity.get("sha256"),
+        "inventoryFingerprint": inventory_identity.get("sha256"),
+        "files": sorted(identities, key=lambda item: item["path"]),
+    }
+    return {
+        "manifestContractVerified": True,
+        "engineName": engine_name,
+        "contractFingerprint": hashlib.sha256(json.dumps(
+            identity, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest(),
+    }
+
+
+def lmstudio_runtime_packs(root: Path | None = None) -> list[dict[str, Any]]:
+    root = root or (Path.home() / ".lmstudio" / "extensions" / "backends")
+    result: list[dict[str, Any]] = []
+    try:
+        root_details = root.lstat()
+        if root.is_symlink() or not stat.S_ISDIR(root_details.st_mode):
+            return result
         entries = sorted(root.iterdir(), key=lambda item: item.name.lower())
     except OSError:
         return result
-    for item in entries:
-        if not item.is_dir() or item.name == "vendor":
+    for item in entries[:128]:
+        try:
+            details = item.lstat()
+        except OSError:
+            continue
+        if item.is_symlink() or not stat.S_ISDIR(details.st_mode) or item.name == "vendor":
             continue
         kind = "MLX" if item.name.startswith("mlx-") else "llama.cpp" if item.name.startswith("llama.cpp-") else "Other"
         version = re.search(r"-(\d+\.\d+\.\d+)$", item.name)
-        result.append({
+        record: dict[str, Any] = {
             "name": item.name[:180],
             "kind": kind,
             "version": version.group(1) if version else "Unknown",
-        })
+        }
+        if kind == "llama.cpp" and version:
+            record.update(_lmstudio_llamacpp_pack_contract(item, version.group(1)))
+        result.append(record)
     return result[:32]
 
 
@@ -3077,7 +4315,10 @@ def runtime_candidate_details(runtime: str) -> list[dict[str, Any]]:
             "Installed (unverified managed runtime)"
             if runtime == "llamacpp" else
             str(uzu_contract["version"])
-            if isinstance(uzu_contract, dict) and uzu_contract.get("binary") else
+            if (
+                isinstance(uzu_contract, dict)
+                and uzu_contract.get("binaryIdentityPinned") is True
+            ) else
             "Installed (unverified managed runtime)"
             if runtime == "mirai" else
             command_version(candidate["path"])
@@ -3099,6 +4340,9 @@ def runtime_candidate_details(runtime: str) -> list[dict[str, Any]]:
             )
         elif runtime == "lms":
             detail["mtpLoadReady"] = lmstudio_mtp_load_supported(candidate["path"])
+            detail["assistantDrafterCliReady"] = (
+                lmstudio_assistant_drafter_load_supported(candidate["path"])
+            )
         elif runtime == "llamacpp":
             detail["pleContract"] = llamacpp_contract
         elif runtime == "mirai":
@@ -3146,8 +4390,15 @@ def runtime_inventory() -> dict[str, Any]:
 
     lms_candidates = runtime_candidate_details("lms")
     lms_selected = next((item for item in lms_candidates if item["selected"]), None)
+    lms_app = runtime_app_status("lms")
     lms_app_version = plist_version(Path("/Applications/LM Studio.app/Contents/Info.plist"))
     packs = lmstudio_runtime_packs()
+    lms_preference = lmstudio_backend_preference()
+    lms_assistant_runtime = lmstudio_assistant_drafter_runtime_contract(
+        BINARIES.get("lms"),
+        str((lms_selected or {}).get("version") or "Not installed"),
+        lms_app, packs, lms_preference,
+    )
     mlx_packs = [item for item in packs if item["kind"] == "MLX"]
     lms_mtp_ready = bool(lms_selected and lms_selected.get("mtpLoadReady"))
     lms_level = (
@@ -3259,13 +4510,19 @@ def runtime_inventory() -> dict[str, Any]:
             "selected": lms_selected, "candidates": lms_candidates,
             "appVersion": lms_app_version, "runtimePacks": packs,
             "benchmarkIdentity": lms_identity, "release": lms_release,
-            "app": runtime_app_status("lms"),
+            "app": lms_app,
+            "assistantDrafterRuntime": lms_assistant_runtime,
             "checks": [
                 {"label": "Desktop app", "ready": bool(lms_app_version), "detail": lms_app_version or "Not detected"},
                 {"label": "Audited upstream release", "ready": lms_release["catalogCurrent"], "advisory": bool(lms_selected), "detail": lms_release["detail"]},
                 {"label": "Launcher CLI", "ready": bool(lms_selected), "detail": str(lms_selected.get("version") if lms_selected else "Not installed")},
                 {"label": "MLX engine packs", "ready": bool(mlx_packs), "detail": ", ".join(item["version"] for item in mlx_packs) or "No local MLX pack detected"},
                 {"label": "Load-time MTP", "ready": lms_mtp_ready, "detail": "Selected CLI advertises MTP enable, disable, and draft-depth flags." if lms_mtp_ready else "Selected CLI is missing one or more required Draft MTP load flags."},
+                {
+                    "label": "Assistant drafter discovery",
+                    "ready": lms_assistant_runtime["ready"],
+                    "detail": lms_assistant_runtime["reason"],
+                },
                 {"label": "Benchmark identity", "ready": bool(lms_selected and mlx_packs), "detail": lms_identity},
             ],
             "update": {
@@ -3299,11 +4556,11 @@ def runtime_inventory() -> dict[str, Any]:
                     "Prefer the app-managed engine and inspect duplicate CLI installs separately."
                 ),
                 "detail": (
-                    "Upstream says 2.10.1 adds sparse Flash-Next prefill beyond 32K on supported "
-                    "M4/M5 GPUs, fixes empty answers after reasoning-only tool turns, and repairs "
-                    "Flash-Next admission on 96 GB plus M2/M3 launch compatibility. Preserve valid "
-                    "older evidence as history, then measure 2.10.1 locally before calling it faster "
-                    "on this Mac."
+                    "Upstream 2.11.2 gates the 27B flash verifier to supported M5 hardware "
+                    "and fixes deep-session and later-conversation cache reuse. "
+                    "Preserve valid older evidence as history, keep "
+                    "swap overcommit and context-specific operator tuning disabled, then measure "
+                    "2.11.2 locally before calling it faster on this Mac."
                     if mtplx_release["updateAvailable"] else
                     "The MTPLX app refreshes its managed engine; a Homebrew or user CLI can remain at a different version without affecting the selected path."
                 ),
@@ -3312,7 +4569,7 @@ def runtime_inventory() -> dict[str, Any]:
                 "docsUrl": MTPLX_INSTALL_DOCS_URL,
                 "release": mtplx_release,
                 "rollback": (
-                    "The vendor app updater replaces its app-managed engine. Existing results stay version-bound; 2.9.0 Turbo results cannot drive fastest-route choices."
+                    "The vendor app updater replaces its app-managed engine. Existing results stay version-bound; measurements from an older runtime cannot drive fastest-route choices."
                     if mtplx_release["updateAvailable"] else
                     "Switching candidates changes only which installed executable new launcher sessions use. It never uninstalls the other copy."
                 ),
@@ -3341,49 +4598,61 @@ def runtime_inventory() -> dict[str, Any]:
         "release": None,
         "checks": [
             {
-                "label": "Pinned and Apple-verified",
+                "label": "Exact hardened bytes",
+                "ready": uzu_contract.get("binaryIdentityPinned") is True,
+                "detail": (
+                    f"{command_version(BINARIES.get('mirai'))} · SHA-256 "
+                    f"{str(uzu_contract.get('expectedBinarySha256') or '')[:12]}… · "
+                    "signing status is not used as launch authority"
+                ),
+            },
+            {
+                "label": "Pinned source hardening",
                 "ready": bool(
-                    uzu_contract.get("binary")
-                    and uzu_contract.get("publisherSignatureValid") is True
-                    and uzu_contract.get("notarizationVerified") is True
+                    uzu_contract.get("memorySafetyBlocked") is False
+                    and uzu_contract.get("upstreamCommit") == UZU_RUNTIME_UPSTREAM_COMMIT
+                    and uzu_contract.get("sourcePatchSha256") == UZU_RUNTIME_SOURCE_PATCH_SHA256
                 ),
                 "detail": (
-                    f"{command_version(BINARIES.get('mirai'))} · Developer ID team "
-                    f"{UZU_PUBLISHER_TEAM_IDENTIFIER}"
+                    f"Uzu {UZU_RUNTIME_UPSTREAM_TAG} commit {UZU_RUNTIME_UPSTREAM_COMMIT[:12]}… "
+                    "plus the reviewed launcher patch."
                 ),
             },
             {
-                "label": "Post-0.5.22 memory fix",
-                "ready": uzu_contract.get("memorySafetyBlocked") is False,
-                "detail": str(uzu_contract.get("reason") or "Memory-safe release verified."),
-            },
-            {
-                "label": "Bounded local-only route",
+                "label": "Native private boundary",
                 "ready": bool(
-                    uzu_contract.get("networkSandbox") is True
-                    and uzu_contract.get("boundedContextReady") is True
+                    uzu_contract.get("boundedContextReady") is True
+                    and uzu_contract.get("nativeBearerAuthentication") is True
+                    and uzu_contract.get("oneUseApiKeyFile") is True
+                    and uzu_contract.get("nativeContextLimit") is True
+                    and uzu_contract.get("nativeOutputLimit") is True
                     and uzu_listener_protection_ready(uzu_contract)
                 ),
                 "detail": (
-                    "The raw listener is protected, the private relay enforces 16K/32K "
-                    "request capacity, and the macOS sandbox denies outbound traffic."
+                    "The raw listener requires a one-use bearer key and enforces each "
+                    "run's context and output ceilings itself."
                     if uzu_listener_protection_ready(uzu_contract) else
-                    "Blocked until direct access to Uzu's unauthenticated raw loopback listener is prevented."
+                    "The hardened raw-listener boundary is not available."
                 ),
+            },
+            {
+                "label": "Outbound isolation",
+                "ready": uzu_contract.get("networkSandbox") is True,
+                "detail": "The launcher still denies outbound network access around inference.",
             },
         ],
         "update": {
             "mode": "manual-review", "automatic": False,
-            "headline": "Wait for and verify the release containing Uzu PR #794.",
+            "headline": f"Hardened Uzu {UZU_RUNTIME_TAG} is an exact local build.",
             "detail": (
-                "The model download is reusable. The launcher will not execute 0.5.22 because its "
-                "generic decode loop can retain allocations. Its pinned macOS binary is validly signed and notarized."
+                "Only the fixed launcher-managed path and SHA-256 are accepted. The launcher "
+                "does not infer trust from a version string or make a Developer ID/notarization claim."
             ),
-            "primaryUrl": UZU_MEMORY_HOTFIX_URL,
-            "primaryLabel": "Open upstream memory hotfix",
+            "primaryUrl": UZU_RUNTIME_RELEASE_URL,
+            "primaryLabel": f"Open upstream Uzu {UZU_RUNTIME_UPSTREAM_TAG}",
             "docsUrl": UZU_MODEL_PAGE_URL,
             "release": None,
-            "rollback": "The blocked 0.5.22 file stays isolated in its versioned launcher directory and is never placed on PATH.",
+            "rollback": "The hardened binary stays isolated in its versioned launcher directory and is never placed on PATH.",
         },
     })
     for runtime_id, label, minimum, detail in (
@@ -3396,8 +4665,8 @@ def runtime_inventory() -> dict[str, Any]:
             "Runs only pinned, verified .gturbo bundles with model-specific Metal kernels.",
         ),
         (
-            "whallm", "Whallm", "macOS 15 · Apple Silicon · 64 GB published floor",
-            "Owns one pinned Qwen3.8 Flash-Next install and streams all 512 routed experts from SSD; 48 GB is experimental.",
+            "whallm", "Whallm", "macOS 15 · Apple Silicon · 64 GiB published floor",
+            "Owns one pinned Qwen3.8 Flash-Next install and streams all 512 routed experts from SSD; 48 GiB is experimental.",
         ),
     ):
         candidates = runtime_candidate_details(runtime_id)
@@ -4578,7 +5847,7 @@ def swiftlm_model_supported(path: Path, config: dict[str, Any], profile: dict[st
     supported = any(marker in identity for marker in (
         "qwen3.5", "qwen3_5", "qwen3.6", "qwen3_6", "qwen3-next", "qwen3_next", "qwen3next",
         "gemma-4", "gemma4",
-        "deepseek_v3", "deepseek-v3", "deepseek_v4", "deepseek-v4",
+        "deepseek_v3", "deepseek-v3", "deepseek_v4", "deepseek-v5",
     ))
     return (
         (True, "SwiftLM supports this MLX MoE family with native SSD expert streaming.")
@@ -5518,6 +6787,9 @@ def model_artifact_fingerprint(path: Path, config: dict[str, Any]) -> str:
             item for item in real.iterdir()
             if item.is_file() and item.suffix in {".safetensors", ".gguf"}
         ]
+        nested_mtp = mtplx_sidecar_path(real, config)
+        if nested_mtp.is_file() and nested_mtp not in candidates:
+            candidates.append(nested_mtp)
         if real.name.endswith(".gturbo"):
             candidates.extend(
                 item for item in (
@@ -5804,8 +7076,13 @@ def darwin_process_physical_footprint(pid: int) -> dict[str, Any]:
             raise OSError(ctypes.get_errno(), "proc_pid_rusage failed")
         current = int(value.ri_phys_footprint)
         lifetime = int(value.ri_lifetime_max_phys_footprint)
-        if current <= 0 or lifetime <= 0 or lifetime < current:
+        if current <= 0 or lifetime <= 0:
             raise ValueError("Darwin returned invalid physical-footprint counters.")
+        # Kernel current/peak counters can be observed between peak updates
+        # during allocation. Current is itself a proven lower bound on peak;
+        # taking the larger value preserves the ceiling without discarding a
+        # valid sample. Failed calls and zero counters still fail closed.
+        lifetime = max(current, lifetime)
         return {
             "processFootprintAvailable": True,
             "processFootprintSource": "proc_pid_rusage RUSAGE_INFO_V4",
@@ -5875,6 +7152,32 @@ def darwin_process_group_physical_footprint(pgid: int) -> dict[str, Any]:
     }
 
 
+def benchmark_system_memory_violation(
+    value: dict[str, Any], counters: dict[str, int], label: str,
+) -> str | None:
+    """Debounce live whole-Mac reserve checks without treating missing data as free RAM."""
+    total, free = value.get("totalBytes"), value.get("freePercent")
+    readable = bool(
+        value.get("memoryAvailable") is True
+        and isinstance(total, int) and not isinstance(total, bool) and total > 0
+        and isinstance(free, (int, float)) and not isinstance(free, bool)
+        and math.isfinite(float(free)) and 0 <= float(free) <= 100
+    )
+    if not readable:
+        counters["missing"] = counters.get("missing", 0) + 1
+        counters["low"] = 0
+        if counters["missing"] >= 3:
+            return f"System-wide memory headroom became unreadable during {label}."
+        return None
+    counters["missing"] = 0
+    reserve = max(SESSION_OS_RESERVE_MIN_BYTES, round(total * SESSION_OS_RESERVE_FRACTION))
+    headroom = round(total * float(free) / 100)
+    counters["low"] = counters.get("low", 0) + 1 if headroom < reserve else 0
+    if counters["low"] >= 2:
+        return f"System-wide memory headroom fell below the protected macOS reserve during {label}."
+    return None
+
+
 class BenchmarkTelemetrySampler:
     """Sample low-overhead, system-wide Apple-silicon resource signals."""
 
@@ -5891,8 +7194,27 @@ class BenchmarkTelemetrySampler:
         self.process_provider = process_provider
         self.invariant_callback = invariant_callback
         self.violation: str | None = None
+        self.clock_anchor: tuple[float, float] | None = None
+        self.maximum_sample_gap = 0.0
+        self.timing_discontinuity: str | None = None
 
     def _sample(self) -> None:
+        monotonic_now, wall_now = time.monotonic(), time.time()
+        if self.clock_anchor is not None:
+            previous_monotonic, previous_wall = self.clock_anchor
+            elapsed = monotonic_now - previous_monotonic
+            wall_elapsed = wall_now - previous_wall
+            self.maximum_sample_gap = max(self.maximum_sample_gap, elapsed, wall_elapsed)
+            if (
+                elapsed > max(30.0, self.interval * 3)
+                or elapsed < 0
+                or abs(wall_elapsed - elapsed) > 10.0
+            ):
+                self.timing_discontinuity = (
+                    "The Mac slept, its clock changed, or benchmark monitoring was interrupted. "
+                    "This comparison cannot produce trustworthy timing; run it again while the Mac stays awake."
+                )
+        self.clock_anchor = (monotonic_now, wall_now)
         try:
             value = apple_resource_snapshot()
         except Exception:  # noqa: BLE001 - telemetry must never break inference
@@ -5903,6 +7225,8 @@ class BenchmarkTelemetrySampler:
                 "capturedAt": time.monotonic(),
             }
         process = self.process_provider() if callable(self.process_provider) else None
+        if self.timing_discontinuity:
+            value["timingDiscontinuity"] = self.timing_discontinuity
         if process is not None and getattr(process, "poll", lambda: 0)() is None:
             value["processAlive"] = True
             value.update(darwin_process_physical_footprint(int(process.pid)))
@@ -5926,6 +7250,7 @@ class BenchmarkTelemetrySampler:
     def start(self, initial_sample: dict[str, Any] | None = None) -> None:
         if self.thread and self.thread.is_alive():
             return
+        self.clock_anchor = (time.monotonic(), time.time())
         if isinstance(initial_sample, dict):
             with self.lock:
                 self.samples.append(copy.deepcopy(initial_sample))
@@ -5992,6 +7317,8 @@ class BenchmarkTelemetrySampler:
         thermal_worst = max(int(item["thermalState"]) for item in thermal) if thermal else None
         result = {
             "version": 1,
+            "timingContinuous": self.timing_discontinuity is None,
+            "maximumSampleGapSeconds": round(self.maximum_sample_gap, 3),
             "samplingComplete": sampling_complete,
             "sampleCount": len(samples),
             "memoryAvailable": bool(memory),
@@ -6705,8 +8032,40 @@ def benchmark_runtime_integrity_issue(record: dict[str, Any]) -> str | None:
     )
 
 
+def benchmark_probe_integrity_issue(record: dict[str, Any]) -> str | None:
+    """Older core-engine probes could inherit the workload's sampling instead.
+
+    Operator v5 was introduced with the corrected wire request. Its full sweep
+    still has to pass the normal verifier; this exception supplies no speed or
+    correctness proof by itself. Uzu has a separate packaged-sampler contract.
+    """
+    if record.get("backend") not in {"omlx", "lmstudio", "mtplx"}:
+        return None
+    if record.get("probeContract") == BENCHMARK_PROBE_CONTRACT:
+        return None
+    sweep = record.get("mtplxOperatorSweep")
+    if (
+        "probeContract" not in record
+        and record.get("backend") == "mtplx"
+        and record.get("kind") == "mtplx-long-context-operator-tuning"
+        and isinstance(sweep, dict)
+        and type(sweep.get("version")) is int
+        and sweep["version"] == 5
+    ):
+        return None
+    return (
+        "This saved run does not verify the corrected correctness-test sampling contract. "
+        "Its measurements remain in history, but re-test this route before using "
+        "it to choose settings automatically."
+    )
+
+
+def benchmark_integrity_issue(record: dict[str, Any]) -> str | None:
+    return benchmark_runtime_integrity_issue(record) or benchmark_probe_integrity_issue(record)
+
+
 def benchmark_record_identity(record: dict[str, Any]) -> tuple[Any, ...]:
-    """Identify one repeatable benchmark route without collapsing its history."""
+    """Identify one repeatable, goal-bound route without collapsing its history."""
     qualification_output_contract = (
         record.get("configuredOutputLimit"),
         record.get("measuredRequestMaxTokens"),
@@ -6721,6 +8080,7 @@ def benchmark_record_identity(record: dict[str, Any]) -> tuple[Any, ...]:
         record.get("client"), record.get("reasoning"), record.get("targetKV"),
         record.get("samplingFingerprint"), record.get("contextMin"), record.get("contextMax"),
         record.get("outputMin"), record.get("outputMax"), record.get("suite"),
+        record.get("selectionPreference"),
         json.dumps(record.get("engineSettings") or {}, sort_keys=True, separators=(",", ":")),
         json.dumps(record.get("scenarioContract") or [], sort_keys=True, separators=(",", ":")),
         *qualification_output_contract,
@@ -6809,7 +8169,7 @@ def matching_benchmark_records(
         and record.get("modelFingerprint") == model_fingerprint
         and record.get("runtimeVersion") == runtime_version
         and record.get("hardwareFingerprint") == machine
-        and benchmark_runtime_integrity_issue(record) is None
+        and benchmark_integrity_issue(record) is None
         and (
             backend not in SSD_STREAMING_BACKENDS
             or (
@@ -6883,6 +8243,10 @@ def dflash2_benchmark_verified(
     """Accept only a structured local result tied to this exact pair/runtime."""
     benchmark = benchmark or capability.get("dflashBenchmark")
     if not isinstance(benchmark, dict):
+        return False
+    if benchmark.get("targetKV") != "off":
+        # AR's quantised cache and DFlash's full-precision cache are not the
+        # same target contract, even when their nominal selector values match.
         return False
     try:
         speedup = float(benchmark.get("endToEndSpeedup"))
@@ -6989,8 +8353,16 @@ def mtp_benchmark_settings_verified(
             return lmstudio_mtp_controls(settings, capability) == settings
         except (TypeError, ValueError):
             return False
+    allowed_keys = {"depth"}
+    if backend == "mtplx" and "mtplxOperatorRoute" in settings:
+        allowed_keys.add("mtplxOperatorRoute")
+        if settings.get("mtplxOperatorRoute") not in {
+            MTPLX_LONG_CONTEXT_DEFAULT_ROUTE,
+            MTPLX_LONG_CONTEXT_2111_ROUTE,
+        }:
+            return False
     return bool(
-        set(settings) == {"depth"}
+        set(settings) == allowed_keys
         and isinstance(settings.get("depth"), int)
         and not isinstance(settings.get("depth"), bool)
         and 1 <= settings["depth"] <= int(capability.get("depthMax") or 1)
@@ -7025,6 +8397,10 @@ def mtplx_mtp_depth_sweep_verified(
     if (
         sweep.get("version") != MTPLX_MTP_DEPTH_SWEEP_VERSION
         or sweep.get("strategy") != "exhaustive-verified-depths"
+        or sweep.get("selectionMetric") != benchmark.get("selectionMetric")
+        or sweep.get("selectionMetric") not in {
+            "generation-tokens-per-second", "end-to-end-tokens-per-second",
+        }
         or sweep.get("complete") is not True
         or sweep.get("resourceComparable") is not True
         or sweep.get("depthCandidates") != expected_depths
@@ -7046,6 +8422,7 @@ def mtplx_mtp_depth_sweep_verified(
             isinstance(depth, bool) or not isinstance(depth, int)
             or depth in seen or depth not in expected_depths
             or settings != {"depth": depth}
+            or candidate.get("selectionMetric") != sweep.get("selectionMetric")
             or candidate.get("qualityMatchesAR") not in {True, False}
             or candidate.get("resourceComparable") is not True
             or candidate.get("selected") not in {True, False}
@@ -7054,6 +8431,7 @@ def mtplx_mtp_depth_sweep_verified(
         seen.add(depth)
         for metric in (
             "medianSpeedupVsAR", "worstCaseSpeedupVsAR",
+            "medianDecodeTokensPerSecond",
             "medianEndToEndTokensPerSecond",
         ):
             value = candidate.get(metric)
@@ -7067,6 +8445,565 @@ def mtplx_mtp_depth_sweep_verified(
             if settings != selected_settings or depth != sweep.get("selectedDepth"):
                 return False
     return seen == set(expected_depths) and selected == 1
+
+
+def _positive_finite_number(value: Any) -> bool:
+    return bool(
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) > 0
+    )
+
+
+def _mtplx_operator_measurement_evidence(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Project the raw route facts needed to re-derive an operator winner.
+
+    The selected route is also stored in ``modes.mtp`` for the normal result
+    UI, but the unselected route would otherwise survive only as duplicated
+    summary numbers. Retaining this small, text-free projection lets record
+    verification recompute both candidates instead of trusting those numbers.
+    """
+    raw_samples = result.get("samples")
+    samples = raw_samples if isinstance(raw_samples, list) else []
+    return {
+        "qualityHash": result.get("qualityHash"),
+        "qualityCompletionTokens": result.get("qualityCompletionTokens"),
+        **{
+            key: copy.deepcopy(result.get(key))
+            for key in MTPLX_OPERATOR_MEASUREMENT_RESULT_KEYS
+        },
+        "samples": [
+            {
+                key: copy.deepcopy(sample.get(key))
+                for key in MTPLX_OPERATOR_MEASUREMENT_SAMPLE_KEYS
+            }
+            for sample in samples if isinstance(sample, dict)
+        ],
+    }
+
+
+def _mtplx_operator_measurement_verified(
+    measurement: Any,
+) -> dict[str, Any] | None:
+    """Recompute every timing aggregate consumed by route and engine ranking."""
+    expected_keys = {
+        "qualityHash", "qualityCompletionTokens", "samples",
+        *MTPLX_OPERATOR_MEASUREMENT_RESULT_KEYS,
+    }
+    if not isinstance(measurement, dict) or set(measurement) != expected_keys:
+        return None
+    quality_hash = measurement.get("qualityHash")
+    quality_tokens = measurement.get("qualityCompletionTokens")
+    samples = measurement.get("samples")
+    if (
+        not isinstance(quality_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", quality_hash) is None
+        or isinstance(quality_tokens, bool)
+        or not isinstance(quality_tokens, int)
+        or quality_tokens <= 0
+        or not isinstance(samples, list)
+        or len(samples) != len(ROUTE_QUALIFICATION_SCENARIOS)
+    ):
+        return None
+    decode: list[float] = []
+    end_to_end: list[float] = []
+    ttft: list[float] = []
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict) or set(sample) != set(
+            MTPLX_OPERATOR_MEASUREMENT_SAMPLE_KEYS
+        ):
+            return None
+        prompt = sample.get("promptTokens")
+        target = sample.get("targetPromptTokens")
+        completion = sample.get("completionTokens")
+        requested = sample.get("requestedMaxTokens")
+        first = sample.get("ttftSeconds")
+        total = sample.get("totalSeconds")
+        decode_tps = sample.get("decodeTokensPerSecond")
+        end_to_end_tps = sample.get("endToEndTokensPerSecond")
+        cached = sample.get("cachedPromptTokens")
+        cache_rate = sample.get("cacheHitRate")
+        if (
+            sample.get("scenario") != ROUTE_QUALIFICATION_SCENARIOS[index]
+            or sample.get("authoritativeUsage") is not True
+            or isinstance(prompt, bool) or not isinstance(prompt, int) or prompt <= 0
+            or isinstance(target, bool) or not isinstance(target, int) or target <= 0
+            or isinstance(completion, bool) or not isinstance(completion, int) or completion <= 0
+            or isinstance(requested, bool) or not isinstance(requested, int)
+            or requested != BENCHMARK_SUITES[MTPLX_LONG_CONTEXT_64K_SUITE]["maxTokens"]
+            or completion > requested
+            or not _positive_finite_number(first)
+            or not _positive_finite_number(total)
+            or float(total) <= float(first)
+            or not _positive_finite_number(decode_tps)
+            or not _positive_finite_number(end_to_end_tps)
+            or (
+                cached is not None
+                and (
+                    isinstance(cached, bool) or not isinstance(cached, int)
+                    or cached < 0 or cached > prompt
+                )
+            )
+            or (
+                cache_rate is not None
+                and (
+                    isinstance(cache_rate, bool)
+                    or not isinstance(cache_rate, (int, float))
+                    or not math.isfinite(float(cache_rate))
+                    or not 0 <= float(cache_rate) <= 1
+                )
+            )
+        ):
+            return None
+        expected_decode = round(
+            max(1, completion - 1)
+            / max(0.000_001, float(total) - float(first)),
+            4,
+        )
+        expected_end_to_end = round(completion / float(total), 4)
+        if (
+            abs(float(decode_tps) - expected_decode)
+            > max(0.01, float(decode_tps) * 0.001)
+            or abs(float(end_to_end_tps) - expected_end_to_end)
+            > max(0.01, float(end_to_end_tps) * 0.001)
+        ):
+            return None
+        decode.append(float(decode_tps))
+        end_to_end.append(float(end_to_end_tps))
+        ttft.append(float(first))
+    expected_aggregates = {
+        "medianTTFT": round(statistics.median(ttft), 4),
+        "medianDecodeTokensPerSecond": round(statistics.median(decode), 3),
+        "medianEndToEndTokensPerSecond": round(statistics.median(end_to_end), 3),
+    }
+    if any(
+        not _positive_finite_number(measurement.get(key))
+        or float(measurement[key]) != expected
+        for key, expected in expected_aggregates.items()
+    ):
+        return None
+    agentic_metrics = measurement.get("agenticMetrics")
+    if (
+        not isinstance(agentic_metrics, dict)
+        or agentic_metrics != summarize_agentic_samples(samples)
+    ):
+        return None
+    resource = measurement.get("resourceTelemetry")
+    cooldown = measurement.get("resourceCooldown")
+    if not isinstance(resource, dict):
+        return None
+    if not isinstance(cooldown, dict):
+        return None
+    return {
+        "qualityHash": quality_hash,
+        "qualityCompletionTokens": quality_tokens,
+        "samples": samples,
+        "median": statistics.median(decode),
+        "worst": min(decode),
+    }
+
+
+def _mtplx_operator_public_measurement_matches(
+    result: Any, measurement: dict[str, Any],
+) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if any(
+        result.get(key) != measurement.get(key)
+        for key in MTPLX_OPERATOR_MEASUREMENT_RESULT_KEYS
+    ):
+        return False
+    return bool(
+        _mtplx_operator_measurement_evidence({"samples": result.get("samples")})["samples"]
+        == measurement.get("samples")
+    )
+
+
+def _mtplx_long_context_usage_verified(
+    benchmark: dict[str, Any], required_modes: set[str],
+) -> bool:
+    if (
+        benchmark.get("suite") != MTPLX_LONG_CONTEXT_64K_SUITE
+        or benchmark.get("workloadKind") != "agentic"
+        or benchmark.get("scenarioContract") != ROUTE_QUALIFICATION_SCENARIOS
+        or not isinstance(benchmark.get("contextMin"), int)
+        or benchmark["contextMin"] < MTPLX_LONG_CONTEXT_MINIMUM
+    ):
+        return False
+    modes = benchmark.get("modes")
+    if not isinstance(modes, dict):
+        return False
+    for mode in required_modes:
+        result = modes.get(mode)
+        samples = result.get("samples") if isinstance(result, dict) else None
+        if not isinstance(samples, list):
+            return False
+        near_tier = [
+            sample for sample in samples
+            if isinstance(sample, dict)
+            and sample.get("scenario") in {"toolIngest", "steadyTurn"}
+        ]
+        if len(near_tier) != 2 or any(
+            sample.get("authoritativeUsage") is not True
+            or sample.get("targetPromptTokens") != MTPLX_LONG_CONTEXT_TARGET_PROMPT
+            or isinstance(sample.get("promptTokens"), bool)
+            or not isinstance(sample.get("promptTokens"), int)
+            or int(sample["promptTokens"]) < MTPLX_LONG_CONTEXT_MINIMUM_PROMPT
+            or isinstance(sample.get("requestedMaxTokens"), bool)
+            or not isinstance(sample.get("requestedMaxTokens"), int)
+            or sample["requestedMaxTokens"] != BENCHMARK_SUITES[MTPLX_LONG_CONTEXT_64K_SUITE]["maxTokens"]
+            or sample["requestedMaxTokens"] > int(benchmark.get("outputMax") or 0)
+            or int(sample["promptTokens"]) + sample["requestedMaxTokens"]
+            > int(benchmark.get("contextMax") or 0)
+            for sample in near_tier
+        ):
+            return False
+    return True
+
+
+def mtplx_operator_sweep_verified(
+    capability: dict[str, Any], benchmark: dict[str, Any], mode_settings: Any,
+) -> bool:
+    """Verify the immutable default-vs-2.11.1 long-context operator sweep."""
+    sweep = benchmark.get("mtplxOperatorSweep")
+    if not isinstance(sweep, dict) or not isinstance(mode_settings, dict):
+        return False
+    receipt = mtplx_long_context_2111_contract(
+        {
+            **(
+                benchmark.get("modelContract")
+                if isinstance(benchmark.get("modelContract"), dict) else {}
+            ),
+            "name": benchmark.get("modelName"),
+            "path": capability.get("modelPath") or benchmark.get("modelPath"),
+            "format": "mlx",
+            "ready": True,
+            "nativeContext": capability.get("contextMaximum") or benchmark.get("contextMax"),
+        },
+        capability,
+        runtime_version=str(benchmark.get("runtimeVersion") or ""),
+    )
+    # Scanner capabilities do not retain a model path, so the record embeds
+    # the exact receipt used for the measurement and we compare it with the
+    # compact scan-time contract instead of manufacturing a new path.
+    stored_contract = sweep.get("contract")
+    if not isinstance(stored_contract, dict):
+        return False
+    advertised = capability.get("longContext2111")
+    if not _mtplx_long_context_capability_matches(advertised, stored_contract):
+        return False
+    expected_qualification = {
+        "suiteName": MTPLX_LONG_CONTEXT_64K_SUITE,
+        "generatedPromptsOnly": True,
+        "authoritativeUsageRequired": True,
+        "minimumPromptTokens": MTPLX_LONG_CONTEXT_MINIMUM_PROMPT,
+        "targetPromptTokens": MTPLX_LONG_CONTEXT_TARGET_PROMPT,
+    }
+    candidates = sweep.get("candidates")
+    route_measurements = sweep.get("routeMeasurements")
+    selected_settings = mode_settings.get("mtp")
+    fixed_depth = sweep.get("fixedMtpDepth")
+    stored_fingerprint = str(stored_contract.get("modelFingerprint") or "")
+    capability_fingerprint = str(
+        capability.get("benchmarkModelFingerprint") or ""
+    )
+    if (
+        receipt is None
+        or receipt != stored_contract
+        or re.fullmatch(r"[0-9a-f]{64}", stored_fingerprint) is None
+        or not secrets.compare_digest(
+            stored_fingerprint, capability_fingerprint,
+        )
+        or not secrets.compare_digest(
+            stored_fingerprint, str(benchmark.get("modelFingerprint") or ""),
+        )
+        or stored_contract.get("modelPath") != benchmark.get("modelPath")
+        or stored_contract.get("runtimeVersion") != benchmark.get("runtimeVersion")
+        or sweep.get("version") != MTPLX_LONG_CONTEXT_2111_SWEEP_VERSION
+        or sweep.get("strategy") != "isolated-long-context-operator-comparison"
+        or sweep.get("complete") is not True
+        or sweep.get("resourceComparable") is not True
+        or sweep.get("suiteName") != MTPLX_LONG_CONTEXT_64K_SUITE
+        or sweep.get("requiredContext") != MTPLX_LONG_CONTEXT_MINIMUM
+        or sweep.get("contractId") != stored_contract.get("contractId")
+        or sweep.get("baselineRoute") != MTPLX_LONG_CONTEXT_DEFAULT_ROUTE
+        or sweep.get("candidateRoute") != MTPLX_LONG_CONTEXT_2111_ROUTE
+        or sweep.get("baselineEnvironment") != MTPLX_LONG_CONTEXT_BASELINE_ENV
+        or sweep.get("candidateEnvironment") != MTPLX_LONG_CONTEXT_CANDIDATE_ENV
+        or sweep.get("selectionMetric") != "generation-tokens-per-second"
+        or sweep.get("minimumMedianSpeedup") != BENCHMARK_MINIMUM_SPEEDUP
+        or sweep.get("minimumWorstSpeedup") != BENCHMARK_MINIMUM_SPEEDUP
+        or sweep.get("qualificationContract") != expected_qualification
+        or isinstance(fixed_depth, bool) or not isinstance(fixed_depth, int)
+        or not 1 <= fixed_depth <= int(capability.get("depthMax") or 1)
+        or not isinstance(candidates, list) or len(candidates) != 2
+        or not isinstance(route_measurements, dict)
+        or set(route_measurements) != {
+            MTPLX_LONG_CONTEXT_DEFAULT_ROUTE,
+            MTPLX_LONG_CONTEXT_2111_ROUTE,
+        }
+        or not isinstance(selected_settings, dict)
+        or selected_settings.get("depth") != fixed_depth
+        or selected_settings.get("mtplxOperatorRoute") != sweep.get("selectedRoute")
+    ):
+        return False
+    by_route: dict[str, dict[str, Any]] = {}
+    derived: dict[str, dict[str, Any]] = {}
+    selected_count = 0
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            return False
+        route = candidate.get("route")
+        if route in by_route or route not in {
+            MTPLX_LONG_CONTEXT_DEFAULT_ROUTE,
+            MTPLX_LONG_CONTEXT_2111_ROUTE,
+        }:
+            return False
+        expected_settings = {
+            "depth": fixed_depth, "mtplxOperatorRoute": route,
+        }
+        if (
+            candidate.get("settings") != expected_settings
+            or candidate.get("qualityMatchesAR") not in {True, False}
+            or candidate.get("qualityMatchesDefault") not in {True, False}
+            or candidate.get("resourceComparable") is not True
+            or candidate.get("resourceCooldownStatus") not in {
+                "ready", "condition-improved",
+            }
+            or candidate.get("selected") not in {True, False}
+            or any(not _positive_finite_number(candidate.get(key)) for key in (
+                "medianGenerationTokensPerSecond",
+                "worstGenerationTokensPerSecond",
+                "medianSpeedupVsDefault",
+                "worstCaseSpeedupVsDefault",
+            ))
+        ):
+            return False
+        if candidate["selected"] is True:
+            selected_count += 1
+        by_route[str(route)] = candidate
+        measurement = route_measurements.get(route)
+        verified_measurement = _mtplx_operator_measurement_verified(measurement)
+        if verified_measurement is None:
+            return False
+        if measurement["resourceCooldown"].get("status") != candidate.get(
+            "resourceCooldownStatus"
+        ):
+            return False
+        measurement_samples = verified_measurement["samples"]
+        speeds: list[float] = []
+        for index, sample in enumerate(measurement_samples):
+            if not isinstance(sample, dict):
+                return False
+            scenario = ROUTE_QUALIFICATION_SCENARIOS[index]
+            prompt_tokens = sample.get("promptTokens")
+            target_prompt = sample.get("targetPromptTokens")
+            sample_completion = sample.get("completionTokens")
+            speed = sample.get("decodeTokensPerSecond")
+            if (
+                sample.get("scenario") != scenario
+                or isinstance(prompt_tokens, bool)
+                or not isinstance(prompt_tokens, int)
+                or prompt_tokens <= 0
+                or isinstance(target_prompt, bool)
+                or not isinstance(target_prompt, int)
+                or target_prompt <= 0
+                or isinstance(sample_completion, bool)
+                or not isinstance(sample_completion, int)
+                or sample_completion <= 0
+                or sample.get("authoritativeUsage") is not True
+                or not _positive_finite_number(speed)
+            ):
+                return False
+            if scenario in {"toolIngest", "steadyTurn"} and (
+                target_prompt != MTPLX_LONG_CONTEXT_TARGET_PROMPT
+                or prompt_tokens < MTPLX_LONG_CONTEXT_MINIMUM_PROMPT
+                or sample["requestedMaxTokens"] > int(benchmark.get("outputMax") or 0)
+                or prompt_tokens + sample["requestedMaxTokens"]
+                > int(benchmark.get("contextMax") or 0)
+            ):
+                return False
+            speeds.append(float(speed))
+        derived[str(route)] = {
+            "qualityHash": verified_measurement["qualityHash"],
+            "qualityCompletionTokens": verified_measurement["qualityCompletionTokens"],
+            "samples": measurement_samples,
+            "median": verified_measurement["median"],
+            "worst": verified_measurement["worst"],
+        }
+    baseline = by_route.get(MTPLX_LONG_CONTEXT_DEFAULT_ROUTE)
+    candidate = by_route.get(MTPLX_LONG_CONTEXT_2111_ROUTE)
+    baseline_measurement = derived.get(MTPLX_LONG_CONTEXT_DEFAULT_ROUTE)
+    candidate_measurement = derived.get(MTPLX_LONG_CONTEXT_2111_ROUTE)
+    if (
+        baseline is None or candidate is None
+        or baseline_measurement is None or candidate_measurement is None
+    ):
+        return False
+    baseline_quality_hash = str(benchmark.get("qualityFingerprint") or "")
+    baseline_completion_tokens = benchmark.get("qualityCompletionTokens")
+    quality_default_ar = bool(
+        baseline_measurement["qualityHash"] == baseline_quality_hash
+        and baseline_measurement["qualityCompletionTokens"]
+        == baseline_completion_tokens
+    )
+    quality_candidate_ar = bool(
+        candidate_measurement["qualityHash"] == baseline_quality_hash
+        and candidate_measurement["qualityCompletionTokens"]
+        == baseline_completion_tokens
+    )
+    quality_candidate_default = bool(
+        candidate_measurement["qualityHash"]
+        == baseline_measurement["qualityHash"]
+        and candidate_measurement["qualityCompletionTokens"]
+        == baseline_measurement["qualityCompletionTokens"]
+    )
+    candidate_median_speedup_raw = (
+        float(candidate_measurement["median"])
+        / max(float(baseline_measurement["median"]), 0.000_001)
+    )
+    candidate_worst_speedup_raw = (
+        float(candidate_measurement["worst"])
+        / max(float(baseline_measurement["worst"]), 0.000_001)
+    )
+    expected_candidate_median_speedup = round(candidate_median_speedup_raw, 4)
+    expected_candidate_worst_speedup = round(candidate_worst_speedup_raw, 4)
+    if (
+        baseline.get("qualityMatchesAR") is not quality_default_ar
+        or baseline.get("qualityMatchesDefault") is not True
+        or float(baseline.get("medianGenerationTokensPerSecond"))
+        != round(float(baseline_measurement["median"]), 3)
+        or float(baseline.get("worstGenerationTokensPerSecond"))
+        != round(float(baseline_measurement["worst"]), 3)
+        or float(baseline.get("medianSpeedupVsDefault")) != 1.0
+        or float(baseline.get("worstCaseSpeedupVsDefault")) != 1.0
+        or candidate.get("qualityMatchesAR") is not quality_candidate_ar
+        or candidate.get("qualityMatchesDefault") is not quality_candidate_default
+        or float(candidate.get("medianGenerationTokensPerSecond"))
+        != round(float(candidate_measurement["median"]), 3)
+        or float(candidate.get("worstGenerationTokensPerSecond"))
+        != round(float(candidate_measurement["worst"]), 3)
+        or float(candidate.get("medianSpeedupVsDefault"))
+        != expected_candidate_median_speedup
+        or float(candidate.get("worstCaseSpeedupVsDefault"))
+        != expected_candidate_worst_speedup
+    ):
+        return False
+    accepted = bool(
+        quality_candidate_ar
+        and quality_candidate_default
+        and candidate_median_speedup_raw >= BENCHMARK_MINIMUM_SPEEDUP
+        and candidate_worst_speedup_raw >= BENCHMARK_MINIMUM_SPEEDUP
+    )
+    expected_selected = (
+        MTPLX_LONG_CONTEXT_2111_ROUTE
+        if accepted else MTPLX_LONG_CONTEXT_DEFAULT_ROUTE
+    )
+    selected_measurement = derived.get(expected_selected)
+    public_modes = benchmark.get("modes")
+    public_ar = public_modes.get("ar") if isinstance(public_modes, dict) else None
+    public_mtp = public_modes.get("mtp") if isinstance(public_modes, dict) else None
+    public_ar_samples = public_ar.get("samples") if isinstance(public_ar, dict) else None
+    public_samples = public_mtp.get("samples") if isinstance(public_mtp, dict) else None
+    raw_ar = sweep.get("arMeasurement")
+    verified_ar = _mtplx_operator_measurement_verified(raw_ar)
+    if (
+        selected_measurement is None
+        or verified_ar is None
+        or raw_ar["resourceCooldown"].get("status") not in {
+            "reference-ready", "ready", "condition-improved",
+        }
+        or not _mtplx_operator_public_measurement_matches(public_ar, raw_ar)
+        or not _mtplx_operator_public_measurement_matches(
+            public_mtp, route_measurements[expected_selected],
+        )
+        or not isinstance(public_ar_samples, list)
+        or len(public_ar_samples) != len(ROUTE_QUALIFICATION_SCENARIOS)
+        or not isinstance(public_samples, list)
+        or _mtplx_operator_measurement_evidence({"samples": public_samples})["samples"]
+        != selected_measurement["samples"]
+        or not _positive_finite_number(public_mtp.get("medianDecodeTokensPerSecond"))
+        or float(public_mtp["medianDecodeTokensPerSecond"])
+        != round(float(selected_measurement["median"]), 3)
+        or public_mtp.get("qualityMatchesAR")
+        is not bool(
+            selected_measurement["qualityHash"] == baseline_quality_hash
+            and selected_measurement["qualityCompletionTokens"]
+            == baseline_completion_tokens
+        )
+        or public_ar.get("qualityMatchesAR") is not True
+    ):
+        return False
+    selected_ar_ratios: list[float] = []
+    for index, (ar_sample, mtp_sample) in enumerate(zip(
+        public_ar_samples, selected_measurement["samples"],
+    )):
+        if (
+            not isinstance(ar_sample, dict)
+            or ar_sample.get("scenario") != ROUTE_QUALIFICATION_SCENARIOS[index]
+            or not _positive_finite_number(ar_sample.get("decodeTokensPerSecond"))
+            or not _positive_finite_number(mtp_sample.get("decodeTokensPerSecond"))
+        ):
+            return False
+        selected_ar_ratios.append(
+            float(mtp_sample["decodeTokensPerSecond"])
+            / max(float(ar_sample["decodeTokensPerSecond"]), 0.000_001)
+        )
+    selected_quality_ar = bool(
+        selected_measurement["qualityHash"] == baseline_quality_hash
+        and selected_measurement["qualityCompletionTokens"]
+        == baseline_completion_tokens
+    )
+    selected_ar_median_raw = statistics.median(selected_ar_ratios)
+    selected_ar_worst_raw = min(selected_ar_ratios)
+    expected_mtp_wins = bool(
+        selected_quality_ar
+        and selected_ar_median_raw >= BENCHMARK_MINIMUM_SPEEDUP
+        and selected_ar_worst_raw >= BENCHMARK_MINIMUM_SPEEDUP
+    )
+    expected_winner = "mtp" if expected_mtp_wins else "ar"
+    expected_winner_median = (
+        round(selected_ar_median_raw, 4) if expected_mtp_wins else 1.0
+    )
+    expected_winner_worst = (
+        round(selected_ar_worst_raw, 4) if expected_mtp_wins else 1.0
+    )
+    if (
+        verified_ar["qualityHash"] != baseline_quality_hash
+        or verified_ar["qualityCompletionTokens"] != baseline_completion_tokens
+    ):
+        return False
+    if (
+        public_mtp.get("qualityMatchesAR") is not selected_quality_ar
+        or public_mtp.get("medianSpeedupVsAR")
+        != round(selected_ar_median_raw, 4)
+        or public_mtp.get("worstCaseSpeedupVsAR")
+        != round(selected_ar_worst_raw, 4)
+        or benchmark.get("selectionMetric") != "generation-tokens-per-second"
+        or benchmark.get("minimumSpeedup") != BENCHMARK_MINIMUM_SPEEDUP
+        or benchmark.get("winner") != expected_winner
+        or not _positive_finite_number(benchmark.get("winnerSpeedup"))
+        or float(benchmark["winnerSpeedup"]) != expected_winner_median
+        or not _positive_finite_number(benchmark.get("worstCaseSpeedup"))
+        or float(benchmark["worstCaseSpeedup"]) != expected_winner_worst
+        or not _positive_finite_number(benchmark.get("endToEndSpeedup"))
+        or float(benchmark["endToEndSpeedup"]) != expected_winner_median
+        or benchmark.get("qualityPassed") is not True
+        or benchmark.get("settings") != mode_settings.get(expected_winner)
+    ):
+        return False
+    return bool(
+        selected_count == 1
+        and sweep.get("candidateAccepted") is accepted
+        and sweep.get("selectedRoute") == expected_selected
+        and by_route[expected_selected]["selected"] is True
+        and sweep.get("selectedSettings") == selected_settings
+        and selected_settings == by_route[expected_selected]["settings"]
+        and _mtplx_long_context_usage_verified(benchmark, {"ar", "mtp"})
+    )
 
 
 def dflash2_tuning_controls(
@@ -7135,11 +9072,16 @@ def optional_tuning_search_metadata_verified(
         return False
     if not (
         set(stop) == {"reason", "stage", "completedCandidateCount"}
-        and stop.get("reason") == "resource-cooldown-timeout"
+        and stop.get("reason") in {"resource-cooldown-timeout", "candidate-budget"}
         and stop.get("stage") in optional_stages
         and isinstance(stop.get("completedCandidateCount"), int)
         and not isinstance(stop.get("completedCandidateCount"), bool)
         and stop.get("completedCandidateCount") == len(candidates)
+    ):
+        return False
+    if (
+        stop.get("reason") == "candidate-budget"
+        and stop.get("completedCandidateCount") != sweep.get("maximumCandidates")
     ):
         return False
     return bool(
@@ -7180,6 +9122,40 @@ def deterministic_tuning_best_candidate(
         )
 
     return max(candidates, key=score)
+
+
+def benchmark_route_selection_metric(job: dict[str, Any]) -> str:
+    """Return the speed metric that an engine-owned route search must honour.
+
+    Cross-engine calibration offers separate goals for sustained generation
+    throughput and complete-workload time.  The old tuner always ranked its
+    MTP/DFlash coordinates by end-to-end throughput, even when the surrounding
+    shootout was explicitly asking for generation TPS.  Keep standalone tuner
+    jobs on their historical total-workload default, but bind Calibration's
+    throughput goal (and the dedicated MTPLX long-context operator contract)
+    to decode/generation TPS.
+    """
+    tuning = job.get("calibrationTuningPlan")
+    if (
+        isinstance(tuning, dict)
+        and tuning.get("strategy")
+        == "isolated-long-context-operator-comparison"
+    ):
+        return "generation-tokens-per-second"
+    return (
+        "generation-tokens-per-second"
+        if str(job.get("enginePreference") or "") == "throughput"
+        else "end-to-end-tokens-per-second"
+    )
+
+
+def tuning_speed_fields(selection_metric: str) -> tuple[str, str]:
+    """Map a public tuning metric to its per-sample and aggregate fields."""
+    if selection_metric == "generation-tokens-per-second":
+        return "decodeTokensPerSecond", "medianDecodeTokensPerSecond"
+    if selection_metric == "end-to-end-tokens-per-second":
+        return "endToEndTokensPerSecond", "medianEndToEndTokensPerSecond"
+    raise ValueError("Unsupported tuning selection metric.")
 
 
 def replay_lmstudio_optional_search(
@@ -7326,8 +9302,48 @@ def tuning_selected_candidate_matches_mode(
         and candidate.get("qualityMatchesAR") == measured.get("qualityMatchesAR")
         and candidate.get("medianSpeedupVsAR") == measured.get("medianSpeedupVsAR")
         and candidate.get("worstCaseSpeedupVsAR") == measured.get("worstCaseSpeedupVsAR")
+        and (
+            "medianDecodeTokensPerSecond" not in candidate
+            or candidate.get("medianDecodeTokensPerSecond")
+            == measured.get("medianDecodeTokensPerSecond")
+        )
         and candidate.get("medianEndToEndTokensPerSecond")
         == measured.get("medianEndToEndTokensPerSecond")
+    )
+
+
+def tuning_selection_contract_verified(
+    benchmark: dict[str, Any], sweep: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> bool:
+    """Reject old route searches as proof for a metric they never optimised."""
+    metric = benchmark.get("selectionMetric")
+    if metric not in {
+        "generation-tokens-per-second", "end-to-end-tokens-per-second",
+    }:
+        return False
+    version = sweep.get("version")
+    if version in {1, 2}:
+        # Historical adaptive searches always used end-to-end throughput.
+        return bool(
+            metric == "end-to-end-tokens-per-second"
+            and sweep.get("selectionMetric") in {None, metric}
+            and all(
+                candidate.get("selectionMetric") in {None, metric}
+                for candidate in candidates
+            )
+        )
+    if version != 3 or sweep.get("selectionMetric") != metric:
+        return False
+    return all(
+        candidate.get("selectionMetric") == metric
+        and _positive_finite_number(
+            candidate.get("medianDecodeTokensPerSecond")
+        )
+        and _positive_finite_number(
+            candidate.get("medianEndToEndTokensPerSecond")
+        )
+        for candidate in candidates
     )
 
 
@@ -7335,6 +9351,9 @@ def lmstudio_mtp_tuning_sweep_verified(
     capability: dict[str, Any], benchmark: dict[str, Any], mode_settings: Any,
 ) -> bool:
     sweep = benchmark.get("tuningSweep")
+    expected_maximum = BENCHMARK_MTP_TUNER_MAX_CANDIDATES
+    if isinstance(expected_maximum, bool) or not isinstance(expected_maximum, int):
+        return False
     if (
         benchmark.get("kind") != "lmstudio-mtp-tuning"
         or not isinstance(sweep, dict)
@@ -7344,7 +9363,7 @@ def lmstudio_mtp_tuning_sweep_verified(
         or sweep.get("strategy") != "bounded-coordinate-search"
         or sweep.get("complete") is not True
         or sweep.get("resourceComparable") is not True
-        or sweep.get("maximumCandidates") != BENCHMARK_MTP_TUNER_MAX_CANDIDATES
+        or sweep.get("maximumCandidates") != expected_maximum
         or not isinstance(mode_settings, dict)
         or not mtp_benchmark_settings_verified(
             "lmstudio", capability, mode_settings.get("mtp"),
@@ -7358,7 +9377,10 @@ def lmstudio_mtp_tuning_sweep_verified(
         not isinstance(candidates, list)
         or isinstance(count, bool) or not isinstance(count, int)
         or count != len(candidates)
-        or not 1 <= count <= BENCHMARK_MTP_TUNER_MAX_CANDIDATES
+        or not 1 <= count <= int(expected_maximum)
+        or not tuning_selection_contract_verified(
+            benchmark, sweep, candidates,
+        )
     ):
         return False
     seen: set[str] = set()
@@ -7472,6 +9494,9 @@ def dflash2_tuning_sweep_verified(
 ) -> bool:
     """Verify a complete, bounded DFlash search before it can guide launches."""
     sweep = benchmark.get("tuningSweep")
+    expected_maximum = BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES
+    if isinstance(expected_maximum, bool) or not isinstance(expected_maximum, int):
+        return False
     baseline_modes = ["ar"] + (["mtp"] if capability.get("mtp") is True else [])
     if (
         benchmark.get("kind") != "omlx-dflash2-tuning"
@@ -7484,7 +9509,7 @@ def dflash2_tuning_sweep_verified(
         or sweep.get("baselineModes") != baseline_modes
         or sweep.get("complete") is not True
         or sweep.get("resourceComparable") is not True
-        or sweep.get("maximumCandidates") != BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES
+        or sweep.get("maximumCandidates") != expected_maximum
         or not isinstance(mode_settings, dict)
         or not dflash2_benchmark_settings_verified(
             capability, mode_settings.get("dflash2"),
@@ -7498,7 +9523,10 @@ def dflash2_tuning_sweep_verified(
         not isinstance(candidates, list)
         or isinstance(count, bool) or not isinstance(count, int)
         or count != len(candidates)
-        or not 1 <= count <= BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES
+        or not 1 <= count <= int(expected_maximum)
+        or not tuning_selection_contract_verified(
+            benchmark, sweep, candidates,
+        )
     ):
         return False
     seen: set[str] = set()
@@ -7623,19 +9651,401 @@ def benchmark_record_output_contract_verified(
         benchmark.get("kind") == "route-qualification"
         and benchmark.get("backend") in {"llamacpp", "uzu"}
     ):
+        if benchmark["backend"] == "uzu":
+            return bool(
+                configured_output == benchmark.get("configuredOutputLimit")
+                and route_qualification_metrics(benchmark) is not None
+            )
         contract = benchmark.get("qualificationContract")
+        sample_tokens = route_qualification_sample_tokens(benchmark["backend"])
         return bool(
             configured_output == benchmark.get("configuredOutputLimit")
             and benchmark.get("measuredRequestMaxTokens")
-            == ROUTE_QUALIFICATION_MAX_TOKENS
-            and output_min == ROUTE_QUALIFICATION_MAX_TOKENS
-            and output_max == ROUTE_QUALIFICATION_MAX_TOKENS
+            == sample_tokens
+            and output_min == sample_tokens
+            and output_max == sample_tokens
             and isinstance(contract, dict)
             and contract.get("configuredOutputLimit") == configured_output
             and contract.get("measuredRequestMaxTokens")
-            == ROUTE_QUALIFICATION_MAX_TOKENS
+            == sample_tokens
         )
     return output_min <= configured_output <= output_max
+
+
+SAMPLING_RECORD_EVIDENCE_KEYS = (
+    "samplingEvidenceVersion", "samplingControlled", "samplingContractVersion",
+    "samplingContract", "samplingContractFingerprint",
+)
+
+
+def sampling_record_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Copy only the strict sampling proof saved beside a benchmark result."""
+    return {
+        key: copy.deepcopy(evidence.get(key))
+        for key in SAMPLING_RECORD_EVIDENCE_KEYS
+    }
+
+
+def sampling_record_evidence_verified(
+    benchmark: dict[str, Any], evidence: dict[str, Any],
+) -> bool:
+    """Verify a launcher-controlled document rather than trusting a hash label."""
+    if (
+        evidence.get("samplingEvidenceVersion") != SAMPLING_EVIDENCE_SCHEMA_VERSION
+        or benchmark.get("samplingEvidenceVersion") != SAMPLING_EVIDENCE_SCHEMA_VERSION
+        or evidence.get("samplingControlled") is not True
+        or benchmark.get("samplingControlled") is not True
+        or evidence.get("samplingContractVersion") != SAMPLING_CONTRACT_SCHEMA_VERSION
+        or benchmark.get("samplingContractVersion") != SAMPLING_CONTRACT_SCHEMA_VERSION
+    ):
+        return False
+    try:
+        expected = load_sampling_contract(evidence.get("samplingContract"))
+        measured = load_sampling_contract(benchmark.get("samplingContract"))
+    except (SamplingContractError, TypeError):
+        return False
+    expected_fingerprint = sampling_fingerprint(expected)
+    measured_fingerprint = sampling_fingerprint(measured)
+    return bool(
+        expected.as_dict() == measured.as_dict()
+        and secrets.compare_digest(expected_fingerprint, measured_fingerprint)
+        and isinstance(evidence.get("samplingContractFingerprint"), str)
+        and secrets.compare_digest(
+            expected_fingerprint, evidence["samplingContractFingerprint"],
+        )
+        and isinstance(benchmark.get("samplingContractFingerprint"), str)
+        and secrets.compare_digest(
+            measured_fingerprint, benchmark["samplingContractFingerprint"],
+        )
+    )
+
+
+def engine_settings_sweep_record_contract(record: dict[str, Any]) -> dict[str, Any]:
+    context = record.get("contextMin")
+    output = record.get("outputMin")
+    if (
+        isinstance(context, bool) or not isinstance(context, int)
+        or isinstance(output, bool) or not isinstance(output, int)
+        or context <= 0 or output <= 0
+    ):
+        raise ValueError("The settings-search record has invalid workload limits.")
+    return {
+        "backend": str(record.get("backend") or ""),
+        "modelFingerprint": str(record.get("modelFingerprint") or ""),
+        "runtimeVersion": str(record.get("runtimeVersion") or ""),
+        "hardwareFingerprint": str(record.get("hardwareFingerprint") or ""),
+        "suite": str(record.get("suite") or ""),
+        "client": str(record.get("client") or ""),
+        "reasoning": str(record.get("reasoning") or ""),
+        "targetKV": str(record.get("targetKV") or "off"),
+        "samplingFingerprint": str(record.get("samplingFingerprint") or ""),
+        "context": context,
+        "output": output,
+        "selectionPreference": str(record.get("selectionPreference") or "throughput"),
+    }
+
+
+def select_engine_settings_sweep_candidate(
+    candidates: list[dict[str, Any]], preference: str,
+) -> dict[str, Any] | None:
+    """Replay the deterministic incumbent-preserving settings decision."""
+    def finite_nonnegative(value: Any) -> bool:
+        return bool(
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and float(value) >= 0
+        )
+
+    usable = [
+        candidate for candidate in candidates
+        if candidate.get("qualityMatchesReference") is True
+        and candidate.get("resourceComparable") is True
+        and finite_nonnegative(candidate.get("preferenceValue"))
+        and finite_nonnegative(candidate.get("worstPreferenceValue"))
+    ]
+    if not usable:
+        return None
+    incumbent = usable[0]
+    higher = incumbent.get("higherIsBetter") is True
+    if any(candidate.get("higherIsBetter") is not higher for candidate in usable):
+        return None
+    best = (
+        max(usable, key=lambda item: (
+            float(item["preferenceValue"]), float(item["worstPreferenceValue"]),
+        ))
+        if higher else
+        min(usable, key=lambda item: (
+            float(item["preferenceValue"]), float(item["worstPreferenceValue"]),
+        ))
+    )
+    if best is incumbent:
+        return incumbent
+    current = float(incumbent["preferenceValue"])
+    measured = float(best["preferenceValue"])
+    current_worst = float(incumbent["worstPreferenceValue"])
+    measured_worst = float(best["worstPreferenceValue"])
+    if preference == "memory":
+        return best if current - measured >= BENCHMARK_MEMORY_MEANINGFUL_BYTES else incumbent
+    if preference == "thermal":
+        return best if measured < current else incumbent
+    median_gain = (
+        measured / max(current, 0.000_001)
+        if higher else current / max(measured, 0.000_001)
+    )
+    worst_gain = (
+        measured_worst / max(current_worst, 0.000_001)
+        if higher else current_worst / max(measured_worst, 0.000_001)
+    )
+    return (
+        best
+        if median_gain >= BENCHMARK_MINIMUM_SPEEDUP
+        and worst_gain >= BENCHMARK_MINIMUM_SPEEDUP
+        else incumbent
+    )
+
+
+def _engine_settings_sweep_settings_valid(
+    backend: str, settings: Any, capability: dict[str, Any],
+) -> bool:
+    if not isinstance(settings, dict):
+        return False
+    expected = set(BENCHMARK_ENGINE_SETTING_KEYS.get(backend, ()))
+    if backend == "omlx" and settings.get("pleStorage") == "mmap":
+        expected.add("pleStorage")
+    if set(settings) != expected:
+        return False
+    try:
+        if backend == "omlx":
+            return bool(
+                settings.get("burst") in {"off", "light", "balanced", "aggressive"}
+                and settings.get("anePrefill") in {"off", "tuned"}
+                and settings.get("memoryGuard") in {"balanced", "high"}
+                and settings.get("pleStorage") in {None, "mmap"}
+            )
+        if backend == "lmstudio":
+            return bool(settings.get("gpu") in {"max", "off"} and settings.get("parallel") == 1)
+        if backend == "mtplx":
+            return bool(
+                settings.get("profile") in {
+                    "stable", "performance-cold", "sustained", "turbo", "exact",
+                }
+                and settings.get("fan") in {"default", "smart", "max"}
+            )
+        if backend == "swiftlm":
+            return bool(
+                settings.get("prefillSize") in SSD_STREAMING_PREFILL_SIZES
+                and settings.get("nativeExpertTopK")
+                == max(0, int(capability.get("nativeExpertTopK") or 0))
+                and settings.get("ssdCacheState") == "natural-cold-to-warm"
+            )
+        if backend == "mference":
+            return bool(
+                settings.get("promptCacheMode") in {"on", "off"}
+                and settings.get("queueLimit") == 1
+                and settings.get("ssdCacheState") == "natural-cold-to-warm"
+            )
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
+def engine_settings_candidate_evidence(
+    candidate: dict[str, Any], record: dict[str, Any],
+    reference: dict[str, Any], preference: str,
+) -> dict[str, Any]:
+    """Derive selection inputs from measured samples, never from display scores."""
+    measured = cross_engine_benchmark_measurement(record)
+    if measured is None:
+        raise ValueError("A settings candidate has incomplete measurement data.")
+    mode = record["modes"][record["winner"]]
+    samples = mode["samples"]
+    if preference in {"memory", "thermal"}:
+        key = "peakPressureDeltaBytes" if preference == "memory" else "thermalWorstValue"
+        value = measured.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ValueError("This settings goal requires available resource telemetry.")
+        worst = value
+    else:
+        key = {"throughput": "decodeTokensPerSecond", "responsive": "ttftSeconds"}.get(
+            preference, "totalSeconds",
+        )
+        values = [sample.get(key) for sample in samples]
+        if not all(_positive_finite_number(value) for value in values):
+            raise ValueError("A settings candidate has invalid timing samples.")
+        value = sum(values) if preference == "fastest" else statistics.median(values)
+        worst = min(values) if preference == "throughput" else max(values)
+    return {
+        **copy.deepcopy(candidate),
+        "qualityMatchesReference": (
+            record["qualityFingerprint"] == reference["qualityFingerprint"]
+            and record["qualityCompletionTokens"] == reference["qualityCompletionTokens"]
+        ),
+        "resourceComparable": all(
+            item.get("resourceCooldown", {}).get("status") in {
+                "reference-ready", "ready", "condition-improved", "unavailable",
+            }
+            for item in record["modes"].values()
+        ),
+        "higherIsBetter": preference == "throughput",
+        "preferenceValue": value, "worstPreferenceValue": worst,
+    }
+
+
+def benchmark_engine_settings_match(
+    benchmark: dict[str, Any], expected: Any,
+) -> bool:
+    """A saved search may replace searched controls; safety controls must still match."""
+    measured = benchmark.get("engineSettings")
+    if not isinstance(expected, dict) or not isinstance(measured, dict):
+        return False
+    sweep = benchmark.get("engineSettingsSweep")
+    if not isinstance(sweep, dict):
+        return measured == expected
+    axes = sweep.get("searchedAxes")
+    if not isinstance(axes, list) or not all(isinstance(axis, str) for axis in axes):
+        return False
+    # This helper only matches requests. The full verifier separately proves
+    # the complete search, exact candidate records, and selected winner.
+    ignored = set(axes)
+    return (
+        {key: value for key, value in measured.items() if key not in ignored}
+        == {key: value for key, value in expected.items() if key not in ignored}
+    )
+
+
+def engine_settings_sweep_receipt_verified(
+    capability: dict[str, Any], benchmark: dict[str, Any],
+) -> bool:
+    try:
+        sweep = benchmark.get("engineSettingsSweep")
+        if not isinstance(sweep, dict) or sweep.get("complete") is not True:
+            return False
+        backend = str(benchmark["backend"])
+        candidates = sweep["candidates"]
+        records = sweep["records"]
+        if (
+            sweep.get("version") != ENGINE_SETTINGS_SWEEP_VERSION
+            or sweep.get("strategy") != "staged-runtime-and-route-search"
+            or sweep.get("backend") != backend
+            or sweep.get("globalCartesianSearch") is not False
+            or sweep.get("contract") != engine_settings_sweep_record_contract(benchmark)
+            or sweep.get("selectionPreference") != benchmark.get("selectionPreference")
+            or not isinstance(candidates, list) or not 1 <= len(candidates) <= 5
+            or not isinstance(records, dict) or len(records) != len(candidates)
+            or sweep.get("candidateCount") != len(candidates)
+        ):
+            return False
+        modes = benchmark["comparedModes"]
+        reference_key = sweep["tuningReferenceKey"]
+        reference = records[reference_key]
+        if not isinstance(reference, dict):
+            return False
+        setting_values = []
+        rows = []
+        for candidate in candidates:
+            settings = candidate["settings"]
+            key = candidate["key"]
+            if (
+                not _engine_settings_sweep_settings_valid(backend, settings, capability)
+                or key != _engine_settings_candidate_key(backend, settings)
+            ):
+                return False
+            setting_values.append(settings)
+            nested = records[key]
+            if (
+                not isinstance(nested, dict) or "engineSettingsSweep" in nested
+                or nested.get("engineSettings") != settings
+                or engine_settings_sweep_record_contract(nested)
+                != engine_settings_sweep_record_contract(benchmark)
+                or nested.get("comparedModes") != modes
+                or nested.get("modeSettings") != reference.get("modeSettings")
+                or nested.get("scenarioContract") != benchmark.get("scenarioContract")
+            ):
+                return False
+            evidence = {
+                **sampling_record_evidence(benchmark),
+                "samplingFingerprint": benchmark["samplingFingerprint"],
+                "context": benchmark["contextMin"], "output": benchmark["outputMin"],
+                "client": benchmark["client"], "reasoning": benchmark["reasoning"],
+                "kv": benchmark["targetKV"],
+                "engineSettings": settings,
+            }
+            if not _local_benchmark_record_verified(capability, nested, evidence):
+                return False
+            rows.append(engine_settings_candidate_evidence(
+                candidate, nested, records[candidates[0]["key"]], sweep["selectionPreference"],
+            ))
+        if len({candidate["key"] for candidate in candidates}) != len(candidates):
+            return False
+        axis = {"omlx": "burst", "lmstudio": "gpu", "mtplx": "profile",
+                "swiftlm": "prefillSize", "mference": "promptCacheMode"}[backend]
+        values = {
+            "omlx": ["off", "light", "balanced", "aggressive"],
+            "lmstudio": ["max", "off"], "swiftlm": list(SSD_STREAMING_PREFILL_SIZES),
+            "mference": ["on", "off"],
+        }
+        if backend == "mtplx":
+            values[backend] = (
+                ["stable", "sustained", "exact"]
+                if sweep["selectionPreference"] in {"memory", "thermal"} else
+                ["performance-cold", "turbo", "sustained"]
+                if sweep["selectionPreference"] == "responsive" else
+                ["turbo", "sustained", "performance-cold"]
+            )
+        fixed_axis = (
+            backend == "mtplx" and benchmark["suite"] == MTPLX_LONG_CONTEXT_64K_SUITE
+            or backend == "mference" and benchmark["workloadKind"] != "agentic"
+        )
+        expected_values = (
+            [setting_values[0][axis]] if fixed_axis else
+            _ordered_unique([setting_values[0][axis], *values[backend]])
+        )
+        if (
+            [settings[axis] for settings in setting_values] != expected_values
+            or sweep.get("searchedAxes") != ([] if fixed_axis else [axis])
+            or any(
+                {k: v for k, v in settings.items() if k != axis}
+                != {k: v for k, v in setting_values[0].items() if k != axis}
+                for settings in setting_values
+            )
+        ):
+            return False
+        if backend == "lmstudio" and "mtp" in modes:
+            base = 1 + BENCHMARK_MTP_TUNER_MAX_CANDIDATES
+            if reference.get("kind") != "lmstudio-mtp-tuning":
+                return False
+        elif backend == "omlx" and "dflash2" in modes:
+            base = len(modes) - 1 + BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES
+            if reference.get("kind") != "omlx-dflash2-tuning":
+                return False
+        elif backend == "mtplx" and "mtp" in modes:
+            base = 3 if fixed_axis else 1 + len(mtplx_mtp_depth_candidates(capability))
+            if not fixed_axis and "mtpDepthSweep" not in reference:
+                return False
+        else:
+            base = len(modes)
+        maximum = base + (len(candidates) - 1) * len(modes)
+        steps = 2 + len(reference["modes"]["ar"]["samples"])
+        counts = {
+            "candidateCount": len(candidates), "maximumEngineSettingLoads": len(candidates),
+            "baseRouteLoads": base, "maximumModelLoads": maximum,
+            "stepsPerLoad": steps, "maximumGeneratedRequests": maximum * steps,
+        }
+        if any(type(sweep.get(key)) is not int or sweep[key] != value for key, value in counts.items()):
+            return False
+        best = select_engine_settings_sweep_candidate(rows, sweep["selectionPreference"])
+        selected = sweep["selectedCandidateKey"]
+        without_sweep = {key: value for key, value in benchmark.items() if key != "engineSettingsSweep"}
+        return bool(
+            maximum <= ENGINE_SETTINGS_SWEEP_MAX_MODEL_LOADS
+            and maximum * steps <= ENGINE_SETTINGS_SWEEP_MAX_GENERATED_REQUESTS
+            and best is not None and best["key"] == selected
+            and sweep["selectedEngineSettings"] == benchmark["engineSettings"]
+            and without_sweep == records[selected]
+        )
+    except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
+        return False
 
 
 def _local_benchmark_record_verified(
@@ -7645,6 +10055,17 @@ def _local_benchmark_record_verified(
     if not isinstance(benchmark, dict):
         return False
     backend = str(benchmark.get("backend") or "")
+    if (
+        backend == "omlx" and benchmark.get("targetKV") != "off"
+        and (
+            benchmark.get("winner") == "dflash2"
+            or (
+                isinstance(benchmark.get("comparedModes"), list)
+                and "dflash2" in benchmark["comparedModes"]
+            )
+        )
+    ):
+        return False
     ssd_identity = benchmark.get("ssdComparisonIdentity")
     if backend in SSD_STREAMING_BACKENDS:
         capability_identity = capability.get("comparisonIdentity")
@@ -7665,7 +10086,7 @@ def _local_benchmark_record_verified(
         or benchmark.get("runtimeVersion") != capability.get("runtimeVersion")
         or benchmark.get("hardwareFingerprint") != hardware_fingerprint()
         or benchmark.get("baselinePassed") is not True
-        or benchmark_runtime_integrity_issue(benchmark) is not None
+        or benchmark_integrity_issue(benchmark) is not None
     ):
         return False
     context = (evidence or {}).get("context")
@@ -7687,6 +10108,17 @@ def _local_benchmark_record_verified(
         return False
     if benchmark.get("samplingFingerprint") != (evidence or {}).get("samplingFingerprint"):
         return False
+    evidence_value = evidence or {}
+    strict_sampling_record = any(
+        key in benchmark for key in SAMPLING_RECORD_EVIDENCE_KEYS
+    )
+    if (
+        evidence_value.get("client") != "chat" or strict_sampling_record
+    ) and not sampling_record_evidence_verified(benchmark, evidence_value):
+        # Agent records have never been safe to reuse without relay-owned
+        # sampling. Legacy records therefore fail closed; legacy Chat records
+        # retain their compatibility fingerprint path.
+        return False
     compared = benchmark.get("comparedModes")
     if not isinstance(compared, list):
         return False
@@ -7694,7 +10126,31 @@ def _local_benchmark_record_verified(
     required = {"ar"}
     if capability.get("mtp") is True:
         required.add("mtp")
-    if capability.get("dflash") is True:
+    contract_version = benchmark.get("comparisonContractVersion")
+    measured_engine_settings = benchmark.get("engineSettings")
+    expected_by_backend = (evidence or {}).get("engineSettingsByBackend")
+    expected_engine_settings = (
+        expected_by_backend.get(backend)
+        if isinstance(expected_by_backend, dict) else
+        (evidence or {}).get("engineSettings")
+    )
+    if (
+        benchmark.get("engineSettingsSweep") is not None
+        and not engine_settings_sweep_receipt_verified(capability, benchmark)
+    ):
+        return False
+    dflash_locked_by_tuned_ane = bool(
+        backend == "omlx"
+        and contract_version == BENCHMARK_COMPARISON_CONTRACT_VERSION
+        and isinstance(measured_engine_settings, dict)
+        and measured_engine_settings.get("anePrefill") == "tuned"
+        and isinstance(expected_engine_settings, dict)
+        and expected_engine_settings.get("anePrefill") == "tuned"
+    )
+    if (
+        capability.get("dflash") is True and not dflash_locked_by_tuned_ane
+        and (backend != "omlx" or benchmark.get("targetKV") == "off")
+    ):
         required.add("dflash2")
     if not required.issubset(compared_modes):
         return False
@@ -7706,7 +10162,6 @@ def _local_benchmark_record_verified(
     winner = benchmark.get("winner")
     if winner not in compared_modes or winner not in {"ar", "mtp", "dflash2"}:
         return False
-    contract_version = benchmark.get("comparisonContractVersion")
     mode_settings = benchmark.get("modeSettings")
     if backend == "lmstudio" and capability.get("mtp") is True:
         if contract_version not in {3, BENCHMARK_COMPARISON_CONTRACT_VERSION}:
@@ -7724,13 +10179,10 @@ def _local_benchmark_record_verified(
         ):
             return False
     if contract_version == BENCHMARK_COMPARISON_CONTRACT_VERSION:
-        expected_by_backend = (evidence or {}).get("engineSettingsByBackend")
-        expected = (
-            expected_by_backend.get(backend)
-            if isinstance(expected_by_backend, dict) else
-            (evidence or {}).get("engineSettings")
-        )
-        if not isinstance(expected, dict) or benchmark.get("engineSettings") != expected:
+        if (
+            not isinstance(expected_engine_settings, dict)
+            or not benchmark_engine_settings_match(benchmark, expected_engine_settings)
+        ):
             return False
     if benchmark.get("kind") == "lmstudio-mtp-tuning" and not lmstudio_mtp_tuning_sweep_verified(
         capability, benchmark, mode_settings,
@@ -7739,6 +10191,38 @@ def _local_benchmark_record_verified(
     if "mtpDepthSweep" in benchmark and (
         backend != "mtplx"
         or not mtplx_mtp_depth_sweep_verified(capability, benchmark, mode_settings)
+    ):
+        return False
+    operator_settings_present = bool(
+        isinstance(mode_settings, dict)
+        and any(
+            isinstance(value, dict) and "mtplxOperatorRoute" in value
+            for value in mode_settings.values()
+        )
+    )
+    operator_evidence_present = bool(
+        benchmark.get("kind") == "mtplx-long-context-operator-tuning"
+        or "mtplxOperatorSweep" in benchmark
+        or operator_settings_present
+    )
+    # The near-64K suite is shared by every engine in the same shootout. Its
+    # presence alone must not make an oMLX/LM Studio peer masquerade as an MTPLX
+    # operator record. Conversely, any actual operator marker on another backend
+    # is invalid, while MTPLX must carry the full immutable sweep for this suite.
+    if backend != "mtplx" and operator_evidence_present:
+        return False
+    long_operator_record = bool(
+        backend == "mtplx"
+        and (
+            benchmark.get("suite") == MTPLX_LONG_CONTEXT_64K_SUITE
+            or operator_evidence_present
+        )
+    )
+    if long_operator_record and (
+        "mtpDepthSweep" in benchmark
+        or not mtplx_operator_sweep_verified(
+            capability, benchmark, mode_settings,
+        )
     ):
         return False
     if benchmark.get("kind") == "omlx-dflash2-tuning" and not dflash2_tuning_sweep_verified(
@@ -7798,10 +10282,24 @@ def _local_benchmark_record_verified(
                 or contract.get("runtimeVersion") != capability.get("runtimeVersion")
                 or not isinstance(runtime_binary, dict)
                 or contract.get("runtimeBinarySha256") != runtime_binary.get("sha256")
+                or contract.get("runtimeBinarySize") != runtime_binary.get("size")
+                or contract.get("runtimeUpstreamCommit")
+                != runtime_identity.get("upstreamCommit")
+                or contract.get("runtimeSourcePatchSha256")
+                != runtime_identity.get("sourcePatchSha256")
                 or contract.get("sandboxProfileSha256") != UZU_SANDBOX_PROFILE_SHA256
                 or contract.get("rawListenerProtected") is not True
+                or contract.get("nativeBoundaryContractId")
+                != runtime_identity.get("nativeBoundaryContractId")
+                or contract.get("nativeBearerAuthentication") is not True
+                or contract.get("oneUseApiKeyFile") is not True
+                or runtime_identity.get("binaryIdentityPinned") is not True
+                or runtime_identity.get("nativeBearerAuthentication") is not True
+                or runtime_identity.get("oneUseApiKeyFile") is not True
+                or runtime_identity.get("nativeContextLimit") is not True
+                or runtime_identity.get("nativeOutputLimit") is not True
                 or not uzu_listener_protection_ready(runtime_identity)
-                or contract.get("memoryCeilingBytes") != UZU_PROCESS_MEMORY_CEILING_BYTES
+                or not uzu_qualification_memory_ceiling_supported(contract.get("memoryCeilingBytes"))
             ):
                 return False
     if winner == "ar":
@@ -7836,7 +10334,8 @@ def verified_local_benchmark(
         records.append(latest)
     matches = [
         record for record in records
-        if _local_benchmark_record_verified(capability, record, evidence)
+        if route_qualification_record_is_fresh(record)
+        and _local_benchmark_record_verified(capability, record, evidence)
     ]
     if not matches:
         return None
@@ -7848,6 +10347,7 @@ def verified_local_benchmark(
         workload_match = int((workload == "agentic") == agent_client)
         suite_strength = {
             "quick": 1, "standard": 2, "thorough": 3, "agentic": 4,
+            MTPLX_LONG_CONTEXT_64K_SUITE: 5,
         }.get(str(record.get("suite") or ""), 0)
         return workload_match, suite_strength, str(record.get("createdAt") or "")
 
@@ -7933,7 +10433,7 @@ def route_performance_evidence(
             "tier": "upstream-measured",
             "label": "Upstream measured",
             "detail": (
-                "Whallm reports roughly 7.8–9.3 generation tok/s on its tested M5 Pro "
+                "Whallm reports 9.7–10.4 generation tok/s on its tested M5 Pro "
                 "Qwen3.8 Flash-Next route through 16K input. This is not a local result."
             ),
             "source": "whallm-upstream",
@@ -8002,9 +10502,9 @@ def route_host_support(
             detail = "Only the synthetic native FreeToken qualification is complete; a real checkpoint is not yet qualified."
         elif whallm_below_floor:
             state = "experimental"
-            label = f"Experimental on {host_memory / 1024**3:.0f} GB"
+            label = f"Experimental on {host_memory / 1024**3:.0f} GiB"
             detail = (
-                f"Whallm publishes a {WHALLM_SUPPORT_FLOOR_BYTES / 1024**3:.0f} GB unified-memory "
+                f"Whallm publishes a {WHALLM_SUPPORT_FLOOR_BYTES / 1024**3:.0f} GiB unified-memory "
                 "support floor. Its live route can be inspected here, but this smaller host is not "
                 "an upstream-supported configuration."
             )
@@ -8979,23 +11479,15 @@ def model_default_sampling(path: Path) -> dict[str, int | float]:
     """Read bounded generation defaults without inventing a sampler."""
     source = read_json(path / "generation_config.json")
     result: dict[str, int | float] = {}
-
-    def number(key: str, low: float, high: float) -> None:
-        value = source.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return
-        parsed = float(value)
-        if low <= parsed <= high:
-            result[key] = parsed
-
-    number("temperature", 0.0, 2.0)
-    number("top_p", 0.0, 1.0)
-    number("repetition_penalty", 0.0, 10.0)
-    number("presence_penalty", -2.0, 2.0)
-    number("frequency_penalty", -2.0, 2.0)
-    top_k = source.get("top_k")
-    if isinstance(top_k, int) and not isinstance(top_k, bool) and 0 <= top_k <= 1_000_000:
-        result["top_k"] = top_k
+    for key in SUPPORTED_SAMPLING_FIELDS:
+        if key not in source:
+            continue
+        try:
+            result.update(canonicalize_sampling({key: source[key]}))
+        except SamplingContractError:
+            # Model metadata is descriptive, not a user request. Preserve the
+            # prior bounded-reader behavior by omitting malformed defaults.
+            continue
     return result
 
 
@@ -9282,6 +11774,61 @@ def inspect_native_freetoken_model(
     return contract
 
 
+def mtplx_sidecar_path(path: Path, config: dict[str, Any]) -> Path:
+    declared = deep_get(config, ("mlx_lm_extra_tensors", "mtp_file"))
+    if isinstance(declared, str) and declared:
+        candidate = (path / declared).resolve()
+        if candidate.is_relative_to(path.resolve()):
+            return candidate
+        return path / "__invalid_mtp_path__"
+    for name in ("mtp.safetensors", "mtp/weights.safetensors", "model-mtp.safetensors"):
+        if (path / name).is_file():
+            return path / name
+    return path / "mtp.safetensors"
+
+
+@functools.lru_cache(maxsize=64)
+def _mtplx_native_mtp_inspection(binary: str, path: str, fingerprint: str,
+                                 binary_mtime: int) -> bool:
+    """Native artifact compatibility, deliberately not a speed qualification."""
+    try:
+        result = subprocess.run(
+            [binary, "inspect", "--model", path, "--json"],
+            env={**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"},
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        receipt = json.loads(result.stdout)
+        if not isinstance(receipt, dict) or not isinstance(receipt.get("mtp"), dict) or not isinstance(receipt.get("compatibility"), dict):
+            return False
+        return bool(
+            result.returncode == 0
+            and Path(receipt.get("model_dir", "")).resolve() == Path(path).resolve()
+            and receipt.get("mtp_supported") == "yes"
+            and receipt.get("unverified_model") is False
+            and receipt.get("mtp", {}).get("passes_tensor_gate") is True
+            and receipt.get("compatibility", {}).get("can_run") is True
+        )
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+        return False
+
+
+def native_mtplx_mtp_ready(path: Path, config: dict[str, Any]) -> bool:
+    binary = BINARIES.get("mtplx")
+    if not binary or not mtplx_sidecar_path(path, config).is_file():
+        return False
+    try:
+        sidecar = mtplx_sidecar_path(path, config).stat()
+        fingerprint = model_artifact_fingerprint(path, config)
+        return _mtplx_native_mtp_inspection(
+            str(binary), str(path.resolve()),
+            f"{fingerprint}:{sidecar.st_size}:{sidecar.st_mtime_ns}:"
+            + json.dumps(read_json(path / "mtplx_runtime.json"), sort_keys=True),
+            Path(binary).stat().st_mtime_ns,
+        )
+    except OSError:
+        return False
+
+
 def verified_mtplx_runtime(path: Path, runtime: dict[str, Any], config: dict[str, Any]) -> bool:
     """Require a complete, internally consistent MTPLX MTP audit stamp."""
     sidecar = path / "mtp.safetensors"
@@ -9378,6 +11925,199 @@ def verified_mtplx_runtime(path: Path, runtime: dict[str, Any], config: dict[str
     ):
         return False
     return True
+
+
+def _normalized_model_type(value: Any) -> str:
+    return str(value or "").strip().replace("-", "_").casefold()
+
+
+def mtplx_exact_2111_runtime(version_text: Any) -> bool:
+    """Accept only the audited stable 2.11.1 CLI identity.
+
+    The generic semantic parser intentionally tolerates suffixes for release
+    ordering. That is too broad for a route which enables an exact reviewed set
+    of operator switches, so prerelease, development and local-build suffixes
+    fail closed here.
+    """
+    value = re.sub(r"\s+", " ", str(version_text or "").strip())
+    return bool(re.fullmatch(
+        r"(?:mtplx\s+)?2\.11\.1(?:\s+\(2\.11\.1\))?",
+        value,
+        re.IGNORECASE,
+    ))
+
+
+def mtplx_long_context_2111_contract(
+    model: dict[str, Any], capability: dict[str, Any],
+    runtime_version: str | None = None,
+) -> dict[str, Any] | None:
+    """Mint the immutable receipt for MTPLX's audited dense-27B operators."""
+    if not isinstance(model, dict) or not isinstance(capability, dict):
+        return None
+    version = str(runtime_version or capability.get("runtimeVersion") or "")[:160]
+    if not mtplx_exact_2111_runtime(version):
+        return None
+    if (
+        model.get("ready") is not True
+        or str(model.get("format") or "") != "mlx"
+        or capability.get("mtp") is not True
+    ):
+        return None
+    try:
+        model_path = Path(str(model.get("path") or "")).expanduser().resolve(strict=True)
+    except OSError:
+        return None
+    if not model_path.is_dir():
+        return None
+    config = read_json(model_path / "config.json")
+    if not config:
+        return None
+    text = config.get("text_config")
+    text_config = text if isinstance(text, dict) else config
+    root_type = _normalized_model_type(config.get("model_type"))
+    text_type = _normalized_model_type(text_config.get("model_type"))
+    if (
+        root_type not in {"qwen3_5", "qwen3_8"}
+        or text_type not in {"qwen3_5_text", "qwen3_8"}
+    ):
+        return None
+    identity_text = " ".join(str(model.get(key) or "") for key in (
+        "name", "architecture", "modelType", "rootModelType", "textModelType",
+    )).casefold()
+    if (
+        "ornith" in identity_text
+        or "flash" in identity_text
+        or "moe" in identity_text
+        or model.get("mixtureOfExperts") is True
+        or any(
+            isinstance(text_config.get(key), int)
+            and not isinstance(text_config.get(key), bool)
+            and int(text_config[key]) > 1
+            for key in ("num_experts", "num_local_experts", "n_routed_experts")
+        )
+    ):
+        return None
+    geometry = {
+        key: text_config.get(key)
+        for key in MTPLX_LONG_CONTEXT_DENSE_GEOMETRY
+    }
+    if geometry != MTPLX_LONG_CONTEXT_DENSE_GEOMETRY:
+        return None
+    context_maximum = capability.get("contextMaximum", model.get("nativeContext"))
+    if (
+        isinstance(context_maximum, bool)
+        or not isinstance(context_maximum, int)
+        or context_maximum < MTPLX_LONG_CONTEXT_MINIMUM
+    ):
+        return None
+    scanned_fingerprint = str(capability.get("benchmarkModelFingerprint") or "")
+    current_fingerprint = model_artifact_fingerprint(model_path, config)
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", scanned_fingerprint) is None
+        or re.fullmatch(r"[0-9a-f]{64}", current_fingerprint) is None
+        or not secrets.compare_digest(scanned_fingerprint, current_fingerprint)
+    ):
+        return None
+    receipt: dict[str, Any] = {
+        "version": MTPLX_LONG_CONTEXT_2111_CONTRACT_VERSION,
+        "backend": "mtplx",
+        "route": MTPLX_LONG_CONTEXT_2111_ROUTE,
+        "runtimeVersion": version,
+        "modelFingerprint": current_fingerprint,
+        "modelPath": str(model_path),
+        "modelType": text_type,
+        "geometry": geometry,
+        "minimumContext": MTPLX_LONG_CONTEXT_MINIMUM,
+        "requiredProfile": "turbo",
+        "requiredAcceleration": "mtp",
+        "environment": copy.deepcopy(MTPLX_LONG_CONTEXT_CANDIDATE_ENV),
+        "baselineEnvironment": copy.deepcopy(MTPLX_LONG_CONTEXT_BASELINE_ENV),
+        "allowSwap": "0",
+        "growthReserve": "absent",
+    }
+    receipt["contractId"] = hashlib.sha256(json.dumps(
+        receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")).hexdigest()
+    return receipt
+
+
+def _mtplx_long_context_capability(
+    receipt: dict[str, Any] | None, runtime_version: str,
+) -> dict[str, Any]:
+    ready = isinstance(receipt, dict)
+    return {
+        "contractVersion": MTPLX_LONG_CONTEXT_2111_CONTRACT_VERSION,
+        "ready": ready,
+        "routeId": MTPLX_LONG_CONTEXT_2111_ROUTE,
+        "contractId": str(receipt.get("contractId")) if ready else None,
+        "minimumContext": MTPLX_LONG_CONTEXT_MINIMUM,
+        "requiredProfile": "turbo",
+        "requiredAcceleration": "mtp",
+        "runtimeVersion": (
+            "2.11.1"
+            if mtplx_exact_2111_runtime(runtime_version)
+            else str(runtime_version or "")[:160]
+        ),
+        "reason": (
+            "Ready for an isolated 64K local comparison of the audited MTPLX 2.11.1 dense-27B operators."
+            if ready else
+            "Requires the exact MTPLX 2.11.1 runtime, verified MTP weights, and the complete non-Ornith Qwen dense-27B geometry."
+        ),
+    }
+
+
+def _mtplx_long_context_capability_matches(
+    value: Any, receipt: dict[str, Any],
+) -> bool:
+    if not isinstance(value, dict):
+        return False
+    receipt_id = receipt.get("contractId")
+    unsigned_receipt = copy.deepcopy(receipt)
+    unsigned_receipt.pop("contractId", None)
+    expected_receipt_id = hashlib.sha256(json.dumps(
+        unsigned_receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")).hexdigest()
+    if (
+        not isinstance(receipt_id, str)
+        or not secrets.compare_digest(receipt_id, expected_receipt_id)
+        or receipt.get("version") != MTPLX_LONG_CONTEXT_2111_CONTRACT_VERSION
+        or receipt.get("backend") != "mtplx"
+        or receipt.get("route") != MTPLX_LONG_CONTEXT_2111_ROUTE
+        or not mtplx_exact_2111_runtime(receipt.get("runtimeVersion"))
+        or receipt.get("geometry") != MTPLX_LONG_CONTEXT_DENSE_GEOMETRY
+        or receipt.get("environment") != MTPLX_LONG_CONTEXT_CANDIDATE_ENV
+        or receipt.get("baselineEnvironment") != MTPLX_LONG_CONTEXT_BASELINE_ENV
+        or receipt.get("allowSwap") != "0"
+        or receipt.get("growthReserve") != "absent"
+    ):
+        return False
+    # Direct model-free contract tests use the full receipt. Scanner output
+    # exposes only the compact public capability schema.
+    route = value.get("routeId", value.get("route"))
+    version = value.get("contractVersion", value.get("version"))
+    ready = value.get("ready", True)
+    contract_id = value.get("contractId")
+    return bool(
+        ready is True
+        and version == MTPLX_LONG_CONTEXT_2111_CONTRACT_VERSION
+        and route == MTPLX_LONG_CONTEXT_2111_ROUTE
+        and isinstance(contract_id, str)
+        and secrets.compare_digest(contract_id, receipt_id)
+        and mtplx_exact_2111_runtime(value.get("runtimeVersion"))
+        and semantic_version_key(str(value.get("runtimeVersion") or ""))
+        == semantic_version_key(str(receipt["runtimeVersion"]))
+        and value.get("minimumContext") == MTPLX_LONG_CONTEXT_MINIMUM
+        and value.get("requiredProfile") == "turbo"
+        and value.get("requiredAcceleration") == "mtp"
+        and (
+            "environment" not in value
+            or value.get("environment") == MTPLX_LONG_CONTEXT_CANDIDATE_ENV
+        )
+        and (
+            "baselineEnvironment" not in value
+            or value.get("baselineEnvironment") == MTPLX_LONG_CONTEXT_BASELINE_ENV
+        )
+    )
 
 
 def lmstudio_model_load_key_index(
@@ -9559,6 +12299,68 @@ def _uzu_registry_entry() -> tuple[dict[str, Any] | None, str | None]:
     if observed != expected or total > UZU_MODEL_MANIFEST_MAX_BYTES:
         return None, "The installed Mirai manifest differs from the launcher's pinned Qwen3.6 file set."
     return copy.deepcopy(entry), None
+
+
+def _uzu_offline_catalog(cache: dict[str, Any]) -> dict[str, Any]:
+    """Adapt the verified legacy entry to Uzu 0.5.23's local-only v2 catalog.
+
+    Filesystem sources bypass the native downloader. The launcher still checks
+    every original receipt and pinned SHA-256 before permitting this path.
+    """
+    if cache.get("ready") is not True or not isinstance(cache.get("registryEntry"), dict):
+        raise ValueError("Verified Uzu model metadata is required for offline startup.")
+    model = copy.deepcopy(cache["registryEntry"])
+    model["accessibility"] = {
+        "type": "on_device",
+        "source": {"type": "filesystem", "path": str(Path(cache["path"]).resolve(strict=True))},
+    }
+    return {"version": 2, "models": [{"model": model, "files": None}]}
+
+
+def _validated_uzu_offline_catalog(cache: dict[str, Any]) -> str:
+    path = UZU_RESOLVED_MODELS_PATH.expanduser()
+    try:
+        details = path.lstat()
+        parent = path.parent.lstat()
+        if (
+            path.is_symlink() or not stat.S_ISREG(details.st_mode)
+            or details.st_uid != os.getuid() or details.st_mode & 0o022
+            or path.parent.is_symlink() or not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.getuid() or parent.st_mode & 0o022
+            or not 0 < details.st_size <= UZU_MODEL_REGISTRY_MAX_BYTES
+        ):
+            raise ValueError("unsafe catalog")
+        payload = path.read_bytes()
+        if json.loads(payload) != _uzu_offline_catalog(cache):
+            raise ValueError("different catalog")
+    except (OSError, ValueError, UnicodeError) as error:
+        raise ValueError(
+            "Uzu's offline catalog is missing or differs from the verified local model. "
+            "Existing catalog data has not been overwritten."
+        ) from error
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _ensure_uzu_offline_catalog(cache: dict[str, Any]) -> None:
+    """Create missing metadata during explicit launch only; never replace a catalog."""
+    payload = json.dumps(_uzu_offline_catalog(cache), sort_keys=True).encode("utf-8")
+    path = UZU_RESOLVED_MODELS_PATH.expanduser()
+    parent = path.parent.lstat()
+    if (
+        path.parent.is_symlink() or not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.getuid() or parent.st_mode & 0o022
+    ):
+        raise ValueError("Uzu's offline catalog directory is unsafe.")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        _validated_uzu_offline_catalog(cache)
+        return
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    _validated_uzu_offline_catalog(cache)
 
 
 def _uzu_model_cache_contract() -> dict[str, Any] | None:
@@ -9795,11 +12597,14 @@ def uzu_model_records(
     geometry, architecture_context = _uzu_model_geometry(config)
     generation = config.get("generation_config") if isinstance(config, dict) else None
     generation = generation if isinstance(generation, dict) else {}
-    default_sampling = {
-        key: generation[key]
-        for key in ("temperature", "top_p", "top_k", "presence_penalty", "frequency_penalty")
-        if isinstance(generation.get(key), (int, float)) and not isinstance(generation.get(key), bool)
-    }
+    default_sampling: dict[str, int | float] = {}
+    for key in SUPPORTED_SAMPLING_FIELDS:
+        if key not in generation:
+            continue
+        try:
+            default_sampling.update(canonicalize_sampling({key: generation[key]}))
+        except SamplingContractError:
+            continue
     listener_protected = uzu_listener_protection_ready(runtime)
     qualification_system_contract = {
         "osReserveBytes": max(
@@ -9808,6 +12613,11 @@ def uzu_model_records(
         ),
         "sandboxProfileSha256": UZU_SANDBOX_PROFILE_SHA256,
         "rawListenerProtected": listener_protected,
+        "nativeBoundaryContractId": runtime.get("nativeBoundaryContractId"),
+        "nativeBearerAuthentication": runtime.get("nativeBearerAuthentication") is True,
+        "oneUseApiKeyFile": runtime.get("oneUseApiKeyFile") is True,
+        "nativeContextLimit": runtime.get("nativeContextLimit") is True,
+        "nativeOutputLimit": runtime.get("nativeOutputLimit") is True,
     }
     fingerprint = str(cache.get("fingerprint") or "")
     runtime_version = command_version(BINARIES.get("mirai"))
@@ -9821,7 +12631,7 @@ def uzu_model_records(
         route_reason = str(runtime.get("reason") or "A verified memory-safe Uzu runtime is required.")
     elif not listener_protected:
         route_reason = (
-            "Direct access to Uzu's unauthenticated raw loopback listener is not isolated."
+            "The hardened Uzu raw-listener authentication boundary is unavailable."
         )
     elif geometry.get("ready") is not True:
         route_reason = "The Uzu config does not expose a complete bounded attention geometry."
@@ -9852,6 +12662,7 @@ def uzu_model_records(
         # Expose model defaults rather than pretending all visible controls
         # can be preserved end to end.
         "customSampling": False,
+        "implicitSamplingDefaultsVerified": True,
         "samplingReason": (
             "This Uzu server can preserve the packaged model defaults, but not "
             "the launcher's complete custom sampling contract."
@@ -9888,6 +12699,9 @@ def uzu_model_records(
         if benchmarks:
             uzu_capability["localBenchmark"] = benchmarks[-1]
             uzu_capability["preferredAccelerationSource"] = "local-benchmark"
+
+    uzu_capability["piTransportVersion"] = command_version(BINARIES.get("pi")) if runnable else None
+    uzu_capability["clientSupport"] = {"pi": resolved_client_support("uzu", "pi", uzu_capability)}
 
     unavailable: dict[str, dict[str, Any]] = {}
     for backend_id, descriptor in ENGINE_ADAPTERS.items():
@@ -9995,11 +12809,18 @@ def scan_models() -> list[dict[str, Any]]:
     omlx_version = command_version(BINARIES.get("omlx"))
     lmstudio_cli_version = command_version(BINARIES.get("lms"))
     lmstudio_packs = lmstudio_runtime_packs()
+    lmstudio_app = runtime_app_status("lms")
     lmstudio_app_version = plist_version(Path("/Applications/LM Studio.app/Contents/Info.plist"))
     lmstudio_version = lmstudio_runtime_identity(
         lmstudio_cli_version, lmstudio_app_version, lmstudio_packs,
     )
     lmstudio_mtp_runtime = lmstudio_mtp_load_supported(BINARIES.get("lms"))
+    lmstudio_assistant_runtime = lmstudio_assistant_drafter_runtime_contract(
+        BINARIES.get("lms"), lmstudio_cli_version, lmstudio_app,
+        lmstudio_packs, lmstudio_backend_preference(),
+    )
+    lmstudio_gguf_models = lmstudio_gguf_catalog()
+    lmstudio_draft_receipts = lmstudio_draft_compatibility_receipts()
     mtplx_version = command_version(BINARIES.get("mtplx"))
     swiftlm_version = command_version(BINARIES.get("swiftlm"))
     mference_version = command_version(BINARIES.get("mference"))
@@ -10209,9 +13030,10 @@ def scan_models() -> list[dict[str, Any]]:
         mtp_layers = deep_get(config, ("text_config", "mtp_num_hidden_layers"), ("mtp_num_hidden_layers",))
         mtp_declared = isinstance(mtp_layers, int) and mtp_layers > 0
         integrated_mtp = mtp_declared and checkpoint_has_mtp_weights(real, config)
-        sidecar_mtp = (real / "mtp.safetensors").is_file()
+        sidecar_path = mtplx_sidecar_path(real, config)
+        sidecar_mtp = sidecar_path.is_file()
         try:
-            mtp_sidecar_bytes = (real / "mtp.safetensors").stat().st_size if sidecar_mtp else 0
+            mtp_sidecar_bytes = sidecar_path.stat().st_size if sidecar_mtp else 0
         except OSError:
             mtp_sidecar_bytes = 0
         runtime = read_json(real / "mtplx_runtime.json")
@@ -10225,8 +13047,11 @@ def scan_models() -> list[dict[str, Any]]:
             default_sampling = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
         lm_reasoning_efforts = [level for level in reasoning_efforts if level in {"low", "medium", "high"}]
         mtplx_verified = verified_mtplx_runtime(real, runtime, config)
+        mtplx_native_ready = mtplx_verified or bool(
+            ready and fmt == "mlx" and runtime and native_mtplx_mtp_ready(real, config)
+        )
         mtp_depth = runtime.get("mtp_depth_default") if isinstance(runtime.get("mtp_depth_default"), int) else 3
-        mtp_depth_max = runtime.get("mtp_depth_max") if mtplx_verified else 1
+        mtp_depth_max = safe_int(runtime.get("mtp_depth_max"), 3, 1, 8) if mtplx_native_ready else 1
         # `lms load` resolves LM Studio's canonical/default identifier,
         # not necessarily the case-preserved catalog path. Recent MLX entries
         # may also use `model@6bit` aliases that a folder name cannot recreate.
@@ -10244,6 +13069,10 @@ def scan_models() -> list[dict[str, Any]]:
                 derived_lm_key = "/".join(lm_relative.parts[:2]) if len(lm_relative.parts) >= 2 else lm_relative.name
                 lm_key = derived_lm_key.lower()
                 lm_catalogued = True
+        lmstudio_assistant_drafter = lmstudio_assistant_drafter_readiness(
+            real, lmstudio_gguf_models, lmstudio_draft_receipts,
+            lmstudio_assistant_runtime,
+        )
         qwen4_architecture = is_qwen4_exp_config(config)
         omlx_artifact_ready = bool(
             ready and fmt == "mlx"
@@ -10386,6 +13215,7 @@ def scan_models() -> list[dict[str, Any]]:
                         if sidecar_mtp else "No MTP sidecar found."
                     ),
                     "mtpRuntimeVerified": lmstudio_mtp_runtime,
+                    "assistantDrafter": lmstudio_assistant_drafter,
                     "preferredAcceleration": "off",
                     "dflash": False,
                     "dflashVersion": None,
@@ -10411,10 +13241,10 @@ def scan_models() -> list[dict[str, Any]]:
                         if ready and fmt == "mlx" else
                         "MTPLX requires a complete compatible MLX artifact"
                     ),
-                    "mtp": mtplx_verified,
+                    "mtp": mtplx_native_ready,
                     "mtpReason": (
                         "Verified MTPLX runtime contract"
-                        if mtplx_verified else
+                        if mtplx_native_ready else
                         "No matching MTP weights have been verified by MTPLX."
                     ),
                     "dflash": False,
@@ -10509,7 +13339,10 @@ def scan_models() -> list[dict[str, Any]]:
                         "Whallm currently accepts only its pinned Qwen3.8 Flash-Next checkpoint."
                     ),
                     "mtp": False,
-                    "mtpReason": "Whallm's public Qwen route does not expose MTP.",
+                    "mtpReason": (
+                        "Whallm's optional Qwen MTP prototype is confined to its own pinned install "
+                        "and is not an acceleration mode for this scanned model folder."
+                    ),
                     "dflash": False,
                     "dflashVersion": None,
                     "dflashReason": "DFlash is not a Whallm serving mode.",
@@ -10688,10 +13521,41 @@ def scan_models() -> list[dict[str, Any]]:
             "whallm": whallm_version,
             "llamacpp": llamacpp_version,
         }
+        mtplx_scan_model = {
+            "name": real.name,
+            "path": str(real),
+            "format": fmt,
+            "architecture": architecture,
+            "modelType": model_type,
+            "rootModelType": root_model_type,
+            "textModelType": text_model_type,
+            "nativeContext": context,
+            "ready": ready,
+        }
+        mtplx_scan_capability = {
+            **backend["mtplx"],
+            "runtimeVersion": mtplx_version,
+            "benchmarkModelFingerprint": model_fingerprint,
+        }
+        mtplx_long_context_receipt = mtplx_long_context_2111_contract(
+            mtplx_scan_model, mtplx_scan_capability,
+            runtime_version=mtplx_version,
+        )
+        backend["mtplx"]["longContext2111"] = _mtplx_long_context_capability(
+            mtplx_long_context_receipt, mtplx_version,
+        )
         for backend_name, capability in backend.items():
             runtime_version = runtime_versions[backend_name]
             capability["runtimeVersion"] = runtime_version
             capability["benchmarkModelFingerprint"] = model_fingerprint
+            # These local routes consume the same verified model artifact from
+            # which ``defaultSampling`` was read. Model mode may therefore
+            # leave protocol-specific fields implicit when a client API cannot
+            # spell every artifact default. Custom mode never receives this
+            # exception.
+            capability["implicitSamplingDefaultsVerified"] = bool(
+                ready and capability.get("runnable") is True
+            )
             if backend_name in SSD_STREAMING_BACKENDS:
                 capability["artifactFingerprint"] = model_fingerprint
                 capability["comparisonIdentity"] = ssd_profile.get("comparisonIdentity")
@@ -10718,14 +13582,11 @@ def scan_models() -> list[dict[str, Any]]:
                 capability["dflashPreferred"] = True
             elif winner == "mtp" and capability.get("mtp"):
                 capability["preferredAcceleration"] = "mtp"
-                settings = benchmark.get("settings")
-                if mtp_benchmark_settings_verified(backend_name, capability, settings):
-                    capability["depth"] = settings["depth"]
-                    if backend_name == "lmstudio":
-                        capability["mtpMinTokens"] = settings["mtpMinTokens"]
-                        capability["mtpMinContinueProbability"] = settings[
-                            "mtpMinContinueProbability"
-                        ]
+                # A catalog scan knows only artifact/runtime/Mac identity. It
+                # must not copy request-specific tuning coordinates into the
+                # artifact capability before context, reasoning, sampling, KV,
+                # and engine controls have been verified. ``fastest_safe_options``
+                # applies those coordinates later from an exact matching record.
             elif winner == "ar":
                 capability["preferredAcceleration"] = "off"
 
@@ -10907,7 +13768,7 @@ def scan_models() -> list[dict[str, Any]]:
             "weightToMemoryRatio": round(WHALLM_MODEL_BYTES / installed_memory, 4) if installed_memory else None,
             "format": "whallm-mxfp4", "reason": (
                 "Whallm advertises its pinned full 512-expert Qwen3.8 Flash-Next model on loopback. "
-                "This 48 GB Mac is experimental because Whallm publishes a 64 GB support floor."
+                "This 48 GiB Mac is experimental because Whallm publishes a 64 GiB support floor."
             ),
             "sourceContract": {
                 "sourceModel": "qwen/qwen3.8-flash-next-fp8",
@@ -10930,10 +13791,14 @@ def scan_models() -> list[dict[str, Any]]:
                 remote_backends[engine_id] = {
                     "runnable": True,
                     "reason": (
-                        "Live Whallm 1.1.x loopback route · full 512 experts · experimental on 48 GB. "
+                        "Live Whallm 1.1.x loopback route · full 512 experts · experimental on 48 GiB. "
                         "Public M5 Pro measurements cover up to 16,384 input tokens."
                     ),
-                    "mtp": False, "mtpReason": "Whallm Qwen does not expose MTP.",
+                    "mtp": False, "mtpReason": (
+                        "Whallm 1.1.4 exposes an optional default-off MTP prototype, but its "
+                        "published formal total-time and tail-latency gates did not accept it. "
+                        "The launcher keeps it unavailable until an exact local route qualification exists."
+                    ),
                     "dflash": False, "dflashVersion": None,
                     "dflashReason": "DFlash is not a Whallm serving mode.",
                     "kv": False, "preferredAcceleration": "off", "fallbackAcceleration": "off",
@@ -10989,6 +13854,15 @@ def scan_models() -> list[dict[str, Any]]:
             "remoteModelId": WHALLM_MODEL_ID,
             "ssdStreaming": ssd_profile, "backends": remote_backends,
         }
+    if not whallm:
+        native_whallm = whallm_runtime.discover(BINARIES.get("whallm"))
+        if native_whallm:
+            native_record = whallm_runtime.model_record(
+                native_whallm,
+                [(engine_id, descriptor.label) for engine_id, descriptor in ENGINE_ADAPTERS.items()],
+                installed_memory,
+            )
+            records[native_record["id"]] = native_record
     for scanned_model in records.values():
         capabilities = scanned_model.get("backends")
         if not isinstance(capabilities, dict):
@@ -11434,6 +14308,21 @@ def fastest_safe_options(
     before = dict(options)
     rationale: list[str] = []
 
+    if dflash_quantized_fallback(backend, options):
+        # Switching this explicit route to AR/MTP would change the primary
+        # cache from full precision to the selected quantised fallback.
+        return {
+            "options": options, "changedKeys": [], "appliedKeys": [],
+            "preservedKeys": [
+                "model", "quantisation", "context", "output", "reasoning",
+                "sampling", "prompts", "tools", "kv", "fan",
+            ],
+            "evidenceTier": "manual-route",
+            "evidenceLabel": "Manual DFlash route preserved",
+            "rationale": [DFLASH_KV_COMPARISON_REASON],
+            "dflashStatus": DFLASH_KV_COMPARISON_REASON,
+        }
+
     if backend == "uzu":
         options.update({"acceleration": "off", "depth": 1, "kv": "off"})
         local_benchmark = verified_local_benchmark(capability, evidence)
@@ -11471,7 +14360,8 @@ def fastest_safe_options(
             preferred = capability.get("fallbackAcceleration")
     if preferred == "dflash":
         dflash_ready = (
-            capability.get("dflash") is True
+            str(options.get("kv") or "off") == "off"
+            and capability.get("dflash") is True
             and capability.get("dflashVersion") == "2"
             and capability.get("dflashPreferred") is True
             and capability.get("dflashBenchmarkVerified") is True
@@ -11575,6 +14465,7 @@ def fastest_safe_options(
                     "Keep LM Studio's conservative MTP minimum and probability defaults until this route is benchmarked."
                 )
     elif backend == "mtplx":
+        options["mtplxOperatorRoute"] = MTPLX_LONG_CONTEXT_DEFAULT_ROUTE
         options["profile"] = str(
             measured_engine_settings.get("profile")
             or capability.get("profile") or "sustained"
@@ -11596,6 +14487,25 @@ def fastest_safe_options(
                 int(capability.get("depth") or 1),
                 1, int(capability.get("depthMax") or 1),
             )
+            measured_operator_route = (
+                str(measured_settings.get("mtplxOperatorRoute") or "")
+                if isinstance(measured_settings, dict) else ""
+            )
+            operator_sweep = (
+                local_benchmark.get("mtplxOperatorSweep")
+                if isinstance(local_benchmark, dict) else None
+            )
+            if (
+                measured_operator_route == MTPLX_LONG_CONTEXT_2111_ROUTE
+                and isinstance(operator_sweep, dict)
+                and operator_sweep.get("candidateAccepted") is True
+                and operator_sweep.get("selectedRoute")
+                == MTPLX_LONG_CONTEXT_2111_ROUTE
+            ):
+                options["mtplxOperatorRoute"] = MTPLX_LONG_CONTEXT_2111_ROUTE
+                rationale.append(
+                    "Reuse the exact locally measured MTPLX 2.11.1 long-context operator route."
+                )
             if not local_verified:
                 evidence_tier = "artifact-benchmark"
                 evidence_label = "Artifact-backed speed preset"
@@ -11724,9 +14634,11 @@ def validated_limits(model: dict[str, Any], payload: dict[str, Any]) -> tuple[in
     context = exact_integer(payload.get("context"), min(DEFAULT_CONTEXT, native), "Context")
     if not 1_024 <= context <= context_maximum:
         raise ValueError(f"Context must be between 1,024 and {context_maximum:,} tokens for this model.")
-    output = exact_integer(payload.get("output"), min(DEFAULT_OUTPUT, context), "Max response")
+    output = exact_integer(payload.get("output"), min(int(model.get("defaultOutput") or DEFAULT_OUTPUT), context), "Max response")
     if not 256 <= output <= context:
         raise ValueError(f"Max response must be between 256 and {context:,} tokens.")
+    if model.get("outputMaximum") and output > model["outputMaximum"]:
+        raise ValueError(f"This model route supports at most {model['outputMaximum']:,} response tokens.")
     if output >= context:
         raise ValueError("Max response must be smaller than the context window so the prompt has room.")
     if context - output < 1_024:
@@ -11828,6 +14740,10 @@ def validated_chat_settings(
     settings["frequencyPenalty"] = finite_number(
         "frequencyPenalty", 0.0, -2.0, 2.0, "Frequency penalty",
     )
+    if raw.get("repetitionPenalty") is not None and raw.get("repetitionPenalty") != "":
+        settings["repetitionPenalty"] = finite_number(
+            "repetitionPenalty", 1.0, 0.0, 10.0, "Repetition penalty",
+        )
 
     def bounded_integer(key: str, default: int, high: int, label: str) -> int:
         value = raw.get(key, default)
@@ -11852,6 +14768,201 @@ def validated_chat_settings(
     else:
         settings["seed"] = None
     return settings
+
+
+GENERATION_SETTING_KEYS = frozenset({
+    "sampling", "temperature", "topP", "topK", "presencePenalty",
+    "frequencyPenalty", "repetitionPenalty", "seed",
+})
+
+
+def sampling_contract_from_settings(
+    model: dict[str, Any], settings: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the strict proxy/benchmark contract from validated UI settings."""
+    try:
+        if settings.get("sampling") == "model":
+            contract = build_sampling_contract(
+                "model", model_defaults=model.get("defaultSampling"),
+            )
+        elif settings.get("sampling") == "custom":
+            aliases = (
+                ("temperature", "temperature"),
+                ("topP", "top_p"),
+                ("topK", "top_k"),
+                ("presencePenalty", "presence_penalty"),
+                ("frequencyPenalty", "frequency_penalty"),
+                ("repetitionPenalty", "repetition_penalty"),
+                ("seed", "seed"),
+            )
+            custom = {
+                canonical: settings[visible]
+                for visible, canonical in aliases
+                if settings.get(visible) is not None
+            }
+            contract = build_sampling_contract("custom", custom=custom)
+        else:
+            raise ValueError("Choose model-default or custom sampling.")
+    except SamplingContractError as error:
+        raise ValueError(str(error)) from error
+    return contract.as_dict()
+
+
+def chat_settings_from_sampling_contract(
+    contract_document: dict[str, Any], *, system_prompt: str = "",
+) -> dict[str, Any]:
+    """Render one trusted contract through the existing Chat plan vocabulary."""
+    try:
+        contract = load_sampling_contract(contract_document)
+    except SamplingContractError as error:
+        raise ValueError(str(error)) from error
+    settings: dict[str, Any] = {
+        "systemPrompt": system_prompt,
+        "sampling": contract.mode,
+    }
+    if contract.mode == "custom":
+        aliases = {
+            "temperature": "temperature",
+            "top_p": "topP",
+            "top_k": "topK",
+            "presence_penalty": "presencePenalty",
+            "frequency_penalty": "frequencyPenalty",
+            "repetition_penalty": "repetitionPenalty",
+            "seed": "seed",
+        }
+        settings.update({aliases[key]: value for key, value in contract.values.items()})
+    return settings
+
+
+def generation_settings_from_sampling_contract(
+    contract_document: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the settings-only public vocabulary for every work surface."""
+    settings = chat_settings_from_sampling_contract(contract_document)
+    settings.pop("systemPrompt", None)
+    return settings
+
+
+def validated_sampling_contract(
+    model: dict[str, Any], payload: dict[str, Any], client: str,
+    chat: dict[str, Any] | None = None, *, require_controlled: bool = False,
+) -> dict[str, Any] | None:
+    """Resolve backward-compatible Chat or generic surface sampling controls.
+
+    The browser supplies visible values, never a claim that they were enforced.
+    The launcher creates the versioned ``controlled`` document only after
+    validation and later installs that same document in the live relay.
+    """
+    chat_contract = (
+        sampling_contract_from_settings(model, chat or {})
+        if client == "chat" else None
+    )
+    raw = payload.get("generation")
+    if raw is None:
+        if chat_contract is not None:
+            return chat_contract
+        # Older saved profiles and agent clients predate the generic
+        # ``generation`` object. Resolve their visible Model defaults choice
+        # into the same strict launcher-authored document instead of leaving
+        # measured or live traffic uncontrolled.
+        return build_sampling_contract(
+            "model", model_defaults=model.get("defaultSampling"),
+        ).as_dict()
+    if not isinstance(raw, dict):
+        raise ValueError("Generation controls must be a JSON object.")
+    unknown = set(raw) - GENERATION_SETTING_KEYS
+    if unknown:
+        raise ValueError(
+            "Unsupported generation controls: "
+            + ", ".join(sorted(str(item) for item in unknown))
+            + "."
+        )
+    if raw.get("sampling") not in {"model", "custom"}:
+        raise ValueError("Generation sampling must explicitly use model defaults or custom values.")
+    generic = validated_chat_settings(
+        model, {"chat": {"systemPrompt": "", **raw}}, "chat",
+    )
+    generation_contract = sampling_contract_from_settings(model, generic)
+    explicit_chat_sampling = bool(
+        client == "chat"
+        and isinstance(payload.get("chat"), dict)
+        and payload["chat"].get("sampling") in {"model", "custom"}
+    )
+    if explicit_chat_sampling and chat_contract is not None and generation_contract != chat_contract:
+        raise ValueError(
+            "Chat and generation controls describe different sampling contracts. "
+            "Refresh the page and choose one set of values."
+        )
+    return generation_contract
+
+
+def validate_sampling_capability(
+    capability: dict[str, Any], contract_document: dict[str, Any] | None,
+) -> None:
+    if not isinstance(contract_document, dict):
+        return
+    try:
+        contract = load_sampling_contract(contract_document)
+    except SamplingContractError as error:
+        raise ValueError(str(error)) from error
+    if contract.mode == "custom" and capability.get("customSampling") is False:
+        raise ValueError(str(
+            capability.get("samplingReason")
+            or "This model/runtime route does not support custom sampling."
+        ))
+
+
+RESPONSES_SAMPLING_FIELDS: dict[str, frozenset[str]] = {
+    # The MTPLX bridge translates exactly these three fields. Adding another
+    # field here before responses_bridge implements it would silently change a
+    # calibrated Codex request.
+    "mtplx": frozenset({"temperature", "top_p", "seed"}),
+    # Direct Responses implementations share these standard request fields.
+    # Runtime-specific extensions remain unavailable until proven end to end.
+    "omlx": frozenset({"temperature", "top_p"}),
+    "lmstudio": frozenset({"temperature", "top_p"}),
+    "freetoken": frozenset({"temperature", "top_p"}),
+    "whallm": frozenset({"temperature", "top_p"}),
+}
+
+
+def sampling_route_enforcement(
+    backend: str, client: str, capability: dict[str, Any],
+    contract_document: dict[str, Any] | None, *, protocol: str | None = None,
+) -> dict[str, Any] | None:
+    """Validate and describe the exact live protocol representation."""
+    if contract_document is None:
+        return None
+    try:
+        contract = load_sampling_contract(contract_document)
+        selected_protocol = protocol or CLIENT_ADAPTERS[client].protocol
+        implicit_defaults = bool(
+            contract.mode == "model"
+            and capability.get("implicitSamplingDefaultsVerified") is True
+        )
+        fields = (
+            RESPONSES_SAMPLING_FIELDS.get(backend, frozenset())
+            if selected_protocol == "responses" else
+            frozenset()
+            if capability.get("customSampling") is False else
+            frozenset(SUPPORTED_SAMPLING_FIELDS)
+        )
+        rewrite = (
+            rewrite_responses_request
+            if selected_protocol == "responses" else rewrite_chat_completions_request
+        )
+        rewrite(
+            {}, contract,
+            representable_fields=fields,
+            implicit_model_defaults=implicit_defaults,
+        )
+    except (KeyError, SamplingContractError) as error:
+        raise ValueError(str(error)) from error
+    return {
+        "protocol": selected_protocol,
+        "representableFields": sorted(fields),
+        "implicitModelDefaults": implicit_defaults,
+    }
 
 
 def validate_chat_capability(
@@ -12672,20 +15783,29 @@ def delete_chat_history(payload: dict[str, Any]) -> dict[str, Any]:
 def optimizer_evidence(
     model: dict[str, Any], context: int, output: int, client: str, reasoning: str, kv: str,
     chat: dict[str, Any] | None = None,
+    sampling_contract_document: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    sampling: dict[str, Any]
-    if client == "chat" and chat and chat.get("sampling") == "custom":
-        sampling = {
-            "temperature": chat.get("temperature"),
-            "top_p": chat.get("topP"),
-            "top_k": chat.get("topK"),
-            "presence_penalty": chat.get("presencePenalty"),
-            "frequency_penalty": chat.get("frequencyPenalty"),
-            "seed": chat.get("seed"),
-        }
-    else:
-        sampling = model.get("defaultSampling") if isinstance(model.get("defaultSampling"), dict) else {}
-    sampling_fingerprint = hashlib.sha256(json.dumps(
+    if sampling_contract_document is None and client == "chat":
+        if chat and chat.get("sampling") in {"model", "custom"}:
+            sampling_contract_document = sampling_contract_from_settings(model, chat)
+        else:
+            sampling_contract_document = build_sampling_contract(
+                "model", model_defaults=model.get("defaultSampling"),
+            ).as_dict()
+    contract = None
+    if sampling_contract_document is not None:
+        try:
+            contract = load_sampling_contract(sampling_contract_document)
+        except SamplingContractError as error:
+            raise ValueError(str(error)) from error
+    sampling = (
+        contract.values if contract is not None else
+        canonicalize_sampling(
+            model.get("defaultSampling")
+            if isinstance(model.get("defaultSampling"), dict) else {}
+        )
+    )
+    compatibility_fingerprint = hashlib.sha256(json.dumps(
         sampling,
         sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
@@ -12695,7 +15815,16 @@ def optimizer_evidence(
         "client": client or "any",
         "reasoning": reasoning or "auto",
         "kv": kv or "off",
-        "samplingFingerprint": sampling_fingerprint,
+        "samplingFingerprint": compatibility_fingerprint,
+        "samplingEvidenceVersion": SAMPLING_EVIDENCE_SCHEMA_VERSION,
+        "samplingControlled": contract is not None,
+        "samplingContractVersion": (
+            SAMPLING_CONTRACT_SCHEMA_VERSION if contract is not None else None
+        ),
+        "samplingContract": contract.as_dict() if contract is not None else None,
+        "samplingContractFingerprint": (
+            sampling_fingerprint(contract) if contract is not None else None
+        ),
     }
 
 
@@ -12784,6 +15913,100 @@ def validated_optimizer_evidence_binding(payload: dict[str, Any]) -> dict[str, A
     return result
 
 
+def optimizer_bound_engine_settings(
+    model: dict[str, Any], eligible_backends: list[str], binding: dict[str, Any],
+    raw_options: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve engine-owned controls from one exact bound shootout.
+
+    Engine settings are deliberately outside the shared comparison contract. A
+    completed tuner may therefore have measured a different valid engine profile
+    from the one still visible in the UI (for example MTPLX Turbo after starting
+    Calibration from Sustained).  The immutable record IDs are the authority for
+    those engine-owned controls; model, context, reasoning, sampling, limits and
+    KV precision continue to come from the current request and are verified later.
+    """
+    if binding.get("scope") != "engine":
+        raise ValueError("A route result cannot supply cross-engine settings.")
+    record_ids = binding.get("recordIds")
+    if (
+        not isinstance(record_ids, dict)
+        or set(record_ids) != set(eligible_backends)
+        or len(set(record_ids.values())) != len(record_ids)
+    ):
+        raise ValueError(
+            "That saved engine comparison no longer names every compatible engine. "
+            "Refresh performance evidence before applying it."
+        )
+    shootout_id = str(binding.get("shootoutId") or "")
+    suite = str(binding.get("suite") or "")
+    resolved: dict[str, dict[str, Any]] = {}
+    for backend in eligible_backends:
+        capability = model.get("backends", {}).get(backend)
+        if not isinstance(capability, dict):
+            raise ValueError(
+                "That saved engine comparison references a route that is no longer available."
+            )
+        records = capability.get("localBenchmarks")
+        candidates = [
+            item for item in records if isinstance(item, dict)
+        ] if isinstance(records, list) else []
+        latest = capability.get("localBenchmark")
+        if isinstance(latest, dict) and latest not in candidates:
+            candidates.append(latest)
+        matches = [
+            record for record in candidates
+            if str(record.get("id") or "") == str(record_ids[backend])
+            and str(record.get("backend") or "") == backend
+            and str(record.get("shootoutId") or "") == shootout_id
+            and str(record.get("suite") or "") == suite
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "That saved engine comparison is stale or incomplete. "
+                "Refresh performance evidence before applying it."
+            )
+        stored = matches[0].get("engineSettings")
+        if not isinstance(stored, dict):
+            raise ValueError(
+                "That saved engine comparison has no validated engine controls. "
+                "Refresh performance evidence before applying it."
+            )
+        visible_options = validated_cross_engine_profile_options(
+            backend, model, capability, raw_options,
+        )
+        visible_settings = benchmark_engine_settings(backend, visible_options)
+        if (
+            backend == "mtplx"
+            and stored.get("fan") != visible_settings.get("fan")
+        ):
+            raise ValueError(
+                "That saved engine comparison used a different cooling setting. "
+                "Restore its measured cooling choice or rerun Calibration."
+            )
+        if backend == "omlx" and any(
+            stored.get(key) != visible_settings.get(key)
+            for key in ("anePrefill", "memoryGuard")
+        ):
+            raise ValueError(
+                "That saved engine comparison used different fixed oMLX settings "
+                "(ANE prefill or memory guard). Restore those settings or rerun Calibration."
+            )
+        option_source = copy.deepcopy(raw_options or {})
+        option_source.update(copy.deepcopy(stored))
+        canonical = validated_cross_engine_profile_options(
+            backend, model, capability, option_source,
+        )
+        expected = benchmark_engine_settings(backend, canonical)
+        if stored != expected:
+            raise ValueError(
+                "That saved engine comparison contains invalid engine controls. "
+                "Refresh performance evidence before applying it."
+            )
+        resolved[backend] = copy.deepcopy(expected)
+    return resolved
+
+
 def route_qualification_record_is_fresh(
     record: dict[str, Any], now: datetime | None = None,
 ) -> bool:
@@ -12858,12 +16081,26 @@ def optimal_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> di
         raise ValueError(str(client_support["reason"]))
     if not capability.get("runnable"):
         raise ValueError(str(capability.get("reason") or "This model cannot run in the selected runtime."))
-    options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    options = copy.deepcopy(
+        payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    )
     context, output = validated_limits(model, payload)
     validate_runtime_context(backend, context)
     chat = validated_chat_settings(model, payload, client)
     validate_chat_capability(capability, chat, client)
+    sampling_contract = validated_sampling_contract(
+        model, payload, client, chat,
+    )
+    assert sampling_contract is not None
+    if client == "chat":
+        chat = chat_settings_from_sampling_contract(
+            sampling_contract,
+            system_prompt=str(chat.get("systemPrompt") or ""),
+        )
+    validate_sampling_capability(capability, sampling_contract)
     reasoning = str(payload.get("reasoning", "auto"))
+    if model.get("nativeWhallm") and reasoning == "auto":
+        reasoning = "medium"
     if reasoning not in {"off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"}:
         raise ValueError("Unknown reasoning level.")
     reasoning_key = "codexReasoning" if client == "codex" else "agentReasoning"
@@ -12873,6 +16110,7 @@ def optimal_request(payload: dict[str, Any], models: list[dict[str, Any]]) -> di
         raise ValueError(f"This model/runtime route can enforce only these reasoning choices: {choices}.")
     evidence = optimizer_evidence(
         model, context, output, client, reasoning, str(options.get("kv") or "off"), chat,
+        sampling_contract,
     )
     add_benchmark_engine_evidence(evidence, model, options, [backend])
     optimizer_capability = copy.deepcopy(capability)
@@ -12967,6 +16205,8 @@ def benchmark_backend_eligibility(
     chat: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """Check the common benchmark route without describing model-default reasoning as absent."""
+    if backend == "uzu" and client == "pi":
+        return False, UZU_PI_BENCHMARK_LIMITATION
     allowed, reason = optimizer_backend_eligibility(
         model, backend, client, reasoning, kv, chat,
     )
@@ -13143,10 +16383,7 @@ def route_qualification_spec(
             if isinstance(context, int) and not isinstance(context, bool)
             else UZU_SAFE_CONTEXT_WINDOWS[0]
         )
-        suites = {
-            16_384: ROUTE_QUALIFICATION_UZU_16K_SUITE,
-            32_768: ROUTE_QUALIFICATION_UZU_32K_SUITE,
-        }
+        suites = ROUTE_QUALIFICATION_UZU_SUITES_BY_CONTEXT
         if (
             capability.get("runnable") is True
             and capability.get("runtimeManagedAcceleration") == "DFlash + Weaver"
@@ -13154,8 +16391,8 @@ def route_qualification_spec(
         ):
             context_k = exact_context // 1024
             return {
-                "id": f"qwen36-uzu-dflash-weaver-{context_k}k-v1",
-                "version": 1, "scope": "route",
+                "id": f"qwen36-uzu-dflash-weaver-{context_k}k-v5",
+                "version": UZU_QUALIFICATION_CONTRACT_VERSION, "scope": "route",
                 "clientAgnostic": False, "client": "chat",
                 "backend": "uzu", "mode": "ar",
                 "modeLabel": "Fixed DFlash + Weaver",
@@ -13257,28 +16494,128 @@ def qwen_ple_route_qualification_reasoning_contract(
     }
 
 
-def apply_route_qualification_budget(job: dict[str, Any]) -> None:
-    """Reserve visible-answer space inside each bounded reasoning sample.
+def route_qualification_sample_tokens(backend: str, configured_output: int | None = None) -> int:
+    if backend == "uzu":
+        return min(UZU_QUALIFICATION_SAMPLE_MAX_TOKENS, configured_output) if configured_output is not None else UZU_QUALIFICATION_SAMPLE_MAX_TOKENS
+    return ROUTE_QUALIFICATION_MAX_TOKENS
 
-    The saved launch contract keeps its original response ceiling.  These
-    fields apply only to the temporary qualification server and its 512-token
-    samples, preventing a reasoning-capable model from spending the complete
-    sample allowance before it can emit the final answer being qualified.
+
+def uzu_qualification_output_policy(configured_output: int) -> dict[str, Any]:
+    return {
+        "id": UZU_QUALIFICATION_OUTPUT_POLICY_ID,
+        "maximumTokens": route_qualification_sample_tokens("uzu", configured_output),
+        "minimumTokens": UZU_QUALIFICATION_SAMPLE_MIN_TOKENS,
+        "promptReserveTokens": UZU_QUALIFICATION_PROMPT_RESERVE_TOKENS,
+        "followupReserveTokens": UZU_QUALIFICATION_SAMPLE_MIN_TOKENS + 128,
+    }
+
+
+def uzu_qualification_request_tokens(scenario: str, target: int, context: int, ceiling: int) -> int:
+    remaining = context - target - UZU_QUALIFICATION_PROMPT_RESERVE_TOKENS
+    if scenario == "toolIngest":
+        remaining -= UZU_QUALIFICATION_SAMPLE_MIN_TOKENS + 128
+    return min(ceiling, remaining)
+
+
+def apply_route_qualification_budget(job: dict[str, Any]) -> None:
+    """Keep bounded test output separate from the user's saved response ceiling.
+
+    llama.cpp uses its explicit 384+128 reasoning/answer split. Uzu retains
+    model-default reasoning with an adaptive allowance and no forced split.
     """
-    if int(job["output"]) < ROUTE_QUALIFICATION_MAX_TOKENS:
+    backend = str(job.get("backend") or "")
+    sample_tokens = route_qualification_sample_tokens(backend, int(job["output"]))
+    minimum = UZU_QUALIFICATION_SAMPLE_MIN_TOKENS if backend == "uzu" else sample_tokens
+    if int(job["output"]) < minimum:
         raise ValueError(
-            "Route qualification requires at least 512 visible response tokens for its exact "
-            "384 reasoning + 128 final-answer contract."
+            f"Route qualification requires at least {minimum:,} visible response tokens."
         )
-    sample_tokens = ROUTE_QUALIFICATION_MAX_TOKENS
     answer_reserve = ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS
     job["suite"]["maxTokens"] = sample_tokens
-    job["qualificationThinkingBudgetTokens"] = max(1, sample_tokens - answer_reserve)
+    # This legacy marker also identifies qualification streams. Only llama.cpp
+    # turns it into a reasoning-boundary request; Uzu never receives a split.
+    job["qualificationThinkingBudgetTokens"] = ROUTE_QUALIFICATION_THINKING_TOKENS
     job["qualificationAnswerReserveTokens"] = answer_reserve
 
 
-# Compatibility name for older callers and tests while both route specs share the budget.
+# Compatibility name for older llama.cpp callers.
 apply_qwen_ple_route_qualification_budget = apply_route_qualification_budget
+
+
+def uzu_qualification_prompt_exercise_policy(exact_context: int) -> dict[str, Any]:
+    """Bind long-context receipts to authoritative near-tier prompt exercise."""
+    return {
+        "id": UZU_QUALIFICATION_NEAR_TIER_POLICY_ID,
+        "appliesAtOrAboveContextTokens": UZU_QUALIFICATION_NEAR_TIER_MINIMUM_CONTEXT,
+        "requiredScenarios": list(UZU_QUALIFICATION_NEAR_TIER_SCENARIOS),
+        "authoritativeUsageRequired": True,
+        "minimumContextFraction": UZU_QUALIFICATION_NEAR_TIER_FRACTION,
+        "minimumPromptTokens": math.ceil(
+            exact_context * UZU_QUALIFICATION_NEAR_TIER_FRACTION
+        ),
+        "targetPromptTokensRequired": True,
+        "targetToleranceFraction": UZU_QUALIFICATION_PROMPT_TOLERANCE_FRACTION,
+        "targetToleranceMinimumTokens": UZU_QUALIFICATION_PROMPT_TOLERANCE_MIN_TOKENS,
+    }
+
+
+def validate_uzu_qualification_sample(
+    sample: dict[str, Any], case: dict[str, Any], max_tokens: int,
+) -> None:
+    """Stop an unusable qualification before spending time on later turns."""
+    if (
+        sample.get("terminalComplete") is not True
+        or sample.get("responseLimitReached") is True
+        or sample.get("reasoningObserved") is not True
+        or sample.get("answerObserved") is not True
+    ):
+        channels = (
+            "Reasoning and answer output were both observed"
+            if sample.get("reasoningObserved") and sample.get("answerObserved") else
+            "Only reasoning output was observed"
+            if sample.get("reasoningObserved") else
+            "Only answer output was observed"
+            if sample.get("answerObserved") else
+            "No reasoning or answer output was observed"
+        )
+        # Only fixed labels and numeric metadata enter the persisted job error.
+        # Do not include generated reasoning, answers, or arbitrary finish strings.
+        counts = []
+        for key, label in (
+            ("completionTokens", "output tokens"),
+            ("reasoningCharacters", "reasoning characters"),
+            ("answerCharacters", "answer characters"),
+        ):
+            value = sample.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                counts.append(f"{value:,} {label}")
+        end = (
+            "the runtime reported a length limit"
+            if sample.get("responseLimitReached") is True else
+            "the runtime reported completion"
+            if sample.get("terminalComplete") is True else
+            "completion was not confirmed"
+        )
+        diagnostics = f" {channels}; {end}."
+        if counts:
+            diagnostics += f" Observed: {', '.join(counts)}."
+        repetition = sample.get("reasoningRepeatedPhraseFraction")
+        if isinstance(repetition, (int, float)) and not isinstance(repetition, bool) and 0.25 <= repetition <= 1:
+            diagnostics += f" In the reasoning tail, {repetition:.0%} of 16-word windows were repeats."
+        raise RuntimeError(
+            f"Uzu's {case['label']} did not pass the complete reasoning-and-answer check "
+            f"with a {max_tokens:,}-token test budget.{diagnostics} "
+            "Qualification stopped; later turns cannot repair this result."
+        )
+    tolerance = max(
+        UZU_QUALIFICATION_PROMPT_TOLERANCE_MIN_TOKENS,
+        round(int(case["targetPromptTokens"]) * UZU_QUALIFICATION_PROMPT_TOLERANCE_FRACTION),
+    )
+    if abs(int(sample["promptTokens"]) - int(case["targetPromptTokens"])) > tolerance:
+        raise RuntimeError(
+            f"Uzu's {case['label']} tokenised outside its intended prompt size. "
+            "Qualification stopped before another model request."
+        )
 
 
 def build_route_qualification_contract(
@@ -13290,7 +16627,7 @@ def build_route_qualification_contract(
         "id": spec["id"], "version": spec["version"], "backend": backend,
         "exactContext": int(request["context"]),
         "scenarioContract": list(ROUTE_QUALIFICATION_SCENARIOS),
-        "sampleMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+        "sampleMaxTokens": route_qualification_sample_tokens(backend, int(request["output"])),
         "answerReserveTokens": ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS,
         "minimumDecodeTokensPerSecond": (
             LLAMACPP_PLE_MINIMUM_DECODE_TPS if backend == "llamacpp" else
@@ -13325,19 +16662,39 @@ def build_route_qualification_contract(
             if isinstance(runtime_identity, dict) else None
         )
         runtime_sha = binary.get("sha256") if isinstance(binary, dict) else None
+        runtime_size = binary.get("size") if isinstance(binary, dict) else None
         model_fingerprint = capability.get("benchmarkModelFingerprint")
+        system_contract = capability.get("qualificationSystemContract")
         if (
             not isinstance(runtime_sha, str)
             or re.fullmatch(r"[0-9a-f]{64}", runtime_sha) is None
+            or not isinstance(runtime_size, int)
+            or isinstance(runtime_size, bool)
+            or runtime_size != UZU_RUNTIME_RELEASE_BINARY_SIZE
+            or not secrets.compare_digest(runtime_sha, UZU_RUNTIME_RELEASE_BINARY_SHA256)
             or not isinstance(model_fingerprint, str)
             or re.fullmatch(r"[0-9a-f]{64}", model_fingerprint) is None
             or capability.get("modelRegistryId") != UZU_MODEL_REGISTRY_ID
             or capability.get("modelCommit") != UZU_MODEL_COMMIT
             or capability.get("modelToolchainVersion") != UZU_MODEL_TOOLCHAIN_VERSION
             or not uzu_listener_protection_ready(runtime_identity)
-            or capability.get("qualificationSystemContract", {}).get(
-                "rawListenerProtected"
-            ) is not True
+            or runtime_identity.get("binaryIdentityPinned") is not True
+            or runtime_identity.get("networkSandbox") is not True
+            or runtime_identity.get("memorySafetyBlocked") is not False
+            or runtime_identity.get("upstreamCommit") != UZU_RUNTIME_UPSTREAM_COMMIT
+            or runtime_identity.get("sourcePatchSha256") != UZU_RUNTIME_SOURCE_PATCH_SHA256
+            or runtime_identity.get("nativeBoundaryContractId") != UZU_NATIVE_BOUNDARY_CONTRACT_ID
+            or runtime_identity.get("nativeBearerAuthentication") is not True
+            or runtime_identity.get("oneUseApiKeyFile") is not True
+            or runtime_identity.get("nativeContextLimit") is not True
+            or runtime_identity.get("nativeOutputLimit") is not True
+            or not isinstance(system_contract, dict)
+            or system_contract.get("rawListenerProtected") is not True
+            or system_contract.get("nativeBoundaryContractId") != UZU_NATIVE_BOUNDARY_CONTRACT_ID
+            or system_contract.get("nativeBearerAuthentication") is not True
+            or system_contract.get("oneUseApiKeyFile") is not True
+            or system_contract.get("nativeContextLimit") is not True
+            or system_contract.get("nativeOutputLimit") is not True
         ):
             raise ValueError(
                 "The Uzu route no longer has a complete runtime and model receipt. Refresh models."
@@ -13346,17 +16703,29 @@ def build_route_qualification_contract(
             "scope": "route", "clientAgnostic": False, "client": "chat",
             "minimumCompletionTokens": ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS,
             "configuredOutputLimit": int(request["output"]),
-            "measuredRequestMaxTokens": ROUTE_QUALIFICATION_MAX_TOKENS,
+            "measuredRequestMaxTokens": route_qualification_sample_tokens("uzu", int(request["output"])),
+            "outputBudgetPolicy": uzu_qualification_output_policy(int(request["output"])),
             "modelFingerprint": model_fingerprint,
             "modelRegistryId": UZU_MODEL_REGISTRY_ID,
             "modelCommit": UZU_MODEL_COMMIT,
             "modelToolchainVersion": UZU_MODEL_TOOLCHAIN_VERSION,
             "runtimeBinarySha256": runtime_sha,
+            "runtimeBinarySize": runtime_size,
+            "runtimeUpstreamCommit": UZU_RUNTIME_UPSTREAM_COMMIT,
+            "runtimeSourcePatchSha256": UZU_RUNTIME_SOURCE_PATCH_SHA256,
             "sandboxProfileSha256": UZU_SANDBOX_PROFILE_SHA256,
             "rawListenerProtected": True,
+            "nativeBoundaryContractId": UZU_NATIVE_BOUNDARY_CONTRACT_ID,
+            "nativeBearerAuthentication": True,
+            "oneUseApiKeyFile": True,
+            "nativeContextLimitTokens": int(request["context"]),
+            "nativeMaxOutputTokens": int(request["output"]),
             "fixedAcceleration": "DFlash + Weaver",
             "kvStateDataType": "BF16",
             "prefixCache": True,
+            "promptExercisePolicy": uzu_qualification_prompt_exercise_policy(
+                int(request["context"])
+            ),
             "osReservePolicy": "max-4gib-or-10-percent-total-v1",
             "osReserveMinimumBytes": SESSION_OS_RESERVE_MIN_BYTES,
             "osReserveBytes": max(
@@ -13627,8 +16996,34 @@ def cross_engine_workload_compatibility(
     }
 
 
+def benchmark_record_matches_selection_preference(
+    record: dict[str, Any], preference: str,
+) -> bool:
+    """Do not reuse a newly measured route for a goal it did not optimise.
+
+    Records created before the selection contract was stored remain readable;
+    new records are bound to the Calibration goal that chose their internal
+    acceleration route and engine-owned settings.
+    """
+    measured = record.get("selectionPreference")
+    # Early v5 standalone operator runs dropped enginePreference when building
+    # the job, despite the fixed operator contract ranking generation TPS.
+    # Interpret that known label error without rewriting saved measurements.
+    # This is only a goal match; callers still require the full record verifier.
+    if (measured == "fastest" and record.get("scope") == "local"
+            and record.get("backend") == "mtplx" and not record.get("shootoutId")
+            and record.get("kind") == "mtplx-long-context-operator-tuning"
+            and record.get("suite") == MTPLX_LONG_CONTEXT_64K_SUITE
+            and record.get("selectionMetric") == "generation-tokens-per-second"
+            and isinstance(record.get("mtplxOperatorSweep"), dict)
+            and record["mtplxOperatorSweep"].get("version") == 5):
+        measured = "throughput"
+    return measured is None or measured == preference
+
+
 def verified_cross_engine_entries(
     model: dict[str, Any], eligible_backends: list[str], evidence: dict[str, Any],
+    preference: str | None = None,
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for backend in eligible_backends:
@@ -13639,7 +17034,16 @@ def verified_cross_engine_entries(
         if isinstance(latest, dict) and latest not in candidates:
             candidates.append(latest)
         for record in candidates:
-            if not _local_benchmark_record_verified(capability, record, evidence):
+            if (
+                not route_qualification_record_is_fresh(record)
+                or not _local_benchmark_record_verified(capability, record, evidence)
+                or (
+                    preference is not None
+                    and not benchmark_record_matches_selection_preference(
+                        record, preference,
+                    )
+                )
+            ):
                 continue
             measurement = cross_engine_benchmark_measurement(record)
             if not measurement:
@@ -13657,7 +17061,10 @@ def _cross_engine_group_rank(
     workload = str(record.get("workloadKind") or "throughput")
     agent_client = client in {"pi", "opencode", "codex"}
     workload_match = int((workload == "agentic") == agent_client)
-    strength = {"quick": 1, "standard": 2, "thorough": 3, "agentic": 4}.get(
+    strength = {
+        "quick": 1, "standard": 2, "thorough": 3, "agentic": 4,
+        MTPLX_LONG_CONTEXT_64K_SUITE: 5,
+    }.get(
         str(record.get("suite") or ""), 0,
     )
     oldest_latest = min(str(item["record"].get("createdAt") or "") for item in group)
@@ -13964,6 +17371,21 @@ def _optimizer_with_forced_record(
 ) -> dict[str, Any]:
     target_payload = copy.deepcopy(payload)
     target_payload["backend"] = backend
+    source_backend = str(payload.get("backend") or "")
+    source_options = copy.deepcopy(
+        target_payload.get("options")
+        if isinstance(target_payload.get("options"), dict) else {}
+    )
+    # Acceleration is owned by the target engine. A cross-engine decision can
+    # start from an explicit route such as oMLX DFlash or MTPLX MTP, neither of
+    # which is a valid input for every peer. Validate the target from its
+    # neutral route, then let the verified record choose its measured route.
+    target_options = copy.deepcopy(source_options)
+    if source_backend != backend:
+        target_options["acceleration"] = (
+            "auto" if backend in {"omlx", "lmstudio", "mtplx"} else "off"
+        )
+    target_payload["options"] = target_options
     # The caller has already resolved and validated the exact record. Avoid
     # recursively treating an engine-shootout binding as a current-route receipt.
     target_payload.pop("evidenceBinding", None)
@@ -13983,7 +17405,11 @@ def _optimizer_with_forced_record(
         capability["dflashPreferred"] = True
         capability["dflashBenchmarkVerified"] = True
         capability["dflashBenchmark"] = copy.deepcopy(record)
-    options = target_payload.get("options") if isinstance(target_payload.get("options"), dict) else {}
+    # On a same-engine reuse, compare the measured result with the real visible
+    # controls so an already-applied route remains a no-op. On an engine switch,
+    # compare with the neutral target route because the source engine's route
+    # vocabulary is not meaningful in the destination engine.
+    options = source_options if source_backend == backend else target_options
     result = fastest_safe_options(backend, capability, options, evidence)
     result.update({
         "backend": backend, "modelId": validated["modelId"],
@@ -14003,7 +17429,7 @@ def engine_selection_next_action(
     labels = {
         "apply": f"Apply {BACKEND_LABELS[backend]}",
         "keep-current": f"Keep {BACKEND_LABELS[backend]}",
-        "calibrate": "Test engines",
+        "calibrate": "Test engines + settings",
     }
     return {
         "id": action,
@@ -14046,6 +17472,7 @@ def route_qualification_engine_reason(backend: str) -> str:
 
 def benchmark_mode_summary(
     model: dict[str, Any], backend: str, modes: list[Any] | tuple[Any, ...],
+    engine_settings: dict[str, Any] | None = None, *, kv: str = "off",
 ) -> str:
     """Explain which verified routes an exact model artifact can actually compare."""
     capability = model.get("backends", {}).get(backend, {})
@@ -14065,11 +17492,22 @@ def benchmark_mode_summary(
     accelerators = labels[1:] if tested[:1] == ["ar"] else [
         label for mode, label in zip(tested, labels) if mode != "ar"
     ]
+    dflash_exclusion = ""
+    if backend == "omlx" and capability.get("dflash") is True and "dflash2" not in tested:
+        if kv != "off":
+            dflash_exclusion = f"DFlash affine KV and ordinary oMLX TurboQuant are not an equivalent {kv.upper()} comparison."
+        elif isinstance(engine_settings, dict) and engine_settings.get("anePrefill") == "tuned":
+            dflash_exclusion = OMLX_DFLASH_TUNED_ANE_EXCLUSION_DETAIL
     if accelerators:
-        return (
+        detail = (
             f"Tests {' + '.join(labels)} for this selected model artifact; "
-            "the fastest correctness-verified route wins."
+            + (
+                "the fastest correctness-verified tested route wins."
+                if dflash_exclusion else
+                "the fastest correctness-verified route wins."
+            )
         )
+        return f"{detail} {dflash_exclusion}".strip()
     reason = str(capability.get("mtpReason") or "No verified matching acceleration weights were found.")
     if backend == "omlx" and capability.get("dflash") is not True:
         dflash_reason = str(capability.get("dflashReason") or "")
@@ -14077,11 +17515,12 @@ def benchmark_mode_summary(
             reason = f"{reason} {dflash_reason}"
     if reason and reason[-1] not in ".!?":
         reason += "."
-    return f"AR only for this selected model artifact. {reason}"
+    return f"AR only for this selected model artifact. {reason} {dflash_exclusion}".strip()
 
 
 def benchmark_acceleration_reason(
     model: dict[str, Any], backend: str, modes: list[Any] | tuple[Any, ...],
+    *, kv: str = "off",
 ) -> str:
     """Return a compact, truthful reason when an engine can measure only AR."""
     tested = {str(mode) for mode in modes}
@@ -14096,6 +17535,8 @@ def benchmark_acceleration_reason(
     if backend == "mtplx" and "mtp" in mtp_reason.lower():
         return "This model has no verified MTPLX MTP weights"
     if backend == "omlx":
+        if capability.get("dflash") is True and kv != "off":
+            return f"DFlash excluded to preserve {kv.upper()} KV"
         return "This model has no verified oMLX accelerator"
     if backend in SSD_STREAMING_BACKENDS:
         return "Exact SSD streaming uses native expert routing; speculative decoding is excluded"
@@ -14155,6 +17596,11 @@ def benchmark_route_settings_label(
     if route == "mtp":
         depth = values.get("depth")
         if isinstance(depth, int) and not isinstance(depth, bool):
+            operator_route = values.get("mtplxOperatorRoute")
+            if backend == "mtplx" and operator_route == MTPLX_LONG_CONTEXT_2111_ROUTE:
+                return f"MTP D{depth} · 2.11 long-context"
+            if backend == "mtplx" and operator_route == MTPLX_LONG_CONTEXT_DEFAULT_ROUTE:
+                return f"MTP D{depth} · 2.11 default"
             if backend == "lmstudio":
                 minimum = values.get("mtpMinTokens")
                 cutoff = values.get("mtpMinContinueProbability")
@@ -14370,7 +17816,14 @@ def qwen_flash_next_model_alternatives(
 
         exact_evidence = optimizer_evidence(
             candidate, int(candidate_request["context"]), int(candidate_request["output"]),
-            client, reasoning, kv, chat,
+            client, reasoning, kv,
+            candidate_request.get("chat")
+            if isinstance(candidate_request.get("chat"), dict) else None,
+            validated_sampling_contract(
+                candidate, candidate_request, client,
+                candidate_request.get("chat")
+                if isinstance(candidate_request.get("chat"), dict) else None,
+            ),
         )
         add_benchmark_engine_evidence(
             exact_evidence, candidate, candidate_request["options"], ["omlx"],
@@ -14703,14 +18156,37 @@ def route_qualification_metrics(
         unload = record.get("unloadEvidence")
         correctness = record.get("correctnessContract")
         exact_context = contract.get("exactContext") if isinstance(contract, dict) else None
-        suites = {
-            16_384: ROUTE_QUALIFICATION_UZU_16K_SUITE,
-            32_768: ROUTE_QUALIFICATION_UZU_32K_SUITE,
-        }
+        suites = ROUTE_QUALIFICATION_UZU_SUITES_BY_CONTEXT
+        if isinstance(exact_context, bool) or not isinstance(exact_context, int) or exact_context not in suites:
+            return None
+        suite = BENCHMARK_SUITES.get(suites.get(exact_context, ""), {})
+        prefix_tokens = int(suite.get("prefixTokens") or 0)
+        tool_tokens = int(suite.get("toolTokens") or 0)
+        expected_prompt_targets = [
+            uzu_conversation_target(
+                scenario, prefix_tokens if index < 2 else prefix_tokens + tool_tokens,
+                samples[index - 1] if index else None, int(exact_context or 0),
+                UZU_QUALIFICATION_SAMPLE_MAX_TOKENS,
+            )
+            for index, scenario in enumerate(ROUTE_QUALIFICATION_SCENARIOS)
+        ]
+        configured_output = contract.get("configuredOutputLimit")
+        if isinstance(configured_output, bool) or not isinstance(configured_output, int):
+            return None
+        output_ceiling = route_qualification_sample_tokens("uzu", configured_output)
+        expected_output_limits = [
+            uzu_qualification_request_tokens(scenario, target, exact_context, output_ceiling)
+            for scenario, target in zip(ROUTE_QUALIFICATION_SCENARIOS, expected_prompt_targets)
+        ]
         expected_id = (
-            f"qwen36-uzu-dflash-weaver-{int(exact_context) // 1024}k-v1"
+            f"qwen36-uzu-dflash-weaver-{int(exact_context) // 1024}k-v5"
             if isinstance(exact_context, int) and not isinstance(exact_context, bool)
             and exact_context in suites else ""
+        )
+        expected_prompt_policy = (
+            uzu_qualification_prompt_exercise_policy(int(exact_context))
+            if isinstance(exact_context, int) and not isinstance(exact_context, bool)
+            and exact_context in suites else None
         )
         expected_correctness_hash = hashlib.sha256(
             UZU_QUALIFICATION_CORRECTNESS_EXPECTED.encode("utf-8")
@@ -14755,7 +18231,7 @@ def route_qualification_metrics(
             not isinstance(contract, dict)
             or not expected_id
             or contract.get("id") != expected_id
-            or contract.get("version") != 1
+            or contract.get("version") != UZU_QUALIFICATION_CONTRACT_VERSION
             or contract.get("scope") != "route"
             or contract.get("clientAgnostic") is not False
             or contract.get("client") != "chat"
@@ -14769,14 +18245,15 @@ def route_qualification_metrics(
             or record.get("scenarioContract") != ROUTE_QUALIFICATION_SCENARIOS
             or isinstance(contract.get("configuredOutputLimit"), bool)
             or not isinstance(contract.get("configuredOutputLimit"), int)
-            or contract.get("configuredOutputLimit") < ROUTE_QUALIFICATION_MAX_TOKENS
+            or configured_output < UZU_QUALIFICATION_SAMPLE_MIN_TOKENS
             or record.get("configuredOutputLimit") != contract.get("configuredOutputLimit")
-            or record.get("measuredRequestMaxTokens") != ROUTE_QUALIFICATION_MAX_TOKENS
-            or record.get("outputMin") != ROUTE_QUALIFICATION_MAX_TOKENS
-            or record.get("outputMax") != ROUTE_QUALIFICATION_MAX_TOKENS
-            or contract.get("measuredRequestMaxTokens") != ROUTE_QUALIFICATION_MAX_TOKENS
+            or record.get("measuredRequestMaxTokens") != max(expected_output_limits)
+            or record.get("outputMin") != min(expected_output_limits)
+            or record.get("outputMax") != max(expected_output_limits)
+            or contract.get("measuredRequestMaxTokens") != output_ceiling
+            or contract.get("outputBudgetPolicy") != uzu_qualification_output_policy(configured_output)
             or contract.get("scenarioContract") != ROUTE_QUALIFICATION_SCENARIOS
-            or contract.get("sampleMaxTokens") != ROUTE_QUALIFICATION_MAX_TOKENS
+            or contract.get("sampleMaxTokens") != output_ceiling
             or contract.get("answerReserveTokens") != ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS
             or contract.get("minimumCompletionTokens")
             != ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS
@@ -14786,7 +18263,7 @@ def route_qualification_metrics(
             or contract.get("reasoningPolicy") != "runtime-default-on"
             or contract.get("toolProbeRequired") is not False
             or contract.get("memoryProofRequired") is not True
-            or contract.get("memoryCeilingBytes") != UZU_PROCESS_MEMORY_CEILING_BYTES
+            or not uzu_qualification_memory_ceiling_supported(contract.get("memoryCeilingBytes"))
             or contract.get("osReservePolicy") != "max-4gib-or-10-percent-total-v1"
             or contract.get("osReserveMinimumBytes") != SESSION_OS_RESERVE_MIN_BYTES
             or required_reserve is None
@@ -14800,11 +18277,24 @@ def route_qualification_metrics(
             or contract.get("modelToolchainVersion") != UZU_MODEL_TOOLCHAIN_VERSION
             or not isinstance(runtime_sha, str)
             or re.fullmatch(r"[0-9a-f]{64}", runtime_sha) is None
+            or not secrets.compare_digest(runtime_sha, UZU_RUNTIME_RELEASE_BINARY_SHA256)
+            or not isinstance(contract.get("runtimeBinarySize"), int)
+            or isinstance(contract.get("runtimeBinarySize"), bool)
+            or contract.get("runtimeBinarySize") != UZU_RUNTIME_RELEASE_BINARY_SIZE
+            or contract.get("runtimeUpstreamCommit") != UZU_RUNTIME_UPSTREAM_COMMIT
+            or contract.get("runtimeSourcePatchSha256") != UZU_RUNTIME_SOURCE_PATCH_SHA256
             or contract.get("sandboxProfileSha256") != UZU_SANDBOX_PROFILE_SHA256
             or contract.get("rawListenerProtected") is not True
+            or contract.get("nativeBoundaryContractId") != UZU_NATIVE_BOUNDARY_CONTRACT_ID
+            or contract.get("nativeBearerAuthentication") is not True
+            or contract.get("oneUseApiKeyFile") is not True
+            or contract.get("nativeContextLimitTokens") != exact_context
+            or contract.get("nativeMaxOutputTokens") != contract.get("configuredOutputLimit")
             or contract.get("fixedAcceleration") != "DFlash + Weaver"
             or contract.get("kvStateDataType") != "BF16"
             or contract.get("prefixCache") is not True
+            or expected_prompt_policy is None
+            or contract.get("promptExercisePolicy") != expected_prompt_policy
             or not isinstance(contract.get("runtimeVersion"), str)
             or not contract["runtimeVersion"].strip()
             or contract.get("runtimeVersion") != record.get("runtimeVersion")
@@ -14839,17 +18329,41 @@ def route_qualification_metrics(
             or telemetry.get("processGroupMemberCountMaximum")
             < telemetry.get("processGroupMemberCountMinimum")
             or not isinstance(group_peak, int) or isinstance(group_peak, bool)
-            or not 0 < group_peak < UZU_PROCESS_MEMORY_CEILING_BYTES
+            or not 0 < group_peak < contract["memoryCeilingBytes"]
             or reasoning_turns != len(ROUTE_QUALIFICATION_SCENARIOS)
             or answer_turns != len(ROUTE_QUALIFICATION_SCENARIOS)
+            or [sample.get("targetPromptTokens") for sample in samples]
+            != expected_prompt_targets
+            or any(
+                abs(int(sample["promptTokens"]) - expected_prompt_targets[index])
+                > max(
+                    UZU_QUALIFICATION_PROMPT_TOLERANCE_MIN_TOKENS,
+                    round(
+                        expected_prompt_targets[index]
+                        * UZU_QUALIFICATION_PROMPT_TOLERANCE_FRACTION
+                    ),
+                )
+                for index, sample in enumerate(samples)
+            )
+            or (
+                int(exact_context) >= UZU_QUALIFICATION_NEAR_TIER_MINIMUM_CONTEXT
+                and any(
+                    sample.get("authoritativeUsage") is not True
+                    or int(sample["promptTokens"])
+                    < int(expected_prompt_policy["minimumPromptTokens"])
+                    for sample in samples
+                    if sample.get("scenario") in UZU_QUALIFICATION_NEAR_TIER_SCENARIOS
+                )
+            )
             or any(speed < UZU_QUALIFICATION_MINIMUM_DECODE_TPS for speed in decode)
             or any(
-                sample.get("requestedMaxTokens") != ROUTE_QUALIFICATION_MAX_TOKENS
+                sample.get("requestedMaxTokens") != expected_output_limits[index]
+                or expected_output_limits[index] < UZU_QUALIFICATION_SAMPLE_MIN_TOKENS
                 or int(sample["completionTokens"]) < ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS
-                or int(sample["completionTokens"]) > ROUTE_QUALIFICATION_MAX_TOKENS
-                or int(sample["promptTokens"]) + ROUTE_QUALIFICATION_MAX_TOKENS
+                or int(sample["completionTokens"]) > expected_output_limits[index]
+                or int(sample["promptTokens"]) + expected_output_limits[index]
                 > int(exact_context)
-                for sample in samples
+                for index, sample in enumerate(samples)
             )
             or not isinstance(correctness, dict)
             or correctness.get("id") != UZU_QUALIFICATION_CORRECTNESS_ID
@@ -15020,6 +18534,21 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             "That saved engine result used a different decision goal. Refresh it before applying."
         )
     current_backend = str(current["backend"])
+    if dflash_quantized_fallback(current_backend, base_payload.get("options") or {}):
+        if binding is not None:
+            raise ValueError(DFLASH_KV_COMPARISON_REASON)
+        current.update({
+            "engineChanged": False, "engineEvidenceTier": "manual-route",
+            "engineEvidenceLabel": "Manual DFlash route preserved",
+            "comparedEngines": [], "qualifiedRoutes": [], "missingEngines": [],
+            "engineRationale": [DFLASH_KV_COMPARISON_REASON],
+            "enginePreference": preference,
+            "engineNextAction": engine_selection_next_action(
+                "keep-current", preference, current_backend,
+                str(payload.get("client") or ""), DFLASH_KV_COMPARISON_REASON,
+            ),
+        })
+        return current
     model_id = str(current["modelId"])
     model = next(item for item in models if item.get("id") == model_id)
     client = str(payload.get("client") or "")
@@ -15028,7 +18557,34 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
     kv = str(options.get("kv") or "off")
     context, output = validated_limits(model, payload)
     chat = validated_chat_settings(model, payload, client)
-    evidence = optimizer_evidence(model, context, output, client, reasoning, kv, chat)
+    sampling_contract = validated_sampling_contract(model, payload, client, chat)
+    assert sampling_contract is not None
+    evidence = optimizer_evidence(
+        model, context, output, client, reasoning, kv, chat, sampling_contract,
+    )
+
+    if current_backend == "uzu" and client == "pi" and binding is None:
+        capacity = _uzu_qualified_session_record({
+            **payload, "context": context, "output": output, "reasoning": reasoning,
+            "options": options, "chat": chat,
+        }, model)
+        if capacity is not None:
+            detail = (
+                "Keep the fixed Uzu DFlash + Weaver route. Its exact context capacity is qualified "
+                "and the pinned Pi transport is verified; no Pi speed ranking is claimed."
+            )
+            current.update({
+                "engineChanged": False, "engineEvidenceTier": "local-capacity-only",
+                "engineEvidenceLabel": "Pi ready · model capacity qualified",
+                "comparedEngines": [], "qualifiedRoutes": [], "missingEngines": [],
+                "engineRationale": [detail], "enginePreference": preference,
+                "engineNextAction": engine_selection_next_action(
+                    "keep-current", preference, current_backend, client, detail,
+                ),
+                "evidenceTier": "local-capacity-only",
+                "evidenceLabel": "Pi ready · model capacity qualified",
+            })
+            return current
 
     eligible: list[str] = []
     excluded: list[dict[str, str]] = []
@@ -15049,7 +18605,19 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             excluded.append({"backend": backend, "label": BACKEND_LABELS[backend], "reason": reason})
 
     add_benchmark_engine_evidence(evidence, model, options, eligible)
-    entries = verified_cross_engine_entries(model, eligible, evidence)
+    if binding is not None:
+        # A bound Apply action names the exact completed records. Let those
+        # records supply only their engine-owned controls before the normal
+        # verifier checks the complete shared request contract. This prevents a
+        # tuned Turbo result being discarded merely because the pre-calibration
+        # UI still shows Sustained, without allowing the binding to alter model,
+        # reasoning, sampling, context, output, or KV precision.
+        evidence["engineSettingsByBackend"] = optimizer_bound_engine_settings(
+            model, eligible, binding, options,
+        )
+    entries = verified_cross_engine_entries(
+        model, eligible, evidence, preference=preference,
+    )
     if binding is not None:
         bound_suite = str(binding["suite"])
         bound_shootout = str(binding.get("shootoutId") or "")
@@ -15321,9 +18889,12 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             "testedModes": copy.deepcopy(item["record"].get("comparedModes") or ["ar"]),
             "modeDetail": benchmark_mode_summary(
                 model, item["backend"], item["record"].get("comparedModes") or ["ar"],
+                item["record"].get("engineSettings"),
+                kv=str(item["record"].get("targetKV") or "off"),
             ),
             "accelerationReason": benchmark_acceleration_reason(
                 model, item["backend"], item["record"].get("comparedModes") or ["ar"],
+                kv=str(item["record"].get("targetKV") or "off"),
             ),
             "settingsLabel": benchmark_engine_settings_label(
                 item["backend"], item["record"].get("engineSettings"),
@@ -15331,6 +18902,9 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             "routeSettingsLabel": benchmark_route_settings_label(
                 item["backend"], item["record"].get("winner"),
                 item["record"].get("settings"),
+            ),
+            "settingsSearch": public_benchmark_settings_search_result(
+                item["record"],
             ),
             "score": round(float(item["score"]), 4),
             "metric": item["metric"], "display": item["display"],
@@ -15431,6 +19005,10 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
             "engineNextAction": engine_selection_next_action(
                 "keep-current", preference, current_backend, client, tie_reason,
             ),
+            "settingsEvidenceTier": current.get("evidenceTier"),
+            "settingsEvidenceLabel": current.get("evidenceLabel"),
+            "evidenceTier": "cross-engine-noise-floor",
+            "evidenceLabel": f"{ENGINE_PREFERENCE_LABELS[preference]} tied · current kept",
         })
         current["rationale"] = current["engineRationale"] + list(current.get("rationale") or [])
         return current
@@ -15494,6 +19072,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
 
 PROFILE_OPTION_KEYS = {
     "acceleration", "depth", "profile", "kv", "fan", "burst",
+    "mtplxOperatorRoute",
     "dflashVerify", "dflashDraftQuant", "anePrefill", "memoryGuard", "gpu", "parallel",
     "mtpMinTokens", "mtpMinContinueProbability",
     "maxBatchSize", "expertCacheSize", "prefixCacheEntries",
@@ -15501,7 +19080,7 @@ PROFILE_OPTION_KEYS = {
 }
 PROFILE_CHAT_KEYS = {
     "systemPrompt", "sampling", "temperature", "topP", "topK",
-    "presencePenalty", "frequencyPenalty", "seed",
+    "presencePenalty", "frequencyPenalty", "repetitionPenalty", "seed",
 }
 
 
@@ -15527,6 +19106,12 @@ def _profile_request_whitelist(value: Any) -> dict[str, Any]:
         request["options"] = {
             key: copy.deepcopy(raw_options[key])
             for key in PROFILE_OPTION_KEYS if key in raw_options
+        }
+    raw_generation = value.get("generation")
+    if isinstance(raw_generation, dict):
+        request["generation"] = {
+            key: copy.deepcopy(raw_generation[key])
+            for key in GENERATION_SETTING_KEYS if key in raw_generation
         }
     raw_chat = value.get("chat")
     if value.get("client") == "chat" and isinstance(raw_chat, dict):
@@ -15574,8 +19159,20 @@ def _load_launch_profiles_unlocked() -> list[dict[str, Any]]:
             or not isinstance(raw.get("request"), dict)
         ):
             continue
+        binding: dict[str, Any] | None = None
+        # Preserve a fail-closed tombstone across unrelated profile writes. A
+        # malformed on-disk binding must never be silently laundered into an
+        # unbound measured profile on the next load.
+        binding_invalid = raw.get("_evidenceBindingInvalid") is True
+        if raw.get("evidenceBinding") is not None:
+            try:
+                binding = validated_optimizer_evidence_binding({
+                    "evidenceBinding": raw.get("evidenceBinding"),
+                })
+            except ValueError:
+                binding_invalid = True
         seen.add(profile_id)
-        profiles.append({
+        profile = {
             "id": profile_id,
             "name": name,
             "createdAt": _profile_text(raw.get("createdAt"), 40),
@@ -15584,7 +19181,12 @@ def _load_launch_profiles_unlocked() -> list[dict[str, Any]]:
             "enginePreference": preference,
             "modelName": _profile_text(raw.get("modelName"), 240),
             "request": _profile_request_whitelist(raw.get("request")),
-        })
+        }
+        if binding is not None:
+            profile["evidenceBinding"] = binding
+        if binding_invalid:
+            profile["_evidenceBindingInvalid"] = True
+        profiles.append(profile)
         if len(profiles) >= LAUNCH_PROFILE_MAX:
             break
     return profiles
@@ -15773,6 +19375,11 @@ def validated_profile_options(
         return {
             "acceleration": acceleration, "depth": depth, "kv": kv,
             "profile": _profile_choice(raw, "profile", str(capability.get("profile") or "sustained"), {"stable", "performance-cold", "sustained", "turbo", "exact"}, "MTPLX runtime profile"),
+            "mtplxOperatorRoute": _profile_choice(
+                raw, "mtplxOperatorRoute", MTPLX_LONG_CONTEXT_DEFAULT_ROUTE,
+                {MTPLX_LONG_CONTEXT_DEFAULT_ROUTE, MTPLX_LONG_CONTEXT_2111_ROUTE},
+                "MTPLX operator route",
+            ),
             "fan": _profile_choice(raw, "fan", "smart", {"default", "smart", "max"}, "MTPLX cooling mode"),
         }
     if backend == "uzu":
@@ -15878,6 +19485,8 @@ def validated_cross_engine_profile_options(
 
 def validated_launch_profile_request(
     value: Any, models: list[dict[str, Any]],
+    *, preserve_comparison_controls: bool = False,
+    allow_unmeasured_mtplx_operator: bool = False,
 ) -> dict[str, Any]:
     """Return a settings-only canonical request suitable for private local persistence."""
     if not isinstance(value, dict):
@@ -15892,8 +19501,35 @@ def validated_launch_profile_request(
     model = next(item for item in models if item.get("id") == model_id)
     capability = model.get("backends", {}).get(backend, {})
     options = validated_profile_options(backend, model, capability, request.get("options"))
+    raw_profile_options = (
+        request.get("options") if isinstance(request.get("options"), dict) else {}
+    )
+    # Cooling is a visible comparison constraint shared by an engine matrix.
+    # Preserve it even when the saved winner is not MTPLX, otherwise replaying
+    # an exact binding would silently fall back to Smart and reject a matrix
+    # measured with System controlled or Maximum cooling.
+    if backend in {"omlx", "lmstudio"} and "fan" in raw_profile_options:
+        options["fan"] = _profile_choice(
+            raw_profile_options, "fan", "smart",
+            {"default", "smart", "max"}, "calibration cooling mode",
+        )
+    # These remain fixed across a comparison even when another engine wins.
+    # Dropping them would either invalidate a saved measured profile on reload
+    # or allow its evidence binding to restore settings the user switched off.
+    if preserve_comparison_controls and backend != "omlx":
+        for key, default, choices, label in (
+            ("anePrefill", "off", {"off", "tuned"}, "ANE prefill"),
+            ("memoryGuard", "balanced", {"balanced", "high"}, "oMLX memory mode"),
+        ):
+            if key in raw_profile_options:
+                # Inactive-engine metadata must not block a fixed route when
+                # that other runtime changes. Full capability checks still run
+                # if oMLX participates in a measured comparison or is launched.
+                options[key] = _profile_choice(raw_profile_options, key, default, choices, label)
     context, output = validated_limits(model, request)
     reasoning = str(request.get("reasoning") or "auto")
+    if model.get("nativeWhallm") and reasoning == "auto":
+        reasoning = "medium"
     if client == "chat":
         agent_host = "launcher"
     else:
@@ -15921,21 +19557,48 @@ def validated_launch_profile_request(
         "mode": "custom",
         "options": options,
     }
+    chat = validated_chat_settings(model, request, client)
+    sampling_contract = validated_sampling_contract(model, request, client, chat)
+    assert sampling_contract is not None
+    validate_sampling_capability(capability, sampling_contract)
+    sampling_route_enforcement(
+        backend, client, capability, sampling_contract,
+    )
+    canonical["generation"] = generation_settings_from_sampling_contract(
+        sampling_contract,
+    )
     if client == "chat":
-        chat = validated_chat_settings(model, request, client)
-        canonical_chat = {
-            "systemPrompt": chat["systemPrompt"],
-            "sampling": chat["sampling"],
-        }
-        if chat["sampling"] == "custom":
-            canonical_chat.update({
-                "temperature": chat["temperature"], "topP": chat["topP"],
-                "topK": chat["topK"],
-                "presencePenalty": chat["presencePenalty"],
-                "frequencyPenalty": chat["frequencyPenalty"],
-                "seed": chat["seed"],
-            })
-        canonical["chat"] = canonical_chat
+        canonical["chat"] = chat_settings_from_sampling_contract(
+            sampling_contract,
+            system_prompt=str(chat.get("systemPrompt") or ""),
+        )
+    if (
+        backend == "mtplx"
+        and options.get("mtplxOperatorRoute")
+        == MTPLX_LONG_CONTEXT_2111_ROUTE
+        and not allow_unmeasured_mtplx_operator
+        and verified_mtplx_operator_candidate_record(
+            model, capability, options, context, output, client, reasoning,
+            chat, sampling_contract,
+        ) is None
+    ):
+        raise ValueError(
+            "This saved MTPLX long-context route needs a matching completed Calibration result."
+        )
+    if (
+        allow_unmeasured_mtplx_operator and backend == "mtplx"
+        and options.get("mtplxOperatorRoute") == MTPLX_LONG_CONTEXT_2111_ROUTE
+    ):
+        # Only a trusted benchmark caller may measure an unproven candidate.
+        # Keep the actual candidate in the capacity estimate, and revalidate
+        # its static runtime/model contract instead of demanding its result.
+        if (
+            context < MTPLX_LONG_CONTEXT_MINIMUM
+            or options.get("profile") != "turbo"
+            or options.get("acceleration") != "mtp"
+        ):
+            raise ValueError("MTPLX operator measurement requires Turbo, MTP, and at least 64K context.")
+        _bind_mtplx_operator_route(model, capability, options, context, "benchmark")
     # A final canonical pass ensures normalization never broadened the route.
     optimal_request(canonical, models)
     return canonical
@@ -15949,12 +19612,32 @@ def launch_profile_inventory(models: list[dict[str, Any]]) -> dict[str, Any]:
             for key in ("id", "name", "createdAt", "updatedAt", "enginePolicy", "enginePreference", "modelName")
         }
         try:
-            request = validated_launch_profile_request(stored["request"], models)
+            if stored.get("_evidenceBindingInvalid") is True:
+                raise ValueError(
+                    "This saved measurement reference is invalid. Save the profile again from a completed result."
+                )
+            request = validated_launch_profile_request(
+                stored["request"], models,
+                preserve_comparison_controls=stored["enginePolicy"] == "measured",
+            )
             item["request"] = request
+            profile_ready = True
+            profile_reason = "Ready to apply."
             if stored["enginePolicy"] == "measured":
                 measured_request = copy.deepcopy(request)
                 measured_request["enginePreference"] = stored["enginePreference"]
-                result = best_engine_request(measured_request, models)
+                stored_binding = stored.get("evidenceBinding")
+                if not isinstance(stored_binding, dict):
+                    raise ValueError(
+                        "Run Calibration once to attach the exact winning engine and settings "
+                        "to this measured profile."
+                    )
+                measured_request["evidenceBinding"] = copy.deepcopy(stored_binding)
+                result = (
+                    optimal_request(measured_request, models)
+                    if stored_binding.get("scope") == "route"
+                    else best_engine_request(measured_request, models)
+                )
                 resolved_backend = str(result["backend"])
                 tier = str(result.get("engineEvidenceTier") or result.get("evidenceTier") or "")
                 evidence_label = str(result.get("engineEvidenceLabel") or result.get("evidenceLabel") or "Measured engine")
@@ -15968,6 +19651,45 @@ def launch_profile_inventory(models: list[dict[str, Any]]) -> dict[str, Any]:
                     "trustedWinner": tier == "cross-engine-local-benchmark",
                     "detail": str(rationale[0]) if rationale else evidence_label,
                 }
+                next_action = result.get("engineNextAction")
+                needs_calibration = bool(
+                    isinstance(next_action, dict)
+                    and (
+                        next_action.get("requiresCalibration") is True
+                        or next_action.get("id") == "calibrate"
+                    )
+                )
+                if needs_calibration:
+                    profile_ready = False
+                    profile_reason = str(
+                        next_action.get("reason")
+                        or "Run Calibration before applying this measured profile."
+                    )
+                result_binding = (
+                    stored_binding
+                    if isinstance(stored_binding, dict) else None
+                )
+                validated_binding = (
+                    validated_optimizer_evidence_binding({
+                        "evidenceBinding": result_binding,
+                    })
+                    if isinstance(result_binding, dict) else None
+                )
+                if validated_binding is None and not needs_calibration:
+                    profile_ready = False
+                    profile_reason = (
+                        "Run Calibration once to attach the exact winning engine and settings "
+                        "to this measured profile."
+                    )
+                elif validated_binding is not None and not needs_calibration:
+                    if validated_binding["preference"] != stored["enginePreference"]:
+                        profile_ready = False
+                        profile_reason = (
+                            "This profile's saved measurement used a different decision goal. "
+                            "Run Calibration again."
+                        )
+                    else:
+                        item["evidenceBinding"] = copy.deepcopy(validated_binding)
             else:
                 backend = str(request["backend"])
                 item["resolution"] = {
@@ -15976,8 +19698,8 @@ def launch_profile_inventory(models: list[dict[str, Any]]) -> dict[str, Any]:
                     "evidenceLabel": "Fixed engine", "trustedWinner": False,
                     "detail": "Uses the saved engine and exact visible runtime controls.",
                 }
-            item["ready"] = True
-            item["reason"] = "Ready to apply."
+            item["ready"] = profile_ready
+            item["reason"] = profile_reason
         except (ValueError, KeyError, StopIteration) as error:
             item["request"] = _profile_request_whitelist(stored.get("request"))
             item["resolution"] = None
@@ -16008,8 +19730,68 @@ def save_launch_profile(payload: dict[str, Any], models: list[dict[str, Any]]) -
     preference = str(payload.get("enginePreference") or "throughput")
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported measured engine goal.")
-    request = validated_launch_profile_request(payload.get("request"), models)
+    request = validated_launch_profile_request(
+        payload.get("request"), models, preserve_comparison_controls=policy == "measured",
+    )
     model = next(item for item in models if item.get("id") == request["modelId"])
+    binding = validated_optimizer_evidence_binding(payload)
+    if binding is not None and policy != "measured":
+        raise ValueError(
+            "Only an auto-measured profile can save a completed performance result."
+        )
+    if policy == "measured":
+        if binding is None:
+            discovery_request = copy.deepcopy(request)
+            discovery_request["enginePreference"] = preference
+            discovery = best_engine_request(discovery_request, models)
+            next_action = discovery.get("engineNextAction")
+            if isinstance(next_action, dict) and (
+                next_action.get("requiresCalibration") is True
+                or next_action.get("id") == "calibrate"
+            ):
+                raise ValueError(str(
+                    next_action.get("reason")
+                    or "Run Calibration before saving an auto-measured profile."
+                ))
+            discovered_binding = (
+                discovery.get("engineEvidenceBinding")
+                or discovery.get("evidenceBinding")
+            )
+            binding = (
+                validated_optimizer_evidence_binding({
+                    "evidenceBinding": discovered_binding,
+                })
+                if isinstance(discovered_binding, dict) else None
+            )
+            if binding is None:
+                raise ValueError(
+                    "Run Calibration once before saving an auto-measured profile; "
+                    "the exact winning engine and settings need a reusable result."
+                )
+        if binding.get("preference") != preference:
+            raise ValueError(
+                "The completed result used a different goal. Apply it again before saving this profile."
+            )
+        bound_request = copy.deepcopy(request)
+        bound_request.update({
+            "enginePreference": preference,
+            "evidenceBinding": copy.deepcopy(binding),
+        })
+        bound_result = (
+            optimal_request(bound_request, models)
+            if binding["scope"] == "route"
+            else best_engine_request(bound_request, models)
+        )
+        if binding["scope"] == "engine":
+            next_action = bound_result.get("engineNextAction")
+            if isinstance(next_action, dict) and (
+                next_action.get("requiresCalibration") is True
+                or next_action.get("id") == "calibrate"
+            ):
+                raise ValueError(
+                    "That measured result no longer matches this profile. "
+                    "Run Calibration again before saving it."
+                )
     requested_id = payload.get("id")
     profile_id = _profile_identifier(requested_id) if requested_id not in (None, "") else None
     if requested_id not in (None, "") and not profile_id:
@@ -16038,6 +19820,8 @@ def save_launch_profile(payload: dict[str, Any], models: list[dict[str, Any]]) -
             "modelName": str(model.get("name") or request["modelId"]),
             "request": request,
         }
+        if binding is not None:
+            record["evidenceBinding"] = copy.deepcopy(binding)
         if index is None:
             profiles.insert(0, record)
         else:
@@ -16082,6 +19866,11 @@ def _session_set_surface_whitelist(value: Any) -> dict[str, Any]:
         surface["project"] = value["project"]
     if isinstance(value.get("agentHost"), str):
         surface["agentHost"] = value["agentHost"]
+    if isinstance(value.get("generation"), dict):
+        surface["generation"] = {
+            key: copy.deepcopy(value["generation"][key])
+            for key in GENERATION_SETTING_KEYS if key in value["generation"]
+        }
     if client == "chat" and isinstance(value.get("chat"), dict):
         surface["chat"] = {
             key: copy.deepcopy(value["chat"][key])
@@ -16168,6 +19957,7 @@ def _session_set_surface_from_request(request: dict[str, Any]) -> dict[str, Any]
         "client": request["client"],
         "project": request["project"],
         "agentHost": request["agentHost"],
+        "generation": copy.deepcopy(request["generation"]),
     }
     if request["client"] == "chat":
         surface["chat"] = copy.deepcopy(request.get("chat") or {
@@ -16193,6 +19983,18 @@ def _session_set_plan_payload(plan: LaunchPlan) -> dict[str, Any]:
             for key, value in plan.options.items() if not key.startswith("_")
         },
     }
+    sampling_contract = (
+        plan.sampling_contract
+        if isinstance(plan.sampling_contract, dict) else
+        sampling_contract_from_settings(plan.model, plan.chat)
+        if plan.client == "chat" and plan.chat.get("sampling") in {"model", "custom"} else
+        build_sampling_contract(
+            "model", model_defaults=plan.model.get("defaultSampling"),
+        ).as_dict()
+    )
+    request["generation"] = generation_settings_from_sampling_contract(
+        sampling_contract,
+    )
     if plan.client == "chat":
         request["chat"] = copy.deepcopy(plan.chat)
     return request
@@ -16448,7 +20250,13 @@ def benchmark_history_request(
     kv = str(options.get("kv") or "off")
     context, output = validated_limits(model, comparison_payload)
     chat = validated_chat_settings(model, comparison_payload, client)
-    evidence = optimizer_evidence(model, context, output, client, reasoning, kv, chat)
+    sampling_contract = validated_sampling_contract(
+        model, comparison_payload, client, chat,
+    )
+    assert sampling_contract is not None
+    evidence = optimizer_evidence(
+        model, context, output, client, reasoning, kv, chat, sampling_contract,
+    )
     suite_name = str(payload.get("suite") or "agentic")
     suite = BENCHMARK_SUITES.get(suite_name)
     if not suite:
@@ -16483,7 +20291,7 @@ def benchmark_history_request(
             and record.get("modelFingerprint") == capability.get("benchmarkModelFingerprint")
             and record.get("runtimeVersion") == capability.get("runtimeVersion")
             and record.get("hardwareFingerprint") == machine
-            and benchmark_runtime_integrity_issue(record) is None
+            and benchmark_integrity_issue(record) is None
             and (
                 not ssd_lane
                 or (
@@ -16494,8 +20302,9 @@ def benchmark_history_request(
             )
             and (
                 record.get("comparisonContractVersion") != BENCHMARK_COMPARISON_CONTRACT_VERSION
-                or record.get("engineSettings")
-                == evidence.get("engineSettingsByBackend", {}).get(record_backend)
+                or benchmark_engine_settings_match(
+                    record, evidence.get("engineSettingsByBackend", {}).get(record_backend),
+                )
             )
             and record.get("client") in {None, "any", client}
             and record.get("reasoning") in {"any", reasoning}
@@ -16506,7 +20315,9 @@ def benchmark_history_request(
             and record["contextMin"] <= context <= record["contextMax"]
             and benchmark_record_output_contract_verified(record, output)
             and record.get("suite") == suite_name
-            and list(record.get("scenarioContract") or []) == scenario_contract
+            and isinstance(record.get("scenarioContract", []), list)
+            and (record.get("scenarioContract") or []) == scenario_contract
+            and benchmark_record_matches_selection_preference(record, preference)
             # History may describe only evidence that could also drive Apply.
             # Reuse the complete local-record verifier here so a structurally
             # matching but failed or tampered shootout never becomes a receipt.
@@ -16591,6 +20402,13 @@ def benchmark_history_request(
                 "value": value, "valueDisplay": value_display,
                 "lowerIsBetter": lower_is_better,
                 "workloadDisplay": item["display"],
+                "routeSettingsLabel": benchmark_route_settings_label(
+                    str(item["backend"]), item["record"].get("winner"),
+                    item["record"].get("settings"),
+                ),
+                "settingsSearch": public_benchmark_settings_search_result(
+                    item["record"],
+                ),
                 "firstTokenSeconds": item.get("firstTokenSeconds"),
                 "peakPressureDeltaBytes": item.get("peakPressureDeltaBytes"),
                 "thermalWorst": item.get("thermalWorst"),
@@ -16663,12 +20481,17 @@ def benchmark_history_request(
             continue
         route_summary = {
             "id": record.get("id"), "createdAt": record.get("createdAt"),
+            "suite": record.get("suite"),
             "backend": backend, "backendLabel": BACKEND_LABELS[backend],
             "winner": record.get("winner"),
             "winnerLabel": benchmark_public_mode_label(
                 backend, str(record.get("winner") or "ar")
             ),
             "display": measurement["display"],
+            "routeSettingsLabel": benchmark_route_settings_label(
+                backend, record.get("winner"), record.get("settings"),
+            ),
+            "settingsSearch": public_benchmark_settings_search_result(record),
             "firstTokenSeconds": measurement.get("firstTokenSeconds"),
             "peakPressureDeltaBytes": measurement.get("peakPressureDeltaBytes"),
             "thermalWorst": measurement.get("thermalWorst"),
@@ -16683,6 +20506,20 @@ def benchmark_history_request(
         current_route_runs.append(route_summary)
         if len(current_route_runs) >= 4:
             break
+
+    # Review comes from verified, saved evidence, never the in-memory job or a
+    # caller-supplied result. Applying still revalidates the exact record ID.
+    review_result = None
+    if "reviewRecordId" in payload:
+        review_id = payload["reviewRecordId"]
+        if not isinstance(review_id, str) or not review_id or len(review_id) > 128:
+            raise ValueError("Choose a saved benchmark result to review.")
+        review_result = next((copy.deepcopy(record) for record in exact_records
+                              if record.get("id") == review_id
+                              and record.get("backend") == backend
+                              and not record.get("shootoutId")), None)
+        if review_result is None:
+            raise ValueError("That saved result no longer matches the selected model and settings.")
 
     current_fingerprints = {
         str(capability.get("benchmarkModelFingerprint") or "")
@@ -16704,6 +20541,8 @@ def benchmark_history_request(
         expected_settings = evidence.get("engineSettingsByBackend", {}).get(record_backend)
         if integrity_issue:
             reason = "Runtime profile re-test required"
+        elif benchmark_probe_integrity_issue(record):
+            reason = "Correctness sampling re-test required"
         elif record.get("modelFingerprint") != capability.get("benchmarkModelFingerprint"):
             reason = "Model artifact changed"
         elif record.get("hardwareFingerprint") != machine:
@@ -16774,6 +20613,8 @@ def benchmark_history_request(
             "backendLabel": BACKEND_LABELS.get(winner_backend, winner_backend),
             "mode": winner_engine.get("mode"),
             "modeLabel": winner_engine.get("modeLabel"),
+            "routeSettingsLabel": winner_engine.get("routeSettingsLabel"),
+            "settingsSearch": copy.deepcopy(winner_engine.get("settingsSearch")),
             "workloadDisplay": winner_engine.get("workloadDisplay"),
             "firstTokenSeconds": winner_engine.get("firstTokenSeconds"),
             "createdAt": latest_shootout.get("createdAt"),
@@ -16812,6 +20653,8 @@ def benchmark_history_request(
             "backendLabel": route.get("backendLabel"),
             "mode": route.get("winner"),
             "modeLabel": route.get("winnerLabel"),
+            "routeSettingsLabel": route.get("routeSettingsLabel"),
+            "settingsSearch": copy.deepcopy(route.get("settingsSearch")),
             "workloadDisplay": route.get("display"),
             "firstTokenSeconds": route.get("firstTokenSeconds"),
             "createdAt": route.get("createdAt"),
@@ -16915,6 +20758,7 @@ def benchmark_history_request(
         "runs": public_runs,
         "series": series,
         "currentRouteRuns": current_route_runs,
+        "reviewResult": review_result,
         "receipt": receipt,
         "otherEvidence": {
             "count": sum(other_reasons.values()),
@@ -17065,7 +20909,10 @@ class LaunchPlan:
     agent_host: str = "terminal"
     purpose: str = "session"
     runtime_binary: str | None = None
+    pi_session_file: str | None = None
     chat: dict[str, Any] = field(default_factory=dict)
+    sampling_contract: dict[str, Any] | None = None
+    sampling_enforcement: dict[str, Any] | None = None
     client_port: int | None = None
     engine_argv: list[str] = field(default_factory=list)
     engine_env: dict[str, str] = field(default_factory=dict)
@@ -17104,6 +20951,10 @@ class LaunchPlan:
             "runtimeVersion": str(capability.get("runtimeVersion") or "")[:160],
             "runtimeAdvisory": launch_runtime_advisory(self.backend, self.model),
             "options": {key: value for key, value in self.options.items() if not key.startswith("_")},
+            "generation": (
+                generation_settings_from_sampling_contract(self.sampling_contract)
+                if isinstance(self.sampling_contract, dict) else None
+            ),
             "chat": copy.deepcopy(self.chat),
             "engineCommand": shell_join_redacted(self.engine_argv),
             "clientCommand": "Built-in launcher chat" if self.client == "chat" else shell_join_redacted(self.client_argv),
@@ -17196,13 +21047,28 @@ class AgentConsole:
     last_output_at: str | None = None
     output: bytearray = field(default_factory=bytearray, repr=False)
     protocol: str = "terminal"
+    transport: ConsoleTransport | None = field(default=None, repr=False)
     rpc_line_buffer: bytearray = field(default_factory=bytearray, repr=False)
+    rpc_discarding_oversize_line: bool = False
     rpc_streaming: bool = False
     rpc_prompt_inflight: bool = False
     rpc_pending_messages: int = 0
     rpc_external_pending_messages: int = 0
     rpc_follow_up_queue: list[str] = field(default_factory=list, repr=False)
+    rpc_external_queue: list[dict[str, str]] = field(default_factory=list, repr=False)
+    rpc_queue_directory: Path | None = field(default=None, repr=False)
+    rpc_queue_session: str = field(default="", repr=False)
+    rpc_conversation_revision: int = 0
+    rpc_queue_saved: str = field(default="", repr=False)
+    rpc_queue_identity: str = field(default="", repr=False)
+    rpc_queue_token: str = field(default="", repr=False)
+    rpc_queue_save_error: str = ""
     rpc_interactions: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    rpc_statuses: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    rpc_commands: list[dict[str, str]] = field(default_factory=list, repr=False)
+    rpc_command_ids: dict[str, str] = field(default_factory=dict, repr=False)
+    rpc_steer_ids: dict[str, str] = field(default_factory=dict, repr=False)
+    rpc_compacting: bool = False
     rpc_section: str = ""
     rpc_history_loaded: bool = False
     rpc_last_queue_count: int = -1
@@ -17214,7 +21080,33 @@ class AgentConsole:
     rpc_settle_revision: int = 0
     rpc_last_state_probe_at: float = 0.0
     rpc_message_blocks: dict[str, str] = field(default_factory=dict, repr=False)
+    rpc_tool_argument_deltas: dict[str, str] = field(default_factory=dict, repr=False)
     rpc_last_assistant: dict[str, Any] = field(default_factory=dict, repr=False)
+    rpc_loop_stop_reason: str = ""
+    rpc_tool_format_error: str = ""
+    rpc_prompt_started: float | None = None
+    rpc_prompt_usage: dict[str, int] = field(default_factory=dict, repr=False)
+    rpc_prompt_usage_last_message: str = ""
+    rpc_timeline_events: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    rpc_timeline_items: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict, repr=False)
+    rpc_timeline_item_text_bytes: int = 0
+    rpc_timeline_revision: int = 0
+    rpc_timeline_text_bytes: int = 0
+    rpc_timeline_turn: int = 0
+    rpc_timeline_user_message: int = 0
+    rpc_timeline_assistant_message: int = 0
+    rpc_timeline_tool: int = 0
+    rpc_timeline_current_message_id: str = ""
+    rpc_timeline_skip_current_message: bool = False
+    rpc_timeline_message_blocks: dict[str, str] = field(default_factory=dict, repr=False)
+    rpc_timeline_delta_counts: dict[str, int] = field(default_factory=dict, repr=False)
+    rpc_timeline_seen_message_ids: set[str] = field(default_factory=set, repr=False)
+    rpc_timeline_live_fingerprints: set[str] = field(default_factory=set, repr=False)
+    rpc_timeline_active_tools: dict[str, str] = field(default_factory=dict, repr=False)
+    rpc_timeline_tool_text: dict[str, str] = field(default_factory=dict, repr=False)
+    rpc_timeline_tool_status: dict[str, str] = field(default_factory=dict, repr=False)
+    rpc_timeline_last_queue_text: str = ""
+    rpc_timeline_omitted_items: set[str] = field(default_factory=set, repr=False)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def append(self, value: bytes) -> None:
@@ -17228,19 +21120,143 @@ class AgentConsole:
                 del self.output[:overflow]
                 self.base_offset += overflow
 
-    def output_slice(self, offset: Any) -> dict[str, Any]:
+    def append_timeline(
+        self, kind: str, text: Any, *, title: Any = "", item_id: Any = "",
+        operation: str = "",
+        created_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Append one safe typed event and evict only complete older events."""
+        if self.protocol != "pi-rpc" or kind not in PI_RPC_TIMELINE_KINDS:
+            return None
+        safe_text = safe_agent_timeline_text(
+            text, PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES,
+        )
+        safe_title = safe_agent_timeline_text(title, 500).strip()
+        safe_item_id = re.sub(
+            r"[^A-Za-z0-9:._-]+", "-",
+            safe_agent_timeline_text(item_id, 200),
+        ).strip("-")
+        safe_operation = operation if operation in {"append", "replace"} else ""
+        if (
+            not safe_text and not safe_title
+            and not (safe_item_id and safe_operation == "replace")
+        ):
+            return None
+        with self.lock:
+            self.rpc_timeline_revision += 1
+            event: dict[str, Any] = {
+                "revision": self.rpc_timeline_revision,
+                "kind": kind,
+                "text": safe_text,
+                "createdAt": created_at if created_at is not None else datetime.now(timezone.utc).isoformat(),
+            }
+            if safe_title:
+                event["title"] = safe_title
+            if safe_item_id:
+                event["itemId"] = safe_item_id
+                if safe_operation:
+                    event["operation"] = safe_operation
+            event_bytes = timeline_event_text_bytes(event)
+            # The token journal is a delivery buffer, not the conversation.
+            # Keep a separately bounded materialized view so a busy stream
+            # cannot erase completed tools/answers from a missed-poll replay.
+            mutable = bool(safe_item_id and safe_operation)
+            item_key = ("item", safe_item_id) if mutable else ("revision", str(self.rpc_timeline_revision))
+            previous = self.rpc_timeline_items.get(item_key)
+            item = copy.deepcopy(event)
+            if previous is not None:
+                item["createdAt"] = previous.get("createdAt", item["createdAt"])
+                self.rpc_timeline_item_text_bytes -= timeline_event_text_bytes(previous)
+                if safe_operation == "append":
+                    item["text"] = str(previous.get("text") or "") + safe_text
+                if not safe_title and previous.get("title"):
+                    item["title"] = previous["title"]
+            item["text"], item["title"] = pi_rpc_timeline_recent_text(
+                item["text"], str(item.get("title") or ""),
+            )
+            if mutable:
+                item["operation"] = "replace"
+            self.rpc_timeline_items[item_key] = item
+            self.rpc_timeline_item_text_bytes += timeline_event_text_bytes(item)
+            while self.rpc_timeline_items and (
+                len(self.rpc_timeline_items) > PI_RPC_TIMELINE_MAX_REPLAY_ITEMS
+                or self.rpc_timeline_item_text_bytes > PI_RPC_TIMELINE_MAX_TEXT_BYTES
+            ):
+                oldest_key = next(iter(self.rpc_timeline_items))
+                removed_item = self.rpc_timeline_items.pop(oldest_key)
+                self.rpc_timeline_item_text_bytes -= timeline_event_text_bytes(removed_item)
+            self.rpc_timeline_events.append(event)
+            self.rpc_timeline_text_bytes += event_bytes
+            while self.rpc_timeline_events and (
+                len(self.rpc_timeline_events) > PI_RPC_TIMELINE_MAX_EVENTS
+                or self.rpc_timeline_text_bytes > PI_RPC_TIMELINE_MAX_TEXT_BYTES
+            ):
+                removed = self.rpc_timeline_events.pop(0)
+                self.rpc_timeline_text_bytes -= timeline_event_text_bytes(removed)
+            return copy.deepcopy(event)
+
+    def timeline_slice(self, revision: Any) -> dict[str, Any]:
+        """Deliver journal deltas, or a bounded conversation snapshot on reset."""
+        invalid = False
+        if revision is None:
+            requested = 0
+        else:
+            try:
+                if isinstance(revision, bool):
+                    raise ValueError
+                requested = int(revision)
+                if requested < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                requested = 0
+                invalid = True
+        with self.lock:
+            latest = self.rpc_timeline_revision
+            base = (
+                int(self.rpc_timeline_events[0]["revision"])
+                if self.rpc_timeline_events else latest + 1
+            )
+            reset = invalid or requested < base - 1 or requested > latest
+            if reset:
+                events = copy.deepcopy(list(self.rpc_timeline_items.values()))
+                # Snapshot order follows first appearance, not last update.
+                # Rebase only this reset envelope so an old item updated late
+                # cannot make the browser discard later chronological items.
+                base = latest - len(events) + 1
+                for index, event in enumerate(events):
+                    event["revision"] = base + index
+            else:
+                events = copy.deepcopy([event for event in self.rpc_timeline_events
+                    if int(event["revision"]) > requested])
+            return {
+                "timelineVersion": PI_RPC_TIMELINE_VERSION,
+                "timelineBaseRevision": base,
+                "timelineRevision": latest,
+                "nextTimelineRevision": latest,
+                "timelineReset": reset,
+                "timelineEvents": events,
+            }
+
+    def output_slice(self, offset: Any, timeline_revision: Any = None,
+                     *, timeline_version: Any = None) -> dict[str, Any]:
         try:
             requested = int(offset)
         except (TypeError, ValueError):
             requested = self.base_offset
         with self.lock:
             end = self.base_offset + len(self.output)
+            # Only omit terminal bytes when the client explicitly understands
+            # this semantic format. Old clients and version mismatches keep raw
+            # replay, and the retained server buffer is never discarded here.
+            semantic_only = (self.protocol == "pi-rpc"
+                and type(timeline_version) is int
+                and timeline_version == PI_RPC_TIMELINE_VERSION)
             reset = requested < self.base_offset or requested > end
             start = self.base_offset if reset else requested
             relative = start - self.base_offset
-            chunk = bytes(self.output[relative:relative + AGENT_CONSOLE_MAX_READ])
-            next_offset = start + len(chunk)
-            return {
+            chunk = b"" if semantic_only else bytes(self.output[relative:relative + AGENT_CONSOLE_MAX_READ])
+            next_offset = end if semantic_only else start + len(chunk)
+            result = {
                 "version": AGENT_CONSOLE_VERSION,
                 "ownerRunId": self.owner_run_id,
                 "surfaceId": self.plan.run_id,
@@ -17251,22 +21267,44 @@ class AgentConsole:
                 "bufferEnd": end,
                 "outputRevision": end,
                 "reset": reset,
-                "data": base64.b64encode(chunk).decode("ascii"),
+                "data": "" if semantic_only else base64.b64encode(chunk).decode("ascii"),
+                "terminalOmitted": semantic_only,
                 "state": self.state,
                 "exitCode": self.exit_code,
                 "lastOutputAt": self.last_output_at,
                 "detail": self.detail,
                 "protocol": self.protocol,
+                "conversationId": self.conversation_id(),
+                "conversationRevision": self.rpc_conversation_revision,
                 "streaming": self.rpc_streaming,
                 "pendingMessages": self.rpc_pending_messages,
                 "queuePaused": self.rpc_queue_paused,
+                "queuedMessages": pi_rpc_visible_queue(self),
+                "queueEditingAvailable": True,
+                "queueSaveError": self.rpc_queue_save_error,
                 "interactions": copy.deepcopy(self.rpc_interactions),
+                "extensionStatuses": copy.deepcopy(self.rpc_statuses),
+                "commands": copy.deepcopy(self.rpc_commands),
+                "compacting": self.rpc_compacting,
             }
+            if self.protocol == "pi-rpc":
+                result.update(self.timeline_slice(timeline_revision))
+            return result
+
+    def conversation_id(self) -> str:
+        # Pi conversations survive engine/run IDs. Publish an opaque identity
+        # for tab-local draft recovery, never the session's filesystem path.
+        if self.protocol != "pi-rpc" or not self.rpc_queue_session:
+            return ""
+        identity = json.dumps([str(self.plan.project), self.rpc_queue_session], separators=(",", ":"))
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
     def public(self) -> dict[str, Any]:
         with self.lock:
-            return {
+            result = {
                 "version": AGENT_CONSOLE_VERSION,
+                "conversationId": self.conversation_id(),
+                "conversationRevision": self.rpc_conversation_revision,
                 "id": self.plan.run_id,
                 "surfaceId": self.plan.run_id,
                 "ownerRunId": self.owner_run_id,
@@ -17295,14 +21333,29 @@ class AgentConsole:
                 "streaming": self.rpc_streaming,
                 "pendingMessages": self.rpc_pending_messages,
                 "queuePaused": self.rpc_queue_paused,
+                "queuedMessages": pi_rpc_visible_queue(self),
+                "queueEditingAvailable": True,
+                "queueSaveError": self.rpc_queue_save_error,
                 "interactions": copy.deepcopy(self.rpc_interactions),
                 "persistent": False,
+                "commands": copy.deepcopy(self.rpc_commands),
                 "canInput": self.state == "running" and self.process.poll() is None,
                 "canStop": self.state in {"starting", "running", "stopping"} and self.process.poll() is None,
                 "canRestart": self.state in {"exited", "stopped", "failed"} or self.process.poll() is not None,
                 "supportsQueue": self.protocol == "pi-rpc",
+                "supportsSteering": self.protocol == "pi-rpc",
                 "supportsDirectKeys": self.protocol != "pi-rpc",
             }
+            if self.protocol == "pi-rpc":
+                result.update({
+                    "timelineVersion": PI_RPC_TIMELINE_VERSION,
+                    "timelineBaseRevision": (
+                        int(self.rpc_timeline_events[0]["revision"])
+                        if self.rpc_timeline_events else self.rpc_timeline_revision + 1
+                    ),
+                    "timelineRevision": self.rpc_timeline_revision,
+                })
+            return result
 
 
 def safe_agent_transcript_text(value: Any, limit: int = 64 * 1024) -> str:
@@ -17324,6 +21377,139 @@ def safe_agent_transcript_text(value: Any, limit: int = 64 * 1024) -> str:
 def safe_agent_ui_text(value: Any, limit: int) -> str:
     """Bound agent-owned dialog copy without passing terminal controls to the UI."""
     return safe_agent_transcript_text(value, limit).replace("\r\n", "\n").strip()
+
+
+_TIMELINE_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def safe_agent_timeline_text(
+    value: Any, limit: int = PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES,
+) -> str:
+    """Return bounded plain text for JSON UI events, without ANSI/control bytes."""
+    raw = str(value or "")[:max(0, limit)].replace("\r\n", "\n").replace("\r", "\n")
+    # Ordinary streamed text needs no per-character Python work. Only actual
+    # controls invoke the replacement, preserving tabs/newlines and visible ESC.
+    cleaned = _TIMELINE_CONTROL_CHARACTERS.sub(
+        lambda match: "␛" if match[0] == "\x1b" else "�", raw,
+    )
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) <= max(0, limit):
+        return cleaned
+    return encoded[:max(0, limit)].decode("utf-8", errors="ignore")
+
+
+def timeline_event_text_bytes(event: dict[str, Any]) -> int:
+    """Count the user-visible text retained by one complete timeline event."""
+    return sum(
+        len(str(event.get(field) or "").encode("utf-8"))
+        for field in ("text", "title")
+    )
+
+
+def pi_rpc_timeline_recent_text(value: Any, title: str = "") -> tuple[str, str]:
+    """Retain the newest safe UTF-8 text, with a visible bounded-view label."""
+    limit = PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES
+    raw = str(value or "")
+    # At most `limit` Unicode characters can fit in `limit` UTF-8 bytes.
+    cleaned = safe_agent_timeline_text(raw[-limit:], limit * 4)
+    encoded = cleaned.encode("utf-8")
+    omitted = len(raw) > limit or len(encoded) > limit
+    recent = encoded[-limit:].decode("utf-8", errors="ignore")
+    if omitted and "Earlier text omitted" not in title:
+        title = f"{title} · Earlier text omitted" if title else "Earlier text omitted"
+    return recent, title
+
+
+def pi_rpc_remember_timeline_value(values: set[str], value: str) -> None:
+    values.add(value)
+    while len(values) > PI_RPC_TIMELINE_MAX_TRACKED_ITEMS:
+        values.pop()
+
+
+def pi_rpc_bound_timeline_mapping(values: dict[str, Any]) -> None:
+    while len(values) > PI_RPC_TIMELINE_MAX_TRACKED_ITEMS:
+        del values[next(iter(values))]
+
+
+def bounded_utf8_prefix(value: str, limit: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max(0, limit):
+        return value
+    return encoded[:max(0, limit)].decode("utf-8", errors="ignore")
+
+
+def pi_rpc_store_bounded_text(
+    values: dict[str, str], key: str, value: str, *,
+    total_bytes: int, max_items: int = PI_RPC_TRANSIENT_MAX_TEXT_ITEMS,
+) -> str:
+    """Keep one newest text value while bounding the whole transient mapping."""
+    bounded = bounded_utf8_prefix(value, total_bytes)
+    values.pop(key, None)
+    values[key] = bounded
+    while len(values) > max(1, max_items):
+        del values[next(iter(values))]
+    retained_bytes = sum(len(item.encode("utf-8")) for item in values.values())
+    while retained_bytes > total_bytes and len(values) > 1:
+        oldest = next(iter(values))
+        retained_bytes -= len(values[oldest].encode("utf-8"))
+        del values[oldest]
+    if retained_bytes > total_bytes:
+        values[key] = bounded_utf8_prefix(values.get(key, ""), total_bytes)
+    return values.get(key, "")
+
+
+def pi_rpc_current_assistant_prefix(console: AgentConsole) -> str:
+    return (
+        console.rpc_timeline_current_message_id
+        or f"live:{console.rpc_timeline_turn}:assistant:"
+        f"{max(1, console.rpc_timeline_assistant_message)}"
+    )
+
+
+def pi_rpc_append_timeline_delta(
+    console: AgentConsole, kind: str, value: Any, *,
+    title: str, item_id: str,
+) -> None:
+    """Append one byte-capped delta or a reconstructable periodic snapshot."""
+    current = console.rpc_timeline_message_blocks.get(item_id, "")
+    delta, delta_title = pi_rpc_timeline_recent_text(value, title)
+    if not delta:
+        return
+    recent, recent_title = pi_rpc_timeline_recent_text(current + delta, title)
+    if delta_title != title:
+        recent_title = delta_title
+    if recent_title != title:
+        pi_rpc_remember_timeline_value(console.rpc_timeline_omitted_items, item_id)
+    elif item_id in console.rpc_timeline_omitted_items:
+        recent_title = f"{title} · Earlier text omitted" if title else "Earlier text omitted"
+    updated = pi_rpc_store_bounded_text(
+        console.rpc_timeline_message_blocks, item_id, recent,
+        total_bytes=PI_RPC_TIMELINE_MAX_TEXT_BYTES,
+    )
+    count = console.rpc_timeline_delta_counts.get(item_id, 0) + 1
+    console.rpc_timeline_delta_counts[item_id] = count
+    pi_rpc_bound_timeline_mapping(console.rpc_timeline_delta_counts)
+    interval = max(
+        1,
+        min(
+            PI_RPC_TIMELINE_SNAPSHOT_INTERVAL,
+            max(1, PI_RPC_TIMELINE_MAX_EVENTS // 4),
+        ),
+    )
+    snapshot = count == 1 or count % interval == 0
+    console.append_timeline(
+        kind, updated if snapshot else delta, title=recent_title, item_id=item_id,
+        operation="replace" if snapshot else "append",
+    )
+
+
+def pi_rpc_reconcile_final_block(streamed: str, final: str) -> str:
+    """Keep a complete streamed block when Pi's closing snapshot is empty or truncated."""
+    if not streamed:
+        return final
+    if not final or (len(final) < len(streamed) and streamed.startswith(final)):
+        return streamed
+    return final
 
 
 def pi_rpc_interaction(event: Any) -> dict[str, Any] | None:
@@ -17384,6 +21570,455 @@ def pi_rpc_message_text(message: Any, *, include_thinking: bool = True) -> list[
     return blocks
 
 
+def pi_rpc_timeline_fingerprint(
+    role: str, kind: str, text: str, title: str = "",
+) -> str:
+    return hashlib.sha256(json.dumps(
+        [role, kind, text, title], ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def pi_rpc_timeline_message_key(message: Any, fallback: str) -> tuple[str, bool]:
+    raw_identifier = ""
+    if isinstance(message, dict):
+        raw_identifier = str(message.get("id") or message.get("messageId") or "")
+    if raw_identifier:
+        digest = hashlib.sha256(raw_identifier.encode("utf-8")).hexdigest()[:24]
+        return f"message:{digest}", True
+    return fallback, False
+
+
+def pi_rpc_timeline_message_parts(
+    message: Any,
+) -> list[tuple[str, str, str, int]]:
+    """Extract typed, plain-text blocks without borrowing terminal formatting."""
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content")
+    if isinstance(content, str):
+        text, title = pi_rpc_timeline_recent_text(content)
+        return [(
+            "answer", text, title, 0,
+        )]
+    if not isinstance(content, list):
+        return []
+    parts: list[tuple[str, str, str, int]] = []
+    for index, block in enumerate(content):
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "")
+        if block_type == "text":
+            text, title = pi_rpc_timeline_recent_text(block.get("text"))
+            parts.append((
+                "answer", text, title, index,
+            ))
+        elif block_type == "thinking":
+            text, title = pi_rpc_timeline_recent_text(block.get("thinking"), "Thinking")
+            parts.append((
+                "thinking", text, title, index,
+            ))
+        elif block_type == "toolCall":
+            title = safe_agent_timeline_text(block.get("name") or "Tool", 160).strip()
+            try:
+                arguments = json.dumps(
+                    block.get("arguments"), ensure_ascii=False, indent=2,
+                )
+            except (TypeError, ValueError):
+                arguments = str(block.get("arguments") or "")
+            parts.append((
+                "toolCall", safe_agent_timeline_text(arguments), title or "Tool", index,
+            ))
+    return parts
+
+
+def pi_rpc_custom_notice(console: AgentConsole, message: dict[str, Any], *, live: bool = False) -> bytes:
+    """Render Pi's explicitly visible extension messages as notices, never tools."""
+    if message.get("role") != "custom" or message.get("display") is not True:
+        return b""
+    titles = {
+        "launcher-tool-format-recovery": "Retrying tool call",
+        "launcher-tool-format-error": "Tool call failed",
+        "launcher-progress-check": "Progress check",
+        "launcher-loop-stop": "Repetition paused",
+    }
+    title = titles.get(message.get("customType"), "Pi extension")
+    text = "\n".join(text for kind, text, _title, _index
+                     in pi_rpc_timeline_message_parts(message) if kind == "answer" and text)
+    if not text:
+        return b""
+    if live and console.rpc_streaming and message.get("customType") == "launcher-loop-stop":
+        console.rpc_loop_stop_reason = text
+        # New Pi defers extension messages until tool results are settled.
+        # Reconcile only the latest aborted result in this prompt.
+        for item in reversed(list(console.rpc_timeline_items.values())):
+            if item.get("kind") == "user":
+                break
+            if item.get("kind") != "toolResult":
+                continue
+            if str(item.get("title", "")).startswith("Failed · ") and re.fullmatch(
+                r"(?:Operation )?abort(?:ed)?[.!]?", str(item.get("text", "")).strip(), re.I,
+            ):
+                evidence_id = item["itemId"]
+                console.append_timeline("toolResult", item["text"],
+                    title=item["title"].replace("Failed · ", "Stopped · ", 1),
+                    item_id=evidence_id, operation="replace")
+                call_id = evidence_id.removesuffix(":result")
+                call = console.rpc_timeline_items.get(("item", call_id))
+                if call:
+                    console.rpc_timeline_tool_status[call_id] = "Stopped"
+                    console.append_timeline("toolCall", call.get("text", ""),
+                        title=call.get("title", "").replace("Failed · ", "Stopped · ", 1),
+                        item_id=call_id, operation="replace")
+            break
+    if live and console.rpc_streaming and message.get("customType") == "launcher-tool-format-error":
+        console.rpc_tool_format_error = text
+        console.rpc_queue_advance_allowed = False
+    identity = hashlib.sha256(json.dumps(
+        [message.get("timestamp"), message.get("customType"), text],
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:24]
+    key = f"custom:{identity}"
+    if key in console.rpc_timeline_seen_message_ids:
+        return b""
+    pi_rpc_remember_timeline_value(console.rpc_timeline_seen_message_ids, key)
+    console.append_timeline("notice", text, title=title, item_id=key,
+                            operation="replace", created_at=pi_rpc_message_timestamp(message))
+    return f"\r\n{title.upper()}\r\n{safe_agent_transcript_text(text)}\r\n".encode("utf-8")
+
+
+def pi_rpc_add_prompt_usage(totals: dict[str, int], message: dict[str, Any]) -> None:
+    """Pi input excludes cache reads/writes; include each exactly once."""
+    totals["requests"] = totals.get("requests", 0) + 1
+    content = message.get("content")
+    totals["tools"] = totals.get("tools", 0) + sum(
+        isinstance(block, dict) and block.get("type") == "toolCall"
+        for block in (content if isinstance(content, list) else [])
+    )
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return
+    values = [usage.get("input"), usage.get("output"),
+              usage.get("cacheRead", 0), usage.get("cacheWrite", 0)]
+    if not all(type(value) is int and 0 <= value <= 10**12 for value in values):
+        return
+    # Pi initializes usage to zero even when the provider never reports it.
+    if not any(values):
+        return
+    incoming, outgoing, cached, written = values
+    totals["reported"] = totals.get("reported", 0) + 1
+    totals["input"] = totals.get("input", 0) + incoming + cached + written
+    totals["output"] = totals.get("output", 0) + outgoing
+    totals["cached"] = totals.get("cached", 0) + cached
+
+
+def pi_rpc_prompt_summary(totals: dict[str, int], elapsed: float | None = None) -> str:
+    parts = []
+    if elapsed is not None:
+        seconds = max(0, round(elapsed))
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        parts.append(f"{hours}h {minutes}m" if hours else
+                     f"{minutes}m {seconds}s" if minutes else f"{seconds}s")
+    if totals.get("reported"):
+        incoming, outgoing = totals.get("input", 0), totals.get("output", 0)
+        qualifier = " reported" if totals["reported"] < totals["requests"] else " total"
+        parts.extend([f"{incoming + outgoing:,}{qualifier} tokens",
+                      f"{incoming:,} input", f"{outgoing:,} output"])
+        if totals.get("cached"):
+            parts.append(f"{totals['cached']:,} cached")
+        if totals["reported"] < totals["requests"]:
+            parts.append("some usage unavailable")
+    else:
+        parts.append("Token usage unavailable")
+    if totals.get("tools"):
+        count = totals["tools"]
+        parts.append(f"{count:,} tool call{'s' if count != 1 else ''}")
+    return " · ".join(parts)
+
+
+def pi_rpc_saved_history(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Display the selected saved branch, including messages before compaction.
+
+    get_messages is the model's compacted context, not a transcript. Pi owns
+    branch selection; follow the leaf from get_entries rather than mixing in
+    messages from abandoned branches. Nothing here is sent back to the model.
+    """
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("Pi did not return saved conversation entries.")
+    by_id = {entry.get("id"): entry for entry in entries
+             if isinstance(entry, dict) and isinstance(entry.get("id"), str)}
+    branch, seen = [], set()
+    current = data.get("leafId")
+    while current is not None:
+        if not isinstance(current, str) or current in seen or current not in by_id:
+            raise ValueError("Pi returned an incomplete conversation branch.")
+        seen.add(current)
+        entry = by_id[current]
+        branch.append(entry)
+        current = entry.get("parentId")
+    messages = []
+    for entry in reversed(branch):
+        if entry.get("type") == "message" and isinstance(entry.get("message"), dict):
+            messages.append({**entry["message"], "id": entry["id"],
+                             "timestamp": entry["message"].get("timestamp", entry.get("timestamp"))})
+        elif entry.get("type") == "custom_message":
+            messages.append({**entry, "role": "custom"})
+        elif entry.get("type") in {"compaction", "branch_summary"}:
+            messages.append({"role": "compactionSummary", "id": entry["id"],
+                             "timestamp": entry.get("timestamp")})
+    return messages
+
+
+def pi_rpc_line_limit(prefix: bytes) -> int:
+    # Saved sessions can exceed an ordinary stream event, but remain bounded.
+    if re.search(rb'"command"\s*:\s*"get_entries"', prefix[:512]):
+        return PI_RPC_HISTORY_MAX_JSON_LINE_BYTES
+    return PI_RPC_MAX_JSON_LINE_BYTES
+
+
+def pi_rpc_record_history(console: AgentConsole, messages: Any) -> None:
+    """Seed the typed journal once, skipping live messages already seen by identity/content."""
+    if not isinstance(messages, list):
+        return
+    retained = messages[-200:]
+    start_index = max(0, len(messages) - len(retained))
+    prompt_usage: dict[str, int] | None = None
+    for relative_index, message in enumerate(retained):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        if role == "custom":
+            pi_rpc_custom_notice(console, message)
+            continue
+        if role == "user":
+            prompt_usage = {}
+        elif role in {"compactionSummary", "branchSummary"}:
+            prompt_usage = None
+            key, _ = pi_rpc_timeline_message_key(message, f"history:{start_index + relative_index}")
+            console.append_timeline(
+                "notice", "Earlier messages were summarized for the model. The saved transcript is retained.",
+                title="Context compacted", item_id=f"{key}:compaction", operation="replace",
+                created_at=pi_rpc_message_timestamp(message),
+            )
+        if role not in {"user", "assistant", "toolResult"}:
+            continue
+        message_key, explicit_id = pi_rpc_timeline_message_key(
+            message, f"history:{start_index + relative_index}",
+        )
+        if explicit_id and message_key in console.rpc_timeline_seen_message_ids:
+            prompt_usage = None
+            continue
+        parts = pi_rpc_timeline_message_parts(message)
+        for part_kind, text, title, block_index in parts:
+            if role == "user":
+                kind = "user"
+                title = "You"
+            elif role == "toolResult":
+                kind = "toolResult"
+                title = safe_agent_timeline_text(
+                    message.get("toolName") or title or "Tool result", 160,
+                ).strip()
+            else:
+                kind = part_kind
+            if not text and kind != "toolCall":
+                continue
+            fingerprint = pi_rpc_timeline_fingerprint(role, kind, text, title)
+            if fingerprint in console.rpc_timeline_live_fingerprints:
+                prompt_usage = None
+                continue
+            console.append_timeline(
+                kind, text, title=title,
+                item_id=f"{message_key}:{kind}:{block_index}", operation="replace",
+                created_at=pi_rpc_message_timestamp(message),
+            )
+        if explicit_id:
+            pi_rpc_remember_timeline_value(
+                console.rpc_timeline_seen_message_ids, message_key,
+            )
+        if role == "assistant" and prompt_usage is not None:
+            pi_rpc_add_prompt_usage(prompt_usage, message)
+            if message.get("stopReason") == "stop":
+                # Pi may persist the terminal extension notice immediately
+                # before or after the malformed assistant response.
+                format_failed = any(
+                    0 <= neighbor < len(retained)
+                    and isinstance(retained[neighbor], dict)
+                    and retained[neighbor].get("role") == "custom"
+                    and retained[neighbor].get("customType") == "launcher-tool-format-error"
+                    for neighbor in (relative_index - 1, relative_index + 1)
+                )
+                console.append_timeline(
+                    "summary", pi_rpc_prompt_summary(prompt_usage),
+                    title="Tool call failed" if format_failed else "Complete",
+                    item_id=f"{message_key}:summary", operation="replace",
+                    created_at=pi_rpc_message_timestamp(message),
+                )
+                prompt_usage = None
+
+
+def pi_rpc_message_timestamp(message: dict[str, Any]) -> str:
+    value = message.get("timestamp")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            pass
+    return ""
+
+
+def pi_rpc_visible_queue(console: AgentConsole) -> list[dict[str, Any]]:
+    identity = json.dumps([console.rpc_queue_session, console.rpc_follow_up_queue])
+    if identity != console.rpc_queue_identity:
+        console.rpc_queue_identity = identity
+        console.rpc_queue_token = secrets.token_hex(16)
+    return [{"message": message, "kind": "followUp",
+             "id": f"{console.rpc_queue_token}:{index}",
+             "editable": not (index == 0 and bool(console.rpc_queued_prompt_message))}
+            for index, message in enumerate(console.rpc_follow_up_queue)] + copy.deepcopy(console.rpc_external_queue)
+
+
+def pi_rpc_queue_path(console: AgentConsole) -> Path | None:
+    if console.rpc_queue_directory is None or not console.rpc_queue_session:
+        return None
+    identity = str(console.plan.project) + "\n" + console.rpc_queue_session
+    return console.rpc_queue_directory / (hashlib.sha256(identity.encode()).hexdigest() + ".json")
+
+
+def pi_rpc_save_queue(console: AgentConsole) -> None:
+    """Persist changes, not every status poll. Restored queues always start paused."""
+    with console.lock:
+        pi_rpc_visible_queue(console)
+        path = pi_rpc_queue_path(console)
+        if path is None:
+            return
+        record = {"version": 1, "sessionFile": console.rpc_queue_session,
+                  "project": str(console.plan.project),
+                  "messages": list(console.rpc_follow_up_queue)}
+        fingerprint = hashlib.sha256(json.dumps(record, ensure_ascii=False).encode()).hexdigest()
+        if fingerprint == console.rpc_queue_saved:
+            return
+        if not record["messages"] and not path.exists():
+            console.rpc_queue_saved = fingerprint
+            return
+        try:
+            atomic_json(path, record)
+        except OSError:
+            console.rpc_queue_save_error = "Queued messages are visible here, but could not be saved to disk. Keep this launcher open."
+        else:
+            console.rpc_queue_saved = fingerprint
+            console.rpc_queue_save_error = ""
+
+
+def pi_rpc_bind_queue(console: AgentConsole, session_file: Any) -> None:
+    if console.rpc_queue_directory is None or not isinstance(session_file, str) or not session_file:
+        return
+    if session_file == console.rpc_queue_session:
+        return
+    # A session switch must not silently send the old conversation's follow-ups.
+    if console.rpc_queue_session:
+        pi_rpc_save_queue(console)
+        if console.rpc_queue_save_error:
+            console.rpc_queue_paused = True
+            console.rpc_queue_advance_allowed = False
+            return
+        console.rpc_follow_up_queue.clear()
+    console.rpc_queue_session = session_file
+    console.rpc_conversation_revision += 1
+    console.rpc_queue_saved = ""
+    path = pi_rpc_queue_path(console)
+    saved = read_json(path) if path else {}
+    messages = saved.get("messages")
+    if (saved.get("version") == 1 and saved.get("sessionFile") == session_file
+            and saved.get("project") == str(console.plan.project)
+            and isinstance(messages, list) and len(messages) <= PI_RPC_MAX_QUEUED_MESSAGES
+            and all(isinstance(item, str) and item.strip() for item in messages)
+            and sum(len(item.encode("utf-8")) for item in messages) <= PI_RPC_MAX_QUEUED_BYTES):
+        console.rpc_follow_up_queue = messages + console.rpc_follow_up_queue
+    if console.rpc_follow_up_queue:
+        console.rpc_queue_paused = True
+        console.rpc_queue_advance_allowed = False
+    pi_rpc_save_queue(console)
+
+
+def pi_rpc_record_queue(console: AgentConsole, text: str, *, title: str = "Queue") -> None:
+    pi_rpc_save_queue(console)
+    safe_text = safe_agent_timeline_text(text)
+    if not safe_text or safe_text == console.rpc_timeline_last_queue_text:
+        return
+    console.rpc_timeline_last_queue_text = safe_text
+    console.append_timeline(
+        "queue", safe_text, title=title, item_id="pi:queue", operation="replace",
+    )
+
+
+def pi_rpc_partial_tool_arguments(raw: str) -> Any:
+    """Decode streamed string arguments even before their closing quote arrives.
+
+    Pi 0.84 RPC deliberately removes `partial` snapshots, leaving JSON deltas.
+    Complete objects use the standard decoder; incomplete common code-tool
+    strings retain literal newlines and safely wait for split escape sequences.
+    """
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        pass
+    result: dict[str, str] = {}
+    for match in re.finditer(r'(?<!\\)"(path|file_path|content|oldText|newText|command)"\s*:\s*"', raw):
+        value = raw[match.end() - 1:]
+        try:
+            result[match.group(1)] = json.JSONDecoder().raw_decode(value)[0]
+        except ValueError:
+            # A trailing partial JSON escape needs its next delta before display.
+            for trim in range(min(6, len(value))):
+                candidate = value[:len(value) - trim] if trim else value
+                try:
+                    result[match.group(1)] = json.loads(candidate + '"')
+                    break
+                except ValueError:
+                    continue
+    return result or {"input": raw}
+
+
+def pi_rpc_timeline_tool_key(
+    console: AgentConsole, event: Any, *, fallback: str = "", new_call: bool = False,
+) -> str:
+    raw_identifier = ""
+    tool_name = ""
+    if isinstance(event, dict):
+        tool = event.get("toolCall") if isinstance(event.get("toolCall"), dict) else {}
+        raw_identifier = str(
+            event.get("toolCallId") or event.get("id")
+            or tool.get("id") or tool.get("toolCallId") or ""
+        )
+        tool_name = str(event.get("toolName") or tool.get("name") or "")
+    map_keys: list[str] = []
+    if raw_identifier:
+        digest = hashlib.sha256(raw_identifier.encode("utf-8")).hexdigest()[:20]
+        map_keys.append(f"id:{digest}")
+        existing = console.rpc_timeline_active_tools.get(map_keys[0])
+        if existing:
+            return existing
+    if tool_name:
+        name_digest = hashlib.sha256(tool_name.encode("utf-8")).hexdigest()[:20]
+        name_key = f"name:{name_digest}"
+        map_keys.append(name_key)
+        if not new_call:
+            existing = console.rpc_timeline_active_tools.get(name_key)
+            if existing:
+                return existing
+    if fallback:
+        item_id = fallback
+    else:
+        console.rpc_timeline_tool += 1
+        item_id = f"live:{console.rpc_timeline_turn}:tool:{console.rpc_timeline_tool}"
+    for map_key in map_keys:
+        console.rpc_timeline_active_tools[map_key] = item_id
+    if map_keys:
+        pi_rpc_bound_timeline_mapping(console.rpc_timeline_active_tools)
+    return item_id
+
+
 def pi_rpc_heading(label: str, colour: str) -> bytes:
     return f"\r\n\x1b[1;{colour}m{label}\x1b[0m\r\n".encode("utf-8")
 
@@ -17436,31 +22071,76 @@ def pi_rpc_settled_output(console: AgentConsole) -> bytes:
             console.rpc_section = name
 
     console.rpc_streaming = False
+    console.rpc_compacting = False
+    for item in list(console.rpc_timeline_items.values()):
+        if item.get("kind") in {"toolCall", "toolResult"} and re.match(r"^(Writing|Running) · ", item.get("title", "")):
+            console.append_timeline(
+                item["kind"], item.get("text", ""),
+                title=re.sub(r"^(Writing|Running)", "Stopped", item["title"]),
+                item_id=item.get("itemId", ""), operation="replace",
+            )
     console.rpc_prompt_inflight = False
     console.rpc_prompt_id = ""
     console.rpc_prompt_acknowledged = False
     console.rpc_queued_prompt_message = ""
-    console.rpc_interactions.clear()
+    if not console.rpc_command_ids:
+        console.rpc_interactions.clear()
     last = console.rpc_last_assistant
+    terminal_state = str(last.get("terminalState") or "unexpected-eof")
+    if (console.rpc_loop_stop_reason and terminal_state in {"aborted", "failed"}
+            and (last.get("stopReason") == "aborted"
+                 or re.search(r"\babort(?:ed)?\b", str(last.get("errorMessage") or ""), re.I))):
+        terminal_state = "paused"
+        last["terminalState"] = terminal_state
+    if console.rpc_tool_format_error and terminal_state == "clean":
+        terminal_state = "tool-format-failed"
+        last["terminalState"] = terminal_state
+        console.rpc_queue_advance_allowed = False
     console.rpc_queue_paused = bool(
         console.rpc_follow_up_queue and not console.rpc_queue_advance_allowed
     )
-    terminal_state = str(last.get("terminalState") or "unexpected-eof")
+    if console.rpc_prompt_started is not None:
+        title = {"clean": "Complete", "failed": "Failed", "aborted": "Stopped", "paused": "Repetition paused",
+                 "limited": "Response limit", "tool-format-failed": "Tool call failed"}.get(terminal_state, "Incomplete")
+        if terminal_state == "clean" and not last.get("textCharacters"):
+            title = "Incomplete"
+        console.append_timeline(
+            "summary", pi_rpc_prompt_summary(
+                console.rpc_prompt_usage, time.monotonic() - console.rpc_prompt_started,
+            ), title=title,
+            item_id=f"live:{console.rpc_timeline_turn}:summary", operation="replace",
+        )
+        console.rpc_prompt_started = None
+        console.rpc_prompt_usage.clear()
+        console.rpc_prompt_usage_last_message = ""
     if (
         terminal_state == "clean"
         and last.get("textCharacters", 0) == 0
         and last.get("toolCalls", 0) == 0
     ):
-        section("incomplete", "NO FINAL ANSWER", "38;5;214")
-        output.extend(
-            b"Pi finished the turn without a final response. Send continue to resume the task."
+        notice_text = (
+            "Pi finished the turn without a final response. Send continue to resume the task."
             if last.get("thinkingCharacters", 0) > 0 else
-            b"Pi finished the turn without visible output. Retry the message."
+            "Pi finished the turn without visible output. Retry the message."
+        )
+        section("incomplete", "NO FINAL ANSWER", "38;5;214")
+        output.extend(notice_text.encode("utf-8"))
+        console.append_timeline(
+            "notice", notice_text, title="No final answer",
+            item_id=f"live:{console.rpc_timeline_turn}:settled", operation="replace",
         )
     elif terminal_state == "unexpected-eof":
+        notice_text = (
+            "Pi became idle without reporting a clean terminal result. "
+            "Any partial output was preserved."
+        )
         section("incomplete", "TURN INCOMPLETE", "38;5;214")
         output.extend(
             b"Pi became idle without reporting a clean terminal result. Any partial output above was preserved."
+        )
+        console.append_timeline(
+            "notice", notice_text, title="Turn incomplete",
+            item_id=f"live:{console.rpc_timeline_turn}:settled", operation="replace",
         )
     if console.rpc_queue_paused:
         section("queue-paused", "QUEUE PAUSED", "38;5;214")
@@ -17468,8 +22148,17 @@ def pi_rpc_settled_output(console: AgentConsole) -> bytes:
             b"Queued follow-ups were kept in place because the previous turn did not finish cleanly. "
             b"Send continue to finish the response, or clear the queue."
         )
+        pi_rpc_record_queue(
+            console,
+            "Queued follow-ups were kept because the previous turn did not finish cleanly.",
+            title="Queue paused",
+        )
     console.rpc_last_assistant = {}
     console.rpc_message_blocks.clear()
+    console.rpc_timeline_message_blocks.clear()
+    console.rpc_timeline_delta_counts.clear()
+    console.rpc_timeline_current_message_id = ""
+    console.rpc_timeline_skip_current_message = False
     console.rpc_settle_revision += 1
     return bytes(output)
 
@@ -17485,10 +22174,22 @@ def pi_rpc_unexpected_eof_output(console: AgentConsole) -> bytes:
         b"The Pi process ended before the active turn reported a clean completion. "
         b"Any partial thinking, response, and tool output above was preserved."
     )
+    console.append_timeline(
+        "error",
+        "The Pi process ended before the active turn reported a clean completion. "
+        "Any partial thinking, response, and tool output was preserved.",
+        title="Pi session ended",
+        item_id=f"live:{console.rpc_timeline_turn}:session-ended", operation="replace",
+    )
     if console.rpc_queue_paused:
         output.extend(pi_rpc_heading("QUEUE PAUSED", "38;5;214"))
         output.extend(
             b"Queued follow-ups were kept in place and were not sent against the incomplete turn."
+        )
+        pi_rpc_record_queue(
+            console,
+            "Queued follow-ups were kept and were not sent against the incomplete turn.",
+            title="Queue paused",
         )
     return bytes(output)
 
@@ -17496,12 +22197,23 @@ def pi_rpc_unexpected_eof_output(console: AgentConsole) -> bytes:
 def pi_rpc_accept_queued_prompt(console: AgentConsole) -> None:
     """Commit a launcher-queued prompt once Pi proves it accepted the write."""
     message = console.rpc_queued_prompt_message
-    if message and console.rpc_follow_up_queue and console.rpc_follow_up_queue[0] == message:
+    accepted = bool(
+        message and console.rpc_follow_up_queue
+        and console.rpc_follow_up_queue[0] == message
+    )
+    if accepted:
         console.rpc_follow_up_queue.pop(0)
     console.rpc_queued_prompt_message = ""
     console.rpc_pending_messages = (
         len(console.rpc_follow_up_queue) + console.rpc_external_pending_messages
     )
+    if accepted:
+        count = console.rpc_pending_messages
+        pi_rpc_record_queue(
+            console,
+            f"{count} message{'s' if count != 1 else ''} waiting"
+            if count else "No queued messages",
+        )
 
 
 def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
@@ -17524,13 +22236,32 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
 
     if event_type == "response":
         command = str(event.get("command") or "")
+        if command == "compact":
+            console.rpc_compacting = False
         response_id = str(event.get("id") or "")
+        if command in {"steer", "prompt"} and response_id in console.rpc_steer_ids:
+            message = console.rpc_steer_ids.pop(response_id)
+            if event.get("success") and not console.rpc_prompt_id:
+                console.rpc_prompt_acknowledged = True
+            console.append_timeline(
+                "notice" if event.get("success") else "error",
+                message if event.get("success") else f"{event.get('error') or 'Steering failed'}\n\nUnsent steering: {message}",
+                title="Steering accepted · next agent step or new turn" if event.get("success") else "Steering failed",
+                item_id=response_id, operation="replace",
+            )
+            return b""
         if event.get("success") is False:
             error_text = safe_agent_transcript_text(
                 event.get("error") or f"{command} failed",
             )
             section("error", "PI ERROR", "38;5;203")
             output.extend(error_text.encode("utf-8"))
+            console.append_timeline(
+                "error", event.get("error") or f"{command} failed",
+                title="Pi error",
+                item_id=f"live:{console.rpc_timeline_turn}:error:{command or 'response'}",
+                operation="replace",
+            )
             if command == "prompt" and (
                 not response_id or not console.rpc_prompt_id
                 or response_id == console.rpc_prompt_id
@@ -17559,21 +22290,49 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
         ):
             pi_rpc_accept_queued_prompt(console)
             console.rpc_prompt_acknowledged = True
-        elif command == "get_messages" and not console.rpc_history_loaded:
+        elif command == "get_commands":
             data = event.get("data") if isinstance(event.get("data"), dict) else {}
-            output.extend(pi_rpc_render_history(data.get("messages")))
+            console.rpc_commands = [
+                {"name": safe_agent_ui_text(item.get("name"), 160),
+                 "description": safe_agent_ui_text(item.get("description"), 500),
+                 "source": safe_agent_ui_text(item.get("source"), 32)}
+                for item in (data.get("commands") or [])[:500]
+                if isinstance(item, dict) and isinstance(item.get("name"), str)
+            ]
+        elif command in {"get_entries", "get_messages"} and not console.rpc_history_loaded:
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            try:
+                messages = pi_rpc_saved_history(data) if command == "get_entries" else data.get("messages")
+            except ValueError as error:
+                console.append_timeline("error", str(error), title="History unavailable")
+                return bytes(output)
+            pi_rpc_record_history(console, messages)
+            output.extend(pi_rpc_render_history(messages))
             console.rpc_history_loaded = True
+            console.rpc_timeline_live_fingerprints.clear()
             console.rpc_section = ""
         elif command == "get_state":
             data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            pi_rpc_bind_queue(console, data.get("sessionFile"))
             try:
                 external_pending = max(0, min(1_000, int(data.get("pendingMessageCount") or 0)))
             except (TypeError, ValueError):
                 external_pending = 0
             console.rpc_external_pending_messages = external_pending
+            if not external_pending:
+                console.rpc_external_queue.clear()
             console.rpc_pending_messages = len(console.rpc_follow_up_queue) + external_pending
+            pi_rpc_record_queue(
+                console,
+                f"{console.rpc_pending_messages} message"
+                f"{'s' if console.rpc_pending_messages != 1 else ''} waiting"
+                if console.rpc_pending_messages else "No queued messages",
+            )
             measured_streaming = data.get("isStreaming") is True
-            if measured_streaming:
+            console.rpc_compacting = data.get("isCompacting") is True
+            if console.rpc_compacting:
+                pass  # Pi can be compacting while its normal stream is idle.
+            elif measured_streaming:
                 console.rpc_streaming = True
                 console.rpc_prompt_inflight = True
             elif not console.rpc_prompt_inflight or console.rpc_prompt_acknowledged:
@@ -17588,31 +22347,71 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
                     console.rpc_prompt_inflight = False
                     console.rpc_prompt_id = ""
                     console.rpc_prompt_acknowledged = False
-                    console.rpc_interactions.clear()
+                    if not console.rpc_command_ids:
+                        console.rpc_interactions.clear()
         return bytes(output)
 
     if event_type == "agent_start":
+        # Automatic recovery can start another agent loop inside this prompt.
+        # Keep its usage and clock until Pi confirms the whole prompt settled.
+        if console.rpc_prompt_started is None:
+            console.rpc_prompt_started = time.monotonic()
+            console.rpc_prompt_usage.clear()
+            console.rpc_prompt_usage_last_message = ""
+        console.rpc_statuses.pop("tokenSpeed", None)
+        console.rpc_timeline_turn += 1
+        console.rpc_timeline_user_message = 0
+        console.rpc_timeline_omitted_items.clear()
+        console.rpc_timeline_assistant_message = 0
+        console.rpc_timeline_tool = 0
+        console.rpc_timeline_current_message_id = ""
+        console.rpc_timeline_skip_current_message = False
+        console.rpc_timeline_message_blocks.clear()
+        console.rpc_timeline_delta_counts.clear()
+        console.rpc_timeline_active_tools.clear()
+        console.rpc_timeline_tool_text.clear()
+        console.rpc_timeline_tool_status.clear()
         console.rpc_prompt_inflight = True
         console.rpc_streaming = True
         console.rpc_queue_paused = False
         console.rpc_queue_advance_allowed = False
         console.rpc_last_assistant.clear()
+        console.rpc_loop_stop_reason = ""
+        console.rpc_tool_format_error = ""
         return b""
+    if event_type == "extension_error":
+        console.append_timeline("error", event.get("error") or "Pi extension failed", title="Pi command error")
+        return pi_rpc_heading("PI COMMAND ERROR", "38;5;203") + safe_agent_transcript_text(event.get("error")).encode("utf-8")
     if event_type == "agent_end":
         console.rpc_section = ""
         if event.get("willRetry") is True:
             console.rpc_streaming = True
             console.rpc_prompt_inflight = True
+            console.append_timeline(
+                "notice", "Pi is retrying the current turn.",
+                title="Retrying",
+                item_id=f"live:{console.rpc_timeline_turn}:retry", operation="replace",
+            )
         return b""
     if event_type == "agent_settled":
         return pi_rpc_settled_output(console)
     if event_type == "queue_update":
         steering = event.get("steering") if isinstance(event.get("steering"), list) else []
         follow_up = event.get("followUp") if isinstance(event.get("followUp"), list) else []
+        console.rpc_external_queue = [
+            {"message": item, "kind": kind}
+            for kind, messages in (("steer", steering), ("followUp", follow_up))
+            for item in messages[:PI_RPC_MAX_QUEUED_MESSAGES] if isinstance(item, str)
+        ]
         count = len(steering) + len(follow_up)
         console.rpc_external_pending_messages = count
         console.rpc_pending_messages = len(console.rpc_follow_up_queue) + count
         total_count = console.rpc_pending_messages
+        pi_rpc_record_queue(
+            console,
+            f"{total_count} message{'s' if total_count != 1 else ''} waiting"
+            if total_count else "No queued messages",
+        )
         if total_count and total_count != console.rpc_last_queue_count:
             section("queue", "QUEUED", "38;5;214")
             output.extend(
@@ -17623,11 +22422,52 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
     if event_type == "message_start":
         message = event.get("message")
         if isinstance(message, dict) and message.get("role") == "user":
+            console.rpc_timeline_user_message += 1
+            message_key, explicit_id = pi_rpc_timeline_message_key(
+                message, f"live:{console.rpc_timeline_turn}:user:{console.rpc_timeline_user_message}",
+            )
+            skip_message = explicit_id and message_key in console.rpc_timeline_seen_message_ids
+            if explicit_id:
+                pi_rpc_remember_timeline_value(
+                    console.rpc_timeline_seen_message_ids, message_key,
+                )
+            if not skip_message:
+                for _part_kind, text, _title, block_index in pi_rpc_timeline_message_parts(message):
+                    if not text:
+                        continue
+                    console.append_timeline(
+                        "user", text, title="You",
+                        item_id=f"{message_key}:user:{block_index}", operation="replace",
+                    )
+                    if not console.rpc_history_loaded:
+                        pi_rpc_remember_timeline_value(
+                            console.rpc_timeline_live_fingerprints,
+                            pi_rpc_timeline_fingerprint("user", "user", text, "You"),
+                        )
             section("user", "YOU", "38;5;75")
             for _kind, text in pi_rpc_message_text(message, include_thinking=False):
                 output.extend(text.encode("utf-8"))
         elif isinstance(message, dict) and message.get("role") == "assistant":
+            console.rpc_timeline_assistant_message += 1
+            assistant_fallback = (
+                f"live:{console.rpc_timeline_turn}:assistant:"
+                f"{console.rpc_timeline_assistant_message}"
+            )
+            message_key, explicit_id = pi_rpc_timeline_message_key(
+                message, assistant_fallback,
+            )
+            console.rpc_timeline_current_message_id = message_key
+            console.rpc_timeline_skip_current_message = bool(
+                explicit_id and message_key in console.rpc_timeline_seen_message_ids
+            )
+            if explicit_id:
+                pi_rpc_remember_timeline_value(
+                    console.rpc_timeline_seen_message_ids, message_key,
+                )
             console.rpc_message_blocks.clear()
+            console.rpc_tool_argument_deltas.clear()
+            console.rpc_timeline_message_blocks.clear()
+            console.rpc_timeline_delta_counts.clear()
             console.rpc_last_assistant.clear()
             console.rpc_queue_advance_allowed = False
         return bytes(output)
@@ -17645,9 +22485,20 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
                 except (TypeError, ValueError):
                     content_index = 0
                 key = f"thinking:{content_index}"
-                console.rpc_message_blocks[key] = (
-                    console.rpc_message_blocks.get(key, "") + text
-                )[:AGENT_CONSOLE_MAX_BUFFER]
+                pi_rpc_store_bounded_text(
+                    console.rpc_message_blocks, key,
+                    console.rpc_message_blocks.get(key, "") + text,
+                    total_bytes=AGENT_CONSOLE_MAX_BUFFER,
+                )
+                timeline_key = (
+                    f"{pi_rpc_current_assistant_prefix(console)}"
+                    f":thinking:{content_index}"
+                )
+                if not console.rpc_timeline_skip_current_message:
+                    pi_rpc_append_timeline_delta(
+                        console, "thinking", update.get("delta"),
+                        title="Thinking", item_id=timeline_key,
+                    )
                 output.extend(f"\x1b[2;38;5;183m{text}\x1b[0m".encode("utf-8"))
         elif update_type.startswith("text_"):
             section("response", "RESPONSE", "38;5;84")
@@ -17658,12 +22509,41 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
                 except (TypeError, ValueError):
                     content_index = 0
                 key = f"text:{content_index}"
-                console.rpc_message_blocks[key] = (
-                    console.rpc_message_blocks.get(key, "") + text
-                )[:AGENT_CONSOLE_MAX_BUFFER]
+                pi_rpc_store_bounded_text(
+                    console.rpc_message_blocks, key,
+                    console.rpc_message_blocks.get(key, "") + text,
+                    total_bytes=AGENT_CONSOLE_MAX_BUFFER,
+                )
+                timeline_key = (
+                    f"{pi_rpc_current_assistant_prefix(console)}"
+                    f":answer:{content_index}"
+                )
+                if not console.rpc_timeline_skip_current_message:
+                    pi_rpc_append_timeline_delta(
+                        console, "answer", update.get("delta"),
+                        title="", item_id=timeline_key,
+                    )
                 output.extend(text.encode("utf-8"))
-        elif update_type == "toolcall_end":
-            tool = update.get("toolCall") if isinstance(update.get("toolCall"), dict) else {}
+        elif update_type in {"toolcall_start", "toolcall_delta", "toolcall_end"}:
+            try:
+                content_index = max(0, min(4_096, int(update.get("contentIndex") or 0)))
+            except (TypeError, ValueError):
+                content_index = 0
+            partial = update.get("partial")
+            blocks = partial.get("content") if isinstance(partial, dict) else None
+            tool = update.get("toolCall")
+            if not isinstance(tool, dict):
+                tool = blocks[content_index] if isinstance(blocks, list) and content_index < len(blocks) else {}
+                if not tool:
+                    key = str(content_index)
+                    raw = console.rpc_tool_argument_deltas.get(key, "")
+                    if update_type == "toolcall_delta":
+                        raw += str(update.get("delta") or "")
+                        pi_rpc_store_bounded_text(console.rpc_tool_argument_deltas, key, raw,
+                                                  total_bytes=AGENT_CONSOLE_MAX_BUFFER)
+                    tool = {"arguments": pi_rpc_partial_tool_arguments(raw)}
+            if not isinstance(tool, dict):
+                return b""
             section(
                 "tool", f"TOOL · {safe_agent_transcript_text(tool.get('name') or 'tool', 160)}",
                 "38;5;214",
@@ -17672,12 +22552,47 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
                 arguments = json.dumps(tool.get("arguments"), ensure_ascii=False, indent=2)
             except (TypeError, ValueError):
                 arguments = str(tool.get("arguments") or "")
-            output.extend(safe_agent_transcript_text(arguments, 16_384).encode("utf-8"))
+            if not console.rpc_timeline_skip_current_message:
+                try:
+                    content_index = max(0, min(4_096, int(update.get("contentIndex") or 0)))
+                except (TypeError, ValueError):
+                    content_index = 0
+                tool_item_id = pi_rpc_timeline_tool_key(
+                    console, {"toolCall": tool},
+                    fallback=(
+                        f"{pi_rpc_current_assistant_prefix(console)}"
+                        f":toolCall:{content_index}"
+                    ),
+                    new_call=True,
+                )
+                timeline_arguments = safe_agent_timeline_text(
+                    arguments, PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES,
+                )
+                pi_rpc_store_bounded_text(
+                    console.rpc_timeline_tool_text, tool_item_id,
+                    timeline_arguments,
+                    total_bytes=PI_RPC_TIMELINE_MAX_TEXT_BYTES,
+                )
+                console.append_timeline(
+                    "toolCall", timeline_arguments,
+                    title=f"Writing · {tool.get('name') or 'Tool'}",
+                    item_id=tool_item_id,
+                    operation="replace",
+                )
+            if update_type == "toolcall_end":
+                output.extend(safe_agent_transcript_text(arguments, 16_384).encode("utf-8"))
         return bytes(output)
     if event_type == "message_end":
         message = event.get("message")
+        if isinstance(message, dict) and message.get("role") == "custom":
+            return pi_rpc_custom_notice(console, message, live=True)
         if not isinstance(message, dict) or message.get("role") != "assistant":
             return b""
+        usage_key = pi_rpc_current_assistant_prefix(console)
+        if (console.rpc_prompt_started is not None
+                and usage_key != console.rpc_prompt_usage_last_message):
+            pi_rpc_add_prompt_usage(console.rpc_prompt_usage, message)
+            console.rpc_prompt_usage_last_message = usage_key
         raw_content = message.get("content")
         if isinstance(raw_content, str):
             content = [{"type": "text", "text": raw_content}]
@@ -17685,26 +22600,117 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
             content = raw_content
         else:
             content = []
+        indexed_content = list(enumerate(content))
+        final_indexes = {
+            index for index, block in indexed_content if isinstance(block, dict)
+        }
+        # A closing snapshot can omit a block entirely even though its deltas
+        # were delivered. Reconcile those orphaned blocks before clearing the
+        # live accumulators so the structured Hub timeline cannot lose output.
+        for block_key, streamed in console.rpc_message_blocks.items():
+            kind, separator, raw_index = block_key.partition(":")
+            if not separator or kind not in {"thinking", "text"}:
+                continue
+            try:
+                index = max(0, min(4_096, int(raw_index)))
+            except (TypeError, ValueError):
+                continue
+            if index in final_indexes:
+                continue
+            indexed_content.append((index, {
+                "type": kind,
+                "thinking" if kind == "thinking" else "text": streamed,
+            }))
+            final_indexes.add(index)
+        indexed_content.sort(key=lambda item: item[0])
+
         thinking_characters = 0
         text_characters = 0
         tool_calls = 0
-        for index, block in enumerate(content):
+        for index, block in indexed_content:
             if not isinstance(block, dict):
                 continue
             kind = str(block.get("type") or "")
             if kind == "thinking":
-                final = safe_agent_transcript_text(block.get("thinking"))
+                final = pi_rpc_reconcile_final_block(
+                    console.rpc_message_blocks.get(f"thinking:{index}", ""),
+                    safe_agent_transcript_text(block.get("thinking"), AGENT_CONSOLE_MAX_BUFFER),
+                )
+                timeline_kind = "thinking"
+                timeline_final, timeline_title = pi_rpc_timeline_recent_text(final, "Thinking")
                 thinking_characters += len(final)
                 label, colour = "RECOVERED THINKING", "38;5;141"
             elif kind == "text":
-                final = safe_agent_transcript_text(block.get("text"))
+                final = pi_rpc_reconcile_final_block(
+                    console.rpc_message_blocks.get(f"text:{index}", ""),
+                    safe_agent_transcript_text(block.get("text"), AGENT_CONSOLE_MAX_BUFFER),
+                )
+                timeline_kind = "answer"
+                timeline_final, timeline_title = pi_rpc_timeline_recent_text(final)
                 text_characters += len(final)
                 label, colour = "RECOVERED RESPONSE", "38;5;84"
             elif kind == "toolCall":
                 tool_calls += 1
+                try:
+                    tool_arguments = json.dumps(
+                        block.get("arguments"), ensure_ascii=False, indent=2,
+                    )
+                except (TypeError, ValueError):
+                    tool_arguments = str(block.get("arguments") or "")
+                timeline_tool_arguments = safe_agent_timeline_text(
+                    tool_arguments, PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES,
+                )
+                tool_item_id = pi_rpc_timeline_tool_key(
+                    console, {"toolCall": block},
+                    fallback=(
+                        f"{pi_rpc_current_assistant_prefix(console)}"
+                        f":toolCall:{index}"
+                    ),
+                )
+                pi_rpc_store_bounded_text(
+                    console.rpc_timeline_tool_text, tool_item_id,
+                    timeline_tool_arguments,
+                    total_bytes=PI_RPC_TIMELINE_MAX_TEXT_BYTES,
+                )
+                tool_title = safe_agent_timeline_text(
+                    block.get("name") or "Tool", 160,
+                ).strip() or "Tool"
+                tool_status = console.rpc_timeline_tool_status.get(tool_item_id, "")
+                console.append_timeline(
+                    "toolCall", timeline_tool_arguments,
+                    title=f"{tool_status} · {tool_title}" if tool_status else tool_title,
+                    item_id=tool_item_id,
+                    operation="replace",
+                )
+                if not console.rpc_history_loaded:
+                    pi_rpc_remember_timeline_value(
+                        console.rpc_timeline_live_fingerprints,
+                        pi_rpc_timeline_fingerprint(
+                            "assistant", "toolCall", timeline_tool_arguments,
+                            safe_agent_timeline_text(
+                                block.get("name") or "Tool", 160,
+                            ).strip(),
+                        ),
+                    )
                 continue
             else:
                 continue
+            timeline_key = (
+                f"{pi_rpc_current_assistant_prefix(console)}"
+                f":{timeline_kind}:{index}"
+            )
+            console.append_timeline(
+                timeline_kind, timeline_final, title=timeline_title,
+                item_id=timeline_key, operation="replace",
+            )
+            if timeline_final:
+                if not console.rpc_history_loaded:
+                    pi_rpc_remember_timeline_value(
+                        console.rpc_timeline_live_fingerprints,
+                        pi_rpc_timeline_fingerprint(
+                            "assistant", timeline_kind, timeline_final, timeline_title,
+                        ),
+                    )
             if not final:
                 continue
             seen = console.rpc_message_blocks.get(f"{kind}:{index}", "")
@@ -17732,6 +22738,9 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
             "aborted": "aborted",
         }.get(normalized_stop_reason, "unexpected-eof")
         error_message = safe_agent_transcript_text(message.get("errorMessage"), 2_000)
+        if (console.rpc_loop_stop_reason and terminal_state in {"failed", "aborted"}
+                and (terminal_state == "aborted" or re.search(r"\babort(?:ed)?\b", error_message, re.I))):
+            terminal_state = "paused"
         console.rpc_last_assistant = {
             "thinkingCharacters": thinking_characters,
             "textCharacters": text_characters,
@@ -17744,11 +22753,19 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
             (text_characters > 0 or tool_calls > 0) and terminal_state == "clean"
         )
         console.rpc_message_blocks.clear()
+        console.rpc_timeline_message_blocks.clear()
         if terminal_state == "limited":
             section("limit", "RESPONSE LIMIT REACHED", "38;5;214")
             output.extend(
                 b"The model used the complete response allowance. Send continue to resume this task, "
                 b"or raise Max response before the next hard task."
+            )
+            console.append_timeline(
+                "notice",
+                "The model used the complete response allowance. Send continue to resume this task, "
+                "or raise Max response before the next hard task.",
+                title="Response limit reached",
+                item_id=f"live:{console.rpc_timeline_turn}:limit", operation="replace",
             )
         elif terminal_state == "failed":
             section("error", "PI ERROR", "38;5;203")
@@ -17756,44 +22773,186 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
                 error_message
                 or "Pi reported that the model turn failed before a clean completion."
             ).encode("utf-8"))
+            console.append_timeline(
+                "error",
+                message.get("errorMessage")
+                or "Pi reported that the model turn failed before a clean completion.",
+                title="Pi error",
+                item_id=f"live:{console.rpc_timeline_turn}:turn-error", operation="replace",
+            )
         elif terminal_state == "aborted":
             section("aborted", "RESPONSE ABORTED", "38;5;214")
             output.extend((
                 error_message
                 or "Pi reported that the model turn was aborted before a clean completion."
             ).encode("utf-8"))
+            console.append_timeline(
+                "notice",
+                message.get("errorMessage")
+                or "Pi reported that the model turn was aborted before a clean completion.",
+                title="Response aborted",
+                item_id=f"live:{console.rpc_timeline_turn}:aborted", operation="replace",
+            )
         return bytes(output)
     if event_type == "tool_execution_start":
+        tool_name = event.get("toolName") or "tool"
+        tool_item_id = pi_rpc_timeline_tool_key(console, event)
+        console.rpc_timeline_tool_status[tool_item_id] = "Running"
+        pi_rpc_bound_timeline_mapping(console.rpc_timeline_tool_status)
         section(
             "tool-running",
-            f"RUNNING · {safe_agent_transcript_text(event.get('toolName') or 'tool', 160)}",
+            f"RUNNING · {safe_agent_transcript_text(tool_name, 160)}",
             "38;5;214",
         )
+        console.append_timeline(
+            "toolCall",
+            console.rpc_timeline_tool_text.get(tool_item_id) or "Running",
+            title=f"Running · {tool_name}",
+            item_id=tool_item_id, operation="replace",
+        )
         return bytes(output)
+    if event_type == "tool_execution_update":
+        tool_item_id = pi_rpc_timeline_tool_key(console, event)
+        result = event.get("partialResult")
+        if isinstance(result, dict):
+            text = "\n".join(text for _kind, text, _title, _index in
+                             pi_rpc_timeline_message_parts({"content": result.get("content")}) if text)
+            console.append_timeline(
+                "toolResult", text, title=f"Running · {event.get('toolName') or 'tool'}",
+                item_id=f"{tool_item_id}:result", operation="replace",
+            )
+        return b""
     if event_type == "tool_execution_end":
+        tool_name = event.get("toolName") or "tool"
+        tool_item_id = pi_rpc_timeline_tool_key(console, event)
+        tool_status = "Failed" if event.get("isError") is True else "Completed"
+        console.rpc_timeline_tool_status[tool_item_id] = tool_status
+        pi_rpc_bound_timeline_mapping(console.rpc_timeline_tool_status)
         label = "TOOL FAILED" if event.get("isError") is True else "TOOL RESULT"
         colour = "38;5;203" if event.get("isError") is True else "38;5;109"
         section(
             "tool-result",
-            f"{label} · {safe_agent_transcript_text(event.get('toolName') or 'tool', 160)}",
+            f"{label} · {safe_agent_transcript_text(tool_name, 160)}",
             colour,
         )
         result = event.get("result")
+        timeline_result: list[str] = []
         if isinstance(result, dict):
             for _kind, text in pi_rpc_message_text(
                 {"content": result.get("content")}, include_thinking=False,
             ):
                 output.extend(text.encode("utf-8"))
+            timeline_result.extend(
+                text for _kind, text, _title, _index
+                in pi_rpc_timeline_message_parts({"content": result.get("content")})
+                if text
+            )
+        elif result is not None:
+            timeline_result.append(safe_agent_timeline_text(result))
+        result_text = "\n".join(timeline_result).strip()
+        guard_aborted = bool(event.get("isError") is True and (
+            (console.rpc_loop_stop_reason and re.search(r"\babort(?:ed)?\b", result_text, re.I))
+            # Pi 0.85 returns the extension's block reason before delivering
+            # its deferred notice, rather than returning an abort error.
+            or result_text.startswith("Paused: the model requested the same tool again after three identical successful results.")
+        ))
+        if guard_aborted:
+            tool_status = "Stopped"
+            console.rpc_timeline_tool_status[tool_item_id] = tool_status
+        console.append_timeline(
+            "toolCall",
+            console.rpc_timeline_tool_text.get(tool_item_id) or tool_status,
+            title=f"{tool_status} · {tool_name}",
+            item_id=tool_item_id, operation="replace",
+        )
+        console.append_timeline(
+            "toolResult",
+            result_text or ("Failed" if event.get("isError") is True else "Completed"),
+            title=f"{'Stopped' if guard_aborted else 'Failed' if event.get('isError') is True else 'Result'} · {tool_name}",
+            item_id=f"{tool_item_id}:result",
+            operation="replace",
+        )
+        if result_text and not console.rpc_history_loaded:
+            pi_rpc_remember_timeline_value(
+                console.rpc_timeline_live_fingerprints,
+                pi_rpc_timeline_fingerprint(
+                    "toolResult", "toolResult", result_text,
+                    safe_agent_timeline_text(tool_name, 160).strip(),
+                ),
+            )
         return bytes(output)
     if event_type == "compaction_start":
+        console.rpc_compacting = True
+        # A recoverable overflow is progress once Pi starts compacting.
+        if event.get("reason") == "overflow":
+            error_key = f"live:{console.rpc_timeline_turn}:turn-error"
+            console.append_timeline("error", "", item_id=error_key, operation="replace")
         section("status", "COMPACTING CONTEXT", "38;5;75")
+        console.append_timeline(
+            "notice", "Pi is compacting the conversation context.",
+            title="Compacting context",
+            item_id=f"live:{console.rpc_timeline_turn}:compaction", operation="replace",
+        )
+        return bytes(output)
+    if event_type == "compaction_end":
+        console.rpc_compacting = False
+        failed = event.get("errorMessage")
+        aborted = event.get("aborted") is True
+        console.append_timeline(
+            "error" if failed else "notice",
+            failed or ("Context compaction cancelled." if aborted else
+                       "Context compacted. Continuing…" if event.get("willRetry") else
+                       "Context compaction finished."),
+            title="Compaction failed" if failed else "Compaction cancelled" if aborted else "Context ready",
+            item_id=f"live:{console.rpc_timeline_turn}:compaction", operation="replace",
+        )
         return bytes(output)
     if event_type == "auto_retry_start":
         section("status", "RETRYING", "38;5;214")
         output.extend(safe_agent_transcript_text(event.get("errorMessage"), 2_000).encode("utf-8"))
+        console.append_timeline(
+            "notice", event.get("errorMessage") or "Pi is retrying the current turn.",
+            title="Retrying",
+            item_id=f"live:{console.rpc_timeline_turn}:retry", operation="replace",
+        )
+        return bytes(output)
+    if event_type == "auto_retry_end":
+        console.append_timeline(
+            "notice", "Pi finished the retry attempt.",
+            title="Retry finished",
+            item_id=f"live:{console.rpc_timeline_turn}:retry", operation="replace",
+        )
         return bytes(output)
     if event_type == "extension_ui_request":
+        # These are fire-and-forget TUI presentation updates, often emitted
+        # once per token. They are neither notifications nor input requests.
+        # Recording them fills the bounded journal and evicts real thinking.
+        if event.get("method") == "setStatus":
+            key = safe_agent_ui_text(event.get("statusKey"), 128)
+            if key:
+                raw = event.get("statusText")
+                if raw is None or raw == "":
+                    console.rpc_statuses.pop(key, None)
+                else:
+                    # Pi themes emit ANSI colour. Keep plain status text outside
+                    # the transcript, replacing each extension's previous value.
+                    limit = 24000 if key == "launcher.customUI" else 2048
+                    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(raw)[:limit * 4])
+                    console.rpc_statuses[key] = {
+                        "text": safe_agent_ui_text(text, limit).replace("\u200b", ""),
+                        "updatedAt": datetime.now(timezone.utc).isoformat(),
+                    }
+                    while len(console.rpc_statuses) > 32:
+                        del console.rpc_statuses[next(iter(console.rpc_statuses))]
+            return b""
+        if event.get("method") in {"setWidget", "setTitle", "set_editor_text"}:
+            return b""
         interaction = pi_rpc_interaction(event)
+        if interaction is not None and interaction["title"] == "__launcher_custom_ui__":
+            console.rpc_interactions = [item for item in console.rpc_interactions
+                if item.get("title") != "__launcher_custom_ui__"]
+            console.rpc_interactions.append(interaction)
+            return b""
         section(
             "action" if interaction is not None else "notice",
             "PI NEEDS INPUT" if interaction is not None else "PI NOTICE",
@@ -17801,6 +22960,15 @@ def pi_rpc_event_output(console: AgentConsole, event: Any) -> bytes:
         )
         title = event.get("title") or event.get("message") or event.get("method") or "Extension request"
         output.extend(safe_agent_transcript_text(title, 2_000).encode("utf-8"))
+        console.append_timeline(
+            "notice", title,
+            title="Pi needs input" if interaction is not None else "Pi notice",
+            item_id=(
+                f"interaction:{hashlib.sha256(str(event.get('id') or '').encode('utf-8')).hexdigest()[:20]}"
+                if event.get("id") else f"live:{console.rpc_timeline_turn}:interaction"
+            ),
+            operation="replace",
+        )
         if interaction is not None:
             console.rpc_interactions = [
                 item for item in console.rpc_interactions
@@ -17824,6 +22992,199 @@ def shell_join_redacted(argv: list[str]) -> str:
         if arg in {"--api-key", "--api-key-file", "--password"}:
             hidden_next = True
     return shlex.join(result)
+
+
+def _revalidated_mtplx_long_context_receipt(
+    model: dict[str, Any], capability: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Recheck runtime, MTP audit, config, path, and fingerprint at launch."""
+    scanned_runtime = str(capability.get("runtimeVersion") or "")
+    current_runtime = command_version(BINARIES.get("mtplx"))
+    if (
+        not scanned_runtime
+        or not current_runtime
+        or not secrets.compare_digest(scanned_runtime, current_runtime)
+        or not mtplx_exact_2111_runtime(current_runtime)
+    ):
+        return None
+    try:
+        model_path = Path(str(model.get("path") or "")).expanduser().resolve(strict=True)
+    except OSError:
+        return None
+    config = read_json(model_path / "config.json")
+    runtime = read_json(model_path / "mtplx_runtime.json")
+    if not config or not verified_mtplx_runtime(model_path, runtime, config):
+        return None
+    current_capability = copy.deepcopy(capability)
+    current_capability.update({"mtp": True, "runtimeVersion": current_runtime})
+    return mtplx_long_context_2111_contract(
+        model, current_capability, runtime_version=current_runtime,
+    )
+
+
+def verified_mtplx_operator_candidate_record(
+    model: dict[str, Any], capability: dict[str, Any], options: dict[str, Any],
+    context: int, output: int, client: str, reasoning: str,
+    chat: dict[str, Any] | None,
+    sampling_contract: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Resolve a fresh accepted 2.11.1 operator result for this exact request."""
+    try:
+        canonical_options = validated_profile_options(
+            "mtplx", model, capability, options,
+        )
+        if (
+            context < MTPLX_LONG_CONTEXT_MINIMUM
+            or canonical_options.get("acceleration") != "mtp"
+            or canonical_options.get("profile") != "turbo"
+        ):
+            return None
+        evidence = optimizer_evidence(
+            model, context, output, client, reasoning,
+            str(canonical_options.get("kv") or "off"), chat,
+            sampling_contract,
+        )
+        add_benchmark_engine_evidence(
+            evidence, model, canonical_options, ["mtplx"],
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    expected_settings = {
+        "depth": canonical_options.get("depth"),
+        "mtplxOperatorRoute": MTPLX_LONG_CONTEXT_2111_ROUTE,
+    }
+    records = capability.get("localBenchmarks")
+    candidates = [
+        item for item in records if isinstance(item, dict)
+    ] if isinstance(records, list) else []
+    latest = capability.get("localBenchmark")
+    if isinstance(latest, dict) and latest not in candidates:
+        candidates.append(latest)
+    matches: list[dict[str, Any]] = []
+    for record in candidates:
+        sweep = record.get("mtplxOperatorSweep")
+        mode_settings = record.get("modeSettings")
+        if (
+            record.get("kind") != "mtplx-long-context-operator-tuning"
+            or record.get("backend") != "mtplx"
+            or record.get("winner") != "mtp"
+            or record.get("settings") != expected_settings
+            or not isinstance(mode_settings, dict)
+            or mode_settings.get("mtp") != expected_settings
+            or not isinstance(sweep, dict)
+            or sweep.get("candidateAccepted") is not True
+            or sweep.get("selectedRoute") != MTPLX_LONG_CONTEXT_2111_ROUTE
+            or not route_qualification_record_is_fresh(record)
+            or not _local_benchmark_record_verified(
+                capability, record, evidence,
+            )
+        ):
+            continue
+        matches.append(record)
+    if not matches:
+        return None
+    return copy.deepcopy(max(
+        matches, key=lambda item: str(item.get("createdAt") or ""),
+    ))
+
+
+def _bind_mtplx_operator_route(
+    model: dict[str, Any], capability: dict[str, Any], options: dict[str, Any],
+    context: int, purpose: str,
+) -> dict[str, Any]:
+    """Replace all caller-supplied private bindings with a fresh local receipt."""
+    bound = copy.deepcopy(options)
+    bound.pop("_mtplxOperatorContractId", None)
+    bound.pop("_mtplxOperatorBaselineContractId", None)
+    route = str(bound.get("mtplxOperatorRoute") or MTPLX_LONG_CONTEXT_DEFAULT_ROUTE)
+    if route not in {MTPLX_LONG_CONTEXT_DEFAULT_ROUTE, MTPLX_LONG_CONTEXT_2111_ROUTE}:
+        raise ValueError("Unknown MTPLX operator route.")
+    bound["mtplxOperatorRoute"] = route
+    candidate_shape = bool(
+        context >= MTPLX_LONG_CONTEXT_MINIMUM
+        and str(bound.get("profile") or capability.get("profile") or "sustained") == "turbo"
+        and str(bound.get("acceleration") or "auto") == "mtp"
+    )
+    needs_receipt = route == MTPLX_LONG_CONTEXT_2111_ROUTE
+    measure_baseline = bool(
+        route == MTPLX_LONG_CONTEXT_DEFAULT_ROUTE
+        and purpose == "benchmark"
+        and candidate_shape
+        and isinstance(capability.get("longContext2111"), dict)
+        and capability["longContext2111"].get("ready") is True
+    )
+    if not (needs_receipt or measure_baseline):
+        return bound
+    receipt = _revalidated_mtplx_long_context_receipt(model, capability)
+    if (
+        receipt is None
+        or not _mtplx_long_context_capability_matches(
+            capability.get("longContext2111"), receipt,
+        )
+    ):
+        raise ValueError(
+            "The MTPLX 2.11.1 long-context receipt changed after scanning. "
+            "Rescan models before measuring or using its isolated operator routes."
+        )
+    binding_key = (
+        "_mtplxOperatorContractId"
+        if needs_receipt else "_mtplxOperatorBaselineContractId"
+    )
+    bound[binding_key] = str(receipt["contractId"])
+    return bound
+
+
+def validated_mtplx_operator_route(
+    plan: LaunchPlan, capability: dict[str, Any],
+) -> str:
+    """Validate one build-time MTPLX operator choice against its static receipt."""
+    route = str(
+        plan.options.get("mtplxOperatorRoute")
+        or MTPLX_LONG_CONTEXT_DEFAULT_ROUTE
+    )
+    if route not in {MTPLX_LONG_CONTEXT_DEFAULT_ROUTE, MTPLX_LONG_CONTEXT_2111_ROUTE}:
+        raise ValueError("Unknown MTPLX operator route.")
+    if route == MTPLX_LONG_CONTEXT_DEFAULT_ROUTE:
+        return route
+    receipt = mtplx_long_context_2111_contract(
+        plan.model, capability,
+        runtime_version=str(capability.get("runtimeVersion") or ""),
+    )
+    advertised = capability.get("longContext2111")
+    supplied_contract = plan.options.get("_mtplxOperatorContractId")
+    if (
+        receipt is None
+        or not _mtplx_long_context_capability_matches(advertised, receipt)
+        or not isinstance(supplied_contract, str)
+        or not secrets.compare_digest(supplied_contract, str(receipt["contractId"]))
+        or plan.context < MTPLX_LONG_CONTEXT_MINIMUM
+        or str(plan.options.get("profile") or capability.get("profile") or "") != "turbo"
+        or str(plan.options.get("acceleration") or "") != "mtp"
+    ):
+        raise ValueError(
+            "The MTPLX 2.11.1 dense-27B long-context route requires its current "
+            "receipt, at least 65,536 context, Turbo profile, and verified MTP."
+        )
+    return route
+
+
+def validated_pi_session_file(value: Any, project: str) -> str | None:
+    """Resume only an explicitly selected Pi session belonging to this project."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Choose a Pi session file.")
+    try:
+        path = Path(value).expanduser().resolve(strict=True)
+        if not path.is_file() or path.suffix != ".jsonl":
+            raise ValueError("Choose a Pi session file.")
+        with path.open(encoding="utf-8") as handle:
+            header = json.loads(handle.readline(16_384))
+        if header.get("type") != "session" or Path(header.get("cwd", "")).resolve() != Path(project).resolve():
+            raise ValueError("That Pi session belongs to a different project.")
+    except (OSError, UnicodeError, json.JSONDecodeError, AttributeError) as error:
+        raise ValueError("That Pi session could not be read.") from error
+    return str(path)
 
 
 def normalized_request(
@@ -17882,7 +23243,22 @@ def normalized_request(
     validate_runtime_context(backend, context)
     chat = validated_chat_settings(model, payload, client)
     validate_chat_capability(capability, chat, client)
+    sampling_contract = validated_sampling_contract(
+        model, payload, client, chat,
+    )
+    assert sampling_contract is not None
+    if client == "chat":
+        chat = chat_settings_from_sampling_contract(
+            sampling_contract,
+            system_prompt=str(chat.get("systemPrompt") or ""),
+        )
+    validate_sampling_capability(capability, sampling_contract)
+    sampling_enforcement = sampling_route_enforcement(
+        backend, client, capability, sampling_contract,
+    )
     reasoning = str(payload.get("reasoning", "medium"))
+    if model.get("nativeWhallm") and reasoning == "auto":
+        reasoning = "medium"
     if reasoning not in {"off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"}:
         raise ValueError("Unknown reasoning level.")
     reasoning_key = "codexReasoning" if client == "codex" else "agentReasoning"
@@ -17911,12 +23287,20 @@ def normalized_request(
     if backend in {"llamacpp", "uzu"} and purpose in {"session", "route-check"}:
         qualification_evidence = optimizer_evidence(
             model, context, output, client, reasoning,
-            str(options.get("kv") or "off"), chat,
+            str(options.get("kv") or "off"), chat, sampling_contract,
         )
         add_benchmark_engine_evidence(
             qualification_evidence, model, options, [backend],
         )
-        if verified_route_qualification(model, backend, qualification_evidence) is None:
+        capacity_record = (
+            _uzu_qualified_session_record({
+                **payload, "context": context, "output": output,
+                "client": client, "reasoning": reasoning,
+                "options": options, "chat": chat,
+            }, model) if backend == "uzu"
+            else verified_route_qualification(model, backend, qualification_evidence)
+        )
+        if capacity_record is None:
             if backend == "uzu":
                 raise ValueError(
                     "This exact Uzu DFlash + Weaver context needs a fresh successful local "
@@ -17930,16 +23314,37 @@ def normalized_request(
     if mode == "fastest":
         fastest_evidence = optimizer_evidence(
             model, context, output, client, reasoning, str(options.get("kv") or "off"), chat,
+            sampling_contract,
         )
         add_benchmark_engine_evidence(fastest_evidence, model, options, [backend])
         optimization = fastest_safe_options(
             backend, capability, options, fastest_evidence,
         )
         options = optimization["options"]
+    if backend == "mtplx":
+        if (
+            purpose in {"session", "route-check"}
+            and str(options.get("mtplxOperatorRoute") or "")
+            == MTPLX_LONG_CONTEXT_2111_ROUTE
+            and verified_mtplx_operator_candidate_record(
+                model, capability, options, context, output, client,
+                reasoning, chat, sampling_contract,
+            ) is None
+        ):
+            raise ValueError(
+                "Test this exact MTPLX long-context setup in Calibration before using its faster route."
+            )
+        options = _bind_mtplx_operator_route(
+            model, capability, options, context, purpose,
+        )
     plan = LaunchPlan(
         run_id, backend, client, model, project, context, output, reasoning,
         port, mode, dict(options), agent_host=agent_host, purpose=purpose,
         runtime_binary=runtime_binary, chat=chat,
+        sampling_contract=sampling_contract,
+        sampling_enforcement=sampling_enforcement,
+        pi_session_file=(validated_pi_session_file(payload.get("piSessionFile"), project)
+                         if client == "pi" and purpose == "session" else None),
     )
     if optimization:
         plan.warnings.append(
@@ -17958,7 +23363,7 @@ def normalized_request(
         build_engine_plan(plan)
         build_client_plan(plan)
     except Exception:
-        dispose_llamacpp_plan_bearers(plan)
+        dispose_plan_secrets(plan)
         raise
     return plan
 
@@ -17971,7 +23376,7 @@ def preview_launch_request(
     try:
         return plan.public()
     finally:
-        dispose_llamacpp_plan_bearers(plan)
+        dispose_plan_secrets(plan)
 
 
 def build_engine_plan(plan: LaunchPlan) -> None:
@@ -18012,8 +23417,18 @@ def build_omlx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     kv = str(plan.options.get("kv", "off"))
     if kv not in {"off", "q8", "q6", "q4"}:
         raise ValueError("Invalid oMLX KV mode.")
+    if acceleration == "dflash" and kv != "off":
+        if str(plan.options.get("dflashVerify", "adaptive")) not in {"adaptive", "dflash"}:
+            raise ValueError("Quantized KV requires Adaptive or Fixed DFlash. DDTree needs full precision.")
+        if semantic_version_key(omlx_plan_runtime_version(plan)) != semantic_version_key("0.6.4"):
+            raise ValueError("Quantized DFlash KV requires the launcher's oMLX 0.6.4 adapter.")
     if kv != "off":
-        plan.warnings.append("TurboQuant KV can change numerical output; the optimiser never enables it for you.")
+        if acceleration == "dflash":
+            plan.warnings.append(
+                f"DFlash target KV uses {kv.upper()} affine quantization with reusable prefixes. Quantization can change numerical output; ordinary oMLX fallback uses TurboQuant."
+            )
+        else:
+            plan.warnings.append("TurboQuant KV can change numerical output; the optimiser never enables it for you.")
     ane_prefill = str(plan.options.get("anePrefill", "off"))
     if ane_prefill not in {"off", "tuned"}:
         raise ValueError("ANE prefill must be Off or a measured local recommendation.")
@@ -18119,18 +23534,20 @@ def build_omlx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
         ):
             raise ValueError("The verified Qwen4 PLE mmap contract changed after scanning. Rescan models before launch.")
     chat_template_kwargs: dict[str, Any] = {}
+    # The private relay strips client reasoning overrides. Keep engine values
+    # as defaults so its native Pi summary requests can disable thinking.
+    # Forcing these keys in oMLX silently overrides that recovery policy and
+    # spends the entire summary allowance on the normal task thinking budget.
     forced_ct_kwargs: list[str] = []
     thinking_budget_enabled = False
     thinking_budget_tokens: int | None = None
     if plan.reasoning == "off":
         chat_template_kwargs["enable_thinking"] = False
-        forced_ct_kwargs.append("enable_thinking")
     elif plan.reasoning != "auto":
         supported_efforts = list(plan.model.get("templateReasoningEfforts") or [])
         if plan.reasoning not in supported_efforts:
             raise ValueError("This model template does not expose the selected reasoning effort in oMLX.")
         chat_template_kwargs.update({"enable_thinking": True, "reasoning_effort": plan.reasoning})
-        forced_ct_kwargs.extend(["enable_thinking", "reasoning_effort"])
         thinking_budget_enabled = True
         qualification_budget = plan.options.get("_qualificationThinkingBudgetTokens")
         if isinstance(qualification_budget, bool) or not isinstance(qualification_budget, int):
@@ -18152,6 +23569,9 @@ def build_omlx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     benchmark_mode = plan.purpose in {"benchmark", "runtime-promotion", "route-check"}
     tuner_mode = plan.purpose == "ane-tune"
     isolated_measurement = benchmark_mode or tuner_mode
+    if isolated_measurement:
+        # Measurements talk to the engine directly rather than the Hub relay.
+        forced_ct_kwargs = list(chat_template_kwargs)
     chunked_ane_prefill = tuner_mode or ane_tuned
     memory_settings = {
         "prefill_memory_guard": True,
@@ -18256,6 +23676,24 @@ def build_omlx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
             "dflash_block_size": depth,
             "dflash_verify_mode": verify_mode,
         })
+        if plan.purpose == "session" and plan.client == "pi":
+            # Keep one reusable conversation prefix. Native generation snapshots
+            # adopt resident arrays; the live memory guard still owns admission.
+            per_model_settings["dflash_in_memory_cache_max_entries"] = 1
+            snapshot_estimate = launch_memory_estimate(
+                {"backend": "omlx", "context": plan.context, "options": plan.options},
+                plan.model, {},
+            )
+            # A full 128K Qwen prefix has 8 GiB of FP16 KV before recurrent
+            # state and hidden features. The upstream 8 GiB logical cache cap
+            # would evict it even when native physical admission permits it.
+            # This limit retains one snapshot; it neither allocates memory nor
+            # changes the process/Metal ceiling or prefill admission checks.
+            per_model_settings["dflash_in_memory_cache_max_bytes"] = max(
+                8 * 1024**3,
+                int(snapshot_estimate["kvCacheBytes"]) + 1024**3
+                if snapshot_estimate["geometryReady"] else 0,
+            )
         if quant_bits is not None:
             plan.warnings.append(
                 "Draft quantisation saves memory but can change DFlash acceptance and speed; target verification still owns the output."
@@ -18278,6 +23716,20 @@ def build_omlx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     omlx_binary = plan.runtime_binary or BINARIES["omlx"]
     plan.engine_argv = [omlx_binary, "serve", "--base-path", str(base), "--model-dir", str(catalog), "--host", "127.0.0.1", "--port", str(plan.port), "--max-concurrent-requests", "1"]
     plan.engine_env = {"OMLX_BASE_PATH": str(base), "OMLX_API_KEY": api_key}
+    # Keep the installed runtime immutable. Only normal DFlash sessions on
+    # this audited API version use the local streaming/admission adapter.
+    if ((plan.purpose == "session" or kv != "off") and acceleration == "dflash"
+            and semantic_version_key(omlx_plan_runtime_version(plan)) == semantic_version_key("0.6.4")):
+        python = omlx_runtime_python(omlx_binary)
+        if not python:
+            raise ValueError("The oMLX DFlash session adapter needs its runtime Python.")
+        plan.engine_argv[:1] = [python, str(APP_DIR / "omlx_hub_runtime.py")]
+        plan.engine_env.update({
+            "LLM_LAUNCHER_OMLX_CONTEXT": str(plan.context),
+            "LLM_LAUNCHER_OMLX_PREVIEW": str(plan.run_dir / "tool-preview.json"),
+            "LLM_LAUNCHER_DFLASH_KV": kv,
+        })
+        plan.secrets["omlxNativeContextGuard"] = True
 
 
 def build_lmstudio(plan: LaunchPlan, cap: dict[str, Any]) -> None:
@@ -18316,10 +23768,48 @@ def build_lmstudio(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     plan.warnings.append("LM Studio is a shared service. Stop unloads only this launcher's model and leaves your LM Studio server running.")
 
 
+def configure_mtplx_hub_memory(plan: LaunchPlan, cap: dict[str, Any]) -> None:
+    """Apply the reviewed 48 GiB Mac policy to dense Qwen 27B sessions."""
+    if plan.purpose in {"benchmark", "route-check"}:
+        return
+    version = str(cap.get("runtimeVersion") or "").strip()
+    if not re.fullmatch(r"(?:mtplx\s+)?2\.11\.2(?:\s+\(2\.11\.2\))?", version, re.I):
+        return
+    config = read_json(Path(plan.model["path"]) / "config.json")
+    text_config = config.get("text_config", config)
+    if not isinstance(text_config, dict):
+        return
+    if (
+        _normalized_model_type(config.get("model_type")) not in {"qwen3_5", "qwen3_8"}
+        or any(text_config.get(key) != value for key, value in MTPLX_LONG_CONTEXT_DENSE_GEOMETRY.items())
+        or any(safe_int(text_config.get(key), 0, 0, 1_000_000) > 1 for key in ("num_experts", "num_local_experts", "n_routed_experts"))
+        or physical_memory_bytes() != 48 * 1024**3
+    ):
+        return
+    python = omlx_runtime_python(BINARIES["mtplx"])
+    if python is None:
+        raise ValueError("The MTPLX runtime Python is missing; repair the runtime before launching.")
+    plan.engine_argv[:1] = [str(python), str(APP_DIR / "mtplx_hub_runtime.py")]
+    plan.engine_env.update({
+        "MTPLX_MEMORY_LIMIT_BYTES": str(40 * 1024**3),
+        # One 128K target+MTP snapshot fits without the old 8 GiB switch to
+        # live-ref-only storage. A bounded total bank prevents accumulation.
+        "MTPLX_SESSION_BANK_PER_SESSION_BYTES": str(12 * 1024**3),
+        # Auto keeps the engine's pressure-sensitive ceiling active; the
+        # adapter additionally clamps the bank's absolute maximum to 12 GiB.
+        "MTPLX_SESSION_BANK_MAX_BYTES": "auto",
+        "MTPLX_PREFILL_ADMISSION_SHED": "1",
+        "MTPLX_MEMORY_PRESSURE_GUARD": "1",
+    })
+    plan.options["mtplxMemoryPolicy"] = "hub-prefill-1"
+
+
 def build_mtplx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     acceleration = str(plan.options.get("acceleration", "auto"))
     profile = str(plan.options.get("profile", cap.get("profile", "sustained")))
     depth = safe_int(plan.options.get("depth"), int(cap.get("depth", 3)), 1, 8)
+    operator_route = validated_mtplx_operator_route(plan, cap)
+    plan.options["mtplxOperatorRoute"] = operator_route
     if acceleration not in {"auto", "off", "mtp"}:
         raise ValueError("Invalid MTPLX acceleration mode.")
     if acceleration == "mtp" and not cap.get("mtp"):
@@ -18359,6 +23849,13 @@ def build_mtplx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
         argv.extend(["--no-mtp", "--no-load-mtp", "--generation-mode", "ar"])
     else:
         argv.extend(["--generation-mode", "auto"])
+    reasoning_template = preserved_qwopus_template(plan.model["path"])
+    if reasoning_template is not None:
+        template_path = plan.run_dir / "qwopus-preserved-thinking.jinja"
+        template_path.write_text(reasoning_template, encoding="utf-8")
+        argv.extend(["--chat-template-profile", "tokenizer", "--chat-template-path", str(template_path)])
+        argv.extend(["--tool-prompt-mode", "native"])
+        plan.options["reasoningHistory"] = "scoped"
     plan.model["servedId"] = served
     plan.secrets["apiKey"] = key_file.read_text(encoding="utf-8").strip()
     plan.engine_argv = argv
@@ -18376,15 +23873,67 @@ def build_mtplx(plan: LaunchPlan, cap: dict[str, Any]) -> None:
         "MTPLX_ACTIVE_READ_COMPACT_MAX_LINES": "4096",
         "MTPLX_PI_CONVERGENCE_AFTER_TOOLS": "0",
         "MTPLX_READ_ONLY_INSPECTION_FORCE_ANSWER_AFTER_TOOLS": "0",
+        # Never inherit an explicit overcommit from a parent shell. The user
+        # previously approved only launcher-admitted memory plans, and MTPLX
+        # 2.11.1 otherwise accepts MTPLX_ALLOW_SWAP=1 as an operator override.
+        "MTPLX_ALLOW_SWAP": "0",
+        # Keep these measured-dark experiments off so an inherited shell
+        # setting cannot opt a normal route into an unqualified execution lane.
+        "MTPLX_ASYNC_AR": "0",
+        "MTPLX_FUSED_MOE_VERIFY": "0",
     }
+    if operator_route == MTPLX_LONG_CONTEXT_2111_ROUTE:
+        plan.engine_env.update(MTPLX_LONG_CONTEXT_CANDIDATE_ENV)
+    elif (
+        plan.purpose == "benchmark"
+        and plan.context >= MTPLX_LONG_CONTEXT_MINIMUM
+        and acceleration == "mtp"
+        and profile == "turbo"
+    ):
+        receipt = mtplx_long_context_2111_contract(
+            plan.model, cap,
+            runtime_version=str(cap.get("runtimeVersion") or ""),
+        )
+        advertised = cap.get("longContext2111")
+        baseline_binding = plan.options.get("_mtplxOperatorBaselineContractId")
+        direct_contract_test = bool(
+            isinstance(advertised, dict) and "environment" in advertised
+        )
+        baseline_capable = bool(
+            isinstance(advertised, dict)
+            and (advertised.get("ready") is True or direct_contract_test)
+        )
+        if baseline_capable:
+            baseline_verified = bool(
+                receipt is not None
+                and _mtplx_long_context_capability_matches(advertised, receipt)
+                and (
+                    direct_contract_test
+                    or (
+                        isinstance(baseline_binding, str)
+                        and secrets.compare_digest(
+                            baseline_binding, str(receipt["contractId"]),
+                        )
+                    )
+                )
+            )
+            if not baseline_verified:
+                raise ValueError(
+                    "The MTPLX 2.11.1 inverse baseline lost its exact receipt before launch. "
+                    "Nothing was measured; rescan models and retry Calibration."
+                )
+            plan.engine_env.update(MTPLX_LONG_CONTEXT_BASELINE_ENV)
     if reasoning_effort in THINKING_BUDGETS:
         effective_budget = min(THINKING_BUDGETS[reasoning_effort], max(1, plan.output // 2))
         plan.engine_env["MTPLX_THINKING_BUDGET"] = str(effective_budget)
         if effective_budget < THINKING_BUDGETS[reasoning_effort]:
             plan.warnings.append("The selected response ceiling is too small for the full reasoning budget; half is reserved for the answer/tool call.")
+    configure_mtplx_hub_memory(plan, cap)
 
 
-def _uzu_engine_argv(plan: LaunchPlan, binary: Path) -> list[str]:
+def _uzu_engine_argv(
+    plan: LaunchPlan, binary: Path, api_key_file: Path,
+) -> list[str]:
     return [
         str(UZU_SANDBOX_EXECUTABLE),
         "-p", UZU_NETWORK_SANDBOX_PROFILE,
@@ -18393,27 +23942,42 @@ def _uzu_engine_argv(plan: LaunchPlan, binary: Path) -> list[str]:
         "--model", UZU_MODEL_REGISTRY_ID,
         "--host", "127.0.0.1",
         "--port", str(plan.port),
+        "--api-key-file", str(api_key_file),
+        "--context-limit", str(plan.context),
+        "--max-output-tokens", str(plan.output),
         "--prefix-cache",
     ]
 
 
 def _validated_uzu_route(
     plan: LaunchPlan, cap: dict[str, Any], *, verify_argv: bool = False,
-) -> tuple[Path, dict[str, Any], dict[str, Any], tuple[str, str]]:
+    opened_revision: OpenExecutableRevision | None = None,
+) -> tuple[Path, dict[str, Any], dict[str, Any], tuple[Any, ...]]:
     """Rebind launch to the exact model receipts and safe runtime bytes."""
     if plan.model.get("uzuNative") is not True:
         raise ValueError("This model is not a pinned Uzu-native artifact.")
     binary_value = plan.runtime_binary or BINARIES.get("mirai")
-    runtime = uzu_runtime_contract(binary_value)
+    runtime = uzu_runtime_contract(binary_value, opened_revision=opened_revision)
     if runtime.get("ready") is not True:
         raise ValueError(str(runtime.get("reason") or "A verified memory-safe Uzu runtime is required."))
+    if any(runtime.get(field) is not True for field in (
+        "binaryIdentityPinned", "nativeBearerAuthentication", "oneUseApiKeyFile",
+        "nativeContextLimit", "nativeOutputLimit", "boundedContextReady",
+    )) or runtime.get("nativeBoundaryContractId") != UZU_NATIVE_BOUNDARY_CONTRACT_ID:
+        raise ValueError(
+            "The selected Uzu binary does not match the launcher's native auth/context/output contract."
+        )
     if not uzu_listener_protection_ready(runtime):
         raise ValueError(
             "Direct access to Uzu's raw loopback listener is not protected; "
             "the bounded launcher relay cannot be trusted."
         )
     try:
-        binary = Path(str(binary_value)).expanduser().resolve(strict=True)
+        binary = (
+            opened_revision.path
+            if opened_revision is not None else
+            Path(str(binary_value)).expanduser().resolve(strict=True)
+        )
         model_path = Path(str(plan.model.get("path") or "")).expanduser().resolve(strict=True)
     except OSError as error:
         raise ValueError("The Uzu executable or model cache moved after the model scan.") from error
@@ -18436,36 +24000,80 @@ def _validated_uzu_route(
         or cap.get("modelToolchainVersion") != UZU_MODEL_TOOLCHAIN_VERSION
     ):
         raise ValueError("The pinned Uzu model files or catalog receipt changed. Rescan models.")
+    runtime_sha = str(runtime.get("binary", {}).get("sha256") or "")
+    scanned_runtime = cap.get("runtimeIdentity")
+    scanned_system = cap.get("qualificationSystemContract")
+    if (
+        not isinstance(scanned_runtime, dict)
+        or not isinstance(scanned_system, dict)
+        or scanned_runtime.get("nativeBoundaryContractId") != UZU_NATIVE_BOUNDARY_CONTRACT_ID
+        or scanned_runtime.get("nativeBearerAuthentication") is not True
+        or scanned_runtime.get("oneUseApiKeyFile") is not True
+        or scanned_runtime.get("nativeContextLimit") is not True
+        or scanned_runtime.get("nativeOutputLimit") is not True
+        or scanned_runtime.get("binaryIdentityPinned") is not True
+        or scanned_runtime.get("networkSandbox") is not True
+        or scanned_runtime.get("memorySafetyBlocked") is not False
+        or not secrets.compare_digest(
+            str(scanned_runtime.get("binary", {}).get("sha256") or ""), runtime_sha,
+        )
+        or scanned_runtime.get("binary", {}).get("size")
+        != runtime.get("binary", {}).get("size")
+        or scanned_runtime.get("upstreamCommit") != runtime.get("upstreamCommit")
+        or scanned_runtime.get("sourcePatchSha256") != runtime.get("sourcePatchSha256")
+        or scanned_system.get("rawListenerProtected") is not True
+        or scanned_system.get("nativeBoundaryContractId") != UZU_NATIVE_BOUNDARY_CONTRACT_ID
+        or scanned_system.get("nativeBearerAuthentication") is not True
+        or scanned_system.get("oneUseApiKeyFile") is not True
+        or scanned_system.get("nativeContextLimit") is not True
+        or scanned_system.get("nativeOutputLimit") is not True
+    ):
+        raise ValueError("The hardened Uzu runtime contract changed after the model scan. Rescan models.")
     if plan.context not in UZU_SAFE_CONTEXT_WINDOWS:
         choices = ", ".join(f"{value:,}" for value in UZU_SAFE_CONTEXT_WINDOWS)
         raise ValueError(f"The first Uzu qualification permits only these bounded contexts: {choices}.")
     options = validated_profile_options("uzu", plan.model, cap, plan.options)
-    expected = _uzu_engine_argv(plan, binary)
-    if verify_argv and (
-        plan.engine_argv != expected
-        or plan.engine_env
-        or any(key.startswith("DYLD_") for key in plan.engine_env)
-    ):
-        raise ValueError("The fixed local-only Uzu launch contract changed after validation.")
-    binary_sha = str(runtime.get("binary", {}).get("sha256") or "")
-    return binary, runtime, cache, (binary_sha, current_fingerprint)
+    key_identity: tuple[Any, ...] | None = None
+    offline_catalog_identity: str | None = None
+    if verify_argv:
+        offline_catalog_identity = _validated_uzu_offline_catalog(cache)
+        api_key_file = _validated_uzu_api_key_file(plan)
+        expected = _uzu_engine_argv(plan, binary, api_key_file)
+        if (
+            plan.engine_argv != expected
+            or plan.engine_env
+            or any(key.startswith("DYLD_") for key in plan.engine_env)
+        ):
+            raise ValueError("The fixed local-only Uzu launch contract changed after validation.")
+        key_identity = _llamacpp_strong_path_identity(api_key_file)
+    return binary, runtime, cache, (
+        runtime_sha,
+        current_fingerprint,
+        key_identity,
+        str(runtime.get("binary", {}).get("id") or ""),
+        offline_catalog_identity,
+    )
 
 
 def build_uzu(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     binary, _runtime, _cache, _identities = _validated_uzu_route(plan, cap)
+    _ensure_uzu_offline_catalog(_cache)
     options = validated_profile_options("uzu", plan.model, cap, plan.options)
     plan.options.update(options)
     plan.model["servedId"] = UZU_MODEL_REGISTRY_ID
-    plan.engine_argv = _uzu_engine_argv(plan, binary)
+    api_key_file, _api_key = _create_plan_api_key_file(
+        plan, backend="uzu", filename=UZU_API_KEY_FILE_NAME, label="Uzu",
+    )
+    plan.engine_argv = _uzu_engine_argv(plan, binary, api_key_file)
     plan.engine_env = {}
     plan.warnings.extend([
         "Uzu owns the bundled DFlash draft and Weaver verification tree; the launcher does not replace them with an AR label or expose unsafe speculative overrides.",
         "The Uzu process is wrapped in a macOS sandbox that denies every outbound connection, including telemetry and automatic downloads; only loopback serving remains available.",
-        f"The protected raw listener and authenticated relay conservatively enforce the selected 16K/32K request boundary, and the engine has a {UZU_PROCESS_MEMORY_CEILING_BYTES / 1024**3:.0f} GiB process-group safety ceiling.",
+        f"The raw server requires a one-use bearer key and natively enforces this run's {plan.context:,}-token context and {plan.output:,}-token output ceilings; the relay adds defense in depth and the engine has a {UZU_PROCESS_MEMORY_CEILING_BYTES / 1024**3:.0f} GiB process-group safety ceiling.",
     ])
 
 
-def validate_uzu_launch_boundary(plan: LaunchPlan) -> tuple[str, str]:
+def validate_uzu_launch_boundary(plan: LaunchPlan) -> tuple[Any, ...]:
     cap = plan.model.get("backends", {}).get("uzu")
     if not isinstance(cap, dict):
         raise ValueError("The Uzu launch capability is missing. Rescan models.")
@@ -18475,10 +24083,85 @@ def validate_uzu_launch_boundary(plan: LaunchPlan) -> tuple[str, str]:
     return identities
 
 
-def confirm_uzu_launch_identities(plan: LaunchPlan, expected: tuple[str, str]) -> None:
+def confirm_uzu_launch_identities(plan: LaunchPlan, expected: tuple[Any, ...]) -> None:
     current = validate_uzu_launch_boundary(plan)
     if not expected or current != expected:
         raise ValueError("The Uzu executable or model receipts changed before launch.")
+
+
+@dataclass
+class UzuExecutableLaunch:
+    """The immediate Uzu command plus its retained, verified executable fd."""
+
+    opened: OpenExecutableRevision
+    argv: list[str]
+    pass_fds: tuple[int, ...]
+    executes_from_fd: bool
+
+    def close(self) -> None:
+        self.opened.close()
+
+
+def _uzu_inherited_executable_path(opened: OpenExecutableRevision) -> str | None:
+    """Return an executable fd path only when the host exposes one as executable.
+
+    macOS currently exposes `/dev/fd/N` without execute permission, so its
+    `sandbox-exec` rejects that path.  Keeping this feature check here permits
+    a descriptor-exec handoff on a host that genuinely supports it without
+    claiming that current macOS has `fexecve`/`execveat` semantics.
+    """
+    candidate = Path("/dev/fd") / str(opened.fd)
+    try:
+        candidate_details = candidate.stat()
+        descriptor_details = os.fstat(opened.fd)
+    except OSError:
+        return None
+    if (
+        candidate_details.st_ino != descriptor_details.st_ino
+        or candidate_details.st_size != descriptor_details.st_size
+        or candidate_details.st_mtime_ns != descriptor_details.st_mtime_ns
+        or not os.access(candidate, os.X_OK)
+    ):
+        return None
+    return str(candidate)
+
+
+def prepare_uzu_executable_launch(
+    plan: LaunchPlan, expected: tuple[Any, ...],
+) -> UzuExecutableLaunch:
+    """Retain the authoritative Uzu runtime fd through immediate process spawn.
+
+    This pins the launcher-managed executable only. The separately validated
+    model-cache receipts remain path based and are not represented as fd-pinned
+    by this handoff.
+    """
+    binary_value = plan.runtime_binary or BINARIES.get("mirai")
+    opened = _open_uzu_runtime_executable(binary_value)
+    try:
+        cap = plan.model.get("backends", {}).get("uzu")
+        if not isinstance(cap, dict):
+            raise ValueError("The Uzu launch capability is missing. Rescan models.")
+        _binary, _runtime, _cache, current = _validated_uzu_route(
+            plan, cap, verify_argv=True, opened_revision=opened,
+        )
+        if not expected or current != expected:
+            raise ValueError("The Uzu executable or model receipts changed before launch.")
+        _confirm_open_uzu_executable(opened)
+        argv = list(plan.engine_argv)
+        executable_path = _uzu_inherited_executable_path(opened)
+        if executable_path is None:
+            # Current macOS cannot exec /dev/fd/N. The owner-only path is
+            # checked against this retained inode immediately before and after
+            # Popen; this narrows but cannot eliminate a malicious same-user
+            # rename race. Do not describe this fallback as race-free.
+            return UzuExecutableLaunch(opened, argv, (), False)
+        if len(argv) < 4 or argv[3] != str(opened.path):
+            raise ValueError("The fixed Uzu executable position changed before launch.")
+        argv[3] = executable_path
+        return UzuExecutableLaunch(opened, argv, (opened.fd,), True)
+    except Exception:
+        opened.close()
+        raise
 
 
 def _verified_ssd_model_path(plan: LaunchPlan, cap: dict[str, Any]) -> Path:
@@ -18568,7 +24251,38 @@ def build_mference(plan: LaunchPlan, cap: dict[str, Any]) -> None:
 
 
 def build_whallm(plan: LaunchPlan, cap: dict[str, Any]) -> None:
-    """Own a private route to Whallm without pretending to own its model process."""
+    """Launch the pinned local install, or bridge an independently running Whallm."""
+    if plan.model.get("nativeWhallm"):
+        if cap.get("nativeWhallm") is not True or cap.get("runnable") is not True:
+            raise ValueError("This model is not a verified native Whallm route. Rescan models.")
+        install = whallm_runtime.inspect_install(BINARIES.get("whallm"), plan.model.get("path"))
+        if install != plan.model["nativeWhallm"]:
+            raise ValueError("Whallm's runtime or model changed. Rescan before launching.")
+        conflict = whallm_qualification_conflict()
+        if conflict:
+            raise ValueError("A separate Whallm model is already active. Use its existing shared route or unload it first.")
+        if plan.reasoning == "off":
+            raise ValueError("Thinking stays enabled on the native Whallm route.")
+        plan.reasoning = "medium" if plan.reasoning == "auto" else plan.reasoning
+        plan.options.update(validated_profile_options("whallm", plan.model, cap, plan.options))
+        config = whallm_runtime.launch_config(
+            install, port=plan.port, context=plan.context, output=plan.output,
+            cache_directory=STATE_DIR / "whallm-cache" / whallm_runtime.VERSION / install["artifactIdentity"][:16] / str(plan.context),
+        )
+        config_path = plan.run_dir / "whallm-owned.json"
+        atomic_json(config_path, config)
+        plan.options["_whallmConfig"] = config
+        plan.model["servedId"] = WHALLM_MODEL_ID
+        plan.secrets["apiKey"] = secrets.token_urlsafe(32)
+        plan.engine_argv = [install["python"], "-I", "-S", "-B", str(APP_DIR / "whallm_runtime.py"), str(config_path)]
+        plan.engine_env = {"DEEPSEEK_API_KEY": plan.secrets["apiKey"],
+                           "WHALLM_ANE_BRIDGE": str(Path(install["app"]) / "Contents/Frameworks/libWhallmANE.dylib")}
+        plan.warnings.extend([
+            "LLM Launcher owns this Whallm process and unloads it when the session ends.",
+            "Full 512-expert Qwen uses SSD streaming with a fixed 40 GiB memory ceiling and 16K working context.",
+            "This 48 GiB Mac remains below Whallm's published 64 GiB support floor; the full model is separate from a pruned REAP checkpoint.",
+        ])
+        return
     if (
         plan.model.get("sharedServer") is not True
         or plan.model.get("remoteModelId") != WHALLM_MODEL_ID
@@ -18603,7 +24317,7 @@ def build_whallm(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     plan.engine_env = {}
     plan.warnings.extend([
         "Whallm owns the full 512-expert model and its SSD cache. Stop closes only this launcher's private route; use Whallm to unload the model.",
-        "Whallm publishes a 64 GB support floor. Its M5 Pro measurements stayed below 19 GiB through 16K input, so this 48 GB Mac is exposed as an experimental—not guaranteed—route.",
+        "Whallm publishes a 64 GiB support floor. Its current M5 Pro measurements reached 22.75 GiB of MLX active memory through 16K input, so this 48 GiB Mac is exposed as an experimental—not guaranteed—route.",
         "The Whallm checkpoint is a separate MXFP4 install and is never compared as equivalent to a pruned REAP checkpoint.",
     ])
 
@@ -18717,18 +24431,30 @@ def _llamacpp_api_key_file(plan: LaunchPlan) -> Path:
     return plan.run_dir / LLAMACPP_API_KEY_FILE_NAME
 
 
-def dispose_llamacpp_plan_bearers(plan: LaunchPlan) -> None:
-    """Remove fixed bearer files from an unstarted or stopped llama.cpp plan.
+def _uzu_api_key_file(plan: LaunchPlan) -> Path:
+    if plan.run_dir is None:
+        raise ValueError("The private Uzu run folder is missing.")
+    return plan.run_dir / UZU_API_KEY_FILE_NAME
 
-    Planning creates the server credential because the exact argv is part of
-    the launch contract.  Read-only previews and a last-second admission race
-    must therefore remove that credential themselves instead of relying on
-    the run manager's stop path.  The operation is deliberately idempotent and
-    limited to the fixed bearer-file names in this plan's owner-controlled run
-    directory.
+
+def _plan_private_bearer_file_names(plan: LaunchPlan) -> tuple[str, ...]:
+    proxy_names = ("session-proxy.json", "codex-proxy.json")
+    if plan.backend == "llamacpp":
+        return LLAMACPP_PRIVATE_BEARER_FILE_NAMES
+    if plan.backend == "uzu":
+        return UZU_PRIVATE_BEARER_FILE_NAMES
+    return proxy_names
+
+
+def dispose_plan_secrets(plan: LaunchPlan) -> None:
+    """Remove fixed bearer files and forget in-memory keys for one plan.
+
+    Uzu and llama.cpp both create their server credential during planning so
+    the exact argv can be validated before exec.  Previews, rejected admission,
+    startup failure, and normal Stop all use this idempotent backend-neutral
+    cleanup path.  Only fixed names inside the plan's owner-controlled run
+    directory may be unlinked.
     """
-    if plan.backend != "llamacpp":
-        return
     run_dir = plan.run_dir
     try:
         if run_dir is None:
@@ -18740,7 +24466,7 @@ def dispose_llamacpp_plan_bearers(plan: LaunchPlan) -> None:
             or directory.st_uid != os.geteuid()
         ):
             raise OSError("unsafe run directory")
-        for name in LLAMACPP_PRIVATE_BEARER_FILE_NAMES:
+        for name in _plan_private_bearer_file_names(plan):
             candidate = run_dir / name
             try:
                 details = candidate.lstat()
@@ -18758,13 +24484,23 @@ def dispose_llamacpp_plan_bearers(plan: LaunchPlan) -> None:
         plan.secrets.pop(key, None)
 
 
-def _validated_llamacpp_api_key_file(plan: LaunchPlan) -> Path:
-    """Bind the live credential to one owner-only regular file in this run."""
-    key_file = _llamacpp_api_key_file(plan)
+def dispose_llamacpp_plan_bearers(plan: LaunchPlan) -> None:
+    """Compatibility wrapper for callers that still use the old name."""
+    dispose_plan_secrets(plan)
+
+
+def _validated_plan_api_key_file(
+    plan: LaunchPlan, *, backend: str, filename: str, label: str,
+) -> Path:
+    """Bind a live credential to one owner-only regular file in this run."""
+    if plan.backend != backend:
+        raise ValueError(f"The private {label} API-key file belongs to another backend.")
     run_dir = plan.run_dir
     if run_dir is None:
-        raise ValueError("The private llama.cpp run folder is missing.")
+        raise ValueError(f"The private {label} run folder is missing.")
+    key_file = run_dir / filename
     expected = str(plan.secrets.get("apiKey") or "")
+    descriptor: int | None = None
     try:
         run_details = run_dir.lstat()
         details = key_file.lstat()
@@ -18781,21 +24517,128 @@ def _validated_llamacpp_api_key_file(plan: LaunchPlan) -> Path:
             or stat.S_IMODE(details.st_mode) != 0o600
             or not 1 <= details.st_size <= 1_024
             or resolved_key_file.parent != resolved_run_dir
-            or resolved_key_file != resolved_run_dir / LLAMACPP_API_KEY_FILE_NAME
+            or resolved_key_file != resolved_run_dir / filename
         ):
-            raise ValueError("The private llama.cpp API-key file changed before launch.")
-        raw = key_file.read_bytes()
+            raise ValueError(f"The private {label} API-key file changed before launch.")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(key_file, flags)
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev != details.st_dev
+            or opened.st_ino != details.st_ino
+            or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_uid != os.geteuid()
+        ):
+            raise ValueError(f"The private {label} API-key file changed before launch.")
+        raw = os.read(descriptor, 1_025)
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev != opened.st_dev
+            or after.st_ino != opened.st_ino
+            or after.st_size != opened.st_size
+            or after.st_mtime_ns != opened.st_mtime_ns
+            or after.st_ctime_ns != opened.st_ctime_ns
+        ):
+            raise ValueError(f"The private {label} API-key file changed before launch.")
         value = raw.decode("utf-8")
     except (OSError, UnicodeError) as error:
-        raise ValueError("The private llama.cpp API-key file is missing or unreadable.") from error
+        raise ValueError(f"The private {label} API-key file is missing or unreadable.") from error
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     if (
         not expected
         or len(expected) > 512
         or "\0" in expected
         or not secrets.compare_digest(value, expected + "\n")
     ):
-        raise ValueError("The private llama.cpp API-key file changed before launch.")
+        raise ValueError(f"The private {label} API-key file changed before launch.")
     return key_file
+
+
+def _create_plan_api_key_file(
+    plan: LaunchPlan, *, backend: str, filename: str, label: str,
+) -> tuple[Path, str]:
+    """Create one exclusive owner-only credential inside the fixed run folder."""
+    if plan.backend != backend or plan.run_dir is None:
+        raise ValueError(f"The private {label} run folder is missing.")
+    run_dir = plan.run_dir
+    key_file = run_dir / filename
+    api_key = secrets.token_urlsafe(32)
+    directory_fd: int | None = None
+    descriptor: int | None = None
+    try:
+        directory_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            directory_flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            directory_flags |= os.O_NOFOLLOW
+        directory_fd = os.open(run_dir, directory_flags)
+        directory = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(directory.st_mode)
+            or directory.st_uid != os.geteuid()
+            or stat.S_IMODE(directory.st_mode) != 0o700
+        ):
+            raise OSError("unsafe run directory")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+        os.fchmod(descriptor, 0o600)
+        encoded = (api_key + "\n").encode("utf-8")
+        written = 0
+        while written < len(encoded):
+            chunk_size = os.write(descriptor, encoded[written:])
+            if chunk_size <= 0:
+                raise OSError("short write while creating private API key")
+            written += chunk_size
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.fsync(directory_fd)
+        plan.secrets["apiKey"] = api_key
+        _validated_plan_api_key_file(
+            plan, backend=backend, filename=filename, label=label,
+        )
+        return key_file, api_key
+    except (OSError, ValueError) as error:
+        plan.secrets.pop("apiKey", None)
+        try:
+            key_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ValueError(f"Could not create the private {label} API-key file.") from error
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if directory_fd is not None:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+
+
+def _validated_llamacpp_api_key_file(plan: LaunchPlan) -> Path:
+    return _validated_plan_api_key_file(
+        plan, backend="llamacpp", filename=LLAMACPP_API_KEY_FILE_NAME,
+        label="llama.cpp",
+    )
+
+
+def _validated_uzu_api_key_file(plan: LaunchPlan) -> Path:
+    return _validated_plan_api_key_file(
+        plan, backend="uzu", filename=UZU_API_KEY_FILE_NAME, label="Uzu",
+    )
 
 
 def _validate_llamacpp_qualified_session_boundary(plan: LaunchPlan) -> None:
@@ -19129,14 +24972,59 @@ def build_chat_client(plan: LaunchPlan, _route: ClientRoute) -> None:
         )
 
 
+def pi_model_identity(plan: LaunchPlan) -> tuple[str, str]:
+    # Pi compares provider + model + API before retaining reasoning blocks.
+    # A process/run ID is transport identity, not a different AI model.
+    artifact_path = str(plan.model.get("path") or "")
+    artifact = (model_artifact_fingerprint(Path(artifact_path), read_json(Path(artifact_path) / "config.json"))
+                if artifact_path and Path(artifact_path).is_dir() else "")
+    pi_identity = hashlib.sha256(json.dumps(
+        [plan.backend, artifact_path, artifact, plan.model.get("id") or plan.model.get("name")],
+        separators=(",", ":"),
+    ).encode()).hexdigest()[:24]
+    return f"launcher-{plan.backend}-{pi_identity}", f"local-{pi_identity}"
+
+
+def pi_browser_test_module(project: str) -> str | None:
+    """Advertise existing browser tooling; never install it during launch."""
+    candidates = [
+        Path(project) / "node_modules" / "playwright",
+        Path.home() / ".cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright",
+        Path("/opt/homebrew/lib/node_modules/playwright"),
+        Path("/usr/local/lib/node_modules/playwright"),
+    ]
+    for candidate in candidates:
+        if (candidate / "index.js").is_file() and read_json(candidate / "package.json").get("name") == "playwright":
+            return str(candidate.resolve())
+    return None
+
+
+def selected_pi_binary(plan: LaunchPlan) -> str | None:
+    pi_binary = BINARIES.get("pi")
+    if plan.backend == "uzu" and command_version(pi_binary) != UZU_PI_TESTED_VERSION:
+        preserved = STATE_DIR / "runtimes" / "pi-uzu-0.84.2" / "node_modules" / ".bin" / "pi"
+        if not preserved.is_file() or command_version(str(preserved)) != UZU_PI_TESTED_VERSION:
+            raise ValueError("The installed Pi version changed; Uzu requires its tested Pi 0.84.2 transport and the preserved runtime is unavailable.")
+        pi_binary = str(preserved)
+    return pi_binary
+
+
 def build_pi_client(plan: LaunchPlan, route: ClientRoute) -> None:
+    pi_binary = selected_pi_binary(plan)
     request_headers = {"x-mtplx-client": "pi"} if plan.backend == "mtplx" else {}
+    pi_provider, pi_model = pi_model_identity(plan)
+    runtime_version = command_version(plan.runtime_binary or BINARIES.get("mtplx")) if plan.backend == "mtplx" else ""
+    model_path = str(plan.model.get("path") or "")
+    prepare_mtplx_image_processor(plan.backend, runtime_version, model_path)
     model_contract: dict[str, Any] = {
-        "id": route.served,
+        "id": pi_model,
         "name": plan.model["name"],
         "reasoning": plan.reasoning != "off",
         "contextWindow": plan.context,
         "maxTokens": plan.output,
+        "input": pi_model_inputs(
+            plan.backend, runtime_version, model_path,
+        ),
     }
     if plan.backend == "whallm":
         allowed = set(
@@ -19150,19 +25038,37 @@ def build_pi_client(plan: LaunchPlan, route: ClientRoute) -> None:
             },
         })
     provider_data = {
-        "id": route.provider,
+        "id": pi_provider,
+        "transportModel": route.served,
         "name": f"LLM Launcher · {plan.backend}",
         "baseUrl": route.base_url,
         "apiKey": route.api_key,
         "headers": request_headers,
         "model": model_contract,
     }
+    if plan.backend in {"omlx", "mtplx"}:
+        provider_data["memoryCompaction"] = True
+    if plan.backend in {"omlx", "mtplx"}:
+        provider_data["compactionRecovery"] = True
+    browser_module = pi_browser_test_module(plan.project)
+    if browser_module:
+        provider_data["browserTestModule"] = browser_module
+        if plan.run_dir:
+            provider_data["browserArtifactDir"] = str(plan.run_dir / "browser")
     plan.client_env["LLM_LAUNCHER_PI_PROVIDER"] = json.dumps(provider_data, separators=(",", ":"))
-    plan.client_argv = [BINARIES["pi"], "--extension", str(APP_DIR / "pi-provider.js"), "--provider", route.provider, "--model", route.served]
+    plan.client_argv = [
+        pi_binary,
+        "--extension", str(APP_DIR / "pi-provider.js"),
+        "--extension", str(APP_DIR / "pi-context-policy.js"),
+        "--extension", str(APP_DIR / "pi-workflow.js"),
+        "--provider", pi_provider, "--model", pi_model,
+    ]
+    if plan.pi_session_file:
+        plan.client_argv.extend(["--session", validated_pi_session_file(plan.pi_session_file, plan.project)])
     if plan.agent_host == "console":
         # Hub Console owns the UI, so consume Pi's supported append-only JSONL
         # protocol instead of attempting to reconstruct its redraw-based TUI.
-        plan.client_argv.extend(["--mode", "rpc"])
+        plan.client_argv.extend(["--extension", str(APP_DIR / "pi-hub-commands.js"), "--mode", "rpc"])
     if plan.reasoning != "auto":
         plan.client_argv.extend(["--thinking", plan.reasoning])
 
@@ -19199,6 +25105,12 @@ def build_opencode_client(plan: LaunchPlan, route: ClientRoute) -> None:
         overlay = {"providers": {route.provider: {"name": f"LLM Launcher · {plan.backend}", "package": "@opencode-ai/ai/providers/openai-compatible", "settings": {"baseURL": route.base_url, "apiKey": route.api_key, "headers": request_headers}, "models": {route.served: {"name": plan.model["name"], "limit": {"context": plan.context, "output": plan.output}, "capabilities": {"tools": True, "input": ["text"], "output": ["text"]}}}}}, "model": f"{route.provider}/{route.served}"}
     else:
         overlay = {"$schema": "https://opencode.ai/config.json", "provider": {route.provider: {"npm": "@ai-sdk/openai-compatible", "name": f"LLM Launcher · {plan.backend}", "options": {"baseURL": route.base_url, "apiKey": route.api_key, "headers": request_headers}, "models": {route.served: {"name": plan.model["name"], "modalities": {"input": ["text"], "output": ["text"]}, "limit": {"context": plan.context, "output": plan.output}}}}}, "model": f"{route.provider}/{route.served}"}
+    if major < 2:
+        model_settings = overlay["provider"][route.provider]["models"][route.served]
+        # Session-specific local IDs have no catalog capability metadata.
+        model_settings.update(tool_call=True, reasoning=plan.reasoning != "off")
+        if plan.backend == "mtplx" and plan.reasoning != "off":
+            model_settings["interleaved"] = {"field": "reasoning_content"}
     if plugins:
         overlay["plugin"] = plugins
     plan.client_env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay, separators=(",", ":"))
@@ -19234,6 +25146,7 @@ def build_codex_client(plan: LaunchPlan, route: ClientRoute) -> None:
     # Hosted web search is a server-side Responses tool. Local runtimes cannot
     # execute it, while Codex's own local/MCP tools remain available.
     plan.client_argv += config("web_search", "disabled")
+    plan.client_argv += config("model_supports_reasoning_summaries", plan.reasoning != "off")
     if plan.backend == "mtplx":
         # MTPLX has no /responses/compact route. Codex retains its local
         # compaction path under the visible context/output contract.
@@ -19340,17 +25253,37 @@ def build_chat_completion_request(
         "stream_options": {"include_usage": True},
         "max_tokens": plan.output,
     }
-    if plan.chat.get("sampling") == "custom":
-        body.update({
-            "temperature": plan.chat["temperature"],
-            "top_p": plan.chat["topP"],
-            "top_k": plan.chat["topK"],
-            "presence_penalty": plan.chat["presencePenalty"],
-            "frequency_penalty": plan.chat["frequencyPenalty"],
-        })
-        if plan.chat.get("seed") is not None:
-            body["seed"] = plan.chat["seed"]
     apply_chat_reasoning_contract(body, plan.backend, plan.reasoning)
+    raw_contract = getattr(plan, "sampling_contract", None)
+    plan_chat = getattr(plan, "chat", None)
+    contract_document = (
+        raw_contract
+        if isinstance(raw_contract, dict) else
+        sampling_contract_from_settings(plan.model, plan_chat)
+        if isinstance(plan_chat, dict) and plan_chat.get("sampling") in {"model", "custom"} else
+        build_sampling_contract(
+            "model", model_defaults=plan.model.get("defaultSampling"),
+        ).as_dict()
+    )
+    raw_enforcement = getattr(plan, "sampling_enforcement", None)
+    enforcement = (
+        raw_enforcement
+        if isinstance(raw_enforcement, dict) else
+        sampling_route_enforcement(
+            plan.backend, "chat",
+            plan.model.get("backends", {}).get(plan.backend, {}),
+            contract_document, protocol="chat-completions",
+        )
+    )
+    assert enforcement is not None
+    try:
+        body = rewrite_chat_completions_request(
+            body, contract_document,
+            representable_fields=enforcement["representableFields"],
+            implicit_model_defaults=enforcement["implicitModelDefaults"],
+        )
+    except SamplingContractError as error:
+        raise ValueError(str(error)) from error
     return urllib.request.Request(
         f"http://127.0.0.1:{plan.client_port or plan.port}/v1/chat/completions",
         data=json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
@@ -19383,6 +25316,38 @@ def benchmark_words(count: int, salt: int) -> str:
     return " ".join(words)
 
 
+def qwen_token_budgeted_words(token_budget: int, salt: int) -> str:
+    """Budget the fixed vocabulary checked against the Uzu and MTPLX Qwen tokenizers.
+
+    Space-prefixed costs were checked with the pinned Uzu tokenizer and the
+    installed Qwen3.8 MTPLX tokenizer (06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523).
+    The old word-count approximation exceeded 64K after tool ingestion. This
+    keeps corpus size near the target; native authoritative usage still decides
+    whether the complete rendered chat exercised the required context tier.
+    """
+    two_token_words = {
+        "cobalt", "juniper", "meadow", "nebula", "orchard", "prairie",
+        "upland", "willow", "xenon", "jigsaw",
+    }
+    state = (salt * 1_103_515_245 + 12_345) & 0x7FFFFFFF
+    words: list[str] = []
+    remaining = max(1, token_budget)
+    while remaining:
+        state = (state * 1_103_515_245 + 12_345) & 0x7FFFFFFF
+        word = BENCHMARK_WORDS[state % len(BENCHMARK_WORDS)]
+        cost = 2 if word in two_token_words else 1
+        if cost > remaining:
+            break
+        words.append(word)
+        remaining -= cost
+    return " ".join(words)
+
+
+def uzu_qualification_words(token_budget: int, salt: int) -> str:
+    """Retain Uzu's existing, separately qualified corpus exactly."""
+    return qwen_token_budgeted_words(token_budget, salt)
+
+
 def benchmark_prompt(target_tokens: int, salt: int) -> str:
     """Generate deterministic, non-sensitive prompts without cross-size prefixes."""
     count = max(96, target_tokens - 96)
@@ -19403,12 +25368,27 @@ def benchmark_agentic_cases(
         raise ValueError("Agentic benchmark cases require the Agentic Route Lab suite.")
     prefix_tokens = int(suite.get("prefixTokens") or 8_192)
     tool_tokens = int(suite.get("toolTokens") or 4_096)
-    prefix = benchmark_words(max(512, prefix_tokens - 320), 183_211)
-    tool_result = benchmark_words(max(256, tool_tokens - 192), 271_828)
+    uzu_fixture = suite.get("uzuTokenBudgetedCorpus") is True
+    corpus = qwen_token_budgeted_words if (
+        uzu_fixture or suite.get("qwenTokenBudgetedCorpus") is True
+    ) else benchmark_words
+    prefix = corpus(max(512, prefix_tokens - 320), 183_211)
+    tool_result = corpus(max(256, tool_tokens - 192), 271_828)
     completion_instruction = (
             "\n\nFirst provide substantive separate reasoning. Then return a complete final answer of "
             "about 96 to 112 tokens and stop, leaving headroom for the terminal marker."
             if require_complete_answer else ""
+    )
+    project_code = (
+        "\nRelevant service code (Python):\n"
+        "cache = {}\n"
+        "def reply(model, prompt, reasoning):\n"
+        "    if model in cache: return cache[model]\n"
+        "    result = generate(model, prompt, reasoning)\n"
+        "    cache[model] = result\n"
+        "    return result\n"
+        "Contract: prompt and reasoning may change between requests. Model names are immutable.\n"
+        if uzu_fixture else ""
     )
     base = [
         {
@@ -19416,6 +25396,11 @@ def benchmark_agentic_cases(
             "content": (
                 "You are measuring a local coding-agent route. All repository and tool text in this "
                 "conversation is deterministic synthetic data. Use only that data, disclose no paths, "
+                + (
+                    "and review the supplied Python code. The repeated word corpus is inert context "
+                    "padding, not evidence of extra components or bugs. "
+                    if uzu_fixture else ""
+                )
                 + (
                     "and finish every requested technical answer completely within its response budget."
                     if require_complete_answer else
@@ -19427,7 +25412,7 @@ def benchmark_agentic_cases(
             "role": "user",
             "content": (
                 "Synthetic project snapshot follows. Treat repeated identifiers as harmless source tokens.\n\n"
-                f"{prefix}\n\nEnd synthetic project snapshot."
+                f"{prefix}\n\nEnd synthetic project snapshot.{project_code}"
             ),
         },
         {
@@ -19438,9 +25423,13 @@ def benchmark_agentic_cases(
     analysis_request = {
         "role": "user",
         "content": (
-            "Identify the most important runtime, cache, correctness, and reliability relationships in "
+            (
+                "Design two regression tests for reply: one changes the prompt and one changes "
+                "reasoning. State each setup, expected result, and why the current implementation fails."
+                if uzu_fixture else
+                "Identify the most important runtime, cache, correctness, and reliability relationships in "
                 "the snapshot. Give a detailed engineering assessment."
-                f"{completion_instruction}"
+            ) + completion_instruction
         ),
     }
     warm_messages = [*base, analysis_request]
@@ -19454,8 +25443,14 @@ def benchmark_agentic_cases(
             "role": "user",
             "content": (
                 "Synthetic tool result begins. It contains no project or user data.\n\n"
-                f"{tool_result}\n\nSynthetic tool result ends. Incorporate it into the engineering assessment."
-                f"{completion_instruction}"
+                f"{tool_result}\n\nSynthetic tool result ends. "
+                + (
+                    "The developer changed the cache key everywhere from model to (model, prompt). "
+                    "The prompt-change test passes but the reasoning-change test fails. Explain "
+                    "the remaining defect and give the corrected key and one regression assertion."
+                    if uzu_fixture else "Incorporate it into the engineering assessment."
+                )
+                + completion_instruction
             ),
         },
     ]
@@ -19468,7 +25463,13 @@ def benchmark_agentic_cases(
         {
             "role": "user",
             "content": (
-                "Now produce the follow-up implementation priorities, failure modes, and verification plan. "
+                (
+                    "A model can now be replaced under the same name; a revision integer increments "
+                    "on replacement. Give the final cache key including revision, its invalidation "
+                    "rule, and the expected outcomes of prompt, reasoning, and revision-change tests. "
+                    if uzu_fixture else
+                    "Now produce the follow-up implementation priorities, failure modes, and verification plan. "
+                )
                 + (
                     "Be concrete."
                     if require_complete_answer else
@@ -19487,8 +25488,13 @@ def benchmark_agentic_cases(
                 {
                     "role": "user",
                     "content": (
-                        "Perform a cold-start architecture review covering latency, memory, correctness, "
-                        "and reliability."
+                        (
+                            "Identify the cache bug in reply, trace two calls with different prompts "
+                            "but the same model, and give a corrected key preserving prompt and reasoning."
+                            if uzu_fixture else
+                            "Perform a cold-start architecture review covering latency, memory, correctness, "
+                            "and reliability."
+                        )
                         + (
                             completion_instruction if require_complete_answer else
                             " Use the full response budget."
@@ -19512,26 +25518,80 @@ def benchmark_agentic_cases(
     ]
 
 
+def uzu_conversation_target(
+    scenario: str, nominal: int, previous: dict[str, Any] | None,
+    context: int, max_tokens: int,
+) -> int:
+    """Reconstruct each adaptive target from numeric evidence, not saved text."""
+    if scenario == "cold":
+        return nominal
+    if scenario == "toolIngest":
+        return min(nominal, context - 2 * UZU_QUALIFICATION_SAMPLE_MIN_TOKENS - 1024)
+    if previous is None:
+        raise ValueError("A continuing Uzu target requires previous token usage.")
+    return int(previous["promptTokens"]) + int(previous["completionTokens"]) + 128
+
+
+def uzu_conversation_case(
+    case: dict[str, Any], history: list[dict[str, str]],
+    previous: dict[str, Any] | None, context: int, max_tokens: int,
+) -> dict[str, Any]:
+    """Extend the real, memory-only conversation instead of replacing its replies.
+
+    Usage from the previous request sizes synthetic padding conservatively.
+    This forecast is not token evidence: native limits and the existing
+    authoritative prompt-size/near-tier checks remain mandatory.
+    """
+    result = copy.deepcopy(case)
+    if previous is None:
+        if history or case["scenario"] != "cold":
+            raise RuntimeError("Uzu conversation must start with the cold turn.")
+        result["maxTokens"] = uzu_qualification_request_tokens(
+            case["scenario"], int(case["targetPromptTokens"]), context, max_tokens,
+        )
+        return result
+    if not history or history[-1].get("role") != "assistant":
+        raise RuntimeError("Uzu qualification is missing its previous completed reply.")
+    user = copy.deepcopy(case["messages"][-1])
+    previous_tokens = int(previous["promptTokens"]) + int(previous["completionTokens"])
+    target = uzu_conversation_target(
+        case["scenario"], int(case["targetPromptTokens"]), previous, context, max_tokens,
+    )
+    result["targetPromptTokens"] = target
+    if case["scenario"] == "toolIngest":
+        # Leave room for this response, a short follow-up, and its response.
+        padding = target - previous_tokens - 192
+        if padding < 256:
+            raise RuntimeError("Uzu conversation leaves no room for the near-tier tool input.")
+        start, remainder = user["content"].split("\n\n", 1)
+        _, end = remainder.split("\n\nSynthetic tool result ends.", 1)
+        user["content"] = (
+            start + "\n\n" + uzu_qualification_words(padding, 271_828)
+            + "\n\nSynthetic tool result ends." + end
+        )
+    result["maxTokens"] = uzu_qualification_request_tokens(case["scenario"], target, context, max_tokens)
+    if result["maxTokens"] < UZU_QUALIFICATION_SAMPLE_MIN_TOKENS:
+        raise RuntimeError("Uzu's continuing conversation has exhausted this context's response reserve.")
+    result["messages"] = [*copy.deepcopy(history), user]
+    return result
+
+
 def benchmark_measurement_count(suite: dict[str, Any]) -> int:
     if suite.get("kind") == "agentic":
         return len(suite.get("scenarios") or [])
     return len(suite.get("promptTokens") or []) * int(suite.get("repetitions") or 1)
 
 
-def benchmark_speed_sampling(model: dict[str, Any], chat: dict[str, Any]) -> dict[str, Any]:
-    if chat.get("sampling") == "custom":
-        sampling = {
-            "temperature": chat.get("temperature"),
-            "top_p": chat.get("topP"),
-            "top_k": chat.get("topK"),
-            "presence_penalty": chat.get("presencePenalty"),
-            "frequency_penalty": chat.get("frequencyPenalty"),
-        }
-        if chat.get("seed") is not None:
-            sampling["seed"] = chat["seed"]
-        return sampling
-    defaults = model.get("defaultSampling")
-    return copy.deepcopy(defaults) if isinstance(defaults, dict) else {}
+def benchmark_speed_sampling(
+    model: dict[str, Any], chat: dict[str, Any],
+    contract_document: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the exact canonical values shared with the live request relay."""
+    document = contract_document or sampling_contract_from_settings(model, chat)
+    try:
+        return load_sampling_contract(document).values
+    except SamplingContractError as error:
+        raise ValueError(str(error)) from error
 
 
 def validated_benchmark_request(
@@ -19539,7 +25599,12 @@ def validated_benchmark_request(
     allow_baseline_only: bool = False,
 ) -> dict[str, Any]:
     backend = str(payload.get("backend") or "")
+    preference = str(payload.get("enginePreference") or "fastest")
+    if preference not in ENGINE_PREFERENCE_LABELS:
+        raise ValueError("Choose a supported benchmark goal.")
     client = str(payload.get("client") or "")
+    if backend == "uzu" and client == "pi":
+        raise ValueError(UZU_PI_BENCHMARK_LIMITATION)
     if backend not in ENGINE_ADAPTERS:
         raise ValueError(
             "Choose oMLX, LM Studio, MTPLX, Uzu, FreeToken, SwiftLM, Mference, Whallm, or llama.cpp SSD PLE before benchmarking."
@@ -19593,20 +25658,55 @@ def validated_benchmark_request(
     if "\x00" in project or not Path(project).is_dir():
         raise ValueError("Project folder does not exist.")
     options = copy.deepcopy(payload.get("options") if isinstance(payload.get("options"), dict) else {})
+    if dflash_quantized_fallback(backend, options):
+        raise ValueError(DFLASH_KV_COMPARISON_REASON)
     chat = validated_chat_settings(model, payload, client)
-    if client != "chat":
-        chat = {"systemPrompt": "", "sampling": "model"}
+    sampling_contract_document = validated_sampling_contract(
+        model, payload, client, chat, require_controlled=client != "chat",
+    )
+    assert sampling_contract_document is not None
+    validate_sampling_capability(capability, sampling_contract_document)
+    live_sampling_enforcement = sampling_route_enforcement(
+        backend, client, capability, sampling_contract_document,
+    )
+    benchmark_sampling_enforcement = sampling_route_enforcement(
+        backend, client, capability, sampling_contract_document,
+        protocol="chat-completions",
+    )
+    chat = chat_settings_from_sampling_contract(
+        sampling_contract_document,
+        system_prompt=str(chat.get("systemPrompt") or "") if client == "chat" else "",
+    )
+    evidence = optimizer_evidence(
+        model, context, output, client, reasoning, str(options.get("kv") or "off"), chat,
+        sampling_contract_document,
+    )
+    add_benchmark_engine_evidence(evidence, model, options, [backend])
+    engine_settings = evidence.get("engineSettings")
+    tuned_ane_locked = bool(
+        backend == "omlx"
+        and isinstance(engine_settings, dict)
+        and engine_settings.get("anePrefill") == "tuned"
+    )
     modes = ["ar"]
     if capability.get("mtp") is True:
         modes.append("mtp")
-    if backend == "omlx" and capability.get("dflash") is True:
+    if (
+        backend == "omlx"
+        and capability.get("dflash") is True
+        and not tuned_ane_locked
+        and str(options.get("kv") or "off") == "off"
+    ):
         modes.append("dflash2")
     if len(modes) < 2 and not (allow_baseline_only or backend == "uzu"):
+        if backend == "omlx" and capability.get("dflash") is True and str(options.get("kv") or "off") != "off":
+            raise ValueError(DFLASH_KV_COMPARISON_REASON)
+        if tuned_ane_locked and capability.get("dflash") is True:
+            raise ValueError(
+                "DFlash 2 cannot be benchmarked while tuned ANE prefill is locked. "
+                "Choose ANE prefill Off or use a baseline-only comparison."
+            )
         raise ValueError("This exact runtime/model route has no verified acceleration path to compare with AR.")
-    evidence = optimizer_evidence(
-        model, context, output, client, reasoning, str(options.get("kv") or "off"), chat,
-    )
-    add_benchmark_engine_evidence(evidence, model, options, [backend])
     ssd_lane = backend in SSD_STREAMING_BACKENDS
     ssd_comparison_identity = str(capability.get("comparisonIdentity") or "") if ssd_lane else ""
     if ssd_lane and re.fullmatch(r"[0-9a-f]{64}", ssd_comparison_identity) is None:
@@ -19625,6 +25725,10 @@ def validated_benchmark_request(
         "reasoning": reasoning,
         "options": options,
         "chat": chat,
+        "samplingContract": copy.deepcopy(sampling_contract_document),
+        "liveSamplingEnforcement": copy.deepcopy(live_sampling_enforcement),
+        "benchmarkSamplingEnforcement": copy.deepcopy(benchmark_sampling_enforcement),
+        "enginePreference": preference,
         "suiteName": suite_name,
         "suite": copy.deepcopy(suite),
         "workloadKind": str(suite.get("kind") or "throughput"),
@@ -19635,7 +25739,9 @@ def validated_benchmark_request(
         "pairFingerprint": capability.get("dflashPairFingerprint"),
         "ssdStreaming": ssd_lane,
         "ssdComparisonIdentity": ssd_comparison_identity,
-        "speedSampling": benchmark_speed_sampling(model, chat),
+        "speedSampling": benchmark_speed_sampling(
+            model, chat, sampling_contract_document,
+        ),
     }
 
 
@@ -19647,32 +25753,151 @@ def _ordered_unique(values: list[Any]) -> list[Any]:
     return result
 
 
+def _mtplx_long_context_suite_requested(
+    model: dict[str, Any], context: int, suite_name: str,
+) -> bool:
+    capability = model.get("backends", {}).get("mtplx", {})
+    advertised = capability.get("longContext2111")
+    return bool(
+        suite_name in {"agentic", MTPLX_LONG_CONTEXT_64K_SUITE}
+        and context >= MTPLX_LONG_CONTEXT_MINIMUM
+        and isinstance(advertised, dict)
+        and advertised.get("ready", True) is True
+        and advertised.get("contractId")
+    )
+
+
+def mtplx_long_context_operator_tuning_plan(
+    job: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Describe the fixed three-load 2.11.1 operator qualification."""
+    if str(job.get("backend") or "") != "mtplx":
+        return None
+    model = job.get("model")
+    if not isinstance(model, dict):
+        return None
+    capability = model.get("backends", {}).get("mtplx")
+    if not isinstance(capability, dict) or capability.get("mtp") is not True:
+        return None
+    suite_name = str(job.get("suiteName") or "")
+    context = job.get("context")
+    if (
+        isinstance(context, bool) or not isinstance(context, int)
+        or not _mtplx_long_context_suite_requested(model, context, suite_name)
+    ):
+        return None
+    receipt = mtplx_long_context_2111_contract(
+        model, capability,
+        runtime_version=str(job.get("runtimeVersion") or capability.get("runtimeVersion") or ""),
+    )
+    if (
+        receipt is None
+        or not _mtplx_long_context_capability_matches(
+            capability.get("longContext2111"), receipt,
+        )
+    ):
+        return None
+    depth = bounded_integer(
+        capability.get("depth"), 1, 1,
+        int(capability.get("depthMax") or 1), "MTPLX MTP depth",
+    )
+    suite = BENCHMARK_SUITES[MTPLX_LONG_CONTEXT_64K_SUITE]
+    steps_per_route = 2 + benchmark_measurement_count(suite)
+    return {
+        "version": MTPLX_LONG_CONTEXT_2111_SWEEP_VERSION,
+        "strategy": "isolated-long-context-operator-comparison",
+        "suiteName": MTPLX_LONG_CONTEXT_64K_SUITE,
+        "requiredContext": MTPLX_LONG_CONTEXT_MINIMUM,
+        "contractId": str(receipt["contractId"]),
+        "contract": copy.deepcopy(receipt),
+        "baselineRoute": MTPLX_LONG_CONTEXT_DEFAULT_ROUTE,
+        "candidateRoute": MTPLX_LONG_CONTEXT_2111_ROUTE,
+        "baselineEnvironment": copy.deepcopy(MTPLX_LONG_CONTEXT_BASELINE_ENV),
+        "candidateEnvironment": copy.deepcopy(MTPLX_LONG_CONTEXT_CANDIDATE_ENV),
+        "fixedMtpDepth": depth,
+        "maximumModelLoads": 3,
+        "stepsPerRoute": steps_per_route,
+        "maximumGeneratedRequests": 3 * steps_per_route,
+        "freshLoadPerRoute": True,
+        "greedyParityPerRoute": True,
+        "selectionMetric": "generation-tokens-per-second",
+        "minimumMedianSpeedup": BENCHMARK_MINIMUM_SPEEDUP,
+        "minimumWorstSpeedup": BENCHMARK_MINIMUM_SPEEDUP,
+        "resourceGatePerRoute": True,
+        "resourceCooldownMemoryToleranceBytes": BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES,
+        "qualificationContract": {
+            "suiteName": MTPLX_LONG_CONTEXT_64K_SUITE,
+            "generatedPromptsOnly": True,
+            "authoritativeUsageRequired": True,
+            "minimumPromptTokens": MTPLX_LONG_CONTEXT_MINIMUM_PROMPT,
+            "targetPromptTokens": MTPLX_LONG_CONTEXT_TARGET_PROMPT,
+        },
+    }
+
+
 def benchmark_job_measurement_routes(job: dict[str, Any]) -> list[dict[str, Any]]:
     """Expand public modes into the exact fresh-load routes a shootout will run."""
+    tuning = job.get("calibrationTuningPlan")
+    if (
+        job.get("backend") == "mtplx"
+        and isinstance(tuning, dict)
+        and tuning.get("strategy") == "isolated-long-context-operator-comparison"
+    ):
+        depth = int(tuning["fixedMtpDepth"])
+        contract_id = str(tuning["contractId"])
+        return [
+            {"mode": "ar", "label": "AR", "stateKey": "ar", "settings": {}},
+            {
+                "mode": "mtp", "label": f"MTP D{depth} · 2.11 default",
+                "stateKey": "mtp-default",
+                "settings": {
+                    "depth": depth,
+                    "mtplxOperatorRoute": MTPLX_LONG_CONTEXT_DEFAULT_ROUTE,
+                },
+                "operatorRoute": MTPLX_LONG_CONTEXT_DEFAULT_ROUTE,
+                "contractId": contract_id,
+            },
+            {
+                "mode": "mtp", "label": f"MTP D{depth} · 2.11 long-context",
+                "stateKey": "mtp-long-context-2111",
+                "settings": {
+                    "depth": depth,
+                    "mtplxOperatorRoute": MTPLX_LONG_CONTEXT_2111_ROUTE,
+                },
+                "operatorRoute": MTPLX_LONG_CONTEXT_2111_ROUTE,
+                "contractId": contract_id,
+            },
+        ]
     routes: list[dict[str, Any]] = []
     for mode in job.get("modes") or []:
-        if mode == "mtp" and job.get("backend") == "mtplx":
-            capability = job["model"]["backends"]["mtplx"]
-            for depth in mtplx_mtp_depth_candidates(capability):
+        if job.get("backend") == "mtplx" and mode == "mtp":
+            for depth in mtplx_mtp_depth_candidates(job["model"]["backends"]["mtplx"]):
                 routes.append({
                     "mode": "mtp", "label": f"MTP D{depth}",
                     "stateKey": f"mtp-d{depth}", "settings": {"depth": depth},
                 })
-            continue
-        routes.append({
-            "mode": str(mode),
-            "label": benchmark_public_mode_label(str(job.get("backend") or ""), mode),
-            "stateKey": str(mode), "settings": {},
-        })
+        else:
+            routes.append({
+                "mode": str(mode),
+                "label": benchmark_public_mode_label(str(job.get("backend") or ""), mode),
+                "stateKey": str(mode), "settings": {},
+            })
     return routes
 
 
-def benchmark_job_maximum_route_count(job: dict[str, Any]) -> int:
-    """Return the disclosed upper bound for adaptive or exhaustive shootout loads."""
+def benchmark_job_base_maximum_route_count(job: dict[str, Any]) -> int:
     tuning = job.get("calibrationTuningPlan")
-    if isinstance(tuning, dict):
-        return int(tuning.get("maximumModelLoads") or 0)
-    return len(benchmark_job_measurement_routes(job))
+    return int(tuning["maximumModelLoads"]) if isinstance(tuning, dict) else len(
+        benchmark_job_measurement_routes(job)
+    )
+
+
+def benchmark_job_maximum_route_count(job: dict[str, Any]) -> int:
+    """Return the exact disclosed upper bound including engine-setting candidates."""
+    sweep = job.get("engineSettingsSweep")
+    if isinstance(sweep, dict):
+        return int(sweep.get("maximumModelLoads") or 0)
+    return benchmark_job_base_maximum_route_count(job)
 
 
 def benchmark_job_public_modes(job: dict[str, Any]) -> list[dict[str, str]]:
@@ -19688,11 +25913,19 @@ def benchmark_job_public_modes(job: dict[str, Any]) -> list[dict[str, str]]:
         ):
             label = f"MTP tuned ≤{BENCHMARK_MTP_TUNER_MAX_CANDIDATES}"
         elif mode == "mtp" and job.get("backend") == "mtplx":
-            depths = mtplx_mtp_depth_candidates(
-                job["model"]["backends"]["mtplx"],
-            )
-            if len(depths) > 1:
-                label = f"MTP D1–D{max(depths)}"
+            tuning = job.get("calibrationTuningPlan")
+            if (
+                isinstance(tuning, dict)
+                and tuning.get("strategy")
+                == "isolated-long-context-operator-comparison"
+            ):
+                label = "MTP default + 2.11 long-context"
+            else:
+                depths = mtplx_mtp_depth_candidates(
+                    job["model"]["backends"]["mtplx"],
+                )
+                if len(depths) > 1:
+                    label = f"MTP D1–D{max(depths)}"
         elif (
             mode == "dflash2" and job.get("backend") == "omlx"
             and isinstance(job.get("calibrationTuningPlan"), dict)
@@ -19700,6 +25933,259 @@ def benchmark_job_public_modes(job: dict[str, Any]) -> list[dict[str, str]]:
             label = f"DFlash tuned ≤{BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES}"
         modes.append({"id": str(mode), "label": label})
     return modes
+
+
+def _public_benchmark_count(value: Any, fallback: int = 0) -> int:
+    """Return a non-negative count while treating malformed legacy data as absent."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return max(0, fallback)
+
+
+def _public_rejected_faster_candidate_count(candidates: Any) -> int:
+    if not isinstance(candidates, list):
+        return 0
+    return sum(
+        1 for candidate in candidates
+        if isinstance(candidate, dict)
+        and candidate.get("qualityMatchesAR") is False
+        and isinstance(candidate.get("medianSpeedupVsAR"), (int, float))
+        and not isinstance(candidate.get("medianSpeedupVsAR"), bool)
+        and math.isfinite(float(candidate["medianSpeedupVsAR"]))
+        and float(candidate["medianSpeedupVsAR"]) > 1.0
+    )
+
+
+def public_benchmark_settings_search_plan(
+    job: dict[str, Any],
+) -> dict[str, Any] | None:
+    sweep = job.get("engineSettingsSweep")
+    if isinstance(sweep, dict):
+        inner = _public_benchmark_route_search_plan(job) or {}
+        presets = len(sweep["candidates"])
+        maximum = int(sweep["maximumModelLoads"])
+        return {
+            "version": 1, "kind": "runtime-and-route",
+            "label": "Runtime and acceleration settings", "strategy": "staged",
+            "maximumSetupCount": maximum,
+            "maximumCandidateCount": maximum - presets,
+            "referenceSetupCount": presets,
+            "axes": [*_public_runtime_search_axes(sweep), *inner.get("axes", [])],
+        }
+    return _public_benchmark_route_search_plan(job)
+
+
+def _public_runtime_search_axes(sweep: dict[str, Any]) -> list[str]:
+    labels = {
+        "burst": "Burst preset", "gpu": "GPU offload", "profile": "Runtime profile",
+        "prefillSize": "Prefill batch size", "promptCacheMode": "Prompt caching",
+    }
+    return [labels[axis] for axis in sweep.get("searchedAxes", []) if axis in labels]
+
+
+def _public_benchmark_route_search_plan(
+    job: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Project the bounded engine-owned setup search without exposing its receipt."""
+    backend = str(job.get("backend") or "")
+    tuning = job.get("calibrationTuningPlan")
+    try:
+        disclosed_maximum = (
+            tuning.get("maximumModelLoads")
+            if isinstance(tuning, dict)
+            else len(benchmark_job_measurement_routes(job))
+        )
+    except (KeyError, TypeError, ValueError):
+        disclosed_maximum = 0
+    maximum_setups = _public_benchmark_count(disclosed_maximum)
+    if maximum_setups <= 0:
+        return None
+    if backend == "lmstudio" and isinstance(tuning, dict):
+        maximum_candidates = _public_benchmark_count(
+            tuning.get("maximumMtpCandidates")
+            or BENCHMARK_MTP_TUNER_MAX_CANDIDATES,
+            BENCHMARK_MTP_TUNER_MAX_CANDIDATES,
+        )
+        reference_setups = max(1, maximum_setups - maximum_candidates)
+        return {
+            "version": 1,
+            "kind": "lmstudio-mtp",
+            "label": "MTP settings",
+            "strategy": "bounded",
+            "maximumSetupCount": maximum_setups,
+            "maximumCandidateCount": maximum_candidates,
+            "referenceSetupCount": reference_setups,
+            "axes": [
+                "MTP draft depth", "minimum draft tokens", "continuation cutoff",
+            ],
+        }
+    if backend == "omlx" and isinstance(tuning, dict):
+        maximum_candidates = _public_benchmark_count(
+            tuning.get("maximumDflashCandidates")
+            or BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES,
+            BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES,
+        )
+        reference_setups = max(1, maximum_setups - maximum_candidates)
+        return {
+            "version": 1,
+            "kind": "omlx-dflash2",
+            "label": "DFlash 2 settings",
+            "strategy": "bounded",
+            "maximumSetupCount": maximum_setups,
+            "maximumCandidateCount": maximum_candidates,
+            "referenceSetupCount": reference_setups,
+            "axes": [
+                "DFlash block size", "verification mode", "draft precision",
+            ],
+        }
+    if backend != "mtplx" or "mtp" not in {
+        str(mode) for mode in job.get("modes") or []
+    }:
+        return None
+    if (
+        isinstance(tuning, dict)
+        and tuning.get("strategy") == "isolated-long-context-operator-comparison"
+    ):
+        return {
+            "version": 1,
+            "kind": "mtplx-operator",
+            "label": "MTP operator route",
+            "strategy": "fixed-comparison",
+            "maximumSetupCount": maximum_setups,
+            "maximumCandidateCount": max(0, maximum_setups - 1),
+            "referenceSetupCount": 1,
+            "axes": ["MTP operator route"],
+        }
+    depths = mtplx_mtp_depth_candidates(
+        job["model"]["backends"]["mtplx"],
+    )
+    if len(depths) <= 1:
+        return None
+    return {
+        "version": 1,
+        "kind": "mtplx-depth",
+        "label": "MTP depth",
+        "strategy": "exhaustive",
+        "maximumSetupCount": maximum_setups,
+        "maximumCandidateCount": len(depths),
+        "referenceSetupCount": 1,
+        "axes": ["MTP draft depth"],
+    }
+
+
+def public_benchmark_settings_search_result(
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    sweep = record.get("engineSettingsSweep")
+    if isinstance(sweep, dict):
+        records = sweep.get("records")
+        if not isinstance(records, dict):
+            return None
+        reference = records.get(sweep.get("tuningReferenceKey"))
+        if not isinstance(reference, dict) or "engineSettingsSweep" in reference:
+            return None
+        inner = _public_benchmark_route_search_result(reference) or {}
+        presets = len(records)
+        modes = len(record.get("comparedModes", []))
+        tested = inner.get("testedSetupCount", modes) + (presets - 1) * modes
+        maximum = _public_benchmark_count(sweep.get("maximumModelLoads"))
+        backend = str(record.get("backend") or "")
+        return {
+            "version": 1, "kind": "runtime-and-route",
+            "label": "Runtime and acceleration settings", "strategy": "staged",
+            "selectedSetupLabel": " · ".join(filter(None, [
+                benchmark_engine_settings_label(backend, record.get("engineSettings")),
+                benchmark_route_settings_label(backend, record.get("winner"), record.get("settings")),
+            ])),
+            "testedSetupCount": tested, "maximumSetupCount": maximum,
+            "testedCandidateCount": max(0, tested - presets),
+            "maximumCandidateCount": max(0, maximum - presets),
+            "referenceSetupCount": presets,
+            "rejectedFasterCandidateCount": inner.get("rejectedFasterCandidateCount", 0),
+            "axes": [*_public_runtime_search_axes(sweep), *inner.get("axes", [])],
+        }
+    return _public_benchmark_route_search_result(record)
+
+
+def _public_benchmark_route_search_result(
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Normalize supported tuning results for UI/history without raw candidates."""
+    backend = str(record.get("backend") or "")
+    sweep: dict[str, Any] | None = None
+    kind = ""
+    label = ""
+    strategy = ""
+    axes: list[str] = []
+    reference_setups = 1
+    maximum_candidates = 0
+    candidate_count = 0
+    if backend == "lmstudio" and isinstance(record.get("tuningSweep"), dict):
+        sweep = record["tuningSweep"]
+        kind, label, strategy = "lmstudio-mtp", "MTP settings", "bounded"
+        axes = ["MTP draft depth", "minimum draft tokens", "continuation cutoff"]
+        maximum_candidates = _public_benchmark_count(
+            sweep.get("maximumCandidates"), BENCHMARK_MTP_TUNER_MAX_CANDIDATES,
+        )
+    elif backend == "omlx" and isinstance(record.get("tuningSweep"), dict):
+        sweep = record["tuningSweep"]
+        kind, label, strategy = "omlx-dflash2", "DFlash 2 settings", "bounded"
+        axes = ["DFlash block size", "verification mode", "draft precision"]
+        baseline_modes = sweep.get("baselineModes")
+        reference_setups = max(
+            1, len(baseline_modes) if isinstance(baseline_modes, list) else 1,
+        )
+        maximum_candidates = _public_benchmark_count(
+            sweep.get("maximumCandidates"), BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES,
+        )
+    elif backend == "mtplx" and isinstance(record.get("mtplxOperatorSweep"), dict):
+        sweep = record["mtplxOperatorSweep"]
+        kind, label, strategy = (
+            "mtplx-operator", "MTP operator route", "fixed-comparison",
+        )
+        axes = ["MTP operator route"]
+        candidates = sweep.get("candidates")
+        maximum_candidates = len(candidates) if isinstance(candidates, list) else 2
+    elif backend == "mtplx" and isinstance(record.get("mtpDepthSweep"), dict):
+        sweep = record["mtpDepthSweep"]
+        kind, label, strategy = "mtplx-depth", "MTP depth", "exhaustive"
+        axes = ["MTP draft depth"]
+        depths = sweep.get("depthCandidates")
+        maximum_candidates = (
+            len(depths) if isinstance(depths, list)
+            else _public_benchmark_count(sweep.get("candidateCount"))
+        )
+    if sweep is None:
+        return None
+    raw_count = sweep.get("candidateCount")
+    candidates = sweep.get("candidates")
+    candidate_count = (
+        len(candidates)
+        if isinstance(candidates, list)
+        else _public_benchmark_count(raw_count)
+    )
+    if maximum_candidates <= 0:
+        maximum_candidates = candidate_count
+    maximum_candidates = max(candidate_count, maximum_candidates)
+    selected_setup = benchmark_route_settings_label(
+        backend, record.get("winner"), record.get("settings"),
+    )
+    return {
+        "version": 1,
+        "kind": kind,
+        "label": label,
+        "strategy": strategy,
+        "selectedSetupLabel": selected_setup,
+        "testedSetupCount": candidate_count + reference_setups,
+        "maximumSetupCount": maximum_candidates + reference_setups,
+        "testedCandidateCount": candidate_count,
+        "maximumCandidateCount": maximum_candidates,
+        "referenceSetupCount": reference_setups,
+        "rejectedFasterCandidateCount": (
+            _public_rejected_faster_candidate_count(candidates)
+        ),
+        "axes": axes,
+    }
 
 
 def lmstudio_mtp_tuning_candidate_key(settings: dict[str, Any]) -> str:
@@ -19732,6 +26218,7 @@ def lmstudio_mtp_tuning_plan(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": BENCHMARK_MTP_TUNER_VERSION,
         "strategy": "bounded-coordinate-search",
+        "selectionMetric": benchmark_route_selection_metric(job),
         "anchor": anchor,
         "depthCandidates": lmstudio_mtp_tuning_depths(capability, anchor["depth"]),
         "cutoffCandidates": list(BENCHMARK_MTP_TUNER_CUTOFFS),
@@ -19797,6 +26284,7 @@ def dflash2_tuning_plan(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": BENCHMARK_DFLASH_TUNER_VERSION,
         "strategy": "bounded-coordinate-search",
+        "selectionMetric": benchmark_route_selection_metric(job),
         "searchedAxes": ["blockSize", "verifyMode", "draftQuant"],
         "anchor": anchor,
         "blockCandidates": dflash2_tuning_block_sizes(
@@ -19829,6 +26317,13 @@ def validated_dflash2_tuning_request(
             capability.get("dflashReason")
             or "This exact oMLX model/runtime route has no verified DFlash 2 pair."
         ))
+    if str(job["options"].get("kv") or "off") != "off":
+        raise ValueError(DFLASH_KV_COMPARISON_REASON)
+    if "dflash2" not in job.get("modes", []):
+        raise ValueError(
+            "DFlash 2 tuning cannot start while tuned ANE prefill is locked for this comparison. "
+            "Choose ANE prefill Off first."
+        )
     scanned_runtime = str(capability.get("dflashRuntimeVersion") or "")
     current_runtime = command_version(BINARIES.get("omlx"))
     if (
@@ -19856,10 +26351,261 @@ def prepare_calibration_tuning_plan(job: dict[str, Any]) -> None:
     # Cross-engine calibration starts each engine from its audited defaults;
     # controls belonging to the currently visible engine must not bias another.
     plan_job["options"] = {}
+    if backend == "mtplx" and "mtp" in modes:
+        tuning = mtplx_long_context_operator_tuning_plan(plan_job)
+        if tuning is not None:
+            # The 2.11.1 operator comparison is meaningful only inside the
+            # release's Turbo route.  Calibration owns engine-specific speed
+            # controls, so bind both isolated MTP loads to Turbo even when the
+            # currently visible MTPLX control is Sustained.  Rebuild the saved
+            # engine-settings evidence at the same time; otherwise planning
+            # would advertise a runnable three-load sweep that the launch-time
+            # receipt correctly rejects, or later reuse would look for the
+            # wrong profile.
+            mtplx_options = copy.deepcopy(job.get("options") or {})
+            mtplx_options["profile"] = "turbo"
+            mtplx_options["mtplxOperatorRoute"] = MTPLX_LONG_CONTEXT_DEFAULT_ROUTE
+            job["options"] = mtplx_options
+            evidence = job.get("evidence")
+            if isinstance(evidence, dict):
+                add_benchmark_engine_evidence(
+                    evidence, job["model"], mtplx_options, ["mtplx"],
+                )
+            job["suiteName"] = MTPLX_LONG_CONTEXT_64K_SUITE
+            job["suite"] = copy.deepcopy(
+                BENCHMARK_SUITES[MTPLX_LONG_CONTEXT_64K_SUITE]
+            )
+            job["workloadKind"] = "agentic"
+            job["calibrationTuningPlan"] = tuning
+            return
     if backend == "lmstudio" and "mtp" in modes:
         job["calibrationTuningPlan"] = lmstudio_mtp_tuning_plan(plan_job)
     elif backend == "omlx" and "dflash2" in modes:
         job["calibrationTuningPlan"] = dflash2_tuning_plan(plan_job)
+
+
+def engine_settings_sweep_contract(job: dict[str, Any]) -> dict[str, Any]:
+    """Bind a settings search to the immutable workload it is allowed to measure."""
+    evidence = job.get("evidence") if isinstance(job.get("evidence"), dict) else {}
+    return {
+        "backend": str(job.get("backend") or ""),
+        "modelFingerprint": str(job.get("modelFingerprint") or ""),
+        "runtimeVersion": str(job.get("runtimeVersion") or ""),
+        "hardwareFingerprint": hardware_fingerprint(),
+        "suite": str(job.get("suiteName") or ""),
+        "client": str(job.get("client") or ""),
+        "reasoning": str(job.get("reasoning") or ""),
+        "targetKV": str(evidence.get("kv") or "off"),
+        "samplingFingerprint": str(evidence.get("samplingFingerprint") or ""),
+        "context": int(job.get("context") or 0),
+        "output": int(job.get("output") or 0),
+        "selectionPreference": str(job.get("enginePreference") or "throughput"),
+    }
+
+
+def _engine_settings_candidate_key(backend: str, settings: dict[str, Any]) -> str:
+    digest = hashlib.sha256(json.dumps(
+        settings, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:16]
+    return f"{backend}-{digest}"
+
+
+def _engine_settings_candidate_label(backend: str, settings: dict[str, Any]) -> str:
+    if backend == "omlx":
+        return f"Burst {str(settings.get('burst') or 'balanced').title()}"
+    if backend == "lmstudio":
+        return "Full GPU" if settings.get("gpu") == "max" else "CPU only"
+    if backend == "mtplx":
+        return f"{str(settings.get('profile') or 'sustained').replace('-', ' ').title()} profile"
+    if backend == "swiftlm":
+        return f"Prefill {int(settings.get('prefillSize') or 512)}"
+    if backend == "mference":
+        return "Prompt cache on" if settings.get("promptCacheMode") == "on" else "Prompt cache off"
+    return BACKEND_LABELS.get(backend, backend)
+
+
+def _engine_settings_for_sweep_candidate(
+    job: dict[str, Any], option_updates: dict[str, Any],
+) -> dict[str, Any]:
+    backend = str(job["backend"])
+    model = job["model"]
+    capability = model["backends"][backend]
+    options = copy.deepcopy(job.get("options") or {})
+    options.update(copy.deepcopy(option_updates))
+    canonical = validated_profile_options(backend, model, capability, options)
+    settings = benchmark_engine_settings(backend, canonical)
+    if backend == "omlx" and is_qwen4_exp_record(model):
+        settings["pleStorage"] = "mmap"
+    return settings
+
+
+def _engine_settings_sweep_candidates(job: dict[str, Any]) -> tuple[
+    list[dict[str, Any]], list[str], list[dict[str, Any]],
+]:
+    """Build a small deterministic coordinate, never a Cartesian product."""
+    backend = str(job["backend"])
+    base = benchmark_engine_settings(backend, job.get("options"))
+    preference = str(job.get("enginePreference") or "throughput")
+    updates: list[dict[str, Any]] = []
+    searched: list[str] = []
+    constrained: list[dict[str, Any]] = []
+    if backend == "omlx":
+        searched = ["burst"]
+        updates = [{"burst": value} for value in _ordered_unique([
+            base.get("burst", "balanced"), "off", "light", "balanced", "aggressive",
+        ])]
+        constrained.extend([
+            {
+                "key": "anePrefill", "value": base.get("anePrefill", "off"),
+                "reason": "Approximate ANE prefill is separately qualified and cannot share DFlash 2.",
+            },
+            {
+                "key": "memoryGuard", "value": base.get("memoryGuard", "balanced"),
+                "reason": "Memory guard is a model-safety contract, not a speed coordinate.",
+            },
+        ])
+    elif backend == "lmstudio":
+        searched = ["gpu"]
+        updates = [
+            {"gpu": value, "parallel": 1}
+            for value in _ordered_unique([base.get("gpu", "max"), "max", "off"])
+        ]
+        constrained.append({
+            "key": "parallel", "value": 1,
+            "reason": "Calibration issues one request at a time; parallel lanes cannot be ranked serially.",
+        })
+    elif backend == "mtplx":
+        tuning = job.get("calibrationTuningPlan")
+        if (
+            isinstance(tuning, dict)
+            and tuning.get("strategy") == "isolated-long-context-operator-comparison"
+        ):
+            profiles = ["turbo"]
+            constrained.append({
+                "key": "profile", "value": "turbo",
+                "reason": "The audited 2.11.1 long-context operator contract requires Turbo.",
+            })
+        else:
+            anchor = str(base.get("profile") or "sustained")
+            preference_profiles = {
+                "throughput": ["turbo", "sustained", "performance-cold"],
+                "fastest": ["turbo", "sustained", "performance-cold"],
+                "responsive": ["performance-cold", "turbo", "sustained"],
+                "memory": ["stable", "sustained", "exact"],
+                "thermal": ["stable", "sustained", "exact"],
+            }
+            profiles = _ordered_unique([
+                anchor, *preference_profiles.get(preference, preference_profiles["throughput"]),
+            ])[:4]
+            searched = ["profile"]
+        updates = [{"profile": value} for value in profiles]
+        constrained.append({
+            "key": "fan", "value": base.get("fan", "smart"),
+            "reason": "Cooling is the user's explicit Calibration safety choice.",
+        })
+    elif backend == "swiftlm":
+        searched = ["prefillSize"]
+        updates = [{"prefillSize": value} for value in _ordered_unique([
+            base.get("prefillSize", 512), *SSD_STREAMING_PREFILL_SIZES,
+        ])]
+        constrained.extend([
+            {
+                "key": "nativeExpertTopK", "value": base.get("nativeExpertTopK", 0),
+                "reason": "The checkpoint's native expert routing is fidelity-owned.",
+            },
+            {
+                "key": "ssdCacheState", "value": "natural-cold-to-warm",
+                "reason": "macOS file cache is observed, never falsely purged.",
+            },
+        ])
+    elif backend == "mference":
+        agentic = str(job.get("workloadKind") or "") == "agentic"
+        searched = ["promptCacheMode"] if agentic else []
+        cache_modes = (
+            _ordered_unique([base.get("promptCacheMode", "on"), "on", "off"])
+            if agentic else [base.get("promptCacheMode", "on")]
+        )
+        updates = [
+            {"promptCacheMode": value, "queueLimit": 1}
+            for value in cache_modes
+        ]
+        constrained.extend([
+            {
+                "key": "queueLimit", "value": 1,
+                "reason": "A serial workload cannot measure queue-depth throughput.",
+            },
+            {
+                "key": "ssdCacheState", "value": "natural-cold-to-warm",
+                "reason": "macOS file cache is observed, never falsely purged.",
+            },
+        ])
+        if not agentic:
+            constrained.append({
+                "key": "promptCacheMode", "value": cache_modes[0],
+                "reason": "Prompt-cache ranking requires the Agentic shared-prefix workload.",
+            })
+    else:
+        return [], [], []
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for update in updates:
+        settings = _engine_settings_for_sweep_candidate(job, update)
+        key = _engine_settings_candidate_key(backend, settings)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append({
+            "key": key,
+            "label": _engine_settings_candidate_label(backend, settings),
+            "settings": settings,
+        })
+    return candidates, searched, constrained
+
+
+def prepare_engine_settings_sweep(job: dict[str, Any]) -> None:
+    """Plan AR presets, acceleration tuning, then each retained route at every preset."""
+    if job.get("routeQualification") is True:
+        return
+    candidates, axes, constrained = _engine_settings_sweep_candidates(job)
+    if not candidates:
+        return
+    base_loads = benchmark_job_base_maximum_route_count(job)
+    loads = base_loads + (len(candidates) - 1) * len(job["modes"])
+    job["engineSettingsSweep"] = {
+        "version": ENGINE_SETTINGS_SWEEP_VERSION,
+        "strategy": "staged-runtime-and-route-search",
+        "backend": job["backend"],
+        "selectionPreference": job.get("enginePreference") or "throughput",
+        "contract": engine_settings_sweep_contract(job),
+        "searchedAxes": axes,
+        "constrainedAxes": constrained,
+        "candidates": candidates,
+        "maximumEngineSettingLoads": len(candidates),
+        "baseRouteLoads": base_loads,
+        "maximumModelLoads": loads,
+        "stepsPerLoad": 2 + benchmark_measurement_count(job["suite"]),
+        "maximumGeneratedRequests": loads * (2 + benchmark_measurement_count(job["suite"])),
+        "globalCartesianSearch": False,
+    }
+
+
+def validate_engine_settings_sweep_budget(jobs: list[dict[str, Any]]) -> None:
+    loads = sum(benchmark_job_maximum_route_count(job) for job in jobs)
+    requests = sum(
+        benchmark_job_maximum_route_count(job)
+        * (2 + benchmark_measurement_count(job["suite"]))
+        for job in jobs
+    )
+    if (
+        loads > ENGINE_SETTINGS_SWEEP_MAX_MODEL_LOADS
+        or requests > ENGINE_SETTINGS_SWEEP_MAX_GENERATED_REQUESTS
+    ):
+        raise ValueError(
+            "The requested Calibration matrix exceeds the bounded settings-search budget "
+            f"({loads}/{ENGINE_SETTINGS_SWEEP_MAX_MODEL_LOADS} model loads, "
+            f"{requests}/{ENGINE_SETTINGS_SWEEP_MAX_GENERATED_REQUESTS} generated requests). "
+            "Choose a smaller compatible engine set or workload."
+        )
 
 
 def rotated_engine_shootout_jobs(
@@ -19936,9 +26682,9 @@ def validated_route_qualification_request(
             raise ValueError(
                 f"This Uzu qualification is fixed to exactly {int(spec['context']):,} context tokens."
             )
-        if int(visible.get("output") or 0) < ROUTE_QUALIFICATION_MAX_TOKENS:
+        if int(visible.get("output") or 0) < UZU_QUALIFICATION_SAMPLE_MIN_TOKENS:
             raise ValueError(
-                "The Uzu qualification requires at least 512 visible response tokens."
+                "The Uzu qualification requires at least 2,048 visible response tokens."
             )
     reasoning_contract = route_qualification_reasoning_contract(visible, model, spec)
     if reasoning_contract.get("reasoningEnabled") is not True:
@@ -20017,6 +26763,8 @@ def validated_engine_shootout_request(
     payload: dict[str, Any], models: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Lock one visible contract across every compatible installed engine."""
+    if dflash_quantized_fallback(str(payload.get("backend") or ""), payload.get("options") or {}):
+        raise ValueError(DFLASH_KV_COMPARISON_REASON)
     preference = str(payload.get("enginePreference") or "throughput")
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported Engine Shootout decision goal.")
@@ -20045,6 +26793,14 @@ def validated_engine_shootout_request(
         comparison_options["fan"] = calibration_cooling
     current = optimal_request(comparison_payload, models)
     client = str(comparison_payload.get("client") or "")
+    requested_suite = str(
+        comparison_payload.get("suite")
+        or ("standard" if client == "chat" else "agentic")
+    )
+    if _mtplx_long_context_suite_requested(
+        model, int(comparison_payload.get("context") or 0), requested_suite,
+    ):
+        comparison_payload["suite"] = MTPLX_LONG_CONTEXT_64K_SUITE
     reasoning = str(comparison_payload.get("reasoning") or "auto")
     options = comparison_payload.get("options") if isinstance(comparison_payload.get("options"), dict) else {}
     kv = str(options.get("kv") or "off")
@@ -20083,7 +26839,9 @@ def validated_engine_shootout_request(
             })
             continue
         job["shootoutId"] = shootout_id
+        job["enginePreference"] = preference
         prepare_calibration_tuning_plan(job)
+        prepare_engine_settings_sweep(job)
         jobs.append(job)
     if len(jobs) < 2:
         detail = "; ".join(
@@ -20115,16 +26873,30 @@ def validated_engine_shootout_request(
             "The compatible engines do not resolve to the same model artifact fingerprint, so a "
             "cross-engine speed comparison would not be trustworthy."
         )
+    validate_engine_settings_sweep_budget(jobs)
     jobs, order_strategy = rotated_engine_shootout_jobs(jobs, model, shootout_id)
     execution_order = [str(job["backend"]) for job in jobs]
     for index, job in enumerate(jobs):
         job["shootoutExecutionOrder"] = list(execution_order)
         job["shootoutOrderIndex"] = index
         job["shootoutOrderStrategy"] = order_strategy
+    # Final result selection must validate against the engine controls that were
+    # actually measured.  A tuner may intentionally normalize an engine-owned
+    # setting after the visible request was captured (MTPLX 2.11.1 long-context
+    # measurements, for example, require Turbo).  Keeping the old visible value
+    # here makes an otherwise valid completed record look stale and sends Apply
+    # back into Calibration.
+    measured_request = copy.deepcopy(comparison_payload)
+    measured_options = copy.deepcopy(measured_request.get("options") or {})
+    for job in jobs:
+        settings = job.get("evidence", {}).get("engineSettings")
+        if isinstance(settings, dict):
+            measured_options.update(copy.deepcopy(settings))
+    measured_request["options"] = measured_options
     return {
         "id": shootout_id,
         "kind": "engine-shootout",
-        "request": copy.deepcopy(comparison_payload),
+        "request": measured_request,
         "reasoningContract": reasoning_contract,
         "enginePreference": preference,
         "modelId": model_id,
@@ -20240,6 +27012,8 @@ def calibration_plan(
     payload: dict[str, Any], models: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Describe an exact-contract calibration without starting or allocating anything."""
+    if dflash_quantized_fallback(str(payload.get("backend") or ""), payload.get("options") or {}):
+        raise ValueError(DFLASH_KV_COMPARISON_REASON)
     calibration_cooling = validated_calibration_cooling(payload)
     raw_options = (
         copy.deepcopy(payload.get("options"))
@@ -20255,7 +27029,9 @@ def calibration_plan(
         calibration_payload, context_adjustment = normalized_ssd_comparison_request(
             calibration_payload, selected,
         )
-    visible_request = validated_launch_profile_request(calibration_payload, models)
+    visible_request = validated_launch_profile_request(
+        calibration_payload, models, preserve_comparison_controls=True,
+    )
     preference = str(payload.get("enginePreference") or "throughput")
     if preference not in ENGINE_PREFERENCE_LABELS:
         raise ValueError("Choose a supported calibration goal.")
@@ -20278,6 +27054,13 @@ def calibration_plan(
         payload.get("suite")
         or ("standard" if visible_request["client"] == "chat" else "agentic")
     )
+    if (
+        route_spec is None
+        and _mtplx_long_context_suite_requested(
+            model, int(visible_request.get("context") or 0), requested_suite_name,
+        )
+    ):
+        requested_suite_name = MTPLX_LONG_CONTEXT_64K_SUITE
     suite_name = str(route_spec["suite"]) if route_spec else requested_suite_name
     suite = BENCHMARK_SUITES.get(suite_name)
     if not suite:
@@ -20297,7 +27080,9 @@ def calibration_plan(
     measurement_payload = copy.deepcopy(visible_request)
     measurement_payload["reasoning"] = reasoning_contract["measured"]
     measurement_payload.setdefault("options", {})["fan"] = calibration_cooling
-    request = validated_launch_profile_request(measurement_payload, models)
+    request = validated_launch_profile_request(
+        measurement_payload, models, preserve_comparison_controls=True,
+    )
     kv = str(request.get("options", {}).get("kv") or "off")
     engines: list[dict[str, Any]] = []
     jobs: list[dict[str, Any]] = []
@@ -20341,6 +27126,9 @@ def calibration_plan(
                 job = validated_benchmark_request(
                     candidate, models, allow_baseline_only=True,
                 )
+                # The engine-owned MTP/DFlash search must use the same goal as
+                # the surrounding cross-engine comparison.
+                job["enginePreference"] = preference
                 if (
                     route_qualification_candidate and backend == route_spec["backend"]
                     and job.get("modes") == ["ar"]
@@ -20364,6 +27152,7 @@ def calibration_plan(
                         job["evidence"], model, job["options"], [backend],
                     )
                 prepare_calibration_tuning_plan(job)
+                prepare_engine_settings_sweep(job)
             except ValueError as error:
                 allowed = False
                 reason = str(error)
@@ -20378,7 +27167,10 @@ def calibration_plan(
             if job is not None else {}
         )
         mode_detail = (
-            benchmark_mode_summary(model, backend, measured_modes or ["ar"])
+            benchmark_mode_summary(
+                model, backend, measured_modes or ["ar"], engine_settings,
+                kv=kv,
+            )
             if job is not None else ""
         )
         if job is not None and job.get("routeQualification") is True:
@@ -20405,14 +27197,27 @@ def calibration_plan(
                 "AR-matching load is kept."
             )
         elif job is not None and backend == "mtplx" and "mtp" in measured_modes:
-            depths = mtplx_mtp_depth_candidates(
-                job["model"]["backends"]["mtplx"],
-            )
-            if len(depths) > 1:
+            tuning = job.get("calibrationTuningPlan")
+            if (
+                isinstance(tuning, dict)
+                and tuning.get("strategy")
+                == "isolated-long-context-operator-comparison"
+            ):
                 mode_detail += (
-                    f" MTPLX is reloaded at every verified draft depth (D1–D{max(depths)}); "
-                    "only the fastest AR-matching depth is kept."
+                    " MTPLX measures AR, the isolated default MTP operators, and the "
+                    "2.11.1 long-context operators at one fixed verified depth. The "
+                    "candidate must clear exact output, resource, median-TPS, and "
+                    "worst-TPS gates before it can be kept."
                 )
+            else:
+                depths = mtplx_mtp_depth_candidates(
+                    job["model"]["backends"]["mtplx"],
+                )
+                if len(depths) > 1:
+                    mode_detail += (
+                        f" MTPLX is reloaded at every verified draft depth (D1–D{max(depths)}); "
+                        "only the fastest AR-matching depth is kept."
+                    )
         engine_capability = model.get("backends", {}).get(backend, {})
         engine_runtime_installed = bool(
             ENGINE_ADAPTERS[backend].public().get("installed") is True
@@ -20443,9 +27248,13 @@ def calibration_plan(
             ),
             "modes": benchmark_job_public_modes(job) if job is not None else [],
             "measurementRouteCount": measurement_route_count,
+            "settingsSearch": (
+                public_benchmark_settings_search_plan(job)
+                if job is not None else None
+            ),
             "modeDetail": mode_detail,
             "accelerationReason": (
-                benchmark_acceleration_reason(model, backend, measured_modes)
+                benchmark_acceleration_reason(model, backend, measured_modes, kv=kv)
                 if job is not None else ""
             ),
             "settingsLabel": (
@@ -20468,6 +27277,7 @@ def calibration_plan(
                 artifact_compatible=engine_artifact_compatible,
             ),
         })
+    validate_engine_settings_sweep_budget(jobs)
 
     route_qualification = bool(
         route_qualification_candidate
@@ -20488,6 +27298,8 @@ def calibration_plan(
     fingerprints = {str(job.get("modelFingerprint") or "") for job in jobs}
     if route_qualification_candidate and reasoning_contract.get("reasoningEnabled") is not True:
         blockers.append(str(reasoning_contract.get("detail") or "Choose a reasoning level first."))
+    elif request["backend"] == "uzu" and request["client"] == "pi":
+        blockers.append(UZU_PI_BENCHMARK_LIMITATION)
     elif len(jobs) < 2 and not route_qualification:
         blockers.append(
             "Whallm's full-expert checkpoint has no equivalent second engine to compare; use its measured route directly."
@@ -20776,6 +27588,22 @@ def public_session_resource(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def dflash_quantized_fallback(backend: str, options: dict[str, Any]) -> bool:
+    return bool(
+        isinstance(options, dict) and backend == "omlx"
+        and options.get("acceleration") == "dflash"
+        and options.get("kv") in {"q4", "q6", "q8"}
+    )
+
+
+def effective_kv_precision(backend: str, options: dict[str, Any]) -> str:
+    """Cache precision wired at launch; incompatible DDTree requests are rejected."""
+    if (backend == "omlx" and options.get("acceleration") == "dflash"
+            and options.get("dflashVerify", "adaptive") == "ddtree"):
+        return "off"
+    return str(options.get("kv") or "off")
+
+
 def launch_memory_estimate(
     request: dict[str, Any], model: dict[str, Any], resource: dict[str, Any],
 ) -> dict[str, Any]:
@@ -20783,7 +27611,25 @@ def launch_memory_estimate(
     options = request.get("options") if isinstance(request.get("options"), dict) else {}
     backend = str(request.get("backend") or "")
     context = int(request.get("context") or 0)
-    kv = str(options.get("kv") or "off")
+    requested_kv = str(options.get("kv") or "off")
+    kv = effective_kv_precision(backend, options)
+    if backend == "whallm" and model.get("nativeWhallm"):
+        working_set = whallm_runtime.WORKING_SET_BYTES
+        total = int(resource.get("totalMemoryBytes") or 0)
+        reserve = max(SESSION_OS_RESERVE_MIN_BYTES, round(total * SESSION_OS_RESERVE_FRACTION))
+        resident = int(model["nativeWhallm"]["commonBytes"]) + whallm_runtime.SLOTS * 2_611_200
+        return {
+            "version": SESSION_MEMORY_ESTIMATE_VERSION, "modelBytes": resident,
+            "ssdWeightBytes": int(model["size"]), "companionBytes": 0, "companionLabels": [],
+            "kvCacheBytes": 0, "kvPrecision": "MXFP8 · included in working-set allowance", "kvScalarBytes": None,
+            "contextTokens": context, "parallelLanes": 1,
+            "runtimeReserveBytes": max(0, working_set - resident),
+            "estimatedWorkingSetBytes": working_set, "osReserveBytes": reserve,
+            "requiredHeadroomBytes": working_set + reserve,
+            "geometryReady": True, "geometry": {"ready": True, "nativeWhallm": True},
+            "memoryCeilingBytes": whallm_runtime.MEMORY_BYTES, "nativeWhallm": True,
+            "basis": "Bounded 4,096-slot full-expert runtime with 2 GiB prompt cache and 16K context; 125 GB of SSD weights are not fully resident RAM. The 26 GiB working-set allowance includes margin above the initial 23 GiB observation; it is an estimate, not a measured 16K process peak.",
+        }
     if backend == "whallm" and model.get("sharedServer") is True:
         bridge_reserve = 512 * 1024**2
         return {
@@ -20803,11 +27649,12 @@ def launch_memory_estimate(
             "geometryReady": True,
             "geometry": {"ready": True, "sharedServer": True},
             "sharedEngine": True,
-            "observedEnginePeakBytes": WHALLM_MEASURED_PEAK_BYTES,
+            "observedMlxActiveMemoryBytes": WHALLM_MEASURED_PEAK_BYTES,
             "basis": (
                 "Whallm is already serving this model before it becomes selectable. The launcher adds only a bounded "
-                "private bridge; Whallm owns model, KV, and SSD-cache memory. Upstream's M5 Pro measurements peaked "
-                "at 18.92 GiB through the published 16K-input case, but its official support floor remains 64 GB."
+                "private bridge; Whallm owns model, KV, and SSD-cache memory. Upstream's M5 Pro measurements reached "
+                "22.75 GiB of MLX active memory through the published 16K-input case; this is not process RSS, and "
+                "Whallm's official support floor remains 64 GiB."
             ),
         }
     if backend == "freetoken" and model.get("remote") is True:
@@ -20879,17 +27726,19 @@ def launch_memory_estimate(
     if backend == "uzu" and model.get("uzuNative") is True:
         geometry = model.get("memoryGeometry") if isinstance(model.get("memoryGeometry"), dict) else {}
         geometry_ready = bool(geometry.get("ready") is True)
+        target_kv_bytes = 0
+        draft_kv_bytes = 0
         kv_bytes = 0
         if geometry_ready and context > 0:
             target_kv_bytes = round(
                 2 * int(geometry["fullAttentionLayers"]) * context
                 * int(geometry["kvHeads"]) * int(geometry["headDimension"]) * 2.0
             )
-            kv_bytes = (
-                target_kv_bytes
-                + context * UZU_DRAFT_FULL_ATTENTION_BYTES_PER_TOKEN
+            draft_kv_bytes = (
+                context * UZU_DRAFT_FULL_ATTENTION_BYTES_PER_TOKEN
                 + UZU_DRAFT_SLIDING_CACHE_BYTES
             )
+            kv_bytes = target_kv_bytes + draft_kv_bytes
         target_bytes = next(
             size for name, size, _crc in UZU_MODEL_FILE_MANIFEST
             if name == "model.safetensors"
@@ -20899,7 +27748,18 @@ def launch_memory_estimate(
             if name == "speculator/model.safetensors"
         )
         total_weights = target_bytes + draft_bytes
-        runtime_reserve = SESSION_RUNTIME_BASE_RESERVE_BYTES + round(total_weights * 0.08)
+        long_context_steps = (
+            context // UZU_LONG_CONTEXT_PREFILL_RESERVE_STEP_TOKENS
+            if context >= UZU_LONG_CONTEXT_PREFILL_RESERVE_STEP_TOKENS else 0
+        )
+        prefill_transient_reserve = (
+            long_context_steps * UZU_LONG_CONTEXT_PREFILL_RESERVE_STEP_BYTES
+        )
+        runtime_reserve = (
+            SESSION_RUNTIME_BASE_RESERVE_BYTES
+            + round(total_weights * 0.08)
+            + prefill_transient_reserve
+        )
         working_set = total_weights + kv_bytes + runtime_reserve
         total = int(resource.get("totalMemoryBytes") or 0)
         os_reserve = max(
@@ -20912,37 +27772,54 @@ def launch_memory_estimate(
             "companionBytes": draft_bytes,
             "companionLabels": ["bundled DFlash draft"],
             "kvCacheBytes": kv_bytes,
+            "targetKvCacheBytes": target_kv_bytes,
+            "draftKvCacheBytes": draft_kv_bytes,
             "kvPrecision": "BF16 · runtime fixed",
             "kvScalarBytes": 2.0,
             "contextTokens": context,
             "parallelLanes": 1,
             "runtimeReserveBytes": runtime_reserve,
+            "prefillTransientReserveBytes": prefill_transient_reserve,
             "estimatedWorkingSetBytes": working_set,
             "osReserveBytes": os_reserve,
             "requiredHeadroomBytes": working_set + os_reserve,
             "processMemoryCeilingBytes": UZU_PROCESS_MEMORY_CEILING_BYTES,
+            "processCeilingAdmissionMarginBytes": UZU_PROCESS_CEILING_ADMISSION_MARGIN_BYTES,
             "geometryReady": geometry_ready,
             "geometry": copy.deepcopy(geometry),
             "uzuSpeculative": True,
             "estimateIsConservative": True,
             "basis": (
                 "Pinned Uzu target plus bundled DFlash draft, runtime-fixed BF16 target and draft "
-                "KV at the selected 16K/32K context (including the draft sliding window), runtime "
-                "workspace, and protected macOS reserve. A separate live process-group and whole-Mac "
-                "headroom guard stop growth before it can consume the host."
+                "KV at the selected exact context (including the draft sliding window), a separate "
+                "long-context prefill reserve, runtime workspace, and protected macOS reserve. "
+                "Admission also keeps a margin below the independent live process-group ceiling; "
+                "the whole-Mac headroom guard can stop the route sooner."
             ),
         }
     qwen4_ple = model.get("qwen4Ple") if isinstance(model.get("qwen4Ple"), dict) else {}
     if backend == "omlx" and qwen4_ple.get("supported") is True:
         geometry = model.get("memoryGeometry") if isinstance(model.get("memoryGeometry"), dict) else {}
         bytes_per_token = geometry.get("fullBytesPerToken")
+        allocation_step = geometry.get("qsaAllocationStepTokens")
         geometry_ready = bool(
             geometry.get("ready") is True
             and geometry.get("qwen4Qsa") is True
             and isinstance(bytes_per_token, int) and not isinstance(bytes_per_token, bool)
             and bytes_per_token > 0
+            and isinstance(allocation_step, int) and not isinstance(allocation_step, bool)
+            and allocation_step == OMLX_QWEN4_QSA_ALLOCATION_STEP_TOKENS
         )
-        kv_bytes = int(bytes_per_token) * context if geometry_ready and context > 0 else 0
+        allocated_context = (
+            qwen4_qsa_allocation_high_water_tokens(
+                context, int(allocation_step),
+            )
+            if geometry_ready and context > 0 else 0
+        )
+        kv_bytes = (
+            int(bytes_per_token) * allocated_context
+            if geometry_ready and allocated_context > 0 else 0
+        )
         model_bytes = max(0, int(qwen4_ple.get("residentBytes") or 0))
         checkpoint_bytes = max(0, int(qwen4_ple.get("checkpointBytes") or 0))
         ple_bytes = max(0, int(qwen4_ple.get("pleBytes") or 0))
@@ -20987,6 +27864,10 @@ def launch_memory_estimate(
             "kvPrecision": "full",
             "kvScalarBytes": 2.0,
             "contextTokens": context,
+            "allocatedContextTokens": allocated_context,
+            "contextAllocationStepTokens": (
+                int(allocation_step) if geometry_ready else None
+            ),
             "parallelLanes": 1,
             "runtimeReserveBytes": runtime_reserve,
             "estimatedWorkingSetBytes": working_set,
@@ -20997,7 +27878,8 @@ def launch_memory_estimate(
             "estimateIsConservative": True,
             "basis": (
                 "Qwen4 PLE capacity: the indexed N-gram table is read-only SSD mmap, the remaining checkpoint "
-                "uses oMLX's 1.05 resident estimate, QSA index keys and MRoPE positions stay full precision, "
+                "uses oMLX's 1.05 resident estimate, QSA raw and pooled index keys plus MRoPE positions stay full precision, "
+                "the active cache is charged for 8,192-token growth and a worst-case prefill-to-decode doubling, "
                 "and runtime plus macOS reserves remain separate. The context-derived Metal limit includes "
                 "oMLX's 95% prefill safety margin and is checked independently from the process guard. "
                 "This is not swap or expert streaming."
@@ -21118,6 +28000,7 @@ def launch_memory_estimate(
         "companionLabels": companion_labels,
         "kvCacheBytes": kv_bytes,
         "kvPrecision": kv,
+        "requestedKvPrecision": requested_kv,
         "kvScalarBytes": scalar_bytes,
         "contextTokens": context,
         "parallelLanes": lanes,
@@ -21127,7 +28010,13 @@ def launch_memory_estimate(
         "requiredHeadroomBytes": working_set + os_reserve,
         "geometryReady": geometry_ready,
         "geometry": copy.deepcopy(geometry),
-        "basis": "Conservative capacity at the full selected context; actual paged-cache residency can be lower.",
+        "basis": (
+            "Conservative capacity at the full selected context; actual paged-cache residency can be lower."
+            + (
+                f" DDTree requires full-precision KV; switch to Adaptive or Fixed DFlash to use {requested_kv.upper()}."
+                if kv != requested_kv else ""
+            )
+        ),
     }
 
 
@@ -21138,11 +28027,16 @@ def _llamacpp_qualified_session_capacity(
     record: dict[str, Any] | None = None
     metrics: dict[str, Any] | None = None
     try:
+        sampling_contract = validated_sampling_contract(
+            model, request, str(request["client"]),
+            request.get("chat") if isinstance(request.get("chat"), dict) else None,
+        )
         evidence = optimizer_evidence(
             model, int(request["context"]), int(request["output"]),
             str(request["client"]), str(request["reasoning"]),
             str(request.get("options", {}).get("kv") or "off"),
             request.get("chat") if isinstance(request.get("chat"), dict) else None,
+            sampling_contract,
         )
         add_benchmark_engine_evidence(
             evidence, model,
@@ -21189,33 +28083,195 @@ def _llamacpp_qualified_session_capacity(
     return record, metrics, estimate
 
 
+def uzu_estimate_within_process_ceiling(estimate: dict[str, Any]) -> bool:
+    """Keep estimated Uzu residency safely below the independent live stop."""
+    working_set = estimate.get("estimatedWorkingSetBytes")
+    ceiling = estimate.get("processMemoryCeilingBytes")
+    margin = estimate.get("processCeilingAdmissionMarginBytes")
+    return bool(
+        isinstance(working_set, int) and not isinstance(working_set, bool)
+        and isinstance(ceiling, int) and not isinstance(ceiling, bool)
+        and isinstance(margin, int) and not isinstance(margin, bool)
+        and working_set > 0 and margin >= 0
+        and working_set + margin < ceiling
+    )
+
+
 def _uzu_qualified_session_record(
     request: dict[str, Any], model: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Resolve only a fresh Uzu receipt matching this exact visible context."""
+    """Resolve capacity only, without promoting Chat measurements as Pi speed.
+
+    The tested Pi transport shares the native sampler, context/output bounds,
+    and live process guard. Its capacity can use the exact Chat receipt; the
+    original receipt and all optimizer/performance client bindings stay intact.
+    """
     try:
+        sampling_contract = validated_sampling_contract(
+            model, request, str(request["client"]),
+            request.get("chat") if isinstance(request.get("chat"), dict) else None,
+        )
         evidence = optimizer_evidence(
             model, int(request["context"]), int(request["output"]),
             str(request["client"]), str(request["reasoning"]),
             str(request.get("options", {}).get("kv") or "off"),
             request.get("chat") if isinstance(request.get("chat"), dict) else None,
+            sampling_contract,
         )
         add_benchmark_engine_evidence(
             evidence, model,
             request.get("options") if isinstance(request.get("options"), dict) else {},
             ["uzu"],
         )
-        return verified_route_qualification(model, "uzu", evidence)
+        if request.get("client") == "pi":
+            if not uzu_pi_transport_supported(model.get("backends", {}).get("uzu")):
+                return None
+            evidence["client"] = "chat"
+        exact = verified_route_qualification(model, "uzu", evidence)
+        if exact is not None:
+            return exact
+        # Capacity is bounded by the total context window and live memory
+        # guard, not by a larger per-response ceiling. Reuse only when the
+        # bounded probe budget is identical; never relabel the stored receipt
+        # or use this relaxation for optimizer/performance comparisons.
+        requested_output = request.get("output")
+        if (
+            isinstance(requested_output, bool) or not isinstance(requested_output, int)
+            or not 0 < requested_output <= int(request["context"])
+        ):
+            return None
+        capability = model.get("backends", {}).get("uzu", {})
+        records = list(capability.get("localBenchmarks") or [])
+        if isinstance(capability.get("localBenchmark"), dict):
+            records.append(capability["localBenchmark"])
+        probe_budget = route_qualification_sample_tokens("uzu", requested_output)
+        outputs = sorted({
+            record["configuredOutputLimit"] for record in records
+            if isinstance(record, dict)
+            and isinstance(record.get("configuredOutputLimit"), int)
+            and not isinstance(record.get("configuredOutputLimit"), bool)
+            and record["configuredOutputLimit"] != requested_output
+            and record.get("measuredRequestMaxTokens") == probe_budget
+            and route_qualification_sample_tokens("uzu", record["configuredOutputLimit"]) == probe_budget
+        }, reverse=True)
+        for output in outputs:
+            candidate_evidence = copy.deepcopy(evidence)
+            candidate_evidence["output"] = output
+            candidate = verified_route_qualification(model, "uzu", candidate_evidence)
+            if candidate is not None:
+                return candidate
+        return None
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def uzu_qualification_memory_ceiling_supported(value: Any) -> bool:
+    """Retain receipts measured under the previous, stricter 36 GiB guard.
+
+    Their measured peak must still be below their recorded ceiling. This does
+    not upgrade their context tier or rewrite historical qualification evidence.
+    """
+    return (
+        type(value) is int
+        and value in (36 * 1024**3, UZU_PROCESS_MEMORY_CEILING_BYTES)
+        and value <= UZU_PROCESS_MEMORY_CEILING_BYTES
+    )
+
+
+def uzu_128k_staged_qualification_proof(
+    request: dict[str, Any], model: dict[str, Any], resource: dict[str, Any],
+    estimate_128k: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project 128K from a fresh matching 64K measured process-group peak."""
+    context = request.get("context")
+    if context != 131_072 or isinstance(context, bool):
+        return {"required": False, "ready": True}
+    staged_request = copy.deepcopy(request)
+    staged_request["context"] = 65_536
+    record = _uzu_qualified_session_record(staged_request, model)
+    if record is None:
+        return {
+            "required": True,
+            "ready": False,
+            "reason": "missing-64k-receipt",
+            "detail": (
+                "Qualify the matching 64K Uzu route first. Its fresh measured process-group "
+                "peak is required before the 128K model load can be admitted."
+            ),
+        }
+    spec_64k = route_qualification_spec(model, "uzu", 65_536)
+    metrics_64k = (
+        route_qualification_metrics(record, spec_64k)
+        if spec_64k is not None else None
+    )
+    estimate_64k = launch_memory_estimate(staged_request, model, resource)
+    current_estimate = (
+        copy.deepcopy(estimate_128k)
+        if isinstance(estimate_128k, dict)
+        else launch_memory_estimate(request, model, resource)
+    )
+    peak_64k = metrics_64k.get("peakMemoryBytes") if isinstance(metrics_64k, dict) else None
+    working_64k = estimate_64k.get("estimatedWorkingSetBytes")
+    working_128k = current_estimate.get("estimatedWorkingSetBytes")
+    margin = current_estimate.get("processCeilingAdmissionMarginBytes")
+    ceiling = current_estimate.get("processMemoryCeilingBytes")
+    if not (
+        isinstance(peak_64k, int) and not isinstance(peak_64k, bool) and peak_64k > 0
+        and isinstance(working_64k, int) and not isinstance(working_64k, bool)
+        and isinstance(working_128k, int) and not isinstance(working_128k, bool)
+        and working_64k > 0 and working_128k > working_64k
+        and isinstance(margin, int) and not isinstance(margin, bool) and margin >= 0
+        and isinstance(ceiling, int) and not isinstance(ceiling, bool)
+        and ceiling == UZU_PROCESS_MEMORY_CEILING_BYTES
+        and margin == UZU_PROCESS_CEILING_ADMISSION_MARGIN_BYTES
+    ):
+        return {
+            "required": True,
+            "ready": False,
+            "reason": "invalid-64k-proof",
+            "detail": (
+                "The matching 64K receipt no longer exposes a complete measured peak and "
+                "comparable 64K-to-128K working-set estimate."
+            ),
+        }
+    growth = working_128k - working_64k
+    projected_peak = peak_64k + growth
+    projected_with_margin = projected_peak + margin
+    ready = projected_with_margin < ceiling
+    return {
+        "required": True,
+        "ready": ready,
+        "reason": "ready" if ready else "projected-ceiling",
+        "detail": (
+            "The fresh matching 64K process-group peak plus estimated 64K-to-128K growth "
+            f"and the protected 2 GiB live-ceiling margin fit below {ceiling / 1024**3:.0f} GiB."
+            if ready else
+            "The fresh matching 64K process-group peak plus estimated 64K-to-128K growth "
+            f"and the protected 2 GiB margin do not fit below Uzu's {ceiling / 1024**3:.0f} GiB live ceiling."
+        ),
+        "receiptId": str(record.get("id") or ""),
+        "receiptCreatedAt": str(record.get("createdAt") or ""),
+        "measured64KProcessGroupPeakBytes": peak_64k,
+        "estimated64KWorkingSetBytes": working_64k,
+        "estimated128KWorkingSetBytes": working_128k,
+        "estimatedWorkingSetGrowthBytes": growth,
+        "processCeilingAdmissionMarginBytes": margin,
+        "projected128KProcessGroupPeakBytes": projected_peak,
+        "projected128KProcessGroupPeakWithMarginBytes": projected_with_margin,
+        "processMemoryCeilingBytes": ceiling,
+    }
 
 
 def session_memory_admission(
     payload: dict[str, Any], models: list[dict[str, Any]],
     resource: dict[str, Any], hub: dict[str, Any], operation: dict[str, Any],
+    *, allow_unmeasured_mtplx_operator: bool = False,
 ) -> dict[str, Any]:
     """Return a one-launch admission decision; never allocate a port or create run files."""
-    request = validated_launch_profile_request(payload, models)
+    request = validated_launch_profile_request(
+        payload, models,
+        allow_unmeasured_mtplx_operator=allow_unmeasured_mtplx_operator,
+    )
     model = next(item for item in models if item.get("id") == request["modelId"])
     llama_route = request.get("backend") == "llamacpp"
     uzu_route = request.get("backend") == "uzu"
@@ -21241,8 +28297,9 @@ def session_memory_admission(
         or OMLX_QWEN4_HIGH_MEMORY_HARD_BYTES
     )
     high_minimum_headroom = int(
-        estimate.get("osReserveBytes") or SESSION_OS_RESERVE_MIN_BYTES
+        estimate.get("requiredHeadroomBytes") or SESSION_OS_RESERVE_MIN_BYTES
     )
+    total_memory = int(resource.get("totalMemoryBytes") or 0)
     required_metal_limit = int(
         estimate.get("requiredMetalWiredLimitBytes")
         or OMLX_QWEN4_METAL_FLOOR_BYTES
@@ -21264,7 +28321,19 @@ def session_memory_admission(
         requires_acknowledgement = False
         launchable = True
         label = "Whallm route is already loaded"
-        detail = "Whallm already owns the model and SSD cache; this launch adds only a private loopback bridge and the selected work surface. The 48 GB host remains an experimental upstream configuration."
+        detail = "Whallm already owns the model and SSD cache; this launch adds only a private loopback bridge and the selected work surface. The 48 GiB host remains an experimental upstream configuration."
+    elif request.get("backend") == "whallm" and model.get("nativeWhallm"):
+        conflict = whallm_qualification_conflict(timeout=0.35)
+        required = int(estimate["requiredHeadroomBytes"])
+        launchable = bool(not conflict and resource.get("memoryAvailable") is True and headroom >= required)
+        requires_acknowledgement = False
+        decision = "ready" if launchable else "pressure"
+        label = "Full Qwen is ready to load" if launchable else "Free memory before loading Qwen"
+        detail = (
+            "A separate Whallm model is active; use its shared route or unload it before starting another copy."
+            if conflict else
+            f"The owned 16K route needs about {required / 1024**3:.1f} GiB of free headroom including the protected macOS reserve. Its process and MLX memory are capped at 40 GiB."
+        )
     elif uzu_route and uzu_record is None:
         decision = "qualification"
         requires_acknowledgement = False
@@ -21272,7 +28341,7 @@ def session_memory_admission(
         label = "Qualify this exact Uzu context once"
         detail = (
             "No fresh successful Uzu qualification matches this runtime, model receipt, "
-            "context, response limit, reasoning, packaged sampling, and fixed DFlash + Weaver "
+            "context, bounded test budget, reasoning, packaged sampling, and fixed DFlash + Weaver "
             "route. Run the bounded qualification; it cannot be bypassed by a checkbox."
         )
     elif uzu_route and resource.get("memoryAvailable") is not True:
@@ -21287,6 +28356,16 @@ def session_memory_admission(
         launchable = False
         label = "Uzu KV capacity unavailable"
         detail = "Uzu is blocked because the pinned config no longer exposes the exact attention geometry required for a full-context estimate."
+    elif uzu_route and not uzu_estimate_within_process_ceiling(estimate):
+        decision = "configuration"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Reduce Uzu context"
+        detail = (
+            "The selected context's conservative working-set estimate does not leave the "
+            f"required {UZU_PROCESS_CEILING_ADMISSION_MARGIN_BYTES / 1024**3:.0f} GiB margin below "
+            f"Uzu's {UZU_PROCESS_MEMORY_CEILING_BYTES / 1024**3:.0f} GiB live process ceiling."
+        )
     elif uzu_route and int(resource.get("headroomBytes") or 0) < int(estimate["requiredHeadroomBytes"]):
         decision = "pressure"
         requires_acknowledgement = False
@@ -21303,8 +28382,9 @@ def session_memory_admission(
         launchable = True
         label = "Bounded Uzu route ready"
         detail = (
-            f"The pinned model receipts, safe runtime, selected context, current headroom, and "
-            f"{UZU_PROCESS_MEMORY_CEILING_BYTES / 1024**3:.0f} GiB live process ceiling all pass."
+            f"Saved {int(request['context']) // 1024}K capacity check reused. "
+            f"Current memory and the {UZU_PROCESS_MEMORY_CEILING_BYTES / 1024**3:.0f} GiB live guard pass. "
+            "The check proves context capacity; it does not benchmark a full-length response."
         )
     elif llama_route and (llama_record is None or llama_metrics is None):
         decision = "qualification"
@@ -21394,6 +28474,30 @@ def session_memory_admission(
             "Qwen high-memory mode is blocked because the checkpoint does not expose the exact QSA "
             "geometry needed to prove its full-context KV allocation."
         )
+    elif (
+        high_memory_route
+        and total_memory > 0
+        and int(estimate.get("requiredHeadroomBytes") or 0) > total_memory
+    ):
+        decision = "configuration"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Reduce Qwen memory"
+        detail = (
+            f"This route projects {int(estimate.get('estimatedWorkingSetBytes') or 0) / 1024**3:.1f} GiB "
+            f"for the model session plus a protected {int(estimate.get('osReserveBytes') or 0) / 1024**3:.1f} GiB "
+            f"for macOS, which exceeds this Mac's {total_memory / 1024**3:.1f} GiB physical memory. "
+            "Reduce context or use a smaller checkpoint; approval cannot bypass physical capacity."
+        )
+    elif high_memory_route and total_memory <= 0:
+        decision = "unknown"
+        requires_acknowledgement = False
+        launchable = False
+        label = "Physical memory unavailable"
+        detail = (
+            "Qwen high-memory mode is blocked because macOS did not provide the physical-memory "
+            "capacity needed to prove the projected session plus protected OS reserve can fit."
+        )
     elif high_memory_route and resource.get("memoryAvailable") is not True:
         decision = "unknown"
         requires_acknowledgement = False
@@ -21409,8 +28513,9 @@ def session_memory_admission(
         launchable = False
         label = "Free memory before launch"
         detail = (
-            f"Qwen high-memory mode requires at least {high_minimum_headroom / 1024**3:.1f} GiB of measured "
-            f"headroom before loading; only {headroom / 1024**3:.1f} GiB is available. Close memory-heavy "
+            f"This Qwen route requires about {high_minimum_headroom / 1024**3:.1f} GiB of measured headroom "
+            f"for the projected model session and protected macOS reserve; only {headroom / 1024**3:.1f} GiB "
+            "is available. Close memory-heavy "
             "apps and refresh capacity."
         )
     elif (
@@ -21596,9 +28701,15 @@ def route_qualification_memory_admission(
         estimate = launch_memory_estimate(visible, model, resource)
         headroom = resource.get("headroomBytes")
         required = estimate.get("requiredHeadroomBytes")
+        ceiling_ready = uzu_estimate_within_process_ceiling(estimate)
+        staged_proof = uzu_128k_staged_qualification_proof(
+            visible, model, resource, estimate,
+        )
         memory_ready = bool(
             resource.get("memoryAvailable") is True
             and estimate.get("geometryReady") is True
+            and ceiling_ready
+            and staged_proof.get("ready") is True
             and isinstance(headroom, int) and not isinstance(headroom, bool)
             and isinstance(required, int) and not isinstance(required, bool)
             and headroom >= required
@@ -21609,6 +28720,35 @@ def route_qualification_memory_admission(
                 current_operation.get("detail")
                 or current_hub.get("message")
                 or "Stop it before qualification."
+            )
+        elif estimate.get("geometryReady") is not True:
+            decision, label = "unknown", "Uzu KV capacity unavailable"
+            detail = (
+                "The pinned config no longer exposes the exact attention geometry required "
+                "for a full-context estimate."
+            )
+        elif not ceiling_ready:
+            decision, label = "configuration", "Reduce Uzu context"
+            detail = (
+                "The selected context's conservative working-set estimate does not leave the "
+                f"required {UZU_PROCESS_CEILING_ADMISSION_MARGIN_BYTES / 1024**3:.0f} GiB margin below "
+                f"Uzu's {UZU_PROCESS_MEMORY_CEILING_BYTES / 1024**3:.0f} GiB live process ceiling."
+            )
+        elif staged_proof.get("ready") is not True:
+            staged_reason = str(staged_proof.get("reason") or "")
+            decision = (
+                "configuration" if staged_reason == "projected-ceiling" else "qualification"
+            )
+            label = (
+                "Qualify Uzu at 64K first"
+                if staged_reason == "missing-64k-receipt" else
+                "128K projection exceeds Uzu ceiling"
+                if staged_reason == "projected-ceiling" else
+                "Refresh the 64K Uzu qualification"
+            )
+            detail = str(
+                staged_proof.get("detail")
+                or "A fresh matching 64K measurement is required before 128K qualification."
             )
         elif not memory_ready:
             decision, label = "pressure", "Free memory before Uzu qualification"
@@ -21638,6 +28778,7 @@ def route_qualification_memory_admission(
                 "context": int(visible["context"]), "kv": "off",
             },
             "estimate": estimate,
+            "stagedQualification": staged_proof,
             "projectedHeadroomBytes": (
                 int(headroom) - int(required)
                 if isinstance(headroom, int) and isinstance(required, int) else None
@@ -21654,8 +28795,8 @@ def route_qualification_memory_admission(
     )
 
 
-def route_qualification_admission_ready(admission: dict[str, Any]) -> bool:
-    """Require the fail-closed, no-approval outcome before a Qwen qualification load."""
+def strict_model_load_admission_ready(admission: dict[str, Any]) -> bool:
+    """Return whether an automated model load has an unqualified ready decision."""
     return bool(
         admission.get("launchable") is True
         and admission.get("requiresAcknowledgement") is False
@@ -21663,9 +28804,99 @@ def route_qualification_admission_ready(admission: dict[str, Any]) -> bool:
     )
 
 
+def route_qualification_admission_ready(admission: dict[str, Any]) -> bool:
+    """Require the fail-closed, no-approval outcome before a route qualification load."""
+    return strict_model_load_admission_ready(admission)
+
+
+AUTOMATED_MODEL_LOAD_PURPOSES = frozenset({
+    "benchmark", "runtime-promotion", "route-check", "ane-tune",
+    "route-qualification",
+})
+MODEL_LOAD_OWNER_KINDS = {
+    "benchmark": "benchmark",
+    "runtime-promotion": "runtime-promotion",
+    "route-check": "route-check",
+    "ane-tune": "ane",
+    "route-qualification": "benchmark",
+    "session-set": "session-set",
+}
+MODEL_LOAD_PURPOSE_LABELS = {
+    "benchmark": "benchmark",
+    "runtime-promotion": "runtime comparison",
+    "route-check": "route check",
+    "ane-tune": "ANE tuning",
+    "route-qualification": "route qualification",
+    "session-set": "Session Set",
+}
+
+
+def require_live_model_load_admission(
+    request: dict[str, Any], models: list[dict[str, Any]], *, purpose: str,
+    approval_payload: dict[str, Any] | None = None,
+    resource_snapshot: dict[str, Any] | None = None,
+    hub: dict[str, Any] | None = None,
+    operation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Re-sample capacity immediately before one caller-owned model load.
+
+    Automated measurements never accept the normal interactive memory-review
+    acknowledgement.  Session Sets retain that acknowledgement contract, while
+    receipt-bound qualification continues to use its specialized Uzu/llama.cpp
+    rules.  The current caller's own operation is ignored, but a different
+    active launcher operation still blocks the load.
+    """
+    if purpose not in MODEL_LOAD_OWNER_KINDS:
+        raise ValueError("Unknown model-load admission purpose.")
+    current_hub = copy.deepcopy(hub) if isinstance(hub, dict) else MANAGER.hub_snapshot()
+    if isinstance(operation, dict):
+        current_operation = copy.deepcopy(operation)
+    else:
+        current_operation = active_launcher_operation(current_hub)
+        owner_kind = MODEL_LOAD_OWNER_KINDS[purpose]
+        if (
+            current_operation.get("active") is True
+            and current_operation.get("kind") == owner_kind
+        ):
+            current_operation = {
+                "active": False, "kind": owner_kind, "phase": "starting",
+                "detail": f"This {MODEL_LOAD_PURPOSE_LABELS[purpose]} owns the next model load.",
+            }
+    snapshot = (
+        copy.deepcopy(resource_snapshot)
+        if isinstance(resource_snapshot, dict) else apple_resource_snapshot()
+    )
+    if purpose == "route-qualification":
+        admission = route_qualification_memory_admission(
+            request, models, resource_snapshot=snapshot,
+            hub=current_hub, operation=current_operation,
+        )
+    else:
+        admission = session_memory_admission(
+            request, models, public_session_resource(snapshot),
+            current_hub, current_operation,
+            allow_unmeasured_mtplx_operator=purpose == "benchmark",
+        )
+    if purpose in AUTOMATED_MODEL_LOAD_PURPOSES:
+        if not strict_model_load_admission_ready(admission):
+            raise RuntimeError(
+                f"Capacity changed immediately before the {MODEL_LOAD_PURPOSE_LABELS[purpose]} model load. "
+                f"{admission.get('label') or 'The route is blocked'}: "
+                f"{admission.get('detail') or 'refresh capacity and try again.'} "
+                "Automated measurements require a ready decision and cannot use a memory acknowledgement."
+            )
+    else:
+        require_session_launch_admission(
+            approval_payload if isinstance(approval_payload, dict) else request,
+            admission,
+        )
+    return admission
+
+
 def build_benchmark_completion_request(
     plan: LaunchPlan, prompt: str | list[dict[str, str]], max_tokens: int,
     sampling: dict[str, Any], *, reasoning_budget_tokens: int | None = None,
+    greedy_probe: bool = False,
 ) -> urllib.request.Request:
     if isinstance(prompt, str):
         messages = [{"role": "user", "content": prompt}]
@@ -21716,15 +28947,55 @@ def build_benchmark_completion_request(
     ):
         body["reasoning_budget_tokens"] = qualification_budget
         body["reasoning_budget_message"] = LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE
-    if plan.backend != "uzu":
-        for key in (
-            "temperature", "top_p", "top_k", "presence_penalty",
-            "frequency_penalty", "seed",
-        ):
-            value = sampling.get(key)
-            if value is not None:
-                body[key] = value
     apply_chat_reasoning_contract(body, plan.backend, plan.reasoning)
+    try:
+        requested_sampling = canonicalize_sampling(sampling)
+        raw_plan_contract = getattr(plan, "sampling_contract", None)
+        plan_contract = (
+            load_sampling_contract(raw_plan_contract)
+            if isinstance(raw_plan_contract, dict) else None
+        )
+        plan_chat = getattr(plan, "chat", None)
+        if (
+            plan_contract is None and isinstance(plan_chat, dict)
+            and plan_chat.get("sampling") in {"model", "custom"}
+        ):
+            plan_contract = load_sampling_contract(
+                sampling_contract_from_settings(plan.model, plan_chat)
+            )
+        if plan_contract is None and (plan.backend == "uzu" or not requested_sampling):
+            plan_contract = build_sampling_contract(
+                "model", model_defaults=plan.model.get("defaultSampling"),
+            )
+        if greedy_probe:
+            if plan.backend == "uzu":
+                raise ValueError("Uzu's packaged sampler cannot run a fixed greedy probe.")
+            fixed_probe = copy.deepcopy(BENCHMARK_PROBE_CONTRACT["sampling"])
+            if requested_sampling != canonicalize_sampling(fixed_probe):
+                raise ValueError("The fixed benchmark probe sampling contract changed.")
+            request_contract = build_sampling_contract("custom", custom=fixed_probe)
+        elif plan_contract is not None:
+            # Uzu's pinned package owns its sampler. Its qualification passes a
+            # historical greedy probe dictionary, but that dictionary was
+            # never representable and was deliberately omitted on the wire.
+            request_contract = plan_contract
+        else:
+            request_contract = build_sampling_contract(
+                "custom", custom=requested_sampling,
+            )
+        enforcement = sampling_route_enforcement(
+            plan.backend, "chat",
+            plan.model.get("backends", {}).get(plan.backend, {}),
+            request_contract.as_dict(), protocol="chat-completions",
+        )
+        assert enforcement is not None
+        body = rewrite_chat_completions_request(
+            body, request_contract,
+            representable_fields=enforcement["representableFields"],
+            implicit_model_defaults=enforcement["implicitModelDefaults"],
+        )
+    except SamplingContractError as error:
+        raise ValueError(str(error)) from error
     return urllib.request.Request(
         f"http://127.0.0.1:{plan.port}/v1/chat/completions",
         data=json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
@@ -21793,16 +29064,29 @@ def _openai_error_detail(payload: Any) -> str | None:
     return f"{message} [{code}]" if code and code not in message else message
 
 
+def benchmark_repeated_phrase_fraction(text: str) -> float:
+    """Bounded repetition diagnostic only; never a correctness/qualification gate."""
+    words = text[-32768:].split()[-4096:]
+    count = len(words) - 15
+    if count <= 0:
+        return 0.0
+    unique = {tuple(words[index:index + 16]) for index in range(count)}
+    return round((count - len(unique)) / count, 4)
+
+
 def run_benchmark_completion(
     plan: LaunchPlan, prompt: str | list[dict[str, str]], max_tokens: int,
     sampling: dict[str, Any],
     cancel_event: threading.Event, *, correctness_expected: str | None = None,
     reasoning_budget_tokens: int | None = None,
+    reply_observer: Callable[[dict[str, str]], None] | None = None,
+    greedy_probe: bool = False,
 ) -> dict[str, Any]:
     """Measure one streamed request and require authoritative token usage."""
     request = build_benchmark_completion_request(
         plan, prompt, max_tokens, sampling,
         reasoning_budget_tokens=reasoning_budget_tokens,
+        greedy_probe=greedy_probe,
     )
     started = time.monotonic()
     first_token_at: float | None = None
@@ -21943,6 +29227,7 @@ def run_benchmark_completion(
         requested_reasoning_budget = None
     result = {
         "promptTokens": prompt_tokens,
+        "authoritativeUsage": True,
         "cachedPromptTokens": cached_prompt_tokens,
         "uncachedPromptTokens": (
             prompt_tokens - cached_prompt_tokens if cached_prompt_tokens is not None else None
@@ -21966,6 +29251,10 @@ def run_benchmark_completion(
         "endToEndTokensPerSecond": round(completion_tokens / max(total, 0.000_001), 4),
         "reasoningObserved": bool(reasoning_text.strip()),
         "answerObserved": bool(answer_text.strip()),
+        "reasoningCharacters": len(reasoning_text.strip()),
+        "answerCharacters": len(answer_text.strip()),
+        "reasoningRepeatedPhraseFraction": benchmark_repeated_phrase_fraction(reasoning_text),
+        "answerRepeatedPhraseFraction": benchmark_repeated_phrase_fraction(answer_text),
         "finishReason": finish_reason,
         "terminalState": terminal_state,
         "terminalComplete": terminal_state == "complete",
@@ -22007,6 +29296,13 @@ def run_benchmark_completion(
                 and not transition_leak
             ),
         }
+    if reply_observer is not None and result["terminalComplete"]:
+        # Exact channel bytes preserve Uzu's message-prefix comparison. The
+        # observer is local to a running qualification, never part of its result.
+        reply_observer({
+            "role": "assistant", "content": "".join(content),
+            **({"reasoning_content": reasoning_text} if reasoning_text else {}),
+        })
     return result
 
 
@@ -22433,7 +29729,7 @@ def _live_telemetry_integer(value: Any, maximum: int = 2_000_000_000) -> int | N
         return None
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if isinstance(value, float) and value != parsed:
         return None
@@ -22650,6 +29946,92 @@ def omlx_activity_supported(plan: LaunchPlan | None) -> bool:
     return bool(version and current != (-1, -1, -1, -1) and current >= minimum)
 
 
+def merge_mtplx_prompt_activity(plan, activity, snapshot, observations):
+    """Only numeric prefill facts, matched by native ID or a unique live lane."""
+    result = copy.deepcopy(activity)
+    if not isinstance(snapshot, dict):
+        return result
+    model = str(plan.model.get("servedId") or plan.model.get("lmKey") or plan.model.get("id") or "")
+    if not model or snapshot.get("model_id") != model:
+        return result
+    active = result.get("active", [])
+    in_flight = snapshot.get("in_flight", [])
+    receipts = snapshot.get("recent", [])
+    if not isinstance(in_flight, list) or not isinstance(receipts, list):
+        return result
+    for request in [*active, *result.get("recent", [])]:
+        key = (plan.run_id, request.get("id"))
+        saved = observations.get(key, {})
+        native_id = request.get("runtimeResponseId") or saved.get("nativeId")
+        matches = [row for row in in_flight if isinstance(row, dict) and row.get("request_id") == native_id and native_id]
+        if not native_id and len(active) == len(in_flight) == 1 and request is active[0]:
+            row = in_flight[0]
+            age = _live_telemetry_number(row.get("age_s"), 604800) if isinstance(row, dict) else None
+            elapsed = _live_telemetry_number(request.get("runSeconds"), 604800)
+            if age is not None and elapsed is not None and -5 <= elapsed - age <= 15 and row.get("model") == model:
+                native_id = row.get("request_id")
+                matches = [row]
+        if not isinstance(native_id, str) or not re.fullmatch(r"chatcmpl-[0-9a-f]{8,32}", native_id):
+            continue
+        stats = None
+        if len(matches) == 1 and matches[0].get("model") == model:
+            progress = matches[0].get("prefill_state")
+            if isinstance(progress, dict) and progress.get("phase") == "chunk":
+                total = _live_telemetry_integer(progress.get("tokens_total"))
+                done = _live_telemetry_integer(progress.get("tokens_done"))
+                cached = _live_telemetry_integer(progress.get("cached_tokens"))
+                elapsed = _live_telemetry_number(progress.get("elapsed_s"), 604800)
+                if None not in (total, done, cached, elapsed) and cached <= done <= total and elapsed > 0:
+                    speed = (done - cached) / elapsed
+                    if 0 < speed <= 1000000:
+                        stats = {"source":"mtplx-prefill", "tokensPerSecond":round(speed, 2),
+                                 "processedTokens":done-cached, "cachedTokens":cached,
+                                 "elapsedSeconds":elapsed, "partial":True}
+        for receipt in receipts[-32:]:
+            if not isinstance(receipt, dict) or receipt.get("request_id") != native_id:
+                continue
+            total = _live_telemetry_integer(receipt.get("prompt_tokens"))
+            new = _live_telemetry_integer(receipt.get("new_prefill_tokens"))
+            cached = _live_telemetry_integer(receipt.get("cached_tokens"))
+            elapsed = _live_telemetry_number(receipt.get("prompt_eval_time_s"), 604800)
+            if None in (total, new, cached, elapsed) or new + cached != total or elapsed <= 0:
+                continue
+            if request.get("usageReported") and total != request.get("promptTokens"):
+                continue
+            speed = new / elapsed
+            if speed <= 1000000:
+                stats = {"source":"mtplx-prefill", "tokensPerSecond":round(speed, 2),
+                         "processedTokens":new, "cachedTokens":cached,
+                         "elapsedSeconds":elapsed, "partial":False}
+        if stats is not None:
+            observations[key] = {"nativeId":native_id, "stats":stats}
+        elif saved.get("nativeId") == native_id:
+            stats = saved.get("stats")
+        if stats is not None:
+            request["promptProcessing"] = copy.deepcopy(stats)
+    while len(observations) > 32:
+        observations.pop(next(iter(observations)))
+    return result
+
+
+def mtplx_prompt_activity(plan, activity, observations):
+    if not mtplx_flight_supported(plan):
+        return activity
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{plan.port}/v1/mtplx/snapshot",
+        headers={"Authorization": f"Bearer {plan.secrets.get('apiKey', 'local')}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=0.6) as response:
+            raw = response.read(512 * 1024 + 1)
+        if len(raw) > 512 * 1024:
+            return activity
+        snapshot = json.loads(raw)
+    except (OSError, ValueError, urllib.error.URLError):
+        return activity
+    return merge_mtplx_prompt_activity(plan, activity, snapshot, observations)
+
+
 def _omlx_activity_summary(
     runtime_version: str, *, supported: bool, state: str, detail: str,
     available: bool = False,
@@ -22755,6 +30137,19 @@ def merge_omlx_activity(
     if not isinstance(models, list) or len(models) > 32:
         return result
     expected_model = str(plan.model.get("servedId") or "")
+    # The native dashboard omits models that are neither loaded nor loading.
+    # A ready, lazy-loading server therefore legitimately returns no models.
+    # Do not mistake that verified idle state for an identity mismatch, or
+    # infer it while the relay/native endpoint reports work in flight.
+    if (expected_model and not models and result.get("active") == []
+            and result.get("queued") == []
+            and _live_telemetry_integer(active_models.get("total_active_requests"), 32) == 0
+            and _live_telemetry_integer(active_models.get("total_waiting_requests"), 32) == 0):
+        result["engineTelemetry"] = _omlx_activity_summary(
+            runtime_version, supported=True, available=True, state="unloaded",
+            detail="oMLX is ready; model weights will load when a request needs them.",
+        )
+        return result
     matches = [
         model for model in models
         if isinstance(model, dict) and str(model.get("id") or "") == expected_model
@@ -22766,6 +30161,12 @@ def merge_omlx_activity(
         )
         return result
     model = matches[0]
+    if model.get("is_loading") is True:
+        result["engineTelemetry"] = _omlx_activity_summary(
+            runtime_version, supported=True, available=True, state="loading",
+            detail="oMLX is loading the selected model's weights.",
+        )
+        return result
     relay_active = result.get("active")
     engine_active = _live_telemetry_integer(model.get("active_requests"), 32)
     if not isinstance(relay_active, list) or len(relay_active) > 16 or engine_active is None:
@@ -22877,6 +30278,133 @@ def merge_omlx_activity(
             "Protected oMLX activity is assigned only for one exact model request and one "
             "launcher-relayed request; engine IDs and text are never published."
         )
+    return result
+
+
+def merge_uzu_prompt_stats(activity: dict[str, Any], log_tail: str) -> dict[str, Any]:
+    """Match native prefill facts by response tag AND exact reported token counts.
+
+    The native log splits cached input from actually prefilled tokens. Only
+    numeric completion lines are read; no prompt or generated text is exposed.
+    Ambiguous tags or missing/mismatching usage fail closed.
+    """
+    pattern = re.compile(
+        r"^\[req ([0-9a-f]{8})\] completed in [0-9.]+s, finish=[a-z_]+, "
+        r"prompt ([0-9]{1,10}) tok \(([0-9]{1,10}) cached, ([0-9]{1,10}) prefilled @ ([0-9.]{1,20}|-) tok/s\), "
+        r"ttft [0-9.]+s, decode ([0-9]{1,10}) tok @ "
+    )
+    matches: dict[str, list[tuple[str, ...]]] = {}
+    for line in log_tail.splitlines():
+        match = pattern.match(line)
+        if match:
+            matches.setdefault(match[1], []).append(match.groups())
+    result = copy.deepcopy(activity)
+    requests = result.get("recent") if isinstance(result.get("recent"), list) else []
+    tags = [item.get("uzuRequestTag") for item in requests if isinstance(item, dict)]
+    for request in requests:
+        if not isinstance(request, dict) or request.get("usageReported") is not True:
+            continue
+        tag = request.get("uzuRequestTag")
+        records = matches.get(tag, []) if isinstance(tag, str) else []
+        if len(records) != 1 or tags.count(tag) != 1:
+            continue
+        _, prompt, cached, prefilled, speed, output = records[0]
+        prompt, cached, prefilled, output = map(int, (prompt, cached, prefilled, output))
+        if (cached + prefilled != prompt or prompt != request.get("promptTokens")
+                or output != request.get("completionTokens") or speed == "-"):
+            continue
+        try:
+            tps = float(speed)
+        except ValueError:
+            continue
+        if not math.isfinite(tps) or not 0 <= tps <= 10_000_000:
+            continue
+        request["promptProcessing"] = {
+            "source": "uzu-native-stats", "tokensPerSecond": tps,
+            "processedTokens": prefilled, "cachedTokens": cached,
+        }
+    return result
+
+
+def uzu_prompt_activity(plan: LaunchPlan, activity: dict[str, Any]) -> dict[str, Any]:
+    if plan.backend != "uzu" or not plan.run_dir:
+        return activity
+    try:
+        with (plan.run_dir / "engine.log").open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            offset = max(0, handle.tell() - 256 * 1024)
+            handle.seek(offset)
+            tail = handle.read(256 * 1024)
+        if offset:
+            tail = tail.partition(b"\n")[2]
+    except OSError:
+        return activity
+    return merge_uzu_prompt_stats(activity, tail.decode("utf-8", errors="replace"))
+
+
+def omlx_prompt_activity(plan: LaunchPlan, activity: dict[str, Any]) -> dict[str, Any]:
+    """Match bounded native DFlash receipts; never infer prefill TPS from TTFT."""
+    if not plan.run_dir or not plan.secrets.get("omlxNativeContextGuard"):
+        return activity
+    try:
+        with (plan.run_dir / "prompt-stats.json").open("rb") as handle:
+            raw = handle.read(32769)
+        if len(raw) > 32768:
+            return activity
+        records = json.loads(raw)
+    except (OSError, ValueError):
+        return activity
+    return merge_omlx_prompt_stats(activity, records)
+
+
+def merge_omlx_prompt_stats(activity: dict[str, Any], records: Any) -> dict[str, Any]:
+    if not isinstance(records, list) or len(records) > 32:
+        return activity
+    result = copy.deepcopy(activity)
+    active = [r for r in result.get("active", []) if r.get("state") == "running"]
+    for request in [*active, *result.get("recent", [])]:
+        response_id = request.get("runtimeResponseId")
+        matches = [r for r in records if isinstance(r, dict)
+                   and response_id and r.get("responseId") == response_id]
+        if not response_id and len(active) == 1 and request is active[0]:
+            # Before the first SSE output, only the single private request can
+            # own a just-started engine receipt. Never use this for history.
+            try:
+                started = datetime.fromisoformat(request["startedAt"].replace("Z", "+00:00")).timestamp()
+                matches = [r for r in records if isinstance(r, dict)
+                           and r.get("phase") in {"prefill", "decode"}
+                           and type(r.get("startedAt")) in (int, float)
+                           and 0 <= r["startedAt"] - started <= 15]
+            except (KeyError, ValueError, TypeError):
+                matches = []
+        if len(matches) != 1:
+            continue
+        record = matches[0]
+        if request in active and record.get("phase") in {"prefill", "decode"}:
+            telemetry = request.setdefault("liveTelemetry", {})
+            telemetry.update(source="omlx-activity", phase=record["phase"],
+                             metricKind=record["phase"], capturedAt=datetime.now(timezone.utc).isoformat())
+            if record["phase"] == "prefill":
+                # A decode estimate from the generic admin activity is not a
+                # prefill measurement. Wait for the native completion event.
+                telemetry["tokensPerSecond"] = None
+        prompt = _live_telemetry_integer(record.get("promptTokens"))
+        processed = _live_telemetry_integer(record.get("processedTokens"))
+        cached = _live_telemetry_integer(record.get("cachedTokens"))
+        seconds = _live_telemetry_number(record.get("elapsedSeconds"), 7 * 24 * 60 * 60)
+        if (prompt is None or processed is None or cached is None or seconds is None
+                or seconds <= 0 or processed + cached != prompt):
+            continue
+        if request.get("usageReported") and request.get("promptTokens") != prompt:
+            continue
+        speed = processed / seconds
+        if not math.isfinite(speed) or speed > 10_000_000:
+            continue
+        request["promptProcessing"] = {
+            "source": "omlx-dflash-prefill", "tokensPerSecond": round(speed, 2),
+            "processedTokens": processed, "cachedTokens": cached,
+            "elapsedSeconds": seconds,
+        }
     return result
 
 
@@ -23694,6 +31222,17 @@ class QualificationSafetyFailure(RuntimeError):
     """A fail-closed qualification invariant stopped the owned model route."""
 
 
+@dataclass(frozen=True)
+class _SessionActivityTarget:
+    """One controller generation; credentials never enter the public activity."""
+
+    owner: LaunchPlan | None = field(repr=False)
+    run_id: str | None
+    port: int | None
+    control_key: str | None = field(repr=False)
+    phase: str
+
+
 class RunManager:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -23701,6 +31240,8 @@ class RunManager:
         self.stop_lock = threading.Lock()
         self.surface_lock = threading.Lock()
         self.engine_telemetry_lock = threading.Lock()
+        self.mtplx_prefill_observations = {}
+        self.whallm_telemetry_observations = {}
         self.state: dict[str, Any] = {"phase": "idle", "message": "Ready", "run": None, "events": []}
         self.process: subprocess.Popen[str] | None = None
         self.proxy_process: subprocess.Popen[str] | None = None
@@ -23774,8 +31315,8 @@ class RunManager:
             detail = "Observed Chat turns did not include cache-token telemetry; timing is not treated as proof."
         else:
             state = "warming"
-            label = "Engine resident"
-            detail = "The model is loaded. Send a Chat turn to see whether this runtime reports prefix reuse."
+            label = "Engine ready"
+            detail = "The session route is ready. Send a Chat turn to see whether this runtime reports prefix reuse."
 
         return {
             "version": CACHE_OBSERVATORY_VERSION,
@@ -23933,15 +31474,31 @@ class RunManager:
             },
         }
 
+    def _activity_target_unlocked(self) -> _SessionActivityTarget:
+        return _SessionActivityTarget(
+            self.plan, self.plan.run_id if self.plan is not None else None,
+            self.session_proxy_port, self.session_proxy_control_key,
+            str(self.state.get("phase") or "idle"),
+        )
+
+    def _activity_target_matches_unlocked(self, target: _SessionActivityTarget) -> bool:
+        return (
+            target.owner is self.plan
+            and target.run_id == (self.plan.run_id if self.plan is not None else None)
+            and target.port == self.session_proxy_port
+            and target.control_key == self.session_proxy_control_key
+            and target.phase == str(self.state.get("phase") or "idle")
+        )
+
     def _session_proxy_api(
         self, method: str, path: str, payload: dict[str, Any] | None = None,
-        *, timeout: float = 1.0,
+        *, timeout: float = 1.0, _target: _SessionActivityTarget | None = None,
     ) -> dict[str, Any]:
         with self.lock:
-            owner = self.plan
-            port = self.session_proxy_port
-            control_key = self.session_proxy_control_key
-            phase = str(self.state.get("phase") or "idle")
+            target = _target if _target is not None else self._activity_target_unlocked()
+            if not self._activity_target_matches_unlocked(target):
+                raise ValueError("The active model route changed. Refresh Sessions and try again.")
+        owner, port, control_key, phase = target.owner, target.port, target.control_key, target.phase
         if (
             owner is None or owner.purpose != "session"
             or phase not in {"starting", "running", "stopping"}
@@ -23970,15 +31527,21 @@ class RunManager:
             raise ValueError(f"Could not reach the private session relay: {error}") from error
         if not isinstance(value, dict):
             raise ValueError("The private session relay returned an invalid response.")
+        with self.lock:
+            if not self._activity_target_matches_unlocked(target):
+                raise ValueError("The active model route changed. Refresh Sessions and try again.")
         return value
 
-    def request_activity(self) -> dict[str, Any]:
-        """Return bounded relay evidence plus the controller-owned idle policy."""
+    def request_activity(
+        self, *, include_engine_telemetry: bool = True,
+        _target: _SessionActivityTarget | None = None,
+    ) -> dict[str, Any]:
+        """Return relay evidence and idle policy, optionally enriched for the Hub."""
         with self.lock:
-            owner = self.plan
-            phase = str(self.state.get("phase") or "idle")
-            timeout_minutes = self.idle_timeout_minutes
-            policy_set_at = self.idle_policy_set_at
+            target = _target if _target is not None else self._activity_target_unlocked()
+            if not self._activity_target_matches_unlocked(target):
+                return self._current_activity_unlocked(target, {})
+        owner, phase = target.owner, target.phase
         resident = bool(owner is not None and owner.purpose == "session" and phase == "running")
         lanes = session_request_lanes(owner if owner and owner.purpose == "session" else None)
         if owner is None or owner.purpose != "session" or phase == "idle":
@@ -23988,7 +31551,7 @@ class RunManager:
             )
         else:
             try:
-                activity = self._session_proxy_api("GET", "/__launcher/status", timeout=0.8)
+                activity = self._session_proxy_api("GET", "/__launcher/status", timeout=0.8, _target=target)
                 activity["engineResident"] = resident
                 activity["detail"] = (
                     f"{int(activity.get('lanes') or lanes)} engine-matched request lane"
@@ -24000,12 +31563,43 @@ class RunManager:
                     "starting" if phase in {"preflight", "starting"} else "unavailable",
                     str(error), resident=resident, lanes=lanes,
                 )
-        if owner is not None and owner.purpose == "session" and owner.backend == "mtplx":
-            activity = mtplx_flight_activity(owner, activity)
-        elif owner is not None and owner.purpose == "session" and owner.backend == "omlx":
+        if include_engine_telemetry and owner is not None and owner.purpose == "session":
             with self.engine_telemetry_lock:
-                activity = omlx_activity_activity(owner, activity)
+                with self.lock:
+                    if not self._activity_target_matches_unlocked(target):
+                        return self._current_activity_unlocked(target, {})
+                if owner.backend == "mtplx":
+                    activity = mtplx_flight_activity(owner, activity)
+                    activity = mtplx_prompt_activity(owner, activity, self.mtplx_prefill_observations)
+                elif owner.backend == "omlx":
+                    activity = omlx_activity_activity(owner, activity)
+                    activity = omlx_prompt_activity(owner, activity)
+                elif owner.backend == "uzu":
+                    activity = uzu_prompt_activity(owner, activity)
+                elif owner.backend == "whallm" and phase == "running" and owner.model.get("nativeWhallm"):
+                    activity = whallm_telemetry.request_activity(owner, activity, self.whallm_telemetry_observations)
 
+        with self.lock:
+            return json.loads(json.dumps(self._current_activity_unlocked(target, activity)))
+
+    def _current_activity_unlocked(
+        self, target: _SessionActivityTarget, activity: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Drop evidence from a replaced route at the same boundary that reads state."""
+        if not self._activity_target_matches_unlocked(target):
+            target = self._activity_target_unlocked()
+            owner = target.owner
+            session = owner is not None and owner.purpose == "session"
+            activity = self._request_activity_fallback(
+                "idle" if not session or target.phase == "idle" else
+                "starting" if target.phase in {"preflight", "starting"} else "unavailable",
+                "The model route changed during this update. Fresh activity will appear on the next update.",
+                resident=session and target.phase == "running",
+                lanes=session_request_lanes(owner) if session else 0,
+            )
+        owner = target.owner
+        timeout_minutes = self.idle_timeout_minutes
+        policy_set_at = self.idle_policy_set_at
         active = int(activity.get("activeCount") or 0)
         queued = int(activity.get("queuedCount") or 0)
         raw_idle = activity.get("idleSeconds")
@@ -24049,10 +31643,14 @@ class RunManager:
             "eligible": idle_eligible,
             "detail": idle_detail,
         }
-        return json.loads(json.dumps(activity))
+        return activity
 
     def register_session_surface(self, owner: LaunchPlan, plan: LaunchPlan) -> None:
-        if owner.purpose != "session" or not plan.secrets.get("clientApiKey"):
+        if (
+            owner.purpose != "session" or not plan.secrets.get("clientApiKey")
+            or not isinstance(plan.sampling_contract, dict)
+            or not isinstance(plan.sampling_enforcement, dict)
+        ):
             raise ValueError("The attached surface has no private relay contract.")
         self._session_proxy_api("POST", "/__launcher/surfaces", {
             "action": "register",
@@ -24060,6 +31658,8 @@ class RunManager:
                 "id": plan.run_id,
                 "client": plan.client,
                 "key": plan.secrets["clientApiKey"],
+                "samplingContract": copy.deepcopy(plan.sampling_contract),
+                "samplingEnforcement": copy.deepcopy(plan.sampling_enforcement),
             },
         }, timeout=2.0)
 
@@ -24090,6 +31690,24 @@ class RunManager:
             "requestId": request_id,
         }, timeout=2.0)
         return self.request_activity()
+
+    def cancel_chat_generation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Cancel queued/running work for one exact built-in Chat surface."""
+        chat_plan = self._chat_plan_for_payload(payload)
+        surface_id = chat_plan.run_id
+        cancelled = 0
+        # Stop can be pressed immediately after dispatch. Give the relay a
+        # brief chance to register the request before a zero count is treated
+        # as an already-settled turn.
+        for attempt in range(5):
+            result = self._session_proxy_api("POST", "/__launcher/surfaces", {
+                "action": "cancel", "surfaceId": surface_id,
+            }, timeout=2.0)
+            cancelled = max(cancelled, int(result.get("cancelled") or 0))
+            if cancelled or attempt == 4:
+                break
+            time.sleep(0.02)
+        return {"surfaceId": surface_id, "cancelled": cancelled}
 
     def set_idle_policy(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
@@ -24132,7 +31750,9 @@ class RunManager:
         return self.request_activity()
 
     def snapshot(self) -> dict[str, Any]:
-        activity = self.request_activity()
+        with self.lock:
+            target = self._activity_target_unlocked()
+        activity = self.request_activity(_target=target)
         with self.lock:
             snapshot = copy.deepcopy(self.state)
             snapshot["attachments"] = [
@@ -24142,12 +31762,14 @@ class RunManager:
                 console.public() for console in self.agent_consoles.values()
             ]
             snapshot["cache"] = self._cache_observatory_unlocked()
-            snapshot["activity"] = activity
+            snapshot["activity"] = self._current_activity_unlocked(target, activity)
             return json.loads(json.dumps(snapshot))
 
     def hub_snapshot(self) -> dict[str, Any]:
         """Describe only this launcher's owned route and handoff components."""
-        activity = self.request_activity()
+        with self.lock:
+            target = self._activity_target_unlocked()
+        activity = self.request_activity(_target=target)
         with self.lock:
             phase = str(self.state.get("phase") or "idle")
             plan = self.plan
@@ -24247,7 +31869,7 @@ class RunManager:
                 ],
                 "agentConsoles": list(consoles.values()) if plan is not None and plan.purpose == "session" else [],
                 "cache": self._cache_observatory_unlocked(),
-                "activity": activity,
+                "activity": self._current_activity_unlocked(target, activity),
                 "ownedProcessCount": sum(
                     1 for item in components if item.get("owned") is True and item.get("pid")
                 ),
@@ -24339,7 +31961,34 @@ class RunManager:
             )
             capability = plan.model.get("backends", {}).get(plan.backend, {})
             validate_chat_capability(capability, updated, "chat")
+            sampling_contract = sampling_contract_from_settings(plan.model, updated)
+            validate_sampling_capability(capability, sampling_contract)
+            sampling_enforcement = sampling_route_enforcement(
+                plan.backend, "chat", capability, sampling_contract,
+            )
+            assert sampling_enforcement is not None
+            updated = chat_settings_from_sampling_contract(
+                sampling_contract,
+                system_prompt=str(updated.get("systemPrompt") or ""),
+            )
+            if (
+                self.session_proxy_port and self.session_proxy_control_key
+                and self.proxy_process is not None
+                and self.proxy_process.poll() is None
+            ):
+                self._session_proxy_api("POST", "/__launcher/surfaces", {
+                    "action": "register",
+                    "surface": {
+                        "id": plan.run_id,
+                        "client": plan.client,
+                        "key": plan.secrets.get("clientApiKey"),
+                        "samplingContract": sampling_contract,
+                        "samplingEnforcement": sampling_enforcement,
+                    },
+                }, timeout=2.0)
             plan.chat = updated
+            plan.sampling_contract = sampling_contract
+            plan.sampling_enforcement = sampling_enforcement
             if plan is self.plan:
                 self.state["run"] = plan.public()
             result = self._chat_settings_snapshot_unlocked(plan)
@@ -24425,6 +32074,20 @@ class RunManager:
             raise ValueError("Project folder does not exist.")
         chat = validated_chat_settings(owner_model, {"chat": payload.get("chat")}, client)
         validate_chat_capability(capability, chat, client)
+        sampling_contract = validated_sampling_contract(
+            owner_model, payload, client, chat,
+        )
+        assert sampling_contract is not None
+        validate_sampling_capability(capability, sampling_contract)
+        sampling_enforcement = sampling_route_enforcement(
+            owner.backend, client, capability, sampling_contract,
+        )
+        assert sampling_enforcement is not None
+        if client == "chat":
+            chat = chat_settings_from_sampling_contract(
+                sampling_contract,
+                system_prompt=str(chat.get("systemPrompt") or ""),
+            )
         if client == "chat":
             agent_host = "launcher"
         else:
@@ -24438,6 +32101,8 @@ class RunManager:
             "client": client,
             "project": project,
             "chat": chat,
+            "samplingContract": sampling_contract,
+            "samplingEnforcement": sampling_enforcement,
             "agentHost": agent_host,
             "relayRunning": relay_running,
             "requestLanes": lanes,
@@ -24627,6 +32292,7 @@ class RunManager:
             "client": request["client"],
             "project": request["project"],
             "chat": copy.deepcopy(request.get("chat")),
+            "generation": copy.deepcopy(request.get("generation")),
             "agentHost": request.get("agentHost", "launcher" if request["client"] == "chat" else "terminal"),
         }
         target: dict[str, Any] | None = None
@@ -24767,6 +32433,8 @@ class RunManager:
             options=copy.deepcopy(owner.options),
             purpose="session",
             chat=copy.deepcopy(target["chat"]),
+            sampling_contract=copy.deepcopy(target["samplingContract"]),
+            sampling_enforcement=copy.deepcopy(target["samplingEnforcement"]),
             agent_host=str(target["agentHost"]),
             client_port=client_port,
             secrets={
@@ -25015,8 +32683,18 @@ class RunManager:
                 self.state["phase"] = "starting"
             log_path = plan.run_dir / "engine.log"
             env = os.environ.copy()
+            if plan.backend == "mtplx":
+                # MTPLX operator experiments must be selected only by the
+                # launcher-owned plan. Never inherit shell-level memory or
+                # execution-lane overrides across the child boundary.
+                for key in (
+                    *MTPLX_LONG_CONTEXT_OPERATOR_ENV_KEYS,
+                    "MTPLX_COMPILED_VERIFY_GROWTH_RESERVE",
+                    "MTPLX_NAX_FLASH_ROUTE",
+                ):
+                    env.pop(key, None)
             env.update(plan.engine_env)
-            if plan.backend in {"llamacpp", "uzu"}:
+            if plan.backend in {"llamacpp", "uzu"} or plan.model.get("nativeWhallm"):
                 env = _environment_without_dyld(env)
             # Reserve the agent-facing route before an expensive model load.
             # No client can reach it until its selected work surface opens
@@ -25029,7 +32707,7 @@ class RunManager:
             elif plan.client == "codex":
                 self._start_codex_proxy(plan, log_path, cancel_event)
             llamacpp_identities: tuple[tuple[Any, ...], ...] | None = None
-            uzu_identities: tuple[str, str] | None = None
+            uzu_identities: tuple[Any, ...] | None = None
             if plan.backend == "llamacpp":
                 # This is deliberately after any proxy setup and immediately
                 # before the process boundary: never rely only on scan/build
@@ -25045,18 +32723,39 @@ class RunManager:
                 # Popen duplicates this descriptor for the child. Closing the
                 # controller's copy prevents one descriptor leaking per run.
                 with open(log_path, "a", encoding="utf-8") as log_handle:
+                    uzu_launch: UzuExecutableLaunch | None = None
+                    process: subprocess.Popen[str] | None = None
                     if plan.backend == "llamacpp":
                         assert llamacpp_identities is not None
                         confirm_llamacpp_launch_identities(plan, llamacpp_identities)
                         env = _environment_without_dyld(env)
                     elif plan.backend == "uzu":
                         assert uzu_identities is not None
-                        confirm_uzu_launch_identities(plan, uzu_identities)
+                        uzu_launch = prepare_uzu_executable_launch(plan, uzu_identities)
                         env = _environment_without_dyld(env)
-                    process = subprocess.Popen(
-                        plan.engine_argv, cwd=plan.project, env=env, text=True,
-                        stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True,
-                    )
+                    argv = uzu_launch.argv if uzu_launch is not None else plan.engine_argv
+                    popen_extra: dict[str, Any] = {}
+                    if uzu_launch is not None and uzu_launch.pass_fds:
+                        popen_extra["pass_fds"] = uzu_launch.pass_fds
+                    try:
+                        process = subprocess.Popen(
+                            argv, cwd=plan.project, env=env, text=True,
+                            stdout=log_handle, stderr=subprocess.STDOUT,
+                            start_new_session=True, **popen_extra,
+                        )
+                        if uzu_launch is not None and not uzu_launch.executes_from_fd:
+                            try:
+                                _confirm_open_uzu_executable(uzu_launch.opened)
+                            except ValueError:
+                                # The child may have crossed the path boundary
+                                # before the post-spawn check. Stop it before it
+                                # can be published as the launcher-owned route.
+                                self._terminate_process(process, 5)
+                                raise
+                    finally:
+                        if uzu_launch is not None:
+                            uzu_launch.close()
+                    assert process is not None
                     self._publish_owned_process("process", process, plan, cancel_event)
                     if plan.backend == "llamacpp":
                         guard = threading.Thread(
@@ -25069,6 +32768,13 @@ class RunManager:
                         guard = threading.Thread(
                             target=self._guard_uzu_memory,
                             args=(plan, process, cancel_event), daemon=True,
+                        )
+                        self.llamacpp_guard_thread = guard
+                        guard.start()
+                    elif plan.model.get("nativeWhallm"):
+                        guard = threading.Thread(
+                            target=self._guard_owned_memory,
+                            args=(plan, process, cancel_event, "Whallm", whallm_runtime.MEMORY_BYTES), daemon=True,
                         )
                         self.llamacpp_guard_thread = guard
                         guard.start()
@@ -25100,7 +32806,7 @@ class RunManager:
                     "Connected model route is ready. Preparing the built-in chat…"
                     if plan.backend == "freetoken" and plan.model.get("remote") is True else
                     "Whallm's shared model route is ready. Preparing the built-in chat…"
-                    if plan.backend == "whallm" else
+                    if plan.backend == "whallm" and plan.model.get("sharedServer") is True else
                     "Native FreeToken is ready. Preparing the built-in chat…"
                     if plan.backend == "freetoken" else
                     "Model is ready. Preparing the built-in chat…"
@@ -25112,9 +32818,9 @@ class RunManager:
                     "Connected model route is ready. Opening the coding agent in a background Terminal…"
                     if plan.backend == "freetoken" else
                     "Whallm's shared model route is ready. Opening the coding agent in Hub Console…"
-                    if plan.backend == "whallm" and plan.agent_host == "console" else
+                    if plan.backend == "whallm" and plan.model.get("sharedServer") is True and plan.agent_host == "console" else
                     "Whallm's shared model route is ready. Opening the coding agent in a background Terminal…"
-                    if plan.backend == "whallm" else
+                    if plan.backend == "whallm" and plan.model.get("sharedServer") is True else
                     "Model is ready. Opening the coding agent in Hub Console…"
                     if plan.agent_host == "console" else
                     "Model is ready. Opening the coding agent in a background Terminal…"
@@ -25131,7 +32837,7 @@ class RunManager:
                             "Built-in Chat is ready on the connected FreeToken model."
                             if plan.backend == "freetoken" and plan.model.get("remote") is True else
                             "Built-in Chat is ready on Whallm's shared model."
-                            if plan.backend == "whallm" else
+                            if plan.backend == "whallm" and plan.model.get("sharedServer") is True else
                             "Built-in Chat is ready on launcher-owned native FreeToken."
                             if plan.backend == "freetoken" else
                             "Built-in Chat is ready on the loaded model."
@@ -25244,6 +32950,14 @@ class RunManager:
                 raise RuntimeError("LM Studio could not load the selected model. Open the run log for details.")
 
     def _wait_ready(self, plan: LaunchPlan, cancel_event: threading.Event) -> None:
+        if plan.backend == "whallm" and plan.model.get("nativeWhallm"):
+            self.event("Loading the full Qwen model from SSD…")
+            whallm_runtime.wait_ready(
+                plan.options["_whallmConfig"], plan.secrets["apiKey"], cancel_event,
+                lambda: self.process is not None and self.process.poll() is None,
+            )
+            plan.model["servedId"] = WHALLM_MODEL_ID
+            return
         deadline = time.time() + 900
         headers = {"Authorization": f"Bearer {plan.secrets.get('apiKey', 'local')}"}
         last_error = ""
@@ -25260,6 +32974,8 @@ class RunManager:
                     plan.model["servedId"] = ids[0]
                     return
                 if plan.model["servedId"] in ids:
+                    if plan.backend == "uzu":
+                        self._verify_uzu_native_security(plan)
                     if plan.backend == "freetoken" and plan.model.get("nativeFreetoken") is True:
                         health_request = urllib.request.Request(
                             f"http://127.0.0.1:{plan.port}/health", headers=headers,
@@ -25279,6 +32995,51 @@ class RunManager:
                 last_error = str(error)
             cancel_event.wait(1.5)
         raise RuntimeError(f"Timed out waiting for the model. {last_error}".strip())
+
+    @staticmethod
+    def _verify_uzu_native_security(plan: LaunchPlan) -> None:
+        """Prove the live raw listener consumed its key and rejects bypasses."""
+        key_file = _uzu_api_key_file(plan)
+        try:
+            key_file.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise RuntimeError("The Uzu one-use API-key file could not be rechecked.") from error
+        else:
+            raise RuntimeError(
+                "The hardened Uzu server did not consume its one-use API-key file before readiness."
+            )
+        wrong_key = secrets.token_urlsafe(32)
+        if secrets.compare_digest(wrong_key, str(plan.secrets.get("apiKey") or "")):
+            wrong_key += "-wrong"
+        for path in ("/models", "/v1/models"):
+            probes = (
+                urllib.request.Request(f"http://127.0.0.1:{plan.port}{path}"),
+                urllib.request.Request(
+                    f"http://127.0.0.1:{plan.port}{path}",
+                    headers={"Authorization": f"Bearer {wrong_key}"},
+                ),
+            )
+            for request in probes:
+                try:
+                    with urllib.request.urlopen(request, timeout=2) as response:
+                        response.read(4_096)
+                except urllib.error.HTTPError as error:
+                    status = error.code
+                    error.close()
+                    if status == HTTPStatus.UNAUTHORIZED:
+                        continue
+                    raise RuntimeError(
+                        "The hardened Uzu raw listener returned an unexpected auth status."
+                    ) from error
+                except (OSError, urllib.error.URLError) as error:
+                    raise RuntimeError(
+                        "The hardened Uzu raw-listener auth boundary could not be verified."
+                    ) from error
+                raise RuntimeError(
+                    "The hardened Uzu raw listener accepted a request without its exact bearer key."
+                )
 
     def _guard_llamacpp_memory(
         self, plan: LaunchPlan, process: subprocess.Popen[str],
@@ -25343,11 +33104,36 @@ class RunManager:
         self, plan: LaunchPlan, process: subprocess.Popen[str],
         cancel_event: threading.Event,
     ) -> None:
-        """Stop Uzu before one process group can starve this 48 GB Mac."""
+        self._guard_owned_memory(plan, process, cancel_event, "Uzu", UZU_PROCESS_MEMORY_CEILING_BYTES)
+
+    def _guard_owned_memory(
+        self, plan: LaunchPlan, process: subprocess.Popen[str],
+        cancel_event: threading.Event, label: str, ceiling: int,
+    ) -> None:
+        """Keep the bounded native process and the protected macOS reserve intact."""
         missing_samples = 0
         missing_system_samples = 0
         low_system_samples = 0
         last_system_check = -math.inf
+
+        def fail(reason: str) -> None:
+            with self.lock:
+                if self.plan is not plan or self.process is not process:
+                    return
+                self.state["phase"] = "failed"
+                self.state["message"] = reason
+                self.state["events"] = (
+                    self.state.get("events", [])
+                    + [{"time": time.strftime("%H:%M:%S"), "level": "error", "message": reason}]
+                )[-80:]
+                self.llamacpp_safety_violation = reason
+            cancel_event.set()
+            if plan.model.get("nativeWhallm"):
+                # A hard memory stop must reach the allocating engine before
+                # waiting for agent/relay shutdown. Normal Stop keeps its order.
+                self._terminate_process(process, 0.25)
+            self._stop_owned(plan)
+
         try:
             while not cancel_event.is_set() and process.poll() is None:
                 try:
@@ -25366,16 +33152,16 @@ class RunManager:
                 reason = ""
                 if complete:
                     missing_samples = 0
-                    if max(int(current), int(peak)) >= UZU_PROCESS_MEMORY_CEILING_BYTES:
+                    if max(int(current), int(peak)) >= ceiling:
                         reason = (
-                            f"Uzu reached the launcher's {UZU_PROCESS_MEMORY_CEILING_BYTES / 1024**3:.0f} GiB "
+                            f"{label} reached the launcher's {ceiling / 1024**3:.0f} GiB "
                             "process-group safety ceiling and was stopped before macOS lost its reserve."
                         )
                 else:
                     missing_samples += 1
                     if missing_samples >= 12:
                         reason = (
-                            "Uzu process-group memory could not be verified continuously, so the route was stopped fail-closed."
+                            f"{label} process-group memory could not be verified continuously, so the route was stopped fail-closed."
                         )
                 now = time.monotonic()
                 if not reason and now - last_system_check >= 1.0:
@@ -25400,7 +33186,7 @@ class RunManager:
                         if low_system_samples >= 2:
                             reason = (
                                 "System-wide memory pressure left less than the protected macOS "
-                                "reserve, so Uzu was stopped before the computer became unresponsive."
+                                f"reserve, so {label} was stopped before the computer became unresponsive."
                             )
                     else:
                         missing_system_samples += 1
@@ -25408,25 +33194,20 @@ class RunManager:
                         if missing_system_samples >= 3:
                             reason = (
                                 "System-wide memory pressure could not be verified continuously, "
-                                "so Uzu was stopped fail-closed."
+                                f"so {label} was stopped fail-closed."
                             )
+                    if not reason and plan.model.get("nativeWhallm") and whallm_qualification_conflict(timeout=0.25):
+                        reason = "A separate Whallm model became active; the launcher-owned copy was stopped to protect memory."
                 if not reason:
                     if cancel_event.wait(0.25):
                         return
                     continue
-                with self.lock:
-                    if self.plan is not plan or self.process is not process:
-                        return
-                    self.state["phase"] = "failed"
-                    self.state["message"] = reason
-                    self.state["events"] = (
-                        self.state.get("events", [])
-                        + [{"time": time.strftime("%H:%M:%S"), "level": "error", "message": reason}]
-                    )[-80:]
-                    self.llamacpp_safety_violation = reason
-                cancel_event.set()
-                self._stop_owned(plan)
+                fail(reason)
                 return
+        except Exception:
+            if not plan.model.get("nativeWhallm"):
+                raise
+            fail("Whallm's memory watchdog failed; its owned process was stopped to protect the macOS reserve.")
         finally:
             with self.lock:
                 if self.llamacpp_guard_thread is threading.current_thread():
@@ -25480,8 +33261,12 @@ class RunManager:
                 ):
                     continue
                 last_health_check = now_monotonic
-                if not reason and plan.purpose == "session":
-                    activity = self.request_activity()
+                with self.lock:
+                    check_idle = self.plan is plan and self.idle_timeout_minutes > 0
+                if not reason and plan.purpose == "session" and check_idle:
+                    # Auto-unload uses the relay's request coverage and idle clock.
+                    # Native token counters are only needed by the visible Hub.
+                    activity = self.request_activity(include_engine_telemetry=False)
                     idle_policy = activity.get("idlePolicy") or {}
                     if (
                         idle_policy.get("enabled") is True
@@ -25621,11 +33406,23 @@ class RunManager:
         with console.lock:
             fd = console.master_fd
             console.master_fd = -1
+            if console.transport is not None:
+                console.transport.close()
+                return
         if fd >= 0:
             try:
                 os.close(fd)
             except OSError:
                 pass
+
+    @staticmethod
+    def _agent_console_transport(console: AgentConsole) -> ConsoleTransport:
+        with console.lock:
+            if console.master_fd < 0:
+                raise ValueError("That agent console has ended.")
+            if console.transport is None:
+                console.transport = ConsoleTransport(console.master_fd)
+            return console.transport
 
     def _launch_agent_console(
         self,
@@ -25638,10 +33435,11 @@ class RunManager:
         if plan.client not in {"pi", "opencode", "codex"} or not plan.client_argv:
             raise ValueError("Hub Console can run only Pi, OpenCode, or Codex.")
         executable_path = plan.client_argv[0]
+        expected_executable = selected_pi_binary(plan) if plan.client == "pi" else BINARIES.get(plan.client)
         if (
             not isinstance(executable_path, str) or not os.path.isabs(executable_path)
             or not os.access(executable_path, os.X_OK)
-            or executable_path != BINARIES.get(plan.client)
+            or executable_path != expected_executable
         ):
             raise ValueError("The selected agent executable changed before Hub Console opened.")
         if not Path(plan.project).is_dir():
@@ -25660,9 +33458,9 @@ class RunManager:
         try:
             self._set_agent_console_size(slave_fd, cols, rows)
             if protocol == "pi-rpc":
-                attributes = termios.tcgetattr(slave_fd)
-                attributes[3] &= ~(termios.ECHO | termios.ECHONL)
-                termios.tcsetattr(slave_fd, termios.TCSANOW, attributes)
+                # RPC is a byte stream, not interactive terminal input. Canonical
+                # mode silently truncates long JSON lines (notably on macOS).
+                tty.setraw(slave_fd, termios.TCSANOW)
             env = os.environ.copy()
             env.update(plan.client_env)
             env.update({
@@ -25700,6 +33498,7 @@ class RunManager:
             cols=cols,
             rows=rows,
             protocol=protocol,
+            rpc_queue_directory=STATE_DIR / "pi-queues" if protocol == "pi-rpc" else None,
         )
         accepted = False
         with self.lifecycle_lock:
@@ -25732,15 +33531,23 @@ class RunManager:
         )
         reader.start()
         if protocol == "pi-rpc":
+            console.append_timeline(
+                "notice",
+                "Stable transcript ready. Thinking, responses, tools, and queued messages stay visible.",
+                title="Pi Hub", item_id="pi:hub", operation="replace",
+            )
             console.append(
                 pi_rpc_heading("PI HUB", "38;5;75")
                 + b"Stable transcript ready. Thinking, responses, tools, and queued messages stay visible.\r\n"
             )
             self._write_pi_rpc_command(console, {
-                "id": "launcher-history", "type": "get_messages",
+                "id": "launcher-history", "type": "get_entries",
             })
             self._write_pi_rpc_command(console, {
                 "id": "launcher-state", "type": "get_state",
+            })
+            self._write_pi_rpc_command(console, {
+                "id": "launcher-commands", "type": "get_commands",
             })
         return console
 
@@ -25752,14 +33559,38 @@ class RunManager:
         try:
             event = json.loads(line.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
+            unsafe_line = line.decode("utf-8", errors="replace")
+            console.append_timeline(
+                "error", unsafe_line, title="Invalid Pi event",
+                item_id=f"pi:invalid-event:{console.rpc_timeline_revision + 1}",
+                operation="replace",
+            )
             console.append(
                 pi_rpc_heading("PI NOTICE", "38;5;214")
                 + safe_agent_transcript_text(
-                    line.decode("utf-8", errors="replace"), 4_000,
+                    unsafe_line, 4_000,
                 ).encode("utf-8")
             )
             return
         with console.lock:
+            command_name = console.rpc_command_ids.pop(str(event.get("id") or ""), None) if event.get("type") == "response" else None
+            if command_name is not None:
+                if event.get("success") is False:
+                    console.append_timeline("error", event.get("error") or "Command failed", title=f"/{command_name}")
+                console.rpc_interactions.clear()
+                console.rpc_statuses.pop("launcher.customUI", None)
+                if console.rpc_statuses.pop("launcher.historyChanged", None) is not None:
+                    console.rpc_history_loaded = False
+                    console.rpc_timeline_items.clear()
+                    console.rpc_timeline_item_text_bytes = 0
+                    console.rpc_timeline_events.clear()
+                    console.rpc_timeline_seen_message_ids.clear()
+                    console.rpc_timeline_live_fingerprints.clear()
+                    console.rpc_timeline_text_bytes = 0
+                    console.rpc_timeline_revision += 1  # Invalidate browser history even when the new session is empty.
+                    self._write_pi_rpc_command(console, {"id": "launcher-history", "type": "get_entries"})
+                self._write_pi_rpc_command(console, {"id": "launcher-commands", "type": "get_commands"})
+                return
             settle_revision = console.rpc_settle_revision
             rendered = pi_rpc_event_output(console, event)
             turn_settled = console.rpc_settle_revision != settle_revision
@@ -25788,10 +33619,17 @@ class RunManager:
                 console.rpc_queue_advance_allowed = False
         if next_message is None:
             return
+        pi_rpc_record_queue(
+            console,
+            f"Starting a queued message; {console.rpc_pending_messages} message"
+            f"{'s' if console.rpc_pending_messages != 1 else ''} retained until Pi accepts it.",
+            title="Starting queued message",
+        )
         console.append(pi_rpc_heading("STARTING QUEUED MESSAGE", "38;5;214"))
         try:
             self._write_pi_rpc_command(console, {
                 "id": prompt_id, "type": "prompt", "message": next_message,
+                "streamingBehavior": "followUp",
             })
             with console.lock:
                 # Keep the head queued until Pi explicitly accepts the prompt.
@@ -25814,6 +33652,17 @@ class RunManager:
                     len(console.rpc_follow_up_queue)
                     + console.rpc_external_pending_messages
                 )
+                console.append_timeline(
+                    "error", error, title="Pi input failed",
+                    item_id=f"live:{console.rpc_timeline_turn}:queue-write-error",
+                    operation="replace",
+                )
+                if console.rpc_queue_paused:
+                    pi_rpc_record_queue(
+                        console,
+                        "The queued message was not sent and remains available to retry.",
+                        title="Queue paused",
+                    )
             console.append(
                 pi_rpc_heading("PI ERROR", "38;5;203")
                 + safe_agent_transcript_text(error, 2_000).encode("utf-8")
@@ -25824,15 +33673,31 @@ class RunManager:
                 )
             )
 
+    def _record_oversize_pi_rpc_line(self, console: AgentConsole) -> None:
+        """Report and forget one JSONL record that crossed the hard input cap."""
+        message = (
+            "Pi sent an RPC event larger than the local safety limit. "
+            "The event was discarded and reading resumes at the next JSON line."
+        )
+        console.append_timeline(
+            "error", message, title="Oversized Pi event",
+            item_id=f"pi:oversized-event:{console.rpc_timeline_revision + 1}",
+            operation="replace",
+        )
+        console.append(
+            pi_rpc_heading("PI NOTICE", "38;5;214")
+            + message.encode("utf-8")
+        )
+
     def _read_agent_console(self, console: AgentConsole) -> None:
         try:
+            with console.lock:
+                if console.master_fd < 0:
+                    return
+                transport = self._agent_console_transport(console)
             while True:
-                with console.lock:
-                    fd = console.master_fd
-                if fd < 0:
-                    break
                 try:
-                    value = os.read(fd, 32 * 1024)
+                    value = transport.read()
                 except OSError:
                     break
                 if not value:
@@ -25841,19 +33706,51 @@ class RunManager:
                     console.append(value)
                     continue
                 with console.lock:
-                    console.rpc_line_buffer.extend(value)
-                    lines: list[bytes] = []
-                    while b"\n" in console.rpc_line_buffer:
-                        line, _, remainder = console.rpc_line_buffer.partition(b"\n")
-                        console.rpc_line_buffer = bytearray(remainder)
-                        lines.append(line)
-                for line in lines:
-                    self._consume_pi_rpc_line(console, line)
+                    pending = value
+                    records: list[bytes | None] = []
+                    while pending:
+                        if console.rpc_discarding_oversize_line:
+                            newline = pending.find(b"\n")
+                            if newline < 0:
+                                break
+                            pending = pending[newline + 1:]
+                            console.rpc_discarding_oversize_line = False
+                            continue
+                        newline = pending.find(b"\n")
+                        if newline < 0:
+                            if (
+                                len(console.rpc_line_buffer) + len(pending)
+                                > pi_rpc_line_limit(bytes(console.rpc_line_buffer[:512]) + pending[:512])
+                            ):
+                                console.rpc_line_buffer.clear()
+                                console.rpc_discarding_oversize_line = True
+                                records.append(None)
+                            else:
+                                console.rpc_line_buffer.extend(pending)
+                            break
+                        segment = pending[:newline]
+                        pending = pending[newline + 1:]
+                        if (
+                            len(console.rpc_line_buffer) + len(segment)
+                            > pi_rpc_line_limit(bytes(console.rpc_line_buffer[:512]) + segment[:512])
+                        ):
+                            console.rpc_line_buffer.clear()
+                            records.append(None)
+                            continue
+                        console.rpc_line_buffer.extend(segment)
+                        records.append(bytes(console.rpc_line_buffer))
+                        console.rpc_line_buffer.clear()
+                for record in records:
+                    if record is None:
+                        self._record_oversize_pi_rpc_line(console)
+                    else:
+                        self._consume_pi_rpc_line(console, record)
         finally:
             if console.protocol == "pi-rpc":
                 with console.lock:
                     final_line = bytes(console.rpc_line_buffer)
                     console.rpc_line_buffer.clear()
+                    console.rpc_discarding_oversize_line = False
                 if final_line:
                     self._consume_pi_rpc_line(console, final_line)
             try:
@@ -25893,6 +33790,14 @@ class RunManager:
                             "Agent exited normally. The shared model remains loaded."
                             if console.exit_code == 0 else
                             f"Agent exited with status {console.exit_code}. The shared model remains loaded."
+                        )
+                    if console.exit_code not in {None, 0} and not unexpected_rpc_eof:
+                        console.append_timeline(
+                            "error",
+                            f"Pi exited with status {console.exit_code}. The shared model remains loaded.",
+                            title="Pi exited",
+                            item_id=f"live:{console.rpc_timeline_turn}:process-exit",
+                            operation="replace",
                         )
             console.append(unexpected_rpc_output)
             with self.lock:
@@ -25937,7 +33842,32 @@ class RunManager:
                     })
                 except ValueError:
                     pass
-        return console.output_slice(payload.get("offset"))
+        result = console.output_slice(
+            payload.get("offset"), payload.get("timelineRevision"),
+            timeline_version=payload.get("timelineVersion"),
+        )
+        result["toolPreview"] = None
+        owner = self.plan
+        if (owner and owner.run_dir and owner.secrets.get("omlxNativeContextGuard")
+                and console.rpc_streaming and not console.rpc_compacting):
+            try:
+                preview_path = owner.run_dir / "tool-preview.json"
+                if preview_path.stat().st_size <= 400_000:
+                    preview = json.loads(preview_path.read_text())
+                    activity = self._session_proxy_api("GET", "/__launcher/status", timeout=0.8)
+                    active = activity.get("active", [])
+                    if (isinstance(preview, dict)
+                            and isinstance(preview.get("updatedAt"), (int, float))
+                            and 0 <= time.time() - preview["updatedAt"] < 5
+                            and isinstance(preview.get("title"), str)
+                            and isinstance(preview.get("text"), str)
+                            and any(item.get("surfaceId") == console.plan.run_id
+                                    and item.get("runtimeResponseId") == preview.get("responseId")
+                                    and item.get("runtimeResponseId") for item in active)):
+                        result["toolPreview"] = preview
+            except (OSError, ValueError, TypeError):
+                pass
+        return result
 
     def write_agent_console(self, payload: dict[str, Any]) -> dict[str, Any]:
         console = self._agent_console_for_payload(payload)
@@ -25953,9 +33883,7 @@ class RunManager:
             with console.lock:
                 if console.state != "running" or console.process.poll() is not None or console.master_fd < 0:
                     raise ValueError("That agent is no longer accepting input.")
-                written = 0
-                while written < len(encoded):
-                    written += os.write(console.master_fd, encoded[written:])
+                self._agent_console_transport(console).send(encoded)
         except OSError as error:
             raise ValueError(f"Could not send input to the agent: {error}") from error
         return console.public()
@@ -25974,9 +33902,10 @@ class RunManager:
                     or console.master_fd < 0
                 ):
                     raise ValueError("That agent is no longer accepting input.")
-                written = 0
-                while written < len(encoded):
-                    written += os.write(console.master_fd, encoded[written:])
+                RunManager._agent_console_transport(console).send(
+                    encoded,
+                    coalesce_key="state" if command.get("type") == "get_state" else None,
+                )
         except OSError as error:
             raise ValueError(f"Could not send input to Pi: {error}") from error
 
@@ -25999,11 +33928,34 @@ class RunManager:
             message = payload.get("message")
             if not isinstance(message, str) or not message.strip():
                 raise ValueError("Enter a message for Pi.")
-            if len(message.encode("utf-8")) > AGENT_CONSOLE_MAX_INPUT - 256:
+            if len(json.dumps(message, ensure_ascii=False).encode("utf-8")) - 2 > AGENT_CONSOLE_MAX_INPUT - 256:
                 raise ValueError("Pi Hub messages must be smaller than 64 KB.")
+            if message.strip() == "/":
+                raise ValueError("Choose a command from the list below the message box.")
+            slash = re.match(r"^/([A-Za-z][\w:-]*)(?:\s|$)", message.strip())
+            if slash:
+                name = slash.group(1)
+                with console.lock:
+                    entry = next((item for item in console.rpc_commands if item["name"] == name), None)
+                    if entry is None:
+                        raise ValueError(f"/{name} is not available in this Pi session. Type / to see available commands.")
+                    if entry.get("source") == "extension":
+                        if console.rpc_command_ids:
+                            raise ValueError("Finish or cancel the current Pi command first.")
+                        command_id = f"launcher-slash-{secrets.token_hex(8)}"
+                        console.rpc_command_ids[command_id] = name
+                        try:
+                            arguments = message.strip()[slash.end():].lstrip()
+                            self._write_pi_rpc_command(console, {"id": command_id, "type": "prompt", "message": f"/{name}" + (f" {arguments}" if arguments else "")})
+                        except ValueError:
+                            console.rpc_command_ids.pop(command_id, None)
+                            raise
+                        return console.public()
             prompt_id = f"launcher-prompt-{secrets.token_hex(8)}"
             with console.lock:
-                is_busy = console.rpc_streaming or console.rpc_prompt_inflight
+                if console.rpc_compacting and not console.rpc_prompt_inflight:
+                    raise ValueError("Wait for context compaction to finish before sending a message.")
+                is_busy = console.rpc_streaming or console.rpc_prompt_inflight or console.rpc_compacting
                 if is_busy:
                     queued_bytes = sum(
                         len(item.encode("utf-8")) for item in console.rpc_follow_up_queue
@@ -26028,6 +33980,10 @@ class RunManager:
                     console.rpc_queue_advance_allowed = False
                     pending = 0
             if is_busy:
+                pi_rpc_record_queue(
+                    console,
+                    f"{pending} follow-up message{'s' if pending != 1 else ''} waiting",
+                )
                 console.append(
                     pi_rpc_heading("QUEUED", "38;5;214")
                     + f"{pending} follow-up message{'s' if pending != 1 else ''} waiting".encode("utf-8")
@@ -26037,7 +33993,35 @@ class RunManager:
                 "id": prompt_id,
                 "type": "prompt",
                 "message": message,
+                "streamingBehavior": "followUp",
             }
+        elif command == "steer":
+            message = payload.get("message")
+            if not isinstance(message, str) or not message.strip():
+                raise ValueError("Enter steering instructions for Pi.")
+            if len(json.dumps(message, ensure_ascii=False).encode("utf-8")) - 2 > AGENT_CONSOLE_MAX_INPUT - 256:
+                raise ValueError("Pi Hub messages must be smaller than 64 KB.")
+            if message.lstrip().startswith("/"):
+                raise ValueError("Use Send for slash commands; Steer accepts instructions for the current task.")
+            with console.lock:
+                if not (console.rpc_streaming or console.rpc_prompt_inflight) or console.rpc_compacting:
+                    raise ValueError("Pi is not currently responding. Use Send to start a new prompt.")
+                if console.rpc_external_pending_messages + len(console.rpc_steer_ids) >= PI_RPC_MAX_QUEUED_MESSAGES:
+                    raise ValueError("Pi has too many pending steering messages. Wait for it to read them.")
+                request_id = f"launcher-steer-{secrets.token_hex(8)}"
+                console.rpc_steer_ids[request_id] = message
+                try:
+                    self._write_pi_rpc_command(console, {"id":request_id, "type":"prompt", "streamingBehavior":"steer", "message":message})
+                except ValueError:
+                    console.rpc_steer_ids.pop(request_id, None)
+                    raise
+            return console.public()
+        elif command == "compact":
+            with console.lock:
+                if console.rpc_streaming or console.rpc_prompt_inflight or console.rpc_compacting:
+                    raise ValueError("Wait for Pi to finish before compacting context.")
+                console.rpc_compacting = True
+            rpc_command = {"id": f"launcher-compact-{secrets.token_hex(6)}", "type": "compact"}
         elif command == "extension_response":
             request_id = str(payload.get("requestId") or "")
             with console.lock:
@@ -26073,15 +34057,56 @@ class RunManager:
                     item for item in console.rpc_interactions
                     if item.get("id") != request_id
                 ]
+            if interaction.get("title") == "__launcher_custom_ui__":
+                return console.public()
             console.append(
                 pi_rpc_heading("PI INPUT SENT", "38;5;109")
                 + safe_agent_transcript_text(response_label, 2_000).encode("utf-8")
+            )
+            console.append_timeline(
+                "notice", response_label, title="Input sent",
+                item_id=f"interaction:{hashlib.sha256(request_id.encode('utf-8')).hexdigest()[:20]}",
+                operation="replace",
             )
             return console.public()
         elif command == "abort":
             rpc_command = {
                 "id": f"launcher-abort-{secrets.token_hex(6)}", "type": "abort",
             }
+        elif command in {"edit_queued_message", "delete_queued_message"}:
+            with console.lock:
+                entries = pi_rpc_visible_queue(console)
+                index = next((i for i, item in enumerate(entries)
+                              if item.get("id") == payload.get("queueId") and item.get("id")), None)
+                if index is None or not entries[index].get("editable"):
+                    raise ValueError("That queued message changed or is already being sent. Refresh the queue and try again.")
+                messages = list(console.rpc_follow_up_queue)
+                if command == "edit_queued_message":
+                    message = payload.get("message")
+                    if not isinstance(message, str) or not message.strip():
+                        raise ValueError("Enter a message for Pi.")
+                    if len(json.dumps(message, ensure_ascii=False).encode("utf-8")) - 2 > AGENT_CONSOLE_MAX_INPUT - 256:
+                        raise ValueError("Pi Hub messages must be smaller than 64 KB.")
+                    messages[index] = message
+                    if sum(len(item.encode("utf-8")) for item in messages) > PI_RPC_MAX_QUEUED_BYTES:
+                        raise ValueError("Pi Hub's follow-up queue has reached its 512 KB memory limit.")
+                else:
+                    messages.pop(index)
+                path = pi_rpc_queue_path(console)
+                if path is None:
+                    raise ValueError("Wait for Pi to open its saved session before changing the queue.")
+                record = {"version": 1, "sessionFile": console.rpc_queue_session,
+                          "project": str(console.plan.project), "messages": messages}
+                try:
+                    atomic_json(path, record)
+                except OSError as error:
+                    raise ValueError("Could not save the queue change. Your original message is still queued.") from error
+                console.rpc_follow_up_queue = messages
+                console.rpc_queue_saved = hashlib.sha256(json.dumps(record, ensure_ascii=False).encode()).hexdigest()
+                console.rpc_queue_save_error = ""
+                console.rpc_pending_messages = len(messages) + console.rpc_external_pending_messages
+                pi_rpc_record_queue(console, "Queued message updated" if command == "edit_queued_message" else "Queued message deleted")
+            return console.public()
         elif command == "clear_queue":
             with console.lock:
                 cleared = len(console.rpc_follow_up_queue)
@@ -26089,6 +34114,12 @@ class RunManager:
                 console.rpc_queued_prompt_message = ""
                 console.rpc_pending_messages = console.rpc_external_pending_messages
                 console.rpc_queue_paused = False
+                pi_rpc_record_queue(
+                    console,
+                    f"{console.rpc_pending_messages} external message"
+                    f"{'s' if console.rpc_pending_messages != 1 else ''} still waiting"
+                    if console.rpc_pending_messages else "Queue cleared",
+                )
             console.append(
                 pi_rpc_heading("QUEUE CLEARED", "38;5;109")
                 + f"Removed {cleared} launcher-queued follow-up message{'s' if cleared != 1 else ''}.".encode("utf-8")
@@ -26099,6 +34130,8 @@ class RunManager:
         try:
             self._write_pi_rpc_command(console, rpc_command)
         except ValueError:
+            if command == "compact":
+                console.rpc_compacting = False
             if command == "prompt":
                 with console.lock:
                     if console.rpc_prompt_id == rpc_command["id"]:
@@ -26113,7 +34146,19 @@ class RunManager:
                         len(console.rpc_follow_up_queue)
                         + console.rpc_external_pending_messages
                     )
+                    console.append_timeline(
+                        "error", "The message could not be sent to Pi.",
+                        title="Pi input failed",
+                        item_id=f"live:{console.rpc_timeline_turn}:prompt-write-error",
+                        operation="replace",
+                    )
             raise
+        if command == "abort":
+            console.append_timeline(
+                "notice", "Stopping the current Pi response.",
+                title="Stopping response",
+                item_id=f"live:{console.rpc_timeline_turn}:abort", operation="replace",
+            )
         return console.public()
 
     def resize_agent_console(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -26175,6 +34220,14 @@ class RunManager:
                     raise ValueError("That Hub Console no longer belongs to the active model route.")
                 attachment.status = "starting"
                 attachment.detail = "Restarting the agent in Hub Console…"
+            if old.protocol == "pi-rpc" and old.rpc_queue_session:
+                session = validated_pi_session_file(old.rpc_queue_session, old.plan.project)
+                old.plan.pi_session_file = session
+                argv = old.plan.client_argv
+                if "--session" in argv:
+                    argv[argv.index("--session") + 1] = session
+                else:
+                    argv.extend(["--session", session])
             console = self._launch_agent_console(
                 old.plan, cancel_event, owner_plan=owner, attachment=attachment,
             )
@@ -26198,7 +34251,10 @@ class RunManager:
             "controlKey": control_key,
             "lanes": session_request_lanes(plan),
             "outputLimit": plan.output,
-            "contextLimit": plan.context if plan.backend == "uzu" else None,
+            "omlxNativeContextGuard": plan.secrets.get("omlxNativeContextGuard") is True,
+            "contextLimit": (
+                plan.context if plan.backend in {"omlx", "uzu"} else None
+            ),
             "reasoning": plan.reasoning,
             "backend": plan.backend,
             "reasoningBudgetMessage": (
@@ -26206,11 +34262,14 @@ class RunManager:
                 if plan.backend == "llamacpp" else None
             ),
             "servedModel": plan.model["servedId"],
+            "servedModelAliases": [pi_model_identity(plan)[1]],
             "templateReasoningEfforts": plan.model.get("templateReasoningEfforts", []),
             "surfaces": [{
                 "id": plan.run_id,
                 "client": plan.client,
                 "key": client_key,
+                "samplingContract": copy.deepcopy(plan.sampling_contract),
+                "samplingEnforcement": copy.deepcopy(plan.sampling_enforcement),
             }],
         })
         proxy: subprocess.Popen[str] | None = None
@@ -26273,10 +34332,13 @@ class RunManager:
             "upstreamKey": plan.secrets.get("apiKey", "local"),
             "clientKey": proxy_key,
             "outputLimit": plan.output,
+            "contextLimit": plan.context if plan.backend == "omlx" else None,
             "reasoning": plan.reasoning,
             "backend": plan.backend,
             "servedModel": plan.model["servedId"],
             "templateReasoningEfforts": plan.model.get("templateReasoningEfforts", []),
+            "samplingContract": copy.deepcopy(plan.sampling_contract),
+            "samplingEnforcement": copy.deepcopy(plan.sampling_enforcement),
         })
         proxy: subprocess.Popen[str] | None = None
         try:
@@ -26380,10 +34442,12 @@ class RunManager:
         except (OSError, urllib.error.URLError) as error:
             raise RuntimeError(f"Codex API preflight failed: {error}") from error
 
-    def stop(self) -> None:
+    def stop(self, *, expected_plan: LaunchPlan | None = None) -> None:
         # Capture the generation before waiting. A duplicate Stop request that
         # queued behind an earlier one must never stop a newer run.
         with self.lock:
+            if expected_plan is not None and self.plan is not expected_plan:
+                return
             target_plan = self.plan
             target_cancel = self.cancel_event
         with self.stop_lock:
@@ -26517,11 +34581,10 @@ class RunManager:
                     self._schedule_lmstudio_cleanup(target_id)
             self._terminate_process(engine, 12)
         finally:
-            if plan.backend == "llamacpp":
-                # Proxy processes are already terminated above, so their
-                # owner-only configs and the engine key can now be removed
-                # without racing a live bearer reader.
-                dispose_llamacpp_plan_bearers(plan)
+            # Proxy and engine processes are already terminated above, so
+            # owner-only configs and one-use engine keys can be removed
+            # without racing a live bearer reader.
+            dispose_plan_secrets(plan)
             complete.set()
 
     @staticmethod
@@ -26626,7 +34689,8 @@ def _runtime_promotion_candidate(
 
 
 def build_runtime_promotion_plan(
-    payload: dict[str, Any], models: list[dict[str, Any]],
+    payload: dict[str, Any], models: list[dict[str, Any]], *,
+    resource_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an exact, read-only A/B contract for two installed oMLX copies."""
     candidate_id = str(payload.get("candidateId") or "")
@@ -26660,6 +34724,17 @@ def build_runtime_promotion_plan(
     job["modes"] = ["ar"]
     job["options"] = options
     job["pairFingerprint"] = None
+    admission_request = {
+        "backend": "omlx", "client": "chat", "modelId": job["modelId"],
+        "project": job["project"], "context": job["context"],
+        "output": job["output"], "reasoning": job["reasoning"],
+        "mode": "custom", "options": copy.deepcopy(job["options"]),
+        "chat": copy.deepcopy(job["chat"]),
+    }
+    memory_admission = route_qualification_memory_admission(
+        admission_request, models, resource_snapshot=resource_snapshot,
+    )
+    capacity_ready = strict_model_load_admission_ready(memory_admission)
     model_fingerprint = str(job.get("modelFingerprint") or "")
     if not re.fullmatch(r"[0-9a-f]{64}", model_fingerprint):
         raise ValueError("The selected model has no stable benchmark fingerprint for runtime promotion.")
@@ -26721,11 +34796,23 @@ def build_runtime_promotion_plan(
             "label": "Controlled route", "state": "pass",
             "detail": "Both copies use AR, full-precision KV, no ANE tuning, the same reasoning and sampling contract, and fresh cache-isolated loads.",
         },
+        {
+            "label": "Live Mac capacity",
+            "state": "pass" if capacity_ready else "block",
+            "detail": (
+                "Current unified-memory headroom passed the strict automated-load gate."
+                if capacity_ready else
+                f"{memory_admission.get('label') or 'Capacity is not ready'}: "
+                f"{memory_admission.get('detail') or 'refresh capacity before comparing runtimes.'}"
+            ),
+        },
     ]
     return {
         "schemaVersion": RUNTIME_PROMOTION_SCHEMA_VERSION,
-        "id": plan_id, "contractId": contract_id, "canStart": True,
+        "id": plan_id, "contractId": contract_id,
+        "canStart": capacity_ready,
         "confirmation": f"runtime-promotion:{plan_id}",
+        "memoryAdmission": copy.deepcopy(memory_admission),
         "selected": selected_public, "candidate": candidate_public,
         "model": {
             "id": job["modelId"], "name": job["model"]["name"],
@@ -26785,6 +34872,7 @@ def _runtime_promotion_measurement(
         "scenarioContract": list(job["suite"].get("scenarios") or []),
         "client": job["client"], "reasoning": job["reasoning"],
         "targetKV": "off", "samplingFingerprint": job["evidence"]["samplingFingerprint"],
+        **sampling_record_evidence(job["evidence"]),
         "contextMin": job["context"], "contextMax": job["context"],
         "outputMin": job["output"], "outputMax": job["output"],
         "qualityFingerprint": result.get("qualityHash"),
@@ -27063,6 +35151,17 @@ class BenchmarkManager:
         elif scope == "dflash-tune":
             tuning_job = validated_dflash2_tuning_request(payload, models)
         job = None if shootout or qualification or tuning_job else validated_benchmark_request(payload, models)
+        if (
+            job is not None and job["backend"] == "mtplx"
+            and job.get("options", {}).get("profile") == "turbo"
+            and _mtplx_long_context_suite_requested(
+                job["model"], job["context"], job["suiteName"],
+            )
+        ):
+            # Current-engine Agentic runs must exercise the same audited
+            # operators as Calibration, without starting other engines or
+            # silently changing a user's Sustained profile to Turbo.
+            prepare_calibration_tuning_plan(job)
         if self.run_manager.snapshot().get("phase") != "idle":
             raise ValueError("Stop the active launcher run before starting Benchmark Lab.")
         if qualification:
@@ -27234,6 +35333,10 @@ class BenchmarkManager:
                 "promptTokens": job["suite"]["promptTokens"],
                 "maxTokens": job["suite"]["maxTokens"], "modes": job["modes"],
             }
+            if isinstance(job.get("calibrationTuningPlan"), dict):
+                public_job["measurementRoutes"] = benchmark_job_measurement_routes(job)
+                public_job["measurementRouteCount"] = benchmark_job_maximum_route_count(job)
+                public_job["calibrationTuningPlan"] = copy.deepcopy(job["calibrationTuningPlan"])
             self.state = {
                 "phase": "queued", "message": "Benchmark accepted. Preparing the first route…",
                 "progress": 0.0, "job": public_job, "modes": {}, "engines": {},
@@ -27244,8 +35347,10 @@ class BenchmarkManager:
             thread.start()
             return copy.deepcopy(public_job)
 
-    def cancel(self) -> None:
+    def cancel(self, expected_job_id: str | None = None) -> None:
         with self.lock:
+            if expected_job_id is not None and self.state.get("job", {}).get("id") != expected_job_id:
+                raise ValueError("The capacity test changed; no other job was stopped.")
             # A worker can still be unwinding its final Python frames after it
             # has atomically published a completed/failed result.  Do not turn
             # that terminal UI state back into "stopping" merely because the
@@ -27499,12 +35604,30 @@ class BenchmarkManager:
         capability = job["model"]["backends"][job["backend"]]
         if job["backend"] == "lmstudio":
             return lmstudio_mtp_controls(options, capability)
-        return {
+        settings = {
             "depth": bounded_integer(
                 options.get("depth"), int(capability.get("depth") or 1),
                 1, int(capability.get("depthMax") or 1), "MTP draft depth",
             )
         }
+        tuning = job.get("calibrationTuningPlan")
+        if (
+            job["backend"] == "mtplx"
+            and isinstance(tuning, dict)
+            and tuning.get("strategy")
+            == "isolated-long-context-operator-comparison"
+        ):
+            route = str(
+                options.get("mtplxOperatorRoute")
+                or MTPLX_LONG_CONTEXT_DEFAULT_ROUTE
+            )
+            if route not in {
+                MTPLX_LONG_CONTEXT_DEFAULT_ROUTE,
+                MTPLX_LONG_CONTEXT_2111_ROUTE,
+            }:
+                raise ValueError("Unknown MTPLX operator benchmark route.")
+            settings["mtplxOperatorRoute"] = route
+        return settings
 
     def _mode_payload(self, job: dict[str, Any], mode: str) -> dict[str, Any]:
         options = copy.deepcopy(job["options"])
@@ -27547,6 +35670,10 @@ class BenchmarkManager:
                     requested_depth, int(capability.get("depth") or 1),
                     1, int(capability.get("depthMax") or 1),
                 )
+                if job["backend"] == "mtplx":
+                    forced_route = job.get("_benchmarkMtplxOperatorRoute")
+                    if forced_route is not None:
+                        options["mtplxOperatorRoute"] = str(forced_route)
         payload = {
             "backend": job["backend"], "client": "chat", "modelId": job["modelId"],
             "project": job["project"], "context": job["context"], "output": job["output"],
@@ -27604,46 +35731,58 @@ class BenchmarkManager:
             purpose="runtime-promotion" if promotion else "benchmark",
             runtime_binary=str(job.get("_runtimeBinary")) if promotion else None,
         )
-        if job.get("routeQualification") is True:
-            try:
-                admission = route_qualification_memory_admission(
-                    mode_payload, models, hub=self.run_manager.snapshot(),
-                    operation={
-                        "active": False, "kind": "benchmark", "phase": "starting",
-                        "detail": "This route qualification owns the next model load.",
-                    },
-                )
-            except BaseException:
-                dispose_llamacpp_plan_bearers(plan)
-                raise
-            if not route_qualification_admission_ready(admission):
-                dispose_llamacpp_plan_bearers(plan)
-                raise RuntimeError(
-                    "Capacity changed immediately before the Qwen model load. "
-                    f"{admission.get('label') or 'The route is blocked'}: "
-                    f"{admission.get('detail') or 'refresh capacity and try again.'}"
-                )
-            with self.lock:
-                if isinstance(self.state.get("job"), dict):
-                    self.state["job"]["memoryAdmission"] = copy.deepcopy(admission)
+        admission_purpose = (
+            "route-qualification"
+            if job.get("routeQualification") is True else
+            "runtime-promotion" if promotion else "benchmark"
+        )
+        try:
+            admission = require_live_model_load_admission(
+                mode_payload, models, purpose=admission_purpose,
+                hub=self.run_manager.snapshot(),
+            )
+        except BaseException:
+            dispose_plan_secrets(plan)
+            raise
+        with self.lock:
+            if isinstance(self.state.get("job"), dict):
+                self.state["job"]["memoryAdmission"] = copy.deepcopy(admission)
         strict_llama = bool(
             job.get("routeQualification") is True and job["backend"] == "llamacpp"
         )
         strict_uzu = bool(
             job.get("routeQualification") is True and job["backend"] == "uzu"
         )
+        core_engine_memory_guard = job["backend"] in {"omlx", "lmstudio", "mtplx"}
         uzu_memory_samples = {"missing": 0, "low": 0}
+        core_memory_samples = {"missing": 0, "low": 0}
 
         def live_invariant(value: dict[str, Any]) -> None:
-            process = self.run_manager.process
-            if not (strict_llama or strict_uzu) or process is None or process.poll() is not None:
-                return
             def abort(message: str) -> None:
                 with self.lock:
                     self.qualification_safety_violation = message
-                threading.Thread(target=self.run_manager.stop, daemon=True).start()
+                threading.Thread(
+                    target=self.run_manager.stop, kwargs={"expected_plan": plan}, daemon=True,
+                ).start()
                 raise QualificationSafetyFailure(message)
 
+            if value.get("timingDiscontinuity"):
+                abort(str(value["timingDiscontinuity"]))
+            if core_engine_memory_guard:
+                # LM Studio's model belongs to its desktop service; its CLI may
+                # have exited or there may be no child PID yet during loading.
+                # Whole-Mac protection must follow the owned run, not a child.
+                if self.run_manager.plan is plan:
+                    reason = benchmark_system_memory_violation(
+                        value, core_memory_samples,
+                        f"the {BACKEND_LABELS[job['backend']]} benchmark",
+                    )
+                    if reason:
+                        abort(reason)
+                return
+            process = self.run_manager.process
+            if not (strict_llama or strict_uzu) or process is None or process.poll() is not None:
+                return
             if strict_llama and value.get("metalWiredLimitBytes") != LLAMACPP_PLE_MEMORY_CEILING_BYTES:
                 abort("The 44 GiB Metal wired-memory limit changed during qualification.")
             if strict_uzu:
@@ -27733,6 +35872,8 @@ class BenchmarkManager:
             self.active_plan = plan
         result: dict[str, Any] | None = None
         tool_contract: dict[str, Any] | None = None
+        conversation: list[dict[str, str]] = []
+        captured_reply: list[dict[str, str]] = []
         run_manager_accepted_plan = False
         try:
             self.run_manager.start(plan)
@@ -27746,6 +35887,7 @@ class BenchmarkManager:
                 plan, benchmark_prompt(128, 11_000 + job["modes"].index(mode)), 32,
                 {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "seed": 17},
                 self.cancel_event,
+                greedy_probe=plan.backend != "uzu",
             )
             completed += 1
             self._update_progress(completed, total, f"{route_label} warm-up complete.")
@@ -27777,7 +35919,7 @@ class BenchmarkManager:
             )
             quality = measured_completion(
                 plan, correctness_prompt,
-                ROUTE_QUALIFICATION_MAX_TOKENS if reliability_qualification else 64,
+                route_qualification_sample_tokens(plan.backend, int(job["output"])) if reliability_qualification else 64,
                 {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "seed": 17},
                 self.cancel_event,
                 correctness_expected=(
@@ -27787,6 +35929,7 @@ class BenchmarkManager:
                     if uzu_qualification else None
                 ),
                 reasoning_budget_tokens=(0 if llama_qualification else None),
+                greedy_probe=not uzu_qualification,
             )
             if llama_qualification:
                 boundary = quality.get("correctnessContract")
@@ -27808,22 +35951,57 @@ class BenchmarkManager:
                         "the route was not qualified."
                     )
             completed += 1
-            self._update_progress(completed, total, f"{route_label} greedy correctness probe complete.")
+            correctness_label = "Model-default" if uzu_qualification else "Greedy"
+            self._update_progress(completed, total, f"{route_label}: {correctness_label} correctness probe complete.")
             samples: list[dict[str, Any]] = []
             if job["workloadKind"] == "agentic":
                 for case in benchmark_agentic_cases(
                     job["suite"],
                     require_complete_answer=job.get("routeQualification") is True,
                 ):
+                    if uzu_qualification:
+                        case = uzu_conversation_case(
+                            case, conversation, samples[-1] if samples else None,
+                            int(job["context"]), int(job["suite"]["maxTokens"]),
+                        )
+                    captured_reply.clear()
+                    request_tokens = int(case.get("maxTokens", job["suite"]["maxTokens"]))
+                    self._update_progress(
+                        completed, total,
+                        f"{route_label}: running {case['label']} "
+                        f"(target {int(case['targetPromptTokens']):,} prompt tokens). "
+                        f"Up to {request_tokens:,} output tokens. TPS updates when this turn completes.",
+                    )
                     sample = measured_completion(
                         plan, case["messages"],
-                        int(job["suite"]["maxTokens"]), job["speedSampling"], self.cancel_event,
+                        request_tokens, job["speedSampling"], self.cancel_event,
+                        **({"reply_observer": captured_reply.append} if uzu_qualification else {}),
                     )
                     sample.update({
                         "scenario": case["scenario"], "scenarioLabel": case["label"],
                         "cacheExpected": case["cacheExpected"],
                         "targetPromptTokens": case["targetPromptTokens"], "repetition": 1,
                     })
+                    if uzu_qualification:
+                        validate_uzu_qualification_sample(sample, case, request_tokens)
+                        if len(captured_reply) != 1:
+                            raise RuntimeError("Uzu's completed reply could not be retained for the next turn.")
+                        conversation[:] = [*case["messages"], captured_reply.pop()]
+                    if (
+                        job.get("suiteName") == MTPLX_LONG_CONTEXT_64K_SUITE
+                        and case["scenario"] in {"toolIngest", "steadyTurn"}
+                        and (
+                            sample.get("authoritativeUsage") is not True
+                            or int(sample.get("promptTokens") or 0)
+                            < MTPLX_LONG_CONTEXT_MINIMUM_PROMPT
+                            or int(sample.get("promptTokens") or 0)
+                            + int(job["suite"]["maxTokens"]) > int(job["context"])
+                        )
+                    ):
+                        raise RuntimeError(
+                            "The MTPLX long-context route did not return authoritative "
+                            "near-64K prompt usage within the selected context."
+                        )
                     qualification_context = job.get("qualificationContract", {}).get(
                         "exactContext"
                     )
@@ -27831,7 +36009,7 @@ class BenchmarkManager:
                         job.get("routeQualification") is True
                         and isinstance(qualification_context, int)
                         and not isinstance(qualification_context, bool)
-                        and int(sample["promptTokens"]) + int(job["suite"]["maxTokens"])
+                        and int(sample["promptTokens"]) + request_tokens
                         > qualification_context
                     ):
                         raise RuntimeError(
@@ -27950,6 +36128,8 @@ class BenchmarkManager:
                     self.state["modes"][state_key or mode] = copy.deepcopy(result)
             return result, completed
         finally:
+            conversation.clear()
+            captured_reply.clear()
             resource_telemetry = telemetry.stop()
             owned_process = self.run_manager.process
             try:
@@ -27964,7 +36144,7 @@ class BenchmarkManager:
                 ) if isinstance(port, int)
             ]
             if run_manager_accepted_plan or self.run_manager.plan is plan:
-                self.run_manager.stop()
+                self.run_manager.stop(expected_plan=plan)
                 unload = benchmark_clean_unload_evidence(
                     self.run_manager, owned_process, owned_pgid, known_ports,
                 )
@@ -27972,7 +36152,7 @@ class BenchmarkManager:
                 # RunManager rejected this plan before taking ownership (for
                 # example, a concurrent launch won the final race). Never stop
                 # that other run, and never leave this plan's bearer file.
-                dispose_llamacpp_plan_bearers(plan)
+                dispose_plan_secrets(plan)
                 unload = {}
             if result is not None:
                 result["resourceTelemetry"] = resource_telemetry
@@ -27992,7 +36172,18 @@ class BenchmarkManager:
         baseline = results["ar"]
         baseline_samples = baseline["samples"]
         quality_hash = baseline["qualityHash"]
+        selection_metric = benchmark_route_selection_metric(job)
+        generation_tps_selection = (
+            selection_metric == "generation-tokens-per-second"
+        )
+        speed_field = (
+            "decodeTokensPerSecond"
+            if generation_tps_selection else "endToEndTokensPerSecond"
+        )
         speedups: dict[str, dict[str, float]] = {"ar": {"median": 1.0, "worst": 1.0}}
+        raw_speedups: dict[str, dict[str, float]] = {
+            "ar": {"median": 1.0, "worst": 1.0},
+        }
         public_modes: dict[str, Any] = {}
         mode_settings: dict[str, dict[str, Any]] = {}
         for mode, result in results.items():
@@ -28013,12 +36204,16 @@ class BenchmarkManager:
             if mode == "ar":
                 continue
             ratios = [
-                sample["endToEndTokensPerSecond"] / max(base["endToEndTokensPerSecond"], 0.000_001)
+                sample[speed_field] / max(base[speed_field], 0.000_001)
                 for sample, base in zip(result["samples"], baseline_samples)
             ]
+            raw_speedups[mode] = {
+                "median": statistics.median(ratios),
+                "worst": min(ratios),
+            }
             speedups[mode] = {
-                "median": round(statistics.median(ratios), 4),
-                "worst": round(min(ratios), 4),
+                "median": round(raw_speedups[mode]["median"], 4),
+                "worst": round(raw_speedups[mode]["worst"], 4),
             }
             public_modes[mode]["medianSpeedupVsAR"] = speedups[mode]["median"]
             public_modes[mode]["worstCaseSpeedupVsAR"] = speedups[mode]["worst"]
@@ -28026,10 +36221,10 @@ class BenchmarkManager:
             mode for mode in job["modes"] if mode != "ar"
             and results[mode]["qualityHash"] == quality_hash
             and results[mode]["qualityCompletionTokens"] == baseline["qualityCompletionTokens"]
-            and speedups[mode]["median"] >= BENCHMARK_MINIMUM_SPEEDUP
-            and speedups[mode]["worst"] >= BENCHMARK_MINIMUM_SPEEDUP
+            and raw_speedups[mode]["median"] >= BENCHMARK_MINIMUM_SPEEDUP
+            and raw_speedups[mode]["worst"] >= BENCHMARK_MINIMUM_SPEEDUP
         ]
-        winner = max(eligible, key=lambda mode: speedups[mode]["median"]) if eligible else "ar"
+        winner = max(eligible, key=lambda mode: raw_speedups[mode]["median"]) if eligible else "ar"
         winner_speedup = speedups[winner]["median"]
         worst_case = speedups[winner]["worst"]
         settings = copy.deepcopy(mode_settings[winner])
@@ -28049,6 +36244,10 @@ class BenchmarkManager:
             int(job["suite"]["maxTokens"])
             if bounded_route_qualification else int(job["output"])
         )
+        measured_output_minimum = measured_output_limit
+        if bounded_route_qualification and job["backend"] == "uzu":
+            measured_output_minimum = min(int(item["requestedMaxTokens"]) for item in all_samples)
+            measured_output_limit = max(int(item["requestedMaxTokens"]) for item in all_samples)
         record = {
             "id": job["id"], "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "scope": "local", "backend": job["backend"], "modelId": job["modelId"],
@@ -28063,8 +36262,9 @@ class BenchmarkManager:
             ),
             "reasoning": job["reasoning"],
             "targetKV": job["evidence"]["kv"], "samplingFingerprint": job["evidence"]["samplingFingerprint"],
+            **sampling_record_evidence(job["evidence"]),
             "contextMin": job["context"], "contextMax": job["context"],
-            "outputMin": measured_output_limit, "outputMax": measured_output_limit,
+            "outputMin": measured_output_minimum, "outputMax": measured_output_limit,
             "promptTokensMin": min(item["promptTokens"] for item in all_samples),
             "promptTokensMax": max(item["promptTokens"] for item in all_samples),
             "comparedModes": list(job["modes"]), "modes": public_modes,
@@ -28089,6 +36289,10 @@ class BenchmarkManager:
             "shootoutOrderIndex": job.get("shootoutOrderIndex"),
             "shootoutOrderStrategy": job.get("shootoutOrderStrategy"),
             "minimumSpeedup": BENCHMARK_MINIMUM_SPEEDUP,
+            "selectionMetric": (
+                selection_metric
+            ),
+            "selectionPreference": str(job.get("enginePreference") or "fastest"),
             "recommendation": (
                 f"Use {self._mode_label(winner)}: it cleared correctness and the "
                 f"{BENCHMARK_MINIMUM_SPEEDUP:.2f}× noise floor"
@@ -28104,6 +36308,10 @@ class BenchmarkManager:
                 )
             ),
         }
+        # Produced only by the corrected worker: correctness/warmup requests use
+        # greedy_probe=True, while timed workloads keep the user's sampling.
+        if job["backend"] in {"omlx", "lmstudio", "mtplx"}:
+            record["probeContract"] = copy.deepcopy(BENCHMARK_PROBE_CONTRACT)
         if bounded_route_qualification:
             record.update({
                 "configuredOutputLimit": int(job["output"]),
@@ -28164,6 +36372,7 @@ class BenchmarkManager:
     def _mtp_tuning_candidate_summary(
         baseline: dict[str, Any], result: dict[str, Any], stage: str,
         resource_status: str,
+        selection_metric: str = "end-to-end-tokens-per-second",
     ) -> dict[str, Any]:
         """Compare one exact MTP load with the single AR reference route."""
         baseline_samples = baseline.get("samples")
@@ -28173,11 +36382,12 @@ class BenchmarkManager:
             or not isinstance(samples, list) or len(samples) != len(baseline_samples)
         ):
             raise RuntimeError("An MTP candidate returned an incomplete benchmark sample set.")
+        sample_field, _aggregate_field = tuning_speed_fields(selection_metric)
         ratios: list[float] = []
         for sample, reference in zip(samples, baseline_samples):
             try:
-                measured = float(sample["endToEndTokensPerSecond"])
-                baseline_speed = float(reference["endToEndTokensPerSecond"])
+                measured = float(sample[sample_field])
+                baseline_speed = float(reference[sample_field])
             except (KeyError, TypeError, ValueError) as error:
                 raise RuntimeError("An MTP candidate returned invalid speed telemetry.") from error
             if (
@@ -28200,8 +36410,12 @@ class BenchmarkManager:
             ),
             "resourceComparable": True,
             "resourceCooldownStatus": resource_status,
+            "selectionMetric": selection_metric,
             "medianSpeedupVsAR": round(statistics.median(ratios), 4),
             "worstCaseSpeedupVsAR": round(min(ratios), 4),
+            "medianDecodeTokensPerSecond": round(
+                float(result.get("medianDecodeTokensPerSecond") or 0), 3,
+            ),
             "medianEndToEndTokensPerSecond": round(
                 float(result.get("medianEndToEndTokensPerSecond") or 0), 3,
             ),
@@ -28213,6 +36427,7 @@ class BenchmarkManager:
     def _mtplx_depth_candidate_summary(
         baseline: dict[str, Any], result: dict[str, Any], depth: int,
         resource_status: str,
+        selection_metric: str = "end-to-end-tokens-per-second",
     ) -> dict[str, Any]:
         """Compare one exact MTPLX depth with the engine's single AR reference."""
         baseline_samples = baseline.get("samples")
@@ -28226,11 +36441,12 @@ class BenchmarkManager:
             raise RuntimeError(
                 f"MTPLX D{depth} did not return the complete requested measurement contract."
             )
+        sample_field, _aggregate_field = tuning_speed_fields(selection_metric)
         ratios: list[float] = []
         for sample, reference in zip(samples, baseline_samples):
             try:
-                measured = float(sample["endToEndTokensPerSecond"])
-                baseline_speed = float(reference["endToEndTokensPerSecond"])
+                measured = float(sample[sample_field])
+                baseline_speed = float(reference[sample_field])
             except (KeyError, TypeError, ValueError) as error:
                 raise RuntimeError(f"MTPLX D{depth} returned invalid speed telemetry.") from error
             if (
@@ -28251,13 +36467,130 @@ class BenchmarkManager:
             ),
             "resourceComparable": resource_comparable,
             "resourceCooldownStatus": resource_status,
+            "selectionMetric": selection_metric,
             "medianSpeedupVsAR": round(statistics.median(ratios), 4),
             "worstCaseSpeedupVsAR": round(min(ratios), 4),
+            "medianDecodeTokensPerSecond": round(
+                float(result.get("medianDecodeTokensPerSecond") or 0), 3,
+            ),
             "medianEndToEndTokensPerSecond": round(
                 float(result.get("medianEndToEndTokensPerSecond") or 0), 3,
             ),
             "selected": False, "_result": result,
         }
+
+    @staticmethod
+    def _mtplx_operator_candidate_summaries(
+        ar: dict[str, Any], default: dict[str, Any], candidate: dict[str, Any],
+        default_resource_status: str, candidate_resource_status: str,
+    ) -> list[dict[str, Any]]:
+        """Compare the two fixed MTP operator routes by generation TPS."""
+        ar_samples = ar.get("samples")
+        default_samples = default.get("samples")
+        candidate_samples = candidate.get("samples")
+        if (
+            not isinstance(ar_samples, list) or not ar_samples
+            or not isinstance(default_samples, list)
+            or not isinstance(candidate_samples, list)
+            or len(default_samples) != len(ar_samples)
+            or len(candidate_samples) != len(default_samples)
+        ):
+            raise RuntimeError(
+                "MTPLX long-context operator routes returned an incomplete sample set."
+            )
+        default_settings = default.get("settings")
+        candidate_settings = candidate.get("settings")
+        if (
+            not isinstance(default_settings, dict)
+            or default_settings.get("mtplxOperatorRoute")
+            != MTPLX_LONG_CONTEXT_DEFAULT_ROUTE
+            or not isinstance(candidate_settings, dict)
+            or candidate_settings.get("mtplxOperatorRoute")
+            != MTPLX_LONG_CONTEXT_2111_ROUTE
+            or default_settings.get("depth") != candidate_settings.get("depth")
+        ):
+            raise RuntimeError(
+                "MTPLX long-context operator routes did not preserve the fixed MTP depth."
+            )
+
+        def speeds(result_samples: list[dict[str, Any]]) -> list[float]:
+            values: list[float] = []
+            for sample in result_samples:
+                value = sample.get("decodeTokensPerSecond") if isinstance(sample, dict) else None
+                if not _positive_finite_number(value):
+                    raise RuntimeError(
+                        "MTPLX long-context operator comparison returned invalid generation TPS."
+                    )
+                values.append(float(value))
+            return values
+
+        default_speeds = speeds(default_samples)
+        candidate_speeds = speeds(candidate_samples)
+        default_median = statistics.median(default_speeds)
+        candidate_median = statistics.median(candidate_speeds)
+        default_worst = min(default_speeds)
+        candidate_worst = min(candidate_speeds)
+        candidate_median_speedup_raw = candidate_median / max(default_median, 0.000_001)
+        candidate_worst_speedup_raw = candidate_worst / max(default_worst, 0.000_001)
+        quality_default_ar = bool(
+            default.get("qualityHash") == ar.get("qualityHash")
+            and default.get("qualityCompletionTokens")
+            == ar.get("qualityCompletionTokens")
+        )
+        quality_candidate_ar = bool(
+            candidate.get("qualityHash") == ar.get("qualityHash")
+            and candidate.get("qualityCompletionTokens")
+            == ar.get("qualityCompletionTokens")
+        )
+        quality_candidate_default = bool(
+            candidate.get("qualityHash") == default.get("qualityHash")
+            and candidate.get("qualityCompletionTokens")
+            == default.get("qualityCompletionTokens")
+        )
+        resource_comparable = bool(
+            default_resource_status in {"ready", "condition-improved"}
+            and candidate_resource_status in {"ready", "condition-improved"}
+        )
+        shared = {
+            "resourceComparable": resource_comparable,
+            "medianSpeedupVsDefault": 1.0,
+            "worstCaseSpeedupVsDefault": 1.0,
+            "selected": False,
+        }
+        return [
+            {
+                **shared,
+                "route": MTPLX_LONG_CONTEXT_DEFAULT_ROUTE,
+                "settings": copy.deepcopy(default_settings),
+                "qualityMatchesAR": quality_default_ar,
+                "qualityMatchesDefault": True,
+                "resourceCooldownStatus": default_resource_status,
+                "medianGenerationTokensPerSecond": round(default_median, 3),
+                "worstGenerationTokensPerSecond": round(default_worst, 3),
+                "_result": default,
+            },
+            {
+                **shared,
+                "route": MTPLX_LONG_CONTEXT_2111_ROUTE,
+                "settings": copy.deepcopy(candidate_settings),
+                "qualityMatchesAR": quality_candidate_ar,
+                "qualityMatchesDefault": quality_candidate_default,
+                "resourceCooldownStatus": candidate_resource_status,
+                "medianSpeedupVsDefault": round(
+                    candidate_median_speedup_raw, 4,
+                ),
+                "worstCaseSpeedupVsDefault": round(
+                    candidate_worst_speedup_raw, 4,
+                ),
+                # Winner selection must never use the rounded display values: a
+                # true +2.999% result otherwise appears to clear the +3% gate.
+                "_medianSpeedupVsDefaultRaw": candidate_median_speedup_raw,
+                "_worstCaseSpeedupVsDefaultRaw": candidate_worst_speedup_raw,
+                "medianGenerationTokensPerSecond": round(candidate_median, 3),
+                "worstGenerationTokensPerSecond": round(candidate_worst, 3),
+                "_result": candidate,
+            },
+        ]
 
     @staticmethod
     def _best_tuning_candidate(
@@ -28354,6 +36687,7 @@ class BenchmarkManager:
                 )
                 summary = self._mtp_tuning_candidate_summary(
                     baseline, result, stage, status,
+                    benchmark_route_selection_metric(job),
                 )
                 if summary["key"] != key:
                     raise RuntimeError("LM Studio loaded different MTP settings than the tuner requested.")
@@ -28411,6 +36745,7 @@ class BenchmarkManager:
             record["tuningSweep"] = {
                 "version": BENCHMARK_MTP_TUNER_VERSION,
                 "strategy": "bounded-coordinate-search",
+                "selectionMetric": str(plan["selectionMetric"]),
                 "complete": True,
                 "resourceComparable": True,
                 "optionalSearchComplete": True,
@@ -28474,6 +36809,7 @@ class BenchmarkManager:
     def _dflash_tuning_candidate_summary(
         baseline: dict[str, Any], result: dict[str, Any], stage: str,
         resource_status: str,
+        selection_metric: str = "end-to-end-tokens-per-second",
     ) -> dict[str, Any]:
         """Compare one exact DFlash load with the single AR reference route."""
         baseline_samples = baseline.get("samples")
@@ -28483,11 +36819,12 @@ class BenchmarkManager:
             or not isinstance(samples, list) or len(samples) != len(baseline_samples)
         ):
             raise RuntimeError("A DFlash candidate returned an incomplete benchmark sample set.")
+        sample_field, _aggregate_field = tuning_speed_fields(selection_metric)
         ratios: list[float] = []
         for sample, reference in zip(samples, baseline_samples):
             try:
-                measured = float(sample["endToEndTokensPerSecond"])
-                baseline_speed = float(reference["endToEndTokensPerSecond"])
+                measured = float(sample[sample_field])
+                baseline_speed = float(reference[sample_field])
             except (KeyError, TypeError, ValueError) as error:
                 raise RuntimeError("A DFlash candidate returned invalid speed telemetry.") from error
             if (
@@ -28510,8 +36847,12 @@ class BenchmarkManager:
             ),
             "resourceComparable": True,
             "resourceCooldownStatus": resource_status,
+            "selectionMetric": selection_metric,
             "medianSpeedupVsAR": round(statistics.median(ratios), 4),
             "worstCaseSpeedupVsAR": round(min(ratios), 4),
+            "medianDecodeTokensPerSecond": round(
+                float(result.get("medianDecodeTokensPerSecond") or 0), 3,
+            ),
             "medianEndToEndTokensPerSecond": round(
                 float(result.get("medianEndToEndTokensPerSecond") or 0), 3,
             ),
@@ -28615,6 +36956,7 @@ class BenchmarkManager:
                 )
                 summary = self._dflash_tuning_candidate_summary(
                     baseline, result, stage, status,
+                    benchmark_route_selection_metric(job),
                 )
                 if summary["key"] != key:
                     raise RuntimeError(
@@ -28675,6 +37017,7 @@ class BenchmarkManager:
             record["tuningSweep"] = {
                 "version": BENCHMARK_DFLASH_TUNER_VERSION,
                 "strategy": "bounded-coordinate-search",
+                "selectionMetric": str(plan["selectionMetric"]),
                 "searchedAxes": ["blockSize", "verifyMode", "draftQuant"],
                 "baselineModes": list(plan["baselineModes"]),
                 "complete": True,
@@ -28806,6 +37149,8 @@ class BenchmarkManager:
                     ),
                     str(record["backend"]),
                     record.get("comparedModes") or ["ar"],
+                    record.get("engineSettings"),
+                    kv=str(record.get("targetKV") or "off"),
                 ),
                 "accelerationReason": benchmark_acceleration_reason(
                     next(
@@ -28814,6 +37159,7 @@ class BenchmarkManager:
                     ),
                     str(record["backend"]),
                     record.get("comparedModes") or ["ar"],
+                    kv=str(record.get("targetKV") or "off"),
                 ),
                 "settingsLabel": benchmark_engine_settings_label(
                     str(record["backend"]), record.get("engineSettings"),
@@ -28822,8 +37168,7 @@ class BenchmarkManager:
                     str(record["backend"]), record.get("winner"),
                     record.get("settings"),
                 ),
-                "mtpDepthSweep": copy.deepcopy(record.get("mtpDepthSweep")),
-                "tuningSweep": copy.deepcopy(record.get("tuningSweep")),
+                "settingsSearch": public_benchmark_settings_search_result(record),
                 "score": round(float(measurement["score"]), 4) if measurement else None,
                 "metric": measurement["metric"] if measurement else None,
                 "display": measurement["display"] if measurement else "Not comparable",
@@ -28847,12 +37192,45 @@ class BenchmarkManager:
             models, shootout["modelId"], records,
         )
         profiles: dict[str, dict[str, Any]] = {}
+        expected_record_ids = {
+            str(record["backend"]): str(record["id"])
+            for record in records
+        }
         for preference, preference_label in ENGINE_PREFERENCE_LABELS.items():
             request = copy.deepcopy(shootout["request"])
             request["enginePreference"] = preference
             decision = best_engine_request(request, enriched)
             tier = str(decision.get("engineEvidenceTier") or "")
             trusted = tier == "cross-engine-local-benchmark" and matrix_quality_passed
+            apply_ready = bool(
+                matrix_quality_passed
+                and tier in {
+                    "cross-engine-local-benchmark",
+                    "cross-engine-leading-band",
+                    "cross-engine-noise-floor",
+                }
+            )
+            raw_binding = decision.get("engineEvidenceBinding")
+            binding: dict[str, Any] | None = None
+            if raw_binding is not None:
+                binding = validated_optimizer_evidence_binding({
+                    "evidenceBinding": raw_binding,
+                })
+                expected_binding = {
+                    "scope": "engine",
+                    "suite": str(shootout["suite"]),
+                    "preference": preference,
+                    "shootoutId": str(shootout["id"]),
+                    "recordIds": expected_record_ids,
+                }
+                if binding != expected_binding:
+                    raise RuntimeError(
+                        "The completed Engine Shootout produced an inconsistent apply reference."
+                    )
+            if apply_ready and binding is None:
+                raise RuntimeError(
+                    "The completed Engine Shootout produced no immutable apply reference."
+                )
             if not matrix_quality_passed:
                 recommendation = str(workload_comparison.get("warning") or (
                     "The completed engine routes did not perform comparable amounts of work."
@@ -28874,6 +37252,7 @@ class BenchmarkManager:
                 "trustedWinner": trusted, "recommendation": recommendation,
                 "exactOutputMatch": workload_comparison.get("exactOutputMatch") is True,
                 "outputWarning": str(workload_comparison.get("warning") or ""),
+                **({"evidenceBinding": copy.deepcopy(binding)} if apply_ready else {}),
             }
         selected_preference = str(shootout["request"].get("enginePreference") or "throughput")
         public_decision = profiles.get(selected_preference) or profiles["throughput"]
@@ -28897,8 +37276,12 @@ class BenchmarkManager:
             },
             "trustedWinner": public_decision["trustedWinner"],
             "recommendedBackend": public_decision["backend"],
-            "decision": public_decision,
+            "decision": copy.deepcopy(public_decision),
             "recommendation": public_decision["recommendation"],
+            **(
+                {"evidenceBinding": copy.deepcopy(public_decision["evidenceBinding"])}
+                if isinstance(public_decision.get("evidenceBinding"), dict) else {}
+            ),
         }
 
     def _shootout_tuning_gate(
@@ -28940,6 +37323,110 @@ class BenchmarkManager:
             )
         return gate, reference
 
+    def _shootout_settings_search(
+        self, job: dict[str, Any], models: list[dict[str, Any]],
+        completed: int, total: int, resource_reference: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], int, dict[str, Any] | None]:
+        plan = job.get("engineSettingsSweep")
+        if not isinstance(plan, dict):
+            return self._shootout_one_engine(job, models, completed, total, resource_reference)
+        expected_job = copy.deepcopy(job)
+        expected_job.pop("engineSettingsSweep", None)
+        prepare_engine_settings_sweep(expected_job)
+        if expected_job.get("engineSettingsSweep") != plan:
+            raise RuntimeError("The runtime settings plan changed; review Calibration again before testing.")
+        backend = str(job["backend"])
+        base_job = copy.deepcopy(job)
+        base_job.pop("engineSettingsSweep", None)
+        candidates = plan["candidates"]
+        ar_results: dict[str, Any] = {}
+        ar_records: dict[str, Any] = {}
+        preference = str(plan["selectionPreference"])
+
+        def candidate_job(candidate: dict[str, Any]) -> dict[str, Any]:
+            value = copy.deepcopy(base_job)
+            value["options"].update(copy.deepcopy(candidate["settings"]))
+            add_benchmark_engine_evidence(value["evidence"], value["model"], value["options"], [backend])
+            return value
+
+        def measure(value: dict[str, Any], mode: str, label: str) -> dict[str, Any]:
+            nonlocal completed, resource_reference
+            if self.cancel_event.is_set():
+                raise LaunchCancelled("Calibration cancelled during settings search.")
+            gate, resource_reference = self._shootout_tuning_gate(label, backend, resource_reference)
+            result, completed = self._measure_mode(
+                value, models, mode, completed, total, gate,
+                display_label=label, state_key=mode,
+            )
+            result["resourceCooldown"] = {
+                key: copy.deepcopy(value) for key, value in gate.items()
+                if not key.startswith("_")
+            }
+            return result
+
+        for index, candidate in enumerate(candidates):
+            value = candidate_job(candidate)
+            label = f"{candidate['label']} · AR · preset {index + 1}/{len(candidates)}"
+            result = measure(value, "ar", label)
+            ar_results[candidate["key"]] = result
+            value["modes"] = ["ar"]
+            ar_records[candidate["key"]] = self._build_record(value, {"ar": result})
+        reference = ar_records[candidates[0]["key"]]
+        provisional_rows = [
+            engine_settings_candidate_evidence(candidate, ar_records[candidate["key"]], reference, preference)
+            for candidate in candidates
+        ]
+        provisional = select_engine_settings_sweep_candidate(provisional_rows, preference)
+        if provisional is None:
+            raise RuntimeError("No runtime preset completed a comparable AR workload.")
+        chosen = next(candidate for candidate in candidates if candidate["key"] == provisional["key"])
+        tuned_job = candidate_job(chosen)
+        tuned_job["_premeasuredAR"] = ar_results[chosen["key"]]
+        tuned_record, completed, resource_reference = self._shootout_one_engine(
+            tuned_job, models, completed, total, resource_reference,
+        )
+        measured_records = {chosen["key"]: tuned_record}
+        for index, candidate in enumerate(candidates):
+            if candidate["key"] == chosen["key"]:
+                continue
+            value = candidate_job(candidate)
+            results = {"ar": ar_results[candidate["key"]]}
+            for mode in value["modes"]:
+                if mode == "ar":
+                    continue
+                settings = tuned_record["modeSettings"][mode]
+                if mode == "dflash2":
+                    value["_benchmarkDflashSettings"] = copy.deepcopy(settings)
+                elif backend == "lmstudio":
+                    value["_benchmarkMtpSettings"] = copy.deepcopy(settings)
+                else:
+                    value["_benchmarkMtpDepth"] = settings["depth"]
+                label = f"{candidate['label']} · {benchmark_public_mode_label(backend, mode)} · preset {index + 1}/{len(candidates)}"
+                results[mode] = measure(value, mode, label)
+            measured_records[candidate["key"]] = self._build_record(value, results)
+        rows = [
+            engine_settings_candidate_evidence(candidate, measured_records[candidate["key"]], reference, preference)
+            for candidate in candidates
+        ]
+        best = select_engine_settings_sweep_candidate(rows, preference)
+        if best is None:
+            raise RuntimeError("No runtime preset passed the final route comparison.")
+        record = copy.deepcopy(measured_records[best["key"]])
+        record["engineSettingsSweep"] = {
+            **copy.deepcopy(plan),
+            "complete": True,
+            "candidateCount": len(candidates),
+            "selectedCandidateKey": best["key"],
+            "selectedEngineSettings": copy.deepcopy(record["engineSettings"]),
+            "tuningReferenceKey": chosen["key"],
+            "records": measured_records,
+        }
+        if not _local_benchmark_record_verified(
+            job["model"]["backends"][backend], record, job["evidence"],
+        ):
+            raise RuntimeError("The completed runtime settings search failed its evidence audit.")
+        return record, completed, resource_reference
+
     def _publish_shootout_tuning(
         self, backend: str, kind: str, candidates: list[dict[str, Any]],
         selected_key: str | None, maximum: int,
@@ -28965,20 +37452,31 @@ class BenchmarkManager:
         self, job: dict[str, Any], models: list[dict[str, Any]],
         completed: int, total: int,
         resource_reference: dict[str, Any] | None,
+        premeasured_baseline: dict[str, Any] | None = None,
+        premeasured_gate: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], int, dict[str, Any] | None]:
         """Return one complete LM Studio record after its bounded MTP search."""
         plan = job["calibrationTuningPlan"]
         capability = job["model"]["backends"]["lmstudio"]
+        maximum_candidates = int(
+            plan.get("maximumMtpCandidates") or BENCHMARK_MTP_TUNER_MAX_CANDIDATES
+        )
         candidates: list[dict[str, Any]] = []
         candidate_by_key: dict[str, dict[str, Any]] = {}
         optional_search_stop: dict[str, Any] | None = None
-        baseline_gate, resource_reference = self._shootout_tuning_gate(
-            "LM Studio · AR tuning baseline", "lmstudio", resource_reference,
-        )
-        baseline, completed = self._measure_mode(
-            job, models, "ar", completed, total, baseline_gate,
-            display_label="AR tuning baseline", state_key="ar",
-        )
+        if premeasured_baseline is None:
+            baseline_gate, resource_reference = self._shootout_tuning_gate(
+                "LM Studio · AR tuning baseline", "lmstudio", resource_reference,
+            )
+            baseline, completed = self._measure_mode(
+                job, models, "ar", completed, total, baseline_gate,
+                display_label="AR tuning baseline", state_key="ar",
+            )
+        else:
+            if not isinstance(premeasured_gate, dict):
+                raise RuntimeError("LM Studio settings search lost its AR resource receipt.")
+            baseline = premeasured_baseline
+            baseline_gate = premeasured_gate
 
         def measure_candidate(
             settings: dict[str, Any], stage: str,
@@ -28988,7 +37486,7 @@ class BenchmarkManager:
             key = lmstudio_mtp_tuning_candidate_key(normalized)
             if key in candidate_by_key:
                 return candidate_by_key[key]
-            if len(candidates) >= BENCHMARK_MTP_TUNER_MAX_CANDIDATES:
+            if len(candidates) >= maximum_candidates:
                 return None
             if self.cancel_event.is_set():
                 raise LaunchCancelled("Engine Shootout cancelled during LM Studio tuning.")
@@ -29007,6 +37505,7 @@ class BenchmarkManager:
             )
             summary = self._mtp_tuning_candidate_summary(
                 baseline, result, stage, str(gate.get("status") or ""),
+                benchmark_route_selection_metric(job),
             )
             if summary["key"] != key:
                 raise RuntimeError(
@@ -29017,7 +37516,7 @@ class BenchmarkManager:
             leading = self._best_tuning_candidate(candidates)
             self._publish_shootout_tuning(
                 "lmstudio", "lmstudio-mtp", candidates, leading["key"],
-                BENCHMARK_MTP_TUNER_MAX_CANDIDATES,
+                maximum_candidates,
             )
             return summary
 
@@ -29027,7 +37526,13 @@ class BenchmarkManager:
             """Stop only optional refinement when its comparable-start wait expires."""
             nonlocal optional_search_stop
             try:
-                measure_candidate(settings, stage)
+                measured = measure_candidate(settings, stage)
+                if measured is None:
+                    optional_search_stop = {
+                        "reason": "candidate-budget", "stage": stage,
+                        "completedCandidateCount": len(candidates),
+                    }
+                    return False
             except BenchmarkResourceCooldownTimeout:
                 optional_search_stop = {
                     "reason": "resource-cooldown-timeout",
@@ -29078,11 +37583,10 @@ class BenchmarkManager:
         best["selected"] = True
         self._publish_shootout_tuning(
             "lmstudio", "lmstudio-mtp", candidates, best["key"],
-            BENCHMARK_MTP_TUNER_MAX_CANDIDATES,
+            maximum_candidates,
         )
-        record = self._build_record(
-            job, {"ar": baseline, "mtp": best["_result"]},
-        )
+        inner_results = {"ar": baseline, "mtp": best["_result"]}
+        record = self._build_record(job, inner_results)
         public_candidates = [
             {
                 key: copy.deepcopy(value)
@@ -29094,12 +37598,13 @@ class BenchmarkManager:
         record["tuningSweep"] = {
             "version": BENCHMARK_MTP_TUNER_VERSION,
             "strategy": "bounded-coordinate-search",
+            "selectionMetric": str(plan["selectionMetric"]),
             "complete": True, "resourceComparable": True,
             "optionalSearchComplete": optional_search_stop is None,
             "optionalSearchStop": copy.deepcopy(optional_search_stop),
             "baselineResourceStatus": str(baseline_gate.get("status") or ""),
             "candidateCount": len(public_candidates),
-            "maximumCandidates": BENCHMARK_MTP_TUNER_MAX_CANDIDATES,
+            "maximumCandidates": maximum_candidates,
             "selectedCandidateKey": best["key"],
             "selectedSettings": copy.deepcopy(best["settings"]),
             "candidates": public_candidates,
@@ -29130,20 +37635,31 @@ class BenchmarkManager:
         self, job: dict[str, Any], models: list[dict[str, Any]],
         completed: int, total: int,
         resource_reference: dict[str, Any] | None,
+        premeasured_baseline: dict[str, Any] | None = None,
+        premeasured_gate: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], int, dict[str, Any] | None]:
         """Return one complete oMLX record after its bounded DFlash search."""
         plan = job["calibrationTuningPlan"]
         capability = job["model"]["backends"]["omlx"]
+        maximum_candidates = int(
+            plan.get("maximumDflashCandidates") or BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES
+        )
         candidates: list[dict[str, Any]] = []
         candidate_by_key: dict[str, dict[str, Any]] = {}
         optional_search_stop: dict[str, Any] | None = None
-        baseline_gate, resource_reference = self._shootout_tuning_gate(
-            "oMLX · AR tuning baseline", "omlx", resource_reference,
-        )
-        baseline, completed = self._measure_mode(
-            job, models, "ar", completed, total, baseline_gate,
-            display_label="AR tuning baseline", state_key="ar",
-        )
+        if premeasured_baseline is None:
+            baseline_gate, resource_reference = self._shootout_tuning_gate(
+                "oMLX · AR tuning baseline", "omlx", resource_reference,
+            )
+            baseline, completed = self._measure_mode(
+                job, models, "ar", completed, total, baseline_gate,
+                display_label="AR tuning baseline", state_key="ar",
+            )
+        else:
+            if not isinstance(premeasured_gate, dict):
+                raise RuntimeError("oMLX settings search lost its AR resource receipt.")
+            baseline = premeasured_baseline
+            baseline_gate = premeasured_gate
         final_results: dict[str, dict[str, Any]] = {"ar": baseline}
         if "mtp" in plan["baselineModes"]:
             mtp_gate, resource_reference = self._shootout_tuning_gate(
@@ -29163,7 +37679,7 @@ class BenchmarkManager:
             key = dflash2_tuning_candidate_key(normalized)
             if key in candidate_by_key:
                 return candidate_by_key[key]
-            if len(candidates) >= BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES:
+            if len(candidates) >= maximum_candidates:
                 return None
             if self.cancel_event.is_set():
                 raise LaunchCancelled("Engine Shootout cancelled during DFlash tuning.")
@@ -29182,6 +37698,7 @@ class BenchmarkManager:
             )
             summary = self._dflash_tuning_candidate_summary(
                 baseline, result, stage, str(gate.get("status") or ""),
+                benchmark_route_selection_metric(job),
             )
             if summary["key"] != key:
                 raise RuntimeError(
@@ -29192,7 +37709,7 @@ class BenchmarkManager:
             leading = self._best_tuning_candidate(candidates)
             self._publish_shootout_tuning(
                 "omlx", "omlx-dflash2", candidates, leading["key"],
-                BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES,
+                maximum_candidates,
             )
             return summary
 
@@ -29202,7 +37719,13 @@ class BenchmarkManager:
             """Stop only optional refinement when its comparable-start wait expires."""
             nonlocal optional_search_stop
             try:
-                measure_candidate(settings, stage)
+                measured = measure_candidate(settings, stage)
+                if measured is None:
+                    optional_search_stop = {
+                        "reason": "candidate-budget", "stage": stage,
+                        "completedCandidateCount": len(candidates),
+                    }
+                    return False
             except BenchmarkResourceCooldownTimeout:
                 optional_search_stop = {
                     "reason": "resource-cooldown-timeout",
@@ -29248,7 +37771,7 @@ class BenchmarkManager:
         best["selected"] = True
         self._publish_shootout_tuning(
             "omlx", "omlx-dflash2", candidates, best["key"],
-            BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES,
+            maximum_candidates,
         )
         final_results["dflash2"] = best["_result"]
         record = self._build_record(job, final_results)
@@ -29263,6 +37786,7 @@ class BenchmarkManager:
         record["tuningSweep"] = {
             "version": BENCHMARK_DFLASH_TUNER_VERSION,
             "strategy": "bounded-coordinate-search",
+            "selectionMetric": str(plan["selectionMetric"]),
             "searchedAxes": ["blockSize", "verifyMode", "draftQuant"],
             "baselineModes": list(plan["baselineModes"]),
             "complete": True, "resourceComparable": True,
@@ -29270,7 +37794,7 @@ class BenchmarkManager:
             "optionalSearchStop": copy.deepcopy(optional_search_stop),
             "baselineResourceStatus": str(baseline_gate.get("status") or ""),
             "candidateCount": len(public_candidates),
-            "maximumCandidates": BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES,
+            "maximumCandidates": maximum_candidates,
             "selectedCandidateKey": best["key"],
             "selectedSettings": copy.deepcopy(best["settings"]),
             "candidates": public_candidates,
@@ -29498,6 +38022,320 @@ class BenchmarkManager:
                 if self.thread is threading.current_thread():
                     self.thread = None
 
+    def _shootout_one_engine(
+        self, job: dict[str, Any], models: list[dict[str, Any]],
+        completed: int, total: int, resource_reference: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], int, dict[str, Any] | None]:
+        tuning_plan = job.get("calibrationTuningPlan")
+        if (
+            isinstance(tuning_plan, dict)
+            and job["backend"] in {"lmstudio", "omlx"}
+        ):
+            if job["backend"] == "lmstudio":
+                record, completed, resource_reference = self._shootout_lmstudio_tuning(
+                    job, models, completed, total, resource_reference,
+                    premeasured_baseline=job.get("_premeasuredAR"),
+                    premeasured_gate=(job.get("_premeasuredAR") or {}).get("resourceCooldown"),
+                )
+            elif job["backend"] == "omlx":
+                record, completed, resource_reference = self._shootout_dflash_tuning(
+                    job, models, completed, total, resource_reference,
+                    premeasured_baseline=job.get("_premeasuredAR"),
+                    premeasured_gate=(job.get("_premeasuredAR") or {}).get("resourceCooldown"),
+                )
+            else:
+                raise RuntimeError("Calibration created an unsupported adaptive engine plan.")
+            return record, completed, resource_reference
+        long_operator_plan = bool(
+            isinstance(tuning_plan, dict)
+            and job["backend"] == "mtplx"
+            and tuning_plan.get("strategy")
+            == "isolated-long-context-operator-comparison"
+        )
+        if isinstance(tuning_plan, dict) and not long_operator_plan:
+            raise RuntimeError(
+                "Calibration created an unsupported adaptive engine plan."
+            )
+        results: dict[str, dict[str, Any]] = {}
+        mtplx_depth_candidates: list[dict[str, Any]] = []
+        mtplx_operator_results: dict[str, dict[str, Any]] = {}
+        mtplx_operator_resource_status: dict[str, str] = {}
+        for route in benchmark_job_measurement_routes(job):
+            if self.cancel_event.is_set():
+                raise LaunchCancelled("Engine Shootout cancelled.")
+            mode = str(route["mode"])
+            if mode == "ar" and isinstance(job.get("_premeasuredAR"), dict):
+                results["ar"] = job["_premeasuredAR"]
+                continue
+            route_label = f"{BACKEND_LABELS[job['backend']]} · {route['label']}"
+            gate, resource_reference = self._shootout_tuning_gate(
+                route_label, str(job["backend"]), resource_reference,
+            )
+            candidate_job = job
+            route_settings = route.get("settings")
+            if (
+                job["backend"] == "mtplx" and mode == "mtp"
+                and isinstance(route_settings, dict)
+                and isinstance(route_settings.get("depth"), int)
+            ):
+                candidate_job = copy.deepcopy(job)
+                candidate_job["_benchmarkMtpDepth"] = int(route_settings["depth"])
+                if long_operator_plan:
+                    operator_route = str(route.get("operatorRoute") or "")
+                    if operator_route not in {
+                        MTPLX_LONG_CONTEXT_DEFAULT_ROUTE,
+                        MTPLX_LONG_CONTEXT_2111_ROUTE,
+                    }:
+                        raise RuntimeError(
+                            "Calibration created an unknown MTPLX operator route."
+                        )
+                    candidate_job["_benchmarkMtplxOperatorRoute"] = operator_route
+            result, completed = self._measure_mode(
+                candidate_job, models, mode, completed, total, gate,
+                display_label=str(route["label"]),
+                state_key=str(route["stateKey"]),
+            )
+            if long_operator_plan and mode == "mtp":
+                operator_route = str(route["operatorRoute"])
+                mtplx_operator_results[operator_route] = result
+                mtplx_operator_resource_status[operator_route] = str(
+                    gate.get("status") or ""
+                )
+                continue
+            if candidate_job is not job:
+                if "ar" not in results:
+                    raise RuntimeError(
+                        "MTPLX depth tuning started before its AR correctness reference."
+                    )
+                mtplx_depth_candidates.append(
+                    self._mtplx_depth_candidate_summary(
+                        results["ar"], result,
+                        int(route_settings["depth"]),
+                        str(gate.get("status") or ""),
+                        benchmark_route_selection_metric(job),
+                    )
+                )
+                with self.lock:
+                    engine = self.state.get("engines", {}).get("mtplx")
+                    if isinstance(engine, dict):
+                        engine["depthSweep"] = [
+                            {
+                                key: copy.deepcopy(value)
+                                for key, value in candidate.items()
+                                if key != "_result"
+                            }
+                            for candidate in mtplx_depth_candidates
+                        ]
+                continue
+            results[mode] = result
+        mtplx_operator_candidates: list[dict[str, Any]] = []
+        if long_operator_plan:
+            baseline_result = mtplx_operator_results.get(
+                MTPLX_LONG_CONTEXT_DEFAULT_ROUTE
+            )
+            candidate_result = mtplx_operator_results.get(
+                MTPLX_LONG_CONTEXT_2111_ROUTE
+            )
+            if (
+                "ar" not in results
+                or not isinstance(baseline_result, dict)
+                or not isinstance(candidate_result, dict)
+            ):
+                raise RuntimeError(
+                    "MTPLX long-context operator calibration returned an incomplete route matrix."
+                )
+            mtplx_operator_candidates = self._mtplx_operator_candidate_summaries(
+                results["ar"], baseline_result, candidate_result,
+                mtplx_operator_resource_status.get(
+                    MTPLX_LONG_CONTEXT_DEFAULT_ROUTE, "",
+                ),
+                mtplx_operator_resource_status.get(
+                    MTPLX_LONG_CONTEXT_2111_ROUTE, "",
+                ),
+            )
+            if not all(
+                item.get("resourceComparable") is True
+                for item in mtplx_operator_candidates
+            ):
+                raise RuntimeError(
+                    "MTPLX operator routes did not start under comparable Mac conditions. "
+                    "Nothing was saved; retry when the Mac is idle."
+                )
+            by_route = {
+                str(item["route"]): item
+                for item in mtplx_operator_candidates
+            }
+            measured_candidate = by_route[MTPLX_LONG_CONTEXT_2111_ROUTE]
+            candidate_accepted = bool(
+                measured_candidate["qualityMatchesAR"] is True
+                and measured_candidate["qualityMatchesDefault"] is True
+                and float(measured_candidate["_medianSpeedupVsDefaultRaw"])
+                >= BENCHMARK_MINIMUM_SPEEDUP
+                and float(measured_candidate["_worstCaseSpeedupVsDefaultRaw"])
+                >= BENCHMARK_MINIMUM_SPEEDUP
+            )
+            selected_route = (
+                MTPLX_LONG_CONTEXT_2111_ROUTE
+                if candidate_accepted else MTPLX_LONG_CONTEXT_DEFAULT_ROUTE
+            )
+            selected_operator = by_route[selected_route]
+            selected_operator["selected"] = True
+            results["mtp"] = selected_operator["_result"]
+        if mtplx_depth_candidates:
+            if not all(
+                candidate.get("resourceComparable") is True
+                for candidate in mtplx_depth_candidates
+            ):
+                raise RuntimeError(
+                    "MTPLX depth candidates did not start under comparable Mac conditions. "
+                    "Nothing was saved; retry when the Mac is idle."
+                )
+            best_depth = self._best_tuning_candidate(mtplx_depth_candidates)
+            best_depth["selected"] = True
+            results["mtp"] = best_depth["_result"]
+        record = self._build_record(job, results)
+        if mtplx_operator_candidates:
+            plan = job["calibrationTuningPlan"]
+            public_candidates = [
+                {
+                    key: copy.deepcopy(value)
+                    for key, value in item.items()
+                    if not key.startswith("_")
+                }
+                for item in mtplx_operator_candidates
+            ]
+            selected = next(
+                item for item in public_candidates
+                if item["selected"] is True
+            )
+            measured_candidate = next(
+                item for item in public_candidates
+                if item["route"] == MTPLX_LONG_CONTEXT_2111_ROUTE
+            )
+            record.update({
+                "kind": "mtplx-long-context-operator-tuning",
+                "selectionPreference": "throughput",
+                "modelPath": str(plan["contract"]["modelPath"]),
+                "mtplxOperatorSweep": {
+                    "version": MTPLX_LONG_CONTEXT_2111_SWEEP_VERSION,
+                    "strategy": "isolated-long-context-operator-comparison",
+                    "complete": True,
+                    "resourceComparable": True,
+                    "suiteName": MTPLX_LONG_CONTEXT_64K_SUITE,
+                    "requiredContext": MTPLX_LONG_CONTEXT_MINIMUM,
+                    "contractId": str(plan["contractId"]),
+                    "contract": copy.deepcopy(plan["contract"]),
+                    "baselineRoute": MTPLX_LONG_CONTEXT_DEFAULT_ROUTE,
+                    "candidateRoute": MTPLX_LONG_CONTEXT_2111_ROUTE,
+                    "baselineEnvironment": copy.deepcopy(
+                        MTPLX_LONG_CONTEXT_BASELINE_ENV
+                    ),
+                    "candidateEnvironment": copy.deepcopy(
+                        MTPLX_LONG_CONTEXT_CANDIDATE_ENV
+                    ),
+                    "selectionMetric": "generation-tokens-per-second",
+                    "minimumMedianSpeedup": BENCHMARK_MINIMUM_SPEEDUP,
+                    "minimumWorstSpeedup": BENCHMARK_MINIMUM_SPEEDUP,
+                    "qualificationContract": copy.deepcopy(
+                        plan["qualificationContract"]
+                    ),
+                    "fixedMtpDepth": int(plan["fixedMtpDepth"]),
+                    "candidateAccepted": bool(
+                        measured_candidate["selected"] is True
+                    ),
+                    "selectedRoute": str(selected["route"]),
+                    "selectedSettings": copy.deepcopy(selected["settings"]),
+                    "arMeasurement": _mtplx_operator_measurement_evidence(
+                        results["ar"],
+                    ),
+                    "routeMeasurements": {
+                        MTPLX_LONG_CONTEXT_DEFAULT_ROUTE:
+                            _mtplx_operator_measurement_evidence(
+                                baseline_result,
+                            ),
+                        MTPLX_LONG_CONTEXT_2111_ROUTE:
+                            _mtplx_operator_measurement_evidence(
+                                candidate_result,
+                            ),
+                    },
+                    "candidates": public_candidates,
+                },
+            })
+            if record["winner"] == "mtp":
+                if selected["route"] == MTPLX_LONG_CONTEXT_2111_ROUTE:
+                    record["recommendation"] = (
+                        "Use MTPLX's measured 2.11.1 long-context MTP route: "
+                        "it preserved exact greedy output and cleared the 3% median "
+                        "and worst-generation-TPS gates over the isolated default route, "
+                        "then beat AR by the same noise floor."
+                    )
+                else:
+                    record["recommendation"] = (
+                        "Use MTPLX's default MTP route: the 2.11.1 long-context "
+                        "operator candidate did not clear every promotion gate, and "
+                        "the default route still beat AR by generation TPS."
+                    )
+            elif selected.get("qualityMatchesAR") is not True:
+                record["recommendation"] = (
+                    "Keep MTPLX AR: the tested MTP output did not exactly match the greedy "
+                    "reference. Its measured speed is shown, but it is not eligible for "
+                    "automatic selection."
+                )
+            else:
+                record["recommendation"] = (
+                    "Keep MTPLX AR: the selected correctness-preserving MTP operator "
+                    "route did not beat AR across both median and worst generation TPS "
+                    "by the 3% noise floor."
+                )
+            capability = job["model"]["backends"]["mtplx"]
+            if not _local_benchmark_record_verified(
+                capability, record, job["evidence"],
+            ):
+                raise RuntimeError(
+                    "The completed MTPLX long-context operator sweep failed its "
+                    "immutable evidence contract."
+                )
+        if mtplx_depth_candidates:
+            public_candidates = [
+                {
+                    key: copy.deepcopy(value)
+                    for key, value in candidate.items()
+                    if key != "_result"
+                }
+                for candidate in mtplx_depth_candidates
+            ]
+            selected = next(
+                candidate for candidate in public_candidates
+                if candidate["selected"] is True
+            )
+            record["mtpDepthSweep"] = {
+                "version": MTPLX_MTP_DEPTH_SWEEP_VERSION,
+                "strategy": "exhaustive-verified-depths",
+                "selectionMetric": benchmark_route_selection_metric(job),
+                "complete": True,
+                "resourceComparable": True,
+                "depthCandidates": mtplx_mtp_depth_candidates(
+                    job["model"]["backends"]["mtplx"],
+                ),
+                "candidateCount": len(public_candidates),
+                "maximumCandidates": MTPLX_MTP_DEPTH_SWEEP_MAX_CANDIDATES,
+                "selectedDepth": selected["depth"],
+                "selectedSettings": copy.deepcopy(selected["settings"]),
+                "candidates": public_candidates,
+            }
+            if record["winner"] == "mtp":
+                record["recommendation"] = (
+                    f"Use MTP D{selected['depth']}: it was the fastest verified MTPLX "
+                    f"depth and cleared exact AR parity plus the "
+                    f"{BENCHMARK_MINIMUM_SPEEDUP:.2f}× median/worst-case noise floor."
+                )
+            else:
+                record["recommendation"] = (
+                    f"Keep AR: none of the {len(public_candidates)} verified MTPLX "
+                    "depths cleared exact parity and the speed noise floor."
+                )
+        return record, completed, resource_reference
+
     def _shootout_worker(
         self, shootout: dict[str, Any], models: list[dict[str, Any]],
     ) -> None:
@@ -29514,135 +38352,9 @@ class BenchmarkManager:
             for job in jobs:
                 if self.cancel_event.is_set():
                     raise LaunchCancelled("Engine Shootout cancelled.")
-                tuning_plan = job.get("calibrationTuningPlan")
-                if isinstance(tuning_plan, dict):
-                    if job["backend"] == "lmstudio":
-                        record, completed, resource_reference = self._shootout_lmstudio_tuning(
-                            job, models, completed, total, resource_reference,
-                        )
-                    elif job["backend"] == "omlx":
-                        record, completed, resource_reference = self._shootout_dflash_tuning(
-                            job, models, completed, total, resource_reference,
-                        )
-                    else:
-                        raise RuntimeError("Calibration created an unsupported adaptive engine plan.")
-                    records.append(record)
-                    with self.lock:
-                        engine = self.state.get("engines", {}).get(job["backend"])
-                        if isinstance(engine, dict):
-                            engine["phase"] = "measured"
-                            engine["record"] = {
-                                "winner": record["winner"],
-                                "winnerLabel": self._mode_label(str(record["winner"])),
-                                "recommendation": record["recommendation"],
-                            }
-                    self._event(
-                        f"{BACKEND_LABELS[job['backend']]} tuning complete; its best route "
-                        "is staged until every engine finishes."
-                    )
-                    continue
-                results: dict[str, dict[str, Any]] = {}
-                mtplx_depth_candidates: list[dict[str, Any]] = []
-                for route in benchmark_job_measurement_routes(job):
-                    if self.cancel_event.is_set():
-                        raise LaunchCancelled("Engine Shootout cancelled.")
-                    mode = str(route["mode"])
-                    route_label = f"{BACKEND_LABELS[job['backend']]} · {route['label']}"
-                    gate = self._wait_for_resource_baseline(
-                        route_label, str(job["backend"]), resource_reference,
-                    )
-                    if resource_reference is None and gate.get("status") != "unavailable":
-                        resource_reference = copy.deepcopy(gate.get("reference"))
-                    candidate_job = job
-                    route_settings = route.get("settings")
-                    if (
-                        job["backend"] == "mtplx" and mode == "mtp"
-                        and isinstance(route_settings, dict)
-                        and isinstance(route_settings.get("depth"), int)
-                    ):
-                        candidate_job = copy.deepcopy(job)
-                        candidate_job["_benchmarkMtpDepth"] = int(route_settings["depth"])
-                    result, completed = self._measure_mode(
-                        candidate_job, models, mode, completed, total, gate,
-                        display_label=str(route["label"]),
-                        state_key=str(route["stateKey"]),
-                    )
-                    if candidate_job is not job:
-                        if "ar" not in results:
-                            raise RuntimeError(
-                                "MTPLX depth tuning started before its AR correctness reference."
-                            )
-                        mtplx_depth_candidates.append(
-                            self._mtplx_depth_candidate_summary(
-                                results["ar"], result,
-                                int(route_settings["depth"]),
-                                str(gate.get("status") or ""),
-                            )
-                        )
-                        with self.lock:
-                            engine = self.state.get("engines", {}).get("mtplx")
-                            if isinstance(engine, dict):
-                                engine["depthSweep"] = [
-                                    {
-                                        key: copy.deepcopy(value)
-                                        for key, value in candidate.items()
-                                        if key != "_result"
-                                    }
-                                    for candidate in mtplx_depth_candidates
-                                ]
-                        continue
-                    results[mode] = result
-                if mtplx_depth_candidates:
-                    if not all(
-                        candidate.get("resourceComparable") is True
-                        for candidate in mtplx_depth_candidates
-                    ):
-                        raise RuntimeError(
-                            "MTPLX depth candidates did not start under comparable Mac conditions. "
-                            "Nothing was saved; retry when the Mac is idle."
-                        )
-                    best_depth = self._best_tuning_candidate(mtplx_depth_candidates)
-                    best_depth["selected"] = True
-                    results["mtp"] = best_depth["_result"]
-                record = self._build_record(job, results)
-                if mtplx_depth_candidates:
-                    public_candidates = [
-                        {
-                            key: copy.deepcopy(value)
-                            for key, value in candidate.items()
-                            if key != "_result"
-                        }
-                        for candidate in mtplx_depth_candidates
-                    ]
-                    selected = next(
-                        candidate for candidate in public_candidates
-                        if candidate["selected"] is True
-                    )
-                    record["mtpDepthSweep"] = {
-                        "version": MTPLX_MTP_DEPTH_SWEEP_VERSION,
-                        "strategy": "exhaustive-verified-depths",
-                        "complete": True,
-                        "resourceComparable": True,
-                        "depthCandidates": mtplx_mtp_depth_candidates(
-                            job["model"]["backends"]["mtplx"],
-                        ),
-                        "candidateCount": len(public_candidates),
-                        "maximumCandidates": MTPLX_MTP_DEPTH_SWEEP_MAX_CANDIDATES,
-                        "selectedDepth": selected["depth"],
-                        "selectedSettings": copy.deepcopy(selected["settings"]),
-                        "candidates": public_candidates,
-                    }
-                    if record["winner"] == "mtp":
-                        record["recommendation"] = (
-                            f"Use MTP D{selected['depth']}: it was the fastest verified MTPLX "
-                            f"depth and cleared exact AR parity plus the "
-                            f"{BENCHMARK_MINIMUM_SPEEDUP:.2f}× median/worst-case noise floor."
-                        )
-                    else:
-                        record["recommendation"] = (
-                            f"Keep AR: none of the {len(public_candidates)} verified MTPLX "
-                            "depths cleared exact parity and the speed noise floor."
-                        )
+                record, completed, resource_reference = self._shootout_settings_search(
+                    job, models, completed, total, resource_reference,
+                )
                 records.append(record)
                 with self.lock:
                     engine = self.state.get("engines", {}).get(job["backend"])
@@ -29665,6 +38377,10 @@ class BenchmarkManager:
                 "scope": "local",
                 "recordCount": len(records),
                 "savedAt": datetime.now(timezone.utc).isoformat(),
+                **(
+                    {"evidenceBinding": copy.deepcopy(result["evidenceBinding"])}
+                    if isinstance(result.get("evidenceBinding"), dict) else {}
+                ),
             }
             with self.lock:
                 self.state["phase"] = "completed"
@@ -29705,16 +38421,29 @@ class BenchmarkManager:
 
     def _worker(self, job: dict[str, Any], models: list[dict[str, Any]]) -> None:
         steps_per_mode = 2 + benchmark_measurement_count(job["suite"])
-        total = steps_per_mode * len(job["modes"])
+        operator_sweep = bool(
+            job["backend"] == "mtplx"
+            and isinstance(job.get("calibrationTuningPlan"), dict)
+            and job["calibrationTuningPlan"].get("strategy")
+            == "isolated-long-context-operator-comparison"
+        )
+        total = steps_per_mode * (
+            benchmark_job_maximum_route_count(job) if operator_sweep else len(job["modes"])
+        )
         completed = 0
         results: dict[str, dict[str, Any]] = {}
         try:
-            for mode in job["modes"]:
-                if self.cancel_event.is_set():
-                    raise LaunchCancelled("Benchmark cancelled.")
-                result, completed = self._measure_mode(job, models, mode, completed, total)
-                results[mode] = result
-            record = self._build_record(job, results)
+            if operator_sweep:
+                record, completed, _reference = self._shootout_one_engine(
+                    job, models, completed, total, None,
+                )
+            else:
+                for mode in job["modes"]:
+                    if self.cancel_event.is_set():
+                        raise LaunchCancelled("Benchmark cancelled.")
+                    result, completed = self._measure_mode(job, models, mode, completed, total)
+                    results[mode] = result
+                record = self._build_record(job, results)
             save_benchmark_record(record)
             with self.lock:
                 self.state["phase"] = "completed"
@@ -29797,6 +38526,12 @@ class RuntimePromotionManager(BenchmarkManager):
             str(payload.get("confirmation") or ""), str(current.get("confirmation") or ""),
         ):
             raise ValueError("Confirm the exact runtime comparison before loading either model route.")
+        if current.get("canStart") is not True:
+            admission = current.get("memoryAdmission")
+            raise ValueError(
+                f"{admission.get('label') if isinstance(admission, dict) else 'Mac capacity is not ready'}: "
+                f"{admission.get('detail') if isinstance(admission, dict) else 'refresh capacity before comparing runtimes.'}"
+            )
         return current
 
     def start(
@@ -30161,6 +38896,17 @@ class RouteCheckManager:
                 self.state["progress"] = 0.08
             self._set_check("model", "running", "Loading the selected model and waiting for its exact served ID…")
             self._event("Loading the selected model once; no agent or Chat surface will be opened.")
+            try:
+                admission = require_live_model_load_admission(
+                    _session_set_plan_payload(plan), [plan.model],
+                    purpose="route-check", hub=self.run_manager.snapshot(),
+                )
+            except BaseException:
+                dispose_plan_secrets(plan)
+                raise
+            with self.lock:
+                if isinstance(self.state.get("job"), dict):
+                    self.state["job"]["memoryAdmission"] = copy.deepcopy(admission)
             self.run_manager.start(plan)
             self._wait_for_engine(plan)
             self._set_check("model", "pass", "The runtime listed the exact selected model ID on loopback.")
@@ -30461,10 +39207,7 @@ class SetupManager:
 
     @staticmethod
     def _log_tail(path: Path) -> str:
-        try:
-            return path.read_text(encoding="utf-8", errors="replace")[-2_000:].strip()
-        except OSError:
-            return ""
+        return read_log_tail(path, 2_000).strip()
 
     def _worker(self, plan: dict[str, Any]) -> None:
         draft = plan["draft"]
@@ -31371,6 +40114,12 @@ class RuntimeUpdateManager:
             raise RuntimeError("The isolated environment did not create an executable oMLX command.")
         if not python.is_file() or not os.access(python, os.X_OK):
             raise RuntimeError("The isolated environment did not create its matching Python command.")
+        local_patches = []
+        if release["version"] == "0.6.4":
+            receipt = dflash_budget_patch.inspect(target)[2]
+            if not receipt["applied"]:
+                raise RuntimeError("The managed oMLX runtime is missing the launcher DFlash thinking-budget patch.")
+            local_patches.append(receipt)
         return_code, version_output = self._run_capture([str(binary), "--version"], timeout=20)
         version_line = (version_output.strip().splitlines() or [""])[0][:100]
         if return_code != 0 or not _exact_omlx_version(version_line, str(release["version"])):
@@ -31397,6 +40146,7 @@ class RuntimeUpdateManager:
             "dependencyCheck": dependency_output.strip()[:500] or "No broken requirements found.",
             "serverCommandReady": True, "nativeKernel": kernel,
             "serverStarted": False, "modelLoaded": False,
+            "localPatches": local_patches,
         }
 
     def _dependency_inventory(self, target: Path) -> list[dict[str, str]]:
@@ -31522,6 +40272,9 @@ class RuntimeUpdateManager:
                     "install", "--no-input", "--no-index", "--no-deps", "--only-binary=:all:",
                     *(str(path) for path in install_paths),
                 ], log_path, "installing", "Installing only the hashed private wheelhouse with the network disabled", 0.74, pip_environment)
+                if release["version"] == "0.6.4":
+                    self._event("Applying the verified DFlash thinking-budget correction to this private copy…")
+                    dflash_budget_patch.apply(staging)
                 with self.lock:
                     self.state["phase"] = "smoke-testing"
                     self.state["progress"] = 0.84
@@ -31872,10 +40625,7 @@ class ANETunerManager:
     def _read_engine_log(plan: LaunchPlan) -> str:
         if not plan.run_dir:
             return ""
-        try:
-            return (plan.run_dir / "engine.log").read_text(encoding="utf-8", errors="replace")[-2_000_000:]
-        except OSError:
-            return ""
+        return read_log_tail(plan.run_dir / "engine.log", 2_000_000)
 
     def _build_record(
         self, plan: LaunchPlan, job: dict[str, Any], snapshot: dict[str, Any],
@@ -31933,6 +40683,17 @@ class ANETunerManager:
             self._event("Loading the model in a private oMLX process; global oMLX settings remain untouched.")
             with self.lock:
                 self.state["phase"] = "starting"
+            try:
+                admission = require_live_model_load_admission(
+                    _session_set_plan_payload(plan), [plan.model],
+                    purpose="ane-tune", hub=self.run_manager.snapshot(),
+                )
+            except BaseException:
+                dispose_plan_secrets(plan)
+                raise
+            with self.lock:
+                if isinstance(self.state.get("job"), dict):
+                    self.state["job"]["memoryAdmission"] = copy.deepcopy(admission)
             self.run_manager.start(plan)
             self._wait_for_engine(plan)
             if self.cancel_event.is_set():
@@ -32411,6 +41172,14 @@ class SessionSetRunner:
                     "experimentalQualificationConsent"
                 ] = True
             launch_plan = normalized_request(launch_request, models)
+            try:
+                require_live_model_load_admission(
+                    launch_request, models, purpose="session-set",
+                    approval_payload=payload, hub=self.run_manager.snapshot(),
+                )
+            except BaseException:
+                dispose_plan_secrets(launch_plan)
+                raise
             self.run_manager.start(launch_plan)
             owner_run_id = launch_plan.run_id
         elif mode not in {"reuse", "already-open"}:
@@ -32729,6 +41498,25 @@ def session_dashboard_plan(
             "estimatesAreConservative": True,
         },
     }
+
+
+def require_session_launch_admission(
+    payload: dict[str, Any], admission: dict[str, Any],
+) -> dict[str, Any]:
+    """Fail closed unless the current one-launch admission may proceed."""
+    if not isinstance(admission, dict) or admission.get("launchable") is not True:
+        detail = admission.get("detail") if isinstance(admission, dict) else None
+        raise ValueError(str(detail or "Another launcher operation is active."))
+    if admission.get("requiresAcknowledgement") is True:
+        expected = str(admission.get("contractId") or "")
+        supplied = str(payload.get("memoryAcknowledgement") or "")
+        if not expected or not secrets.compare_digest(supplied, expected):
+            raise ValueError(
+                f"{admission.get('label') or 'Capacity review required'}: "
+                f"{admission.get('detail') or 'Review the current memory estimate.'} "
+                "Open Sessions, review the capacity estimate, and approve this exact launch once."
+            )
+    return admission
 
 
 def build_chat_history_resume_plan(
@@ -33354,6 +42142,26 @@ def route_check_plan(
     }
 
 
+def read_browser_artifact(run_id: str, name: str) -> bytes:
+    """Read only a bounded PNG produced in a launcher's browser artifact folder."""
+    if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", run_id):
+        raise ValueError("Invalid browser artifact run.")
+    if not re.fullmatch(r"[0-9]{13}-[0-9a-f]{8}\.png", name):
+        raise ValueError("Invalid browser artifact name.")
+    folder = RUNS_DIR / run_id / "browser"
+    if folder.resolve() != RUNS_DIR.resolve() / run_id / "browser":
+        raise ValueError("Invalid browser artifact folder.")
+    fd = os.open(folder / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 8 <= info.st_size <= 10 * 1024**2:
+            raise ValueError("Invalid browser artifact size or type.")
+        data = source.read(10 * 1024**2 + 1)
+    if len(data) > 10 * 1024**2 or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("Invalid browser PNG.")
+    return data
+
+
 class Handler(SimpleHTTPRequestHandler):
     server_version = "LLMLauncher/1"
 
@@ -33377,6 +42185,23 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self.allowed():
             self.send_error(HTTPStatus.FORBIDDEN)
+            return
+        if urllib.parse.urlsplit(self.path).path == "/api/browser-artifact":
+            if self.headers.get("Sec-Fetch-Site") == "cross-site":
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                data = read_browser_artifact(query.get("runId", [""])[0], query.get("name", [""])[0])
+            except (OSError, ValueError):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            self.end_headers()
+            self.wfile.write(data)
             return
         if self.path == "/api/bootstrap":
             self.json_response({
@@ -33474,10 +42299,7 @@ class Handler(SimpleHTTPRequestHandler):
             plan = MANAGER.plan
             text = ""
             if plan and plan.run_dir:
-                try:
-                    text = (plan.run_dir / "engine.log").read_text(encoding="utf-8", errors="replace")[-40_000:]
-                except OSError:
-                    pass
+                text = read_log_tail(plan.run_dir / "engine.log", 40_000)
             self.json_response({"log": text})
             return
         if self.path == "/":
@@ -33510,7 +42332,14 @@ class Handler(SimpleHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(payload, dict):
                 raise ValueError("Invalid request.")
-            if self.path == "/api/optimal":
+            if self.path == "/api/hub/fans":
+                from hub_fans import control_fans
+                with SESSION_OPERATION_LOCK:
+                    plan = MANAGER.plan
+                    if plan is None or payload.get("runId") != plan.run_id:
+                        raise ValueError("This session has ended. Open the active Hub to change fans.")
+                    self.json_response({"ok": True, **control_fans(plan, payload.get("mode"))})
+            elif self.path == "/api/optimal":
                 self.json_response({"ok": True, "optimization": optimal_request(payload, scan_models())})
             elif self.path == "/api/optimal-engine":
                 self.json_response({"ok": True, "optimization": best_engine_request(payload, scan_models())})
@@ -33766,17 +42595,7 @@ class Handler(SimpleHTTPRequestHandler):
             elif self.path == "/api/launch":
                 models = scan_models()
                 sessions = session_dashboard_plan(payload, models)
-                admission = sessions["admission"]
-                if not admission.get("launchable"):
-                    raise ValueError(str(admission.get("detail") or "Another launcher operation is active."))
-                if (
-                    admission.get("requiresAcknowledgement") is True
-                    and str(payload.get("memoryAcknowledgement") or "") != admission.get("contractId")
-                ):
-                    raise ValueError(
-                        f"{admission.get('label')}: {admission.get('detail')} "
-                        "Open Sessions, review the capacity estimate, and approve this exact launch once."
-                    )
+                require_session_launch_admission(payload, sessions.get("admission"))
                 verified_receipt: dict[str, Any] | None = None
                 with SESSION_OPERATION_LOCK:
                     ensure_session_set_idle("launching another session")
@@ -33794,6 +42613,10 @@ class Handler(SimpleHTTPRequestHandler):
                         raise ValueError("Runtime Update is changing an isolated runtime. Stop it before launching a session.")
                     if RUNTIME_PROMOTION.is_active():
                         raise ValueError("Runtime Promotion is measuring installed runtimes. Stop it before launching a session.")
+                    fresh_sessions = session_dashboard_plan(payload, models)
+                    require_session_launch_admission(
+                        payload, fresh_sessions.get("admission"),
+                    )
                     if payload.get("routeVerification") is not None:
                         verified_receipt = ROUTE_CHECK.validated_launch_receipt(payload, models)
                     plan = normalized_request(payload, models)
@@ -33822,7 +42645,10 @@ class Handler(SimpleHTTPRequestHandler):
                     job = BENCHMARK.start(payload, scan_models())
                 self.json_response({"ok": True, "benchmark": job}, HTTPStatus.ACCEPTED)
             elif self.path == "/api/benchmark/stop":
-                BENCHMARK.cancel()
+                expected_job_id = payload.get("jobId")
+                if expected_job_id is not None and (not isinstance(expected_job_id, str) or not expected_job_id):
+                    raise ValueError("Choose a valid capacity-test job to stop.")
+                BENCHMARK.cancel(expected_job_id=expected_job_id)
                 self.json_response({"ok": True})
             elif self.path == "/api/setup/plan":
                 _model, plan = validated_setup_request(payload, scan_models())
@@ -33943,6 +42769,10 @@ class Handler(SimpleHTTPRequestHandler):
                 self.json_response({"ok": True, **recover_chat_turn_checkpoint(payload)})
             elif self.path == "/api/chat/turn/clear":
                 self.json_response({"ok": True, **clear_chat_turn_checkpoint(payload)})
+            elif self.path == "/api/chat/stop":
+                self.json_response({
+                    "ok": True, **MANAGER.cancel_chat_generation(payload),
+                }, HTTPStatus.ACCEPTED)
             elif self.path == "/api/chat":
                 request = MANAGER.chat_request(payload)
                 self.stream_chat(request)
@@ -34106,6 +42936,27 @@ class Handler(SimpleHTTPRequestHandler):
         })
 
 
+class ControllerHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    allow_reuse_port = False
+
+
+def open_controller_server(requested_port: int) -> ControllerHTTPServer:
+    """Bind the real listener, allowing a restart over old TIME_WAIT sockets.
+
+    A temporary free-port probe has different reuse semantics and can wrongly
+    move the app to another origin after a clean shutdown. Never share an
+    active listener, and only fall back for an address that is actually busy.
+    """
+    for port in _ordered_unique([requested_port or 17344, 18080, 18081, 18082, 18083, 18100, 0]):
+        try:
+            return ControllerHTTPServer(("127.0.0.1", port), Handler)
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                raise
+    raise RuntimeError("Could not bind a local launcher port.")
+
+
 def serve(no_browser: bool, requested_port: int) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -34117,8 +42968,10 @@ def serve(no_browser: bool, requested_port: int) -> None:
             webbrowser.open(existing_url)
         return
     try:
-        port = free_port(requested_port if requested_port else 17344)
-        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        from process_identity import set_controller_display_name
+        set_controller_display_name()
+        server = open_controller_server(requested_port)
+        port = int(server.server_address[1])
         server.csrf_token = secrets.token_urlsafe(32)
         publish_controller_instance(instance_lock, port)
         url = f"http://127.0.0.1:{port}/"

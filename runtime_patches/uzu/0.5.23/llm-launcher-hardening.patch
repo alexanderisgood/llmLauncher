@@ -1,0 +1,1593 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 4a053599ab8a0b6f4ebf6bd63d4f26aa3e36be7c..093a1939ae7aec6e2c1895f78ae48e46ef292f87 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -953,12 +953,15 @@ dependencies = [
+  "indoc",
+  "iocraft",
+  "jsonschema",
++ "libc",
+  "nagare",
+  "ratatui",
+  "rocket",
+  "serde",
+  "serde_json",
++ "sha2",
+  "shoji",
++ "subtle",
+  "sysinfo",
+  "thiserror 2.0.18",
+  "tokio",
+diff --git a/Cargo.toml b/Cargo.toml
+index 1b9479ca710f3494ab8545a3e0043ad7693ba70b..abbbfbd7a9f391bec8d632008b5f777ef991399f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -155,6 +155,7 @@ chrono = { version = "0.4.42", features = ["serde"] }
+ hex = "0.4.3"
+ sha1 = "0.10.6"
+ sha2 = "0.10.9"
++subtle = "2.6.1"
+ jsonschema = "0.46.0"
+ # Please make sure to use compatible versions of the cargo-swift / uniffi pair.
+ # See: https://github.com/antoniusnaumann/cargo-swift?tab=readme-ov-file#installing-for-a-different-uniffi-version
+diff --git a/crates/legacy/cli/Cargo.toml b/crates/legacy/cli/Cargo.toml
+index cd9a8daf96e71f1681da47a38b16454046ff26f1..372df82abf61909d971ee874eb2be170f6f87757 100644
+--- a/crates/legacy/cli/Cargo.toml
++++ b/crates/legacy/cli/Cargo.toml
+@@ -35,12 +35,15 @@ indicatif.workspace = true
+ indoc.workspace = true
+ iocraft.workspace = true
+ jsonschema.workspace = true
++libc.workspace = true
+ nagare.workspace = true
+ ratatui.workspace = true
+ rocket.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
++sha2.workspace = true
+ shoji.workspace = true
++subtle.workspace = true
+ sysinfo.workspace = true
+ thiserror.workspace = true
+ tokio = { workspace = true, features = ["full"] }
+diff --git a/crates/legacy/cli/src/main.rs b/crates/legacy/cli/src/main.rs
+index ac57345c116caf3612a3d5467bd39fec864e6414..1ff4843884d63e47c294dd7b84d914ee069634ed 100644
+--- a/crates/legacy/cli/src/main.rs
++++ b/crates/legacy/cli/src/main.rs
+@@ -1,6 +1,7 @@
+ use anyhow::Result;
+ use clap::{Parser, Subcommand};
+ use shoji::types::basic::ReasoningEffort;
++use std::path::PathBuf;
+ 
+ mod bench;
+ mod common;
+@@ -42,6 +43,15 @@ enum Commands {
+         port: u16,
+         #[arg(long, default_value = "127.0.0.1")]
+         host: String,
++        /// Read the required Bearer credential from an owner-only file, then unlink it.
++        #[arg(long, value_name = "PATH")]
++        api_key_file: PathBuf,
++        /// Hard maximum token capacity for the native model session.
++        #[arg(long, value_parser = clap::value_parser!(u32).range(1_024..=262_144))]
++        context_limit: u32,
++        /// Hard maximum generated tokens per request.
++        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=262_144))]
++        max_output_tokens: u32,
+         /// Reuse the previous request's state when the new prompt extends it (enabled by default).
+         #[arg(long = "prefix-cache", action = clap::ArgAction::SetTrue, conflicts_with = "no_prefix_cache")]
+         prefix_cache: bool,
+@@ -73,9 +83,23 @@ async fn main() -> Result<()> {
+             model,
+             port,
+             host,
++            api_key_file,
++            context_limit,
++            max_output_tokens,
+             prefix_cache,
+             no_prefix_cache,
+-        }) => server::run_server(model, host, port, prefix_cache || !no_prefix_cache).await?,
++        }) => {
++            server::run_server(
++                model,
++                host,
++                port,
++                prefix_cache || !no_prefix_cache,
++                api_key_file,
++                context_limit,
++                max_output_tokens,
++            )
++            .await?
++        },
+         Some(Commands::Storage {
+             download_manager,
+         }) => storage::run(download_manager).await?,
+diff --git a/crates/legacy/cli/src/server/chat_completions.rs b/crates/legacy/cli/src/server/chat_completions.rs
+index 70de7d5780a8e00e684482440db5737b5ffb8398..11e02f47d04b66cc242dff1a0622361f18d57898 100644
+--- a/crates/legacy/cli/src/server/chat_completions.rs
++++ b/crates/legacy/cli/src/server/chat_completions.rs
+@@ -35,7 +35,7 @@ use uzu::{
+ use crate::{
+     common::thinking::ThinkingSupport,
+     server::{
+-        ServerState,
++        Authorized, ServerSecurity, ServerState,
+         chat_tool_calls::{
+             OaiTool, OaiToolCall, ToolCallStreamer, ToolParameterTypes, backfill_tool_result_names, choose_tools,
+             coerce_tool_call, insert_tools_message, oai_tool_call, parse_scalar_text, reply_tool_calls, to_tool_call,
+@@ -555,9 +555,30 @@ fn build_reply_config(request: &ChatCompletionRequest) -> Result<ChatReplyConfig
+     Ok(config)
+ }
+ 
++fn enforce_output_limit(
++    request: &mut ChatCompletionRequest,
++    hard_limit: u32,
++) -> Result<(), (&'static str, String)> {
++    let mut requested = Vec::new();
++    for (param, value) in [("max_tokens", request.max_tokens), ("max_completion_tokens", request.max_completion_tokens)]
++    {
++        if let Some(value) = value {
++            if value == 0 {
++                return Err((param, format!("{param} must be greater than zero")));
++            }
++            requested.push(value);
++        }
++    }
++    let effective = requested.into_iter().min().unwrap_or(hard_limit).min(hard_limit);
++    request.max_tokens = None;
++    request.max_completion_tokens = Some(effective);
++    Ok(())
++}
++
+ fn map_finish_reason(finish_reason: &ChatReplyFinishReason) -> String {
+     match finish_reason {
+-        ChatReplyFinishReason::Stop | ChatReplyFinishReason::Cancelled => "stop",
++        ChatReplyFinishReason::Stop => "stop",
++        ChatReplyFinishReason::Cancelled => "cancelled",
+         ChatReplyFinishReason::Length | ChatReplyFinishReason::ContextLimitReached => "length",
+         ChatReplyFinishReason::ToolCalls => "tool_calls",
+         ChatReplyFinishReason::Rejected => "content_filter",
+@@ -1151,19 +1172,21 @@ async fn run_stream(
+ #[allow(private_interfaces)]
+ #[post("/chat/completions", format = "json", data = "<body>")]
+ pub async fn handle_chat_completions(
++    _authorized: Authorized,
+     body: Data<'_>,
+     state: &State<ServerState>,
++    security: &State<ServerSecurity>,
+ ) -> ChatCompletionResult {
+-    let body = match body.open(ByteUnit::Mebibyte(64)).into_string().await {
++    let body = match body.open(ByteUnit::Mebibyte(16)).into_string().await {
+         Ok(body) if body.is_complete() => body.into_inner(),
+         Ok(_) => {
+-            return invalid_request_response("body", "request_too_large", "request body exceeds 64 MiB".to_string());
++            return invalid_request_response("body", "request_too_large", "request body exceeds 16 MiB".to_string());
+         },
+         Err(error) => {
+             return invalid_request_response("body", "invalid_body", format!("failed to read request body: {error}"));
+         },
+     };
+-    let request = match serde_json::from_str::<ChatCompletionRequest>(&body) {
++    let mut request = match serde_json::from_str::<ChatCompletionRequest>(&body) {
+         Ok(request) => request,
+         Err(error) => {
+             RequestLog::rejected(&format!("failed to parse chat completion request: {error}"));
+@@ -1186,6 +1209,11 @@ pub async fn handle_chat_completions(
+         request.reasoning_effort.as_ref().and_then(serde_json::Value::as_str).or(Some("unspecified")),
+     );
+ 
++    if let Err((param, message)) = enforce_output_limit(&mut request, security.max_output_tokens()) {
++        log.fail(&message);
++        return invalid_request_response(param, "out_of_range", message);
++    }
++
+     if let Err((param, message)) = validate_sampling(&request) {
+         log.fail(&message);
+         return invalid_request_response(param, "out_of_range", message);
+@@ -1207,6 +1235,26 @@ pub async fn handle_chat_completions(
+             return invalid_request_response(param, code, detail);
+         },
+     };
++    // This independent canonical count gives clients an early OpenAI-style
++    // rejection. The authoritative safety check lives in Nagare's token
++    // session, where cached sampled tokens and the exact suffix are known.
++    let prompt_tokens = match state.prompt_counter.lock().await.count(&messages) {
++        Ok(prompt_tokens) => prompt_tokens,
++        Err(error) => {
++            let detail = format!("failed to count the canonical prompt: {error}");
++            log.fail(&detail);
++            return invalid_request_response("messages", "prompt_encoding_failed", detail);
++        },
++    };
++    let output_tokens = request.max_completion_tokens.unwrap_or(security.max_output_tokens());
++    if !security.accepts_context(prompt_tokens, output_tokens) {
++        let detail = format!(
++            "the canonical prompt ({prompt_tokens} tokens) plus the response limit ({output_tokens} tokens) exceeds the {}-token server context",
++            security.context_limit(),
++        );
++        log.fail(&detail);
++        return invalid_request_response("messages", "context_length_exceeded", detail);
++    }
+ 
+     // The parser cannot type scalar arguments; the declared schemas restore
+     // the types when replies cross back into the OpenAI wire format.
+diff --git a/crates/legacy/cli/src/server/mod.rs b/crates/legacy/cli/src/server/mod.rs
+index 8a09adf69280cc0562246b3fa05a554dbfa130f7..be16cd1b1cb7dcc1d3432019234a1895dee31866 100644
+--- a/crates/legacy/cli/src/server/mod.rs
++++ b/crates/legacy/cli/src/server/mod.rs
+@@ -1,11 +1,15 @@
+ pub mod chat_completions;
+ pub mod chat_tool_calls;
+ pub mod models;
++pub mod prompt_counter;
+ pub mod request_log;
+ pub mod runner;
++pub mod security;
+ pub mod state;
+ 
+ pub use chat_completions::handle_chat_completions;
+ pub use models::handle_models;
++pub use prompt_counter::PromptTokenCounter;
+ pub use runner::run_server;
++pub use security::{Authorized, ServerSecurity, unauthorized};
+ pub use state::ServerState;
+diff --git a/crates/legacy/cli/src/server/models.rs b/crates/legacy/cli/src/server/models.rs
+index 1db75c6b3abd7e9f0f5823bad6cf2cf1cba8e651..2714e6824824782d797a61bc9c1bb176e7f32a82 100644
+--- a/crates/legacy/cli/src/server/models.rs
++++ b/crates/legacy/cli/src/server/models.rs
+@@ -1,7 +1,7 @@
+ use rocket::{State, get, serde::json::Json};
+ use serde::{Deserialize, Serialize};
+ 
+-use crate::server::ServerState;
++use crate::server::{Authorized, ServerState};
+ 
+ #[derive(Serialize, Deserialize)]
+ pub struct Model {
+@@ -18,7 +18,10 @@ pub struct ModelsResponse {
+ }
+ 
+ #[get("/models")]
+-pub fn handle_models(state: &State<ServerState>) -> Json<ModelsResponse> {
++pub fn handle_models(
++    _authorized: Authorized,
++    state: &State<ServerState>,
++) -> Json<ModelsResponse> {
+     Json(ModelsResponse {
+         object: "list".to_string(),
+         data: vec![Model {
+diff --git a/crates/legacy/cli/src/server/prompt_counter.rs b/crates/legacy/cli/src/server/prompt_counter.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1d231f9d31dbe858607e361bd9c45ce3fb8c7ad
+--- /dev/null
++++ b/crates/legacy/cli/src/server/prompt_counter.rs
+@@ -0,0 +1,42 @@
++use anyhow::{Context, Result, bail};
++use hanashi::{Encoding as EncodingTrait, chat::Encoding};
++use uzu::{
++    session::chat::{ChatInstance, ChatInstanceKind, token::encoding_for_instance},
++    types::session::chat::ChatMessage,
++};
++
++pub struct PromptTokenCounter {
++    encoding: Encoding,
++}
++
++impl PromptTokenCounter {
++    pub fn new(
++        instance: &ChatInstance,
++        expected_context_limit: u32,
++    ) -> Result<Self> {
++        let ChatInstanceKind::Token(token_instance) = instance.kind() else {
++            bail!("The hardened local server requires a token-backed chat model");
++        };
++        let expected_context_limit = usize::try_from(expected_context_limit)
++            .context("The configured context limit cannot be represented on this platform")?;
++        if token_instance.max_context_length() != Some(expected_context_limit) {
++            bail!(
++                "The token backend did not preserve the configured {expected_context_limit}-token native context limit"
++            );
++        }
++        let encoding = encoding_for_instance(token_instance.as_ref(), &instance.reference(), &instance.model())
++            .context("Failed to create the exact prompt counter")?;
++        Ok(Self {
++            encoding,
++        })
++    }
++
++    pub fn count(
++        &mut self,
++        messages: &[ChatMessage],
++    ) -> Result<usize> {
++        self.encoding.reset().context("Failed to reset the prompt counter")?;
++        self.encoding.encode(messages.to_vec()).context("Failed to encode the prompt")?;
++        Ok(self.encoding.state().tokens.len())
++    }
++}
+diff --git a/crates/legacy/cli/src/server/runner.rs b/crates/legacy/cli/src/server/runner.rs
+index afc0755ff1bb2237963a93376d5289943933b7e1..6a381a7e3dc23b1ba99a4f3cc3b0cfb4e8eaca10 100644
+--- a/crates/legacy/cli/src/server/runner.rs
++++ b/crates/legacy/cli/src/server/runner.rs
+@@ -1,17 +1,17 @@
+-use std::{net::IpAddr, sync::Arc, time::Duration};
++use std::{net::IpAddr, path::PathBuf, sync::Arc, time::Duration};
+ 
+ use anyhow::{Context, Result, bail};
+ use indicatif::{ProgressBar, ProgressStyle};
+-use rocket::{Config, config::LogLevel, routes};
++use rocket::{Config, catchers, config::LogLevel, routes};
+ use tokio::sync::Mutex;
+ use uzu::{
+     engine::{Engine, EngineConfig},
+-    types::session::chat::ChatConfig,
++    types::{basic::ContextLength, session::chat::ChatConfig},
+ };
+ 
+ use crate::{
+     common::thinking::ThinkingSupport,
+-    server::{ServerState, handle_chat_completions, handle_models},
++    server::{PromptTokenCounter, ServerSecurity, ServerState, handle_chat_completions, handle_models, unauthorized},
+ };
+ 
+ pub async fn run_server(
+@@ -19,7 +19,18 @@ pub async fn run_server(
+     host: String,
+     port: u16,
+     prefix_cache: bool,
++    api_key_file: PathBuf,
++    context_limit: u32,
++    max_output_tokens: u32,
+ ) -> Result<()> {
++    let address: IpAddr = host.parse().with_context(|| format!("Invalid host: {host}"))?;
++    if !address.is_loopback() {
++        bail!("The authenticated local server accepts only a loopback host");
++    }
++    // Consume and unlink the credential before model discovery, download, or
++    // allocation. A failed security setup must never start an expensive load.
++    let security = ServerSecurity::load(&api_key_file, context_limit, max_output_tokens)
++        .context("Failed to establish server security")?;
+     let engine_config = EngineConfig::default().with_application_identifier("com.trymirai.cli".to_string());
+     let engine = Engine::new(engine_config).await.context("Failed to create engine")?;
+ 
+@@ -39,17 +50,22 @@ pub async fn run_server(
+     spinner.finish_with_message(format!("Loaded: {}", resolved.identifier));
+ 
+     let thinking_support = ThinkingSupport::for_model(&resolved);
+-    let session =
+-        engine.chat(resolved.clone(), ChatConfig::default()).await.context("Failed to create chat session")?;
++    let chat_config = ChatConfig::default().with_context_length(ContextLength::Custom {
++        length: i64::from(security.context_limit()),
++    });
++    let instance =
++        engine.chat_instance(resolved.clone(), chat_config).await.context("Failed to create chat instance")?;
++    let prompt_counter = PromptTokenCounter::new(&instance, security.context_limit())?;
++    let session = engine.chat_with_instance(&instance).await.context("Failed to create chat session")?;
+     let model_name = resolved.identifier.clone();
+     let state = ServerState {
+         model_name: model_name.clone(),
+         session: Arc::new(Mutex::new(session)),
++        prompt_counter: Arc::new(Mutex::new(prompt_counter)),
+         thinking_support,
+         prefix_cache,
+     };
+ 
+-    let address: IpAddr = host.parse().with_context(|| format!("Invalid host: {host}"))?;
+     let config = Config {
+         port,
+         address,
+@@ -59,6 +75,9 @@ pub async fn run_server(
+ 
+     println!("🚀 OpenAI-compatible server for model: {model_name}");
+     println!("🌐 Available at: http://{host}:{port}");
++    println!("🔒 Bearer authentication: required");
++    println!("📏 Context limit: {} tokens", security.context_limit());
++    println!("📤 Response limit: {} tokens", security.max_output_tokens());
+     println!(
+         "🗄️  Prefix cache: {}",
+         if prefix_cache {
+@@ -73,6 +92,8 @@ pub async fn run_server(
+ 
+     let rocket = rocket::custom(config)
+         .manage(state)
++        .manage(security)
++        .register("/", catchers![unauthorized])
+         .mount("/", routes![handle_chat_completions, handle_models])
+         .mount("/v1", routes![handle_chat_completions, handle_models]);
+ 
+diff --git a/crates/legacy/cli/src/server/security.rs b/crates/legacy/cli/src/server/security.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0bd0fed1c866b825f0814d5f8ba593d997666b7e
+--- /dev/null
++++ b/crates/legacy/cli/src/server/security.rs
+@@ -0,0 +1,468 @@
++use std::{
++    fs::{File, OpenOptions},
++    io::{Cursor, Read},
++    path::Path,
++};
++
++use anyhow::{Context, Result, bail};
++use rocket::{
++    Request, catch,
++    http::{ContentType, Status},
++    request::{FromRequest, Outcome},
++    response::{Responder, Response},
++};
++use sha2::{Digest, Sha256};
++use subtle::ConstantTimeEq;
++
++const MIN_API_KEY_BYTES: usize = 32;
++const MAX_API_KEY_BYTES: usize = 512;
++const UNAUTHORIZED_BODY: &str = r#"{"error":{"message":"A valid Bearer credential is required.","type":"authentication_error","param":null,"code":"invalid_api_key"}}"#;
++
++pub struct ServerSecurity {
++    expected_key_digest: [u8; 32],
++    context_limit: u32,
++    max_output_tokens: u32,
++}
++
++impl ServerSecurity {
++    pub fn load(
++        api_key_file: &Path,
++        context_limit: u32,
++        max_output_tokens: u32,
++    ) -> Result<Self> {
++        if context_limit == 0 || max_output_tokens == 0 {
++            bail!("context-limit and max-output-tokens must both be positive");
++        }
++        if max_output_tokens > context_limit {
++            bail!("max-output-tokens cannot exceed context-limit");
++        }
++        let mut key_file = open_private_key_file(api_key_file)?;
++        let mut key = Vec::new();
++        if let Err(error) = key_file.by_ref().take((MAX_API_KEY_BYTES + 3) as u64).read_to_end(&mut key) {
++            key.fill(0);
++            return Err(error).context("Cannot read the API-key file");
++        }
++        if key.ends_with(b"\r\n") {
++            key.truncate(key.len() - 2);
++        } else if key.ends_with(b"\n") {
++            key.truncate(key.len() - 1);
++        }
++        if !(MIN_API_KEY_BYTES..=MAX_API_KEY_BYTES).contains(&key.len()) || !key.iter().all(u8::is_ascii_graphic) {
++            key.fill(0);
++            bail!("The API-key file must contain 32 to 512 visible ASCII bytes");
++        }
++        let expected_key_digest = Sha256::digest(&key).into();
++        key.fill(0);
++        unlink_opened_key_file(api_key_file, &key_file)?;
++        Ok(Self {
++            expected_key_digest,
++            context_limit,
++            max_output_tokens,
++        })
++    }
++
++    pub fn context_limit(&self) -> u32 {
++        self.context_limit
++    }
++
++    pub fn max_output_tokens(&self) -> u32 {
++        self.max_output_tokens
++    }
++
++    pub fn accepts_context(
++        &self,
++        prompt_tokens: usize,
++        output_tokens: u32,
++    ) -> bool {
++        let Ok(output_tokens) = usize::try_from(output_tokens) else {
++            return false;
++        };
++        let Ok(context_limit) = usize::try_from(self.context_limit) else {
++            return false;
++        };
++        prompt_tokens.checked_add(output_tokens).is_some_and(|total| total <= context_limit)
++    }
++
++    fn authorizes_header(
++        &self,
++        header: Option<&str>,
++    ) -> bool {
++        let Some((scheme, candidate)) = header.and_then(|header| header.split_once(' ')) else {
++            return false;
++        };
++        if !scheme.eq_ignore_ascii_case("Bearer") || candidate.is_empty() {
++            return false;
++        }
++        let candidate_digest: [u8; 32] = Sha256::digest(candidate.as_bytes()).into();
++        bool::from(candidate_digest.ct_eq(&self.expected_key_digest))
++    }
++
++    #[cfg(test)]
++    pub(crate) fn for_test(
++        key: &[u8],
++        context_limit: u32,
++        max_output_tokens: u32,
++    ) -> Self {
++        Self {
++            expected_key_digest: Sha256::digest(key).into(),
++            context_limit,
++            max_output_tokens,
++        }
++    }
++}
++
++#[cfg(unix)]
++fn open_private_key_file(path: &Path) -> Result<File> {
++    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
++
++    let parent = path.parent().context("The API-key file has no parent directory")?;
++    let parent_metadata = parent.symlink_metadata().context("Cannot inspect the API-key directory")?;
++    // SAFETY: geteuid has no preconditions and does not retain pointers.
++    let effective_uid = unsafe { libc::geteuid() };
++    if !parent_metadata.is_dir()
++        || parent_metadata.uid() != effective_uid
++        || parent_metadata.permissions().mode() & 0o777 != 0o700
++    {
++        bail!("The API-key directory must be owner-controlled with mode 0700");
++    }
++
++    let path_metadata = path.symlink_metadata().context("Cannot inspect the API-key file")?;
++    if !path_metadata.is_file() {
++        bail!("The API-key path must be a regular file, not a link");
++    }
++    let file = OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_NOFOLLOW)
++        .open(path)
++        .context("Cannot open the API-key file")?;
++    let metadata = file.metadata().context("Cannot inspect the opened API-key file")?;
++    if !metadata.is_file()
++        || metadata.uid() != effective_uid
++        || metadata.permissions().mode() & 0o777 != 0o600
++        || metadata.nlink() != 1
++        || metadata.dev() != path_metadata.dev()
++        || metadata.ino() != path_metadata.ino()
++    {
++        bail!("The API-key file must be one owner-only regular file with mode 0600");
++    }
++    Ok(file)
++}
++
++#[cfg(not(unix))]
++fn open_private_key_file(_path: &Path) -> Result<File> {
++    bail!("The hardened local server currently requires Unix file permissions")
++}
++
++#[cfg(unix)]
++fn unlink_opened_key_file(
++    path: &Path,
++    file: &File,
++) -> Result<()> {
++    use std::os::unix::fs::MetadataExt;
++
++    let opened = file.metadata().context("Cannot recheck the opened API-key file")?;
++    let current = path.symlink_metadata().context("Cannot recheck the API-key path")?;
++    if !current.is_file() || current.dev() != opened.dev() || current.ino() != opened.ino() {
++        bail!("The API-key file changed while it was being consumed");
++    }
++    std::fs::remove_file(path).context("Cannot unlink the consumed API-key file")?;
++    let unlinked = file.metadata().context("Cannot inspect the consumed API-key file")?;
++    if unlinked.nlink() != 0 {
++        bail!("The consumed API-key file gained another filesystem link");
++    }
++    Ok(())
++}
++
++#[cfg(not(unix))]
++fn unlink_opened_key_file(
++    _path: &Path,
++    _file: &File,
++) -> Result<()> {
++    bail!("The hardened local server currently requires Unix file permissions")
++}
++
++pub struct Authorized;
++
++#[rocket::async_trait]
++impl<'r> FromRequest<'r> for Authorized {
++    type Error = ();
++
++    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
++        let Some(security) = request.rocket().state::<ServerSecurity>() else {
++            return Outcome::Error((Status::InternalServerError, ()));
++        };
++        let mut authorization_headers = request.headers().get("Authorization");
++        let authorization = authorization_headers.next();
++        if authorization_headers.next().is_none() && security.authorizes_header(authorization) {
++            Outcome::Success(Self)
++        } else {
++            Outcome::Error((Status::Unauthorized, ()))
++        }
++    }
++}
++
++#[catch(401)]
++pub fn unauthorized() -> UnauthorizedResponse {
++    UnauthorizedResponse
++}
++
++pub struct UnauthorizedResponse;
++
++impl<'r> Responder<'r, 'static> for UnauthorizedResponse {
++    fn respond_to(
++        self,
++        _request: &'r Request<'_>,
++    ) -> rocket::response::Result<'static> {
++        Response::build()
++            .status(Status::Unauthorized)
++            .header(ContentType::JSON)
++            .raw_header("WWW-Authenticate", "Bearer")
++            .sized_body(UNAUTHORIZED_BODY.len(), Cursor::new(UNAUTHORIZED_BODY))
++            .ok()
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[cfg(unix)]
++    use std::{
++        fs::{self, DirBuilder, OpenOptions},
++        io::Write,
++        os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink},
++        path::{Path, PathBuf},
++    };
++
++    #[cfg(unix)]
++    struct PrivateTestDirectory(PathBuf);
++
++    #[cfg(unix)]
++    impl PrivateTestDirectory {
++        fn new() -> Self {
++            let path = std::env::temp_dir().join(format!("uzu-security-test-{}", uuid::Uuid::new_v4()));
++            DirBuilder::new().mode(0o700).create(&path).expect("create private test directory");
++            Self(path)
++        }
++
++        fn key_path(&self) -> PathBuf {
++            self.0.join("api-key")
++        }
++
++        fn write_key(
++            &self,
++            key: &[u8],
++        ) -> PathBuf {
++            let path = self.key_path();
++            let mut file = OpenOptions::new()
++                .write(true)
++                .create_new(true)
++                .mode(0o600)
++                .open(&path)
++                .expect("create private key file");
++            file.write_all(key).expect("write private key file");
++            file.sync_all().expect("sync private key file");
++            path
++        }
++    }
++
++    #[cfg(unix)]
++    impl AsRef<Path> for PrivateTestDirectory {
++        fn as_ref(&self) -> &Path {
++            &self.0
++        }
++    }
++
++    #[cfg(unix)]
++    impl Drop for PrivateTestDirectory {
++        fn drop(&mut self) {
++            let _ = fs::remove_dir_all(&self.0);
++        }
++    }
++
++    fn test_security() -> ServerSecurity {
++        ServerSecurity::for_test(b"0123456789abcdefghijklmnopqrstuvwxyzABCDEF", 16_384, 2_048)
++    }
++
++    #[rocket::get("/private")]
++    fn private_route(_authorized: Authorized) -> &'static str {
++        "ok"
++    }
++
++    #[test]
++    fn bearer_guard_rejects_missing_and_wrong_credentials() {
++        let client = rocket::local::blocking::Client::tracked(
++            rocket::build()
++                .manage(test_security())
++                .register("/", rocket::catchers![unauthorized])
++                .mount("/", rocket::routes![private_route]),
++        )
++        .expect("rocket client");
++        let missing = client.get("/private").dispatch();
++        assert_eq!(missing.status(), Status::Unauthorized);
++        assert_eq!(missing.content_type(), Some(ContentType::JSON));
++        assert_eq!(missing.headers().get_one("WWW-Authenticate"), Some("Bearer"));
++        assert_eq!(missing.into_string().as_deref(), Some(UNAUTHORIZED_BODY));
++        assert_eq!(
++            client
++                .get("/private")
++                .header(rocket::http::Header::new("Authorization", "Bearer wrong"))
++                .dispatch()
++                .status(),
++            Status::Unauthorized,
++        );
++        let mut duplicate = client.get("/private");
++        duplicate.add_header(rocket::http::Header::new(
++            "Authorization",
++            "Bearer 0123456789abcdefghijklmnopqrstuvwxyzABCDEF",
++        ));
++        duplicate.add_header(rocket::http::Header::new(
++            "Authorization",
++            "Bearer 0123456789abcdefghijklmnopqrstuvwxyzABCDEF",
++        ));
++        assert_eq!(duplicate.dispatch().status(), Status::Unauthorized);
++        assert_eq!(
++            client
++                .get("/private")
++                .header(
++                    rocket::http::Header::new("Authorization", "Bearer 0123456789abcdefghijklmnopqrstuvwxyzABCDEF",)
++                )
++                .dispatch()
++                .status(),
++            Status::Ok,
++        );
++        assert_eq!(
++            client
++                .get("/private")
++                .header(
++                    rocket::http::Header::new("Authorization", "bEaReR 0123456789abcdefghijklmnopqrstuvwxyzABCDEF",)
++                )
++                .dispatch()
++                .status(),
++            Status::Ok,
++        );
++        assert_eq!(
++            client.get("/private").header(rocket::http::Header::new("Authorization", "Bearer ")).dispatch().status(),
++            Status::Unauthorized,
++        );
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn private_key_file_is_consumed_before_use() {
++        const KEY: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEF";
++        let directory = PrivateTestDirectory::new();
++        let path = directory.write_key(KEY);
++
++        let security = ServerSecurity::load(&path, 16_384, 2_048).expect("load private API key");
++
++        assert!(!path.exists(), "the credential must be unlinked after it is read");
++        assert!(security.authorizes_header(Some("Bearer 0123456789abcdefghijklmnopqrstuvwxyzABCDEF")));
++        assert_eq!(security.context_limit(), 16_384);
++        assert_eq!(security.max_output_tokens(), 2_048);
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn private_key_file_rejects_unsafe_permissions() {
++        let directory = PrivateTestDirectory::new();
++        let path = directory.write_key(b"0123456789abcdefghijklmnopqrstuvwxyzABCDEF");
++        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("make key permissions unsafe");
++
++        let error = ServerSecurity::load(&path, 16_384, 2_048).err().expect("unsafe mode must fail");
++
++        assert!(error.to_string().contains("mode 0600"));
++        assert!(path.exists(), "a rejected credential must not be consumed");
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn private_key_file_rejects_symlinks_and_hard_links() {
++        let directory = PrivateTestDirectory::new();
++        let target = directory.write_key(b"0123456789abcdefghijklmnopqrstuvwxyzABCDEF");
++        let link = directory.as_ref().join("api-key-link");
++        symlink(&target, &link).expect("create API-key symlink");
++        assert!(ServerSecurity::load(&link, 16_384, 2_048).is_err());
++
++        fs::remove_file(&link).expect("remove symlink");
++        fs::hard_link(&target, &link).expect("create API-key hard link");
++        let error = ServerSecurity::load(&target, 16_384, 2_048).err().expect("hard link must fail");
++
++        assert!(error.to_string().contains("one owner-only regular file"));
++        assert!(target.exists());
++        assert!(link.exists());
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn private_key_file_rejects_an_unsafe_parent_directory() {
++        let directory = PrivateTestDirectory::new();
++        let path = directory.write_key(b"0123456789abcdefghijklmnopqrstuvwxyzABCDEF");
++        fs::set_permissions(directory.as_ref(), fs::Permissions::from_mode(0o750))
++            .expect("make directory permissions unsafe");
++
++        let error = ServerSecurity::load(&path, 16_384, 2_048).err().expect("unsafe parent must fail");
++
++        assert!(error.to_string().contains("mode 0700"));
++        assert!(path.exists());
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn private_key_file_accepts_one_line_ending() {
++        const KEY: &str = "0123456789abcdefghijklmnopqrstuvwxyzABCDEF";
++        for line_ending in ["\n", "\r\n"] {
++            let directory = PrivateTestDirectory::new();
++            let path = directory.write_key(format!("{KEY}{line_ending}").as_bytes());
++
++            let security = ServerSecurity::load(&path, 16_384, 2_048).expect("load newline-terminated key");
++
++            assert!(security.authorizes_header(Some(&format!("Bearer {KEY}"))));
++            assert!(!path.exists());
++        }
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn private_key_file_rejects_bad_content_without_consuming_it() {
++        for key in [
++            b"short".as_slice(),
++            b"0123456789abcdefghijklmnopqrstuv\t".as_slice(),
++            vec![b'x'; MAX_API_KEY_BYTES + 1].as_slice(),
++        ] {
++            let directory = PrivateTestDirectory::new();
++            let path = directory.write_key(key);
++
++            assert!(ServerSecurity::load(&path, 16_384, 2_048).is_err());
++            assert!(path.exists());
++        }
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn invalid_limits_do_not_consume_the_key_file() {
++        let directory = PrivateTestDirectory::new();
++        let path = directory.write_key(b"0123456789abcdefghijklmnopqrstuvwxyzABCDEF");
++
++        assert!(ServerSecurity::load(&path, 1_024, 2_048).is_err());
++        assert!(path.exists());
++        assert!(ServerSecurity::load(&path, 0, 0).is_err());
++        assert!(path.exists());
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn unlink_recheck_detects_a_hard_link_race() {
++        let directory = PrivateTestDirectory::new();
++        let path = directory.write_key(b"0123456789abcdefghijklmnopqrstuvwxyzABCDEF");
++        let file = open_private_key_file(&path).expect("open private key file");
++        let raced_link = directory.as_ref().join("raced-link");
++        fs::hard_link(&path, &raced_link).expect("race in a second filesystem link");
++
++        let error = unlink_opened_key_file(&path, &file).err().expect("link race must fail");
++
++        assert!(error.to_string().contains("gained another filesystem link"));
++        assert!(!path.exists());
++        assert!(raced_link.exists());
++    }
++}
+diff --git a/crates/legacy/cli/src/server/state.rs b/crates/legacy/cli/src/server/state.rs
+index a6fbd3d7d0d48bec5fe16ec01c2bc4b9eedc4637..9a8a61e3a825cc53630e085445c20e9e0c3a797f 100644
+--- a/crates/legacy/cli/src/server/state.rs
++++ b/crates/legacy/cli/src/server/state.rs
+@@ -3,11 +3,12 @@ use std::sync::Arc;
+ use tokio::sync::Mutex;
+ use uzu::session::chat::ChatSession;
+ 
+-use crate::common::thinking::ThinkingSupport;
++use crate::{common::thinking::ThinkingSupport, server::PromptTokenCounter};
+ 
+ pub struct ServerState {
+     pub model_name: String,
+     pub session: Arc<Mutex<ChatSession>>,
++    pub prompt_counter: Arc<Mutex<PromptTokenCounter>>,
+     pub thinking_support: ThinkingSupport,
+     pub prefix_cache: bool,
+ }
+diff --git a/crates/legacy/cli/unit/server/chat_completions_test.rs b/crates/legacy/cli/unit/server/chat_completions_test.rs
+index 3ea76baa9bae3187004ef9a0a518678d5968838f..1445fe506e806edae782a1897f42ca84b5d29ad4 100644
+--- a/crates/legacy/cli/unit/server/chat_completions_test.rs
++++ b/crates/legacy/cli/unit/server/chat_completions_test.rs
+@@ -314,6 +314,39 @@ fn error_responder_yields_http_400_with_openai_body() {
+     );
+ }
+ 
++#[test]
++fn native_output_limit_is_mandatory_and_uses_the_stricter_alias() {
++    let mut absent = request(r#"{"messages":[]}"#);
++    enforce_output_limit(&mut absent, 2048).expect("server default");
++    assert_eq!(absent.max_tokens, None);
++    assert_eq!(absent.max_completion_tokens, Some(2048));
++
++    let mut oversized = request(r#"{"messages":[],"max_tokens":9000}"#);
++    enforce_output_limit(&mut oversized, 2048).expect("clamped request");
++    assert_eq!(oversized.max_completion_tokens, Some(2048));
++
++    let mut aliases = request(r#"{"messages":[],"max_tokens":1536,"max_completion_tokens":1024}"#);
++    enforce_output_limit(&mut aliases, 2048).expect("stricter alias");
++    assert_eq!(aliases.max_tokens, None);
++    assert_eq!(aliases.max_completion_tokens, Some(1024));
++}
++
++#[test]
++fn native_output_limit_rejects_zero() {
++    for body in [r#"{"messages":[],"max_tokens":0}"#, r#"{"messages":[],"max_completion_tokens":0}"#] {
++        let mut request = request(body);
++        assert!(enforce_output_limit(&mut request, 2048).is_err());
++    }
++}
++
++#[test]
++fn native_context_limit_reserves_the_complete_response_budget() {
++    let security = ServerSecurity::for_test(b"not-used-for-this-test-1234567890", 16_384, 2_048);
++    assert!(security.accepts_context(14_336, 2_048));
++    assert!(!security.accepts_context(14_337, 2_048));
++    assert!(!security.accepts_context(usize::MAX, 2_048));
++}
++
+ #[cfg(feature = "capability-grammar")]
+ #[test]
+ fn response_format_composes_with_sampling_options() {
+@@ -512,3 +545,9 @@ fn backend_error_bodies_are_openai_errors_with_collapsed_prefixes() {
+     assert_eq!(body["error"]["type"], "server_error");
+     assert_eq!(body["error"]["message"], "No response generated");
+ }
++
++#[test]
++fn cancelled_finish_reason_is_not_reported_as_a_completed_stop() {
++    assert_eq!(map_finish_reason(&ChatReplyFinishReason::Cancelled), "cancelled");
++    assert_eq!(map_finish_reason(&ChatReplyFinishReason::Stop), "stop");
++}
+diff --git a/crates/legacy/nagare/src/chat/mod.rs b/crates/legacy/nagare/src/chat/mod.rs
+index 75f0c01682d69c835cb3e15a11f25ab33915efea..fe5f8e7dacd3119d6b127c3c3c013ffa9d1b5d5e 100644
+--- a/crates/legacy/nagare/src/chat/mod.rs
++++ b/crates/legacy/nagare/src/chat/mod.rs
+@@ -264,21 +264,20 @@ impl ChatSession {
+         cancel_token: CancellationToken,
+         completed_stats: &mut Vec<ChatReplyStats>,
+     ) -> Option<Vec<ChatReply>> {
+-        // prepare all messages
+-        let all_messages = {
+-            let mut messages_guard = self.messages.lock().await;
+-            messages_guard.extend(input);
+-
+-            // register tools if needed
+-            if let Some(ref registry) = self.tool_registry {
+-                let namespaces = registry.lock().await.get_namespaces();
+-                if !namespaces.is_empty() {
+-                    merge_registered_tools(&mut messages_guard, namespaces);
+-                }
++        // Prepare against a private prospective history while retaining the
++        // history lock. A token preflight rejection is therefore never visible
++        // to another reader and needs no compensating mutation to roll back.
++        let mut messages_guard = self.messages.lock().await;
++        let mut all_messages = messages_guard.clone();
++        all_messages.extend(input);
++
++        // register tools if needed
++        if let Some(ref registry) = self.tool_registry {
++            let namespaces = registry.lock().await.get_namespaces();
++            if !namespaces.is_empty() {
++                merge_registered_tools(&mut all_messages, namespaces);
+             }
+-
+-            messages_guard.clone()
+-        };
++        }
+ 
+         self.telemetry.report(TelemetryEvent::ModelInferenceStarted {
+             model_id: self.model_id.clone(),
+@@ -291,10 +290,26 @@ impl ChatSession {
+         let mut latest_stats: Option<ChatReplyStats> = None;
+ 
+         let mut instance = self.instance.lock().await;
+-        let mut stream = match &mut *instance {
++        let stream = match &mut *instance {
+             Instance::Token(session) => session.stream(&all_messages, config, cancel_token).await,
+-            Instance::Message(session) => session.stream(&all_messages, config, cancel_token),
++            Instance::Message(session) => Ok(session.stream(&all_messages, config, cancel_token)),
++        };
++        let mut stream = match stream {
++            Ok(stream) => stream,
++            Err(error) => {
++                // Token-backed preparation is transactional. If rendering,
++                // suffix tokenization, native-context reservation, or cache
++                // replacement fails, the prospective outer history is simply
++                // discarded before exposing the rejection to the caller.
++                self.telemetry.report(TelemetryEvent::ModelInferenceFailed {
++                    error: serde_json::json!({ "message": error.to_string() }),
++                });
++                let _ = sender.send(Err(error));
++                return None;
++            },
+         };
++        *messages_guard = all_messages.clone();
++        drop(messages_guard);
+         while let Some(partial_output) = stream.next().await {
+             match partial_output {
+                 Ok(backend_output) => {
+@@ -339,7 +354,6 @@ impl ChatSession {
+             }
+         }
+         drop(stream);
+-        drop(instance);
+ 
+         // telemetry report result
+         if let Some(error) = error_value {
+@@ -931,6 +945,45 @@ fn merge_tool_namespaces(
+ mod tests {
+     use super::*;
+ 
++    #[tokio::test]
++    async fn token_preflight_rejection_keeps_outer_history_clean_before_a_replacement_turn() {
++        let backend = Arc::new(token::test_support::FakeTokenInstance::new(1));
++        let model = token::test_support::model();
++        let token_session = token::Session::with_instance(backend.clone(), "unused".to_string(), &model)
++            .await
++            .expect("test token session");
++        let session = ChatSession {
++            instance: Arc::new(Mutex::new(Instance::Token(token_session))),
++            state: Arc::new(Mutex::new(ChatSessionState::Idle)),
++            messages: Arc::new(Mutex::new(Vec::new())),
++            model_id: model.identifier,
++            telemetry: Telemetry::disabled(),
++            tool_registry: None,
++        };
++        let config = ChatReplyConfig {
++            token_limit: Some(1),
++            ..ChatReplyConfig::default()
++        };
++
++        let rejected = ChatMessage::user().with_text("rejected overflow turn".to_string());
++        let error = session
++            .reply(vec![rejected], config.clone())
++            .await
++            .expect_err("native context overflow must reject the turn");
++        assert!(error.to_string().contains("exceeds the native 1-token context"));
++        assert!(session.messages().await.is_empty());
++        assert_eq!(backend.stream_call_count(), 0);
++
++        backend.set_max_context_length(4_096);
++        let replacement = ChatMessage::user().with_text("accepted replacement turn".to_string());
++        let replies = session.reply(vec![replacement.clone()], config).await.expect("replacement turn");
++        assert_eq!(replies.len(), 1);
++        assert_eq!(backend.stream_call_count(), 1);
++        let history = session.messages().await;
++        assert!(history.contains(&replacement));
++        assert!(history.iter().all(|message| message.text().as_deref() != Some("rejected overflow turn")));
++    }
++
+     #[test]
+     fn normalize_tool_call_arguments_canonicalizes_and_unwraps_string_encoding() {
+         let object = normalize_tool_call_arguments(Value {
+diff --git a/crates/legacy/nagare/src/chat/token.rs b/crates/legacy/nagare/src/chat/token.rs
+index 99ccc754090a310b4e403c6a5bb0976f362b9df3..f9b0ca454822ad3898d80fe743783e232d9a013b 100644
+--- a/crates/legacy/nagare/src/chat/token.rs
++++ b/crates/legacy/nagare/src/chat/token.rs
+@@ -33,20 +33,65 @@ use shoji::{
+ };
+ use tokio_util::sync::CancellationToken;
+ 
++use crate::chat::ChatSessionError;
+ #[cfg(any(target_os = "macos", target_os = "ios"))]
+ use crate::util::power::{EnergyRecorder, Error as EnergyError};
+-use crate::{chat::ChatSessionError, util::helpers::error_stream};
+ 
+ pub struct Session {
+     instance: Arc<dyn ChatTokenBackendInstance>,
+     state: Box<dyn State>,
+     encoding: Encoding,
++    reference: String,
++    model: Model,
+     input_tokens: Vec<u64>,
+     stop_token_ids: Box<[u64]>,
+     #[cfg(any(target_os = "macos", target_os = "ios"))]
+     energy_recorder: EnergyRecorder,
+ }
+ 
++/// Construct the canonical chat encoding used by a token-backed instance.
++/// Keeping this in one place lets server-side preflight count the exact prompt
++/// without mutating the live session's prefix-cache state.
++pub fn encoding_for_instance(
++    instance: &dyn ChatTokenBackendInstance,
++    reference: &str,
++    model: &Model,
++) -> Result<Encoding, ChatSessionError> {
++    let encoding_config: Option<EncodingConfig> = model
++        .encoding
++        .as_ref()
++        .map(|value| serde_json::from_str::<EncodingConfig>(value.json.as_str()))
++        .transpose()
++        .map_err(|error| ChatSessionError::Loading {
++            message: format!("Failed to parse encoding config: {error}"),
++        })?;
++
++    let tokenizer_location = TokenizerLocation::Directory {
++        path: reference.to_string(),
++        name: None,
++    };
++
++    match encoding_config {
++        Some(EncodingConfig::Hanashi {
++            config,
++        }) => HanashiEncodingImpl::new(config, instance.tokenizer()).map(Encoding::Hanashi).map_err(|err| {
++            ChatSessionError::Loading {
++                message: format!("can not create hanashi encoding: {err}"),
++            }
++        }),
++        Some(EncodingConfig::Harmony {
++            config,
++        }) => HarmonyEncodingImpl::new(config, tokenizer_location).map(Encoding::Harmony).map_err(|err| {
++            ChatSessionError::Loading {
++                message: format!("can not create harmony encoding: {err}"),
++            }
++        }),
++        None => Err(ChatSessionError::Loading {
++            message: "can not get encoding config".to_string(),
++        }),
++    }
++}
++
+ impl Session {
+     pub async fn create_instance(
+         backend: &dyn Backend,
+@@ -64,39 +109,7 @@ impl Session {
+         reference: String,
+         model: &Model,
+     ) -> Result<Self, ChatSessionError> {
+-        let encoding_config: Option<EncodingConfig> = model
+-            .encoding
+-            .as_ref()
+-            .map(|value| serde_json::from_str::<EncodingConfig>(value.json.as_str()))
+-            .transpose()
+-            .map_err(|error| ChatSessionError::Loading {
+-                message: format!("Failed to parse encoding config: {error}"),
+-            })?;
+-
+-        let tokenizer_location = TokenizerLocation::Directory {
+-            path: reference,
+-            name: None,
+-        };
+-
+-        let encoding = match encoding_config {
+-            Some(EncodingConfig::Hanashi {
+-                config,
+-            }) => HanashiEncodingImpl::new(config, instance.tokenizer()).map(Encoding::Hanashi).map_err(|err| {
+-                ChatSessionError::Loading {
+-                    message: format!("can not create harmony encoding: {err}"),
+-                }
+-            }),
+-            Some(EncodingConfig::Harmony {
+-                config,
+-            }) => HarmonyEncodingImpl::new(config, tokenizer_location).map(Encoding::Harmony).map_err(|err| {
+-                ChatSessionError::Loading {
+-                    message: format!("can not create harmony encoding: {err}"),
+-                }
+-            }),
+-            None => Err(ChatSessionError::Loading {
+-                message: "can not get encoding config".to_string(),
+-            }),
+-        }?;
++        let encoding = encoding_for_instance(instance.as_ref(), &reference, model)?;
+         let state = instance.state().await.map_err(|error| ChatSessionError::Backend {
+             message: error.to_string(),
+         })?;
+@@ -108,6 +121,8 @@ impl Session {
+             instance,
+             state,
+             encoding,
++            reference,
++            model: model.clone(),
+             input_tokens: Vec::new(),
+             stop_token_ids,
+             #[cfg(any(target_os = "macos", target_os = "ios"))]
+@@ -128,18 +143,15 @@ impl Session {
+         input: &'a [ChatMessage],
+         config: ChatReplyConfig,
+         cancel_token: CancellationToken,
+-    ) -> Pin<Box<dyn Stream<Item = Result<Output, ChatSessionError>> + Send + 'a>> {
++    ) -> Result<Pin<Box<dyn Stream<Item = Result<Output, ChatSessionError>> + Send + 'a>>, ChatSessionError> {
+         let time_start = Instant::now();
+ 
+         let curr_all_tokens = self.encoding.state().tokens.clone();
+-        let new_all_tokens = match self.build_input(input) {
+-            Ok(input) => input,
+-            Err(err) => {
+-                return error_stream(ChatSessionError::Backend {
+-                    message: err.to_string(),
+-                });
+-            },
+-        };
++        // Render into an independent encoding. The live encoding, input suffix, and
++        // backend cache remain untouched until every fallible preflight check has
++        // succeeded, so a rejected turn can be retried or replaced safely.
++        let mut candidate_encoding = encoding_for_instance(self.instance.as_ref(), &self.reference, &self.model)?;
++        let new_all_tokens = Self::build_input(&mut candidate_encoding, input)?;
+ 
+         // The engine state can only be kept whole or reset, so reuse it whenever the session's
+         // text is a prefix of the newly rendered text — even if tokenizations differ, as sampled
+@@ -148,7 +160,7 @@ impl Session {
+             text.push_str(&token.value);
+             text
+         });
+-        let new_text = self.encoding.state().tokens.iter().fold(String::new(), |mut text, token| {
++        let new_text = candidate_encoding.state().tokens.iter().fold(String::new(), |mut text, token| {
+             text.push_str(&token.value);
+             text
+         });
+@@ -158,30 +170,57 @@ impl Session {
+         } else {
+             curr_all_tokens.len()
+         };
+-        self.input_tokens = if reset {
+-            if let Err(err) = self.state_reset().await {
+-                return error_stream(err);
+-            }
++        let candidate_input_tokens = if reset {
+             new_all_tokens
+         } else {
+-            match self.encoding.tokenize(&new_text[curr_text.len()..]) {
+-                Ok(suffix_tokens) => suffix_tokens.into_iter().map(u64::from).collect(),
+-                Err(err) => {
+-                    return error_stream(ChatSessionError::Backend {
+-                        message: err.to_string(),
+-                    });
+-                },
+-            }
++            candidate_encoding
++                .tokenize(&new_text[curr_text.len()..])
++                .map(|suffix_tokens| suffix_tokens.into_iter().map(u64::from).collect())
++                .map_err(|err| ChatSessionError::Backend {
++                    message: err.to_string(),
++                })?
+         };
+ 
+-        let instance = self.instance.as_ref();
++        // Canonically re-tokenizing a complete chat is not an authoritative
++        // bound once prefix caching has retained sampled tokens. Reserve the
++        // response against the exact live KV occupancy: either a reset prompt,
++        // or the existing cached token sequence plus the exact new suffix.
++        let live_prompt_tokens =
++            cached_tokens_input.checked_add(candidate_input_tokens.len()).ok_or_else(|| ChatSessionError::Backend {
++                message: "live prompt token count overflowed".to_string(),
++            })?;
++        if let (Some(max_context_length), Some(token_limit)) = (self.instance.max_context_length(), config.token_limit)
++            && !context_reservation_fits(live_prompt_tokens, token_limit, max_context_length)
++        {
++            return Err(ChatSessionError::Backend {
++                message: format!(
++                    "live prompt ({live_prompt_tokens} tokens) plus response limit ({token_limit} tokens) exceeds the native {max_context_length}-token context"
++                ),
++            });
++        }
++
++        // Obtain a replacement backend state before committing the candidate.
++        // Energy setup below is also completed before assignment, so all three
++        // live fields can then be committed together without a fallible step.
++        let replacement_state = if reset {
++            Some(self.instance.state().await.map_err(|error| ChatSessionError::Backend {
++                message: error.to_string(),
++            })?)
++        } else {
++            None
++        };
+         let time_prefill_start = Instant::now();
+         #[cfg(any(target_os = "macos", target_os = "ios"))]
+         {
+-            if let Err(error) = self.energy_recorder.begin() {
+-                return error_stream(error.into());
+-            }
++            self.energy_recorder.begin().map_err(ChatSessionError::from)?;
++        }
++        if let Some(state) = replacement_state {
++            self.state = state;
+         }
++        self.encoding = candidate_encoding;
++        self.input_tokens = candidate_input_tokens;
++
++        let instance = self.instance.as_ref();
+         let stream = instance.stream(&self.input_tokens, self.state.as_mut(), config.clone(), cancel_token.clone());
+ 
+         let stream_state = StreamingState {
+@@ -205,7 +244,7 @@ impl Session {
+             metrics: None,
+         };
+ 
+-        stream::unfold(
++        Ok(stream::unfold(
+             (stream, stream_state, false, false),
+             move |(mut inner, mut state, terminated, tail_done)| async move {
+                 if tail_done {
+@@ -231,7 +270,7 @@ impl Session {
+                 }
+             },
+         )
+-        .boxed()
++        .boxed())
+     }
+ 
+     pub fn peak_memory_usage(&self) -> Option<usize> {
+@@ -246,16 +285,16 @@ impl Session {
+     }
+ 
+     fn build_input(
+-        &mut self,
++        encoding: &mut Encoding,
+         all_messages: &[ChatMessage],
+     ) -> Result<StreamInput, ChatSessionError> {
+-        self.encoding.reset().map_err(|err| ChatSessionError::Backend {
++        encoding.reset().map_err(|err| ChatSessionError::Backend {
+             message: err.to_string(),
+         })?;
+-        self.encoding.encode(all_messages.to_vec()).map_err(|err| ChatSessionError::Backend {
++        encoding.encode(all_messages.to_vec()).map_err(|err| ChatSessionError::Backend {
+             message: err.to_string(),
+         })?;
+-        let all_tokens = self.encoding.state().tokens.iter().map(|token| token.id as u64).collect::<Vec<u64>>();
++        let all_tokens = encoding.state().tokens.iter().map(|token| token.id as u64).collect::<Vec<u64>>();
+         Ok(all_tokens)
+     }
+ 
+@@ -479,3 +518,247 @@ fn calculate_rate(
+ 
+     Some((tokens - 1) as f64 / duration.as_secs_f64())
+ }
++
++fn context_reservation_fits(
++    live_prompt_tokens: usize,
++    output_tokens: u32,
++    max_context_length: usize,
++) -> bool {
++    usize::try_from(output_tokens)
++        .ok()
++        .and_then(|output| live_prompt_tokens.checked_add(output))
++        .is_some_and(|reserved| reserved <= max_context_length)
++}
++
++#[cfg(test)]
++pub(crate) mod test_support {
++    use std::{
++        future::Future,
++        pin::Pin,
++        sync::{
++            Arc, Mutex as StdMutex,
++            atomic::{AtomicUsize, Ordering},
++        },
++    };
++
++    use shoji::{
++        traits::backend::{Instance as BackendInstance, InstanceStream, NoMetricsStream},
++        types::{
++            basic::Value,
++            model::{ModelAccessibility, ModelSpecialization},
++        },
++    };
++    use tokenizers::{
++        AddedToken, Tokenizer,
++        models::bpe::{BPE, Vocab},
++        pre_tokenizers::byte_level::ByteLevel,
++    };
++
++    use super::*;
++
++    #[derive(Debug)]
++    struct FakeState;
++
++    impl State for FakeState {}
++
++    pub(crate) struct FakeTokenInstance {
++        tokenizer: Arc<Tokenizer>,
++        max_context_length: AtomicUsize,
++        state_creations: AtomicUsize,
++        stream_inputs: StdMutex<Vec<Vec<u64>>>,
++    }
++
++    impl FakeTokenInstance {
++        pub(crate) fn new(max_context_length: usize) -> Self {
++            let vocabulary: Vocab = ByteLevel::alphabet()
++                .into_iter()
++                .enumerate()
++                .map(|(index, value)| (value.to_string(), index as u32))
++                .collect();
++            let model =
++                BPE::builder().vocab_and_merges(vocabulary, Vec::new()).build().expect("valid test tokenizer model");
++            let mut tokenizer = Tokenizer::new(model);
++            tokenizer
++                .with_pre_tokenizer(Some(ByteLevel::default().add_prefix_space(false)))
++                .with_decoder(Some(ByteLevel::default()));
++            tokenizer.add_special_tokens(
++                &["<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>", "<|eom_id|>", "<|python_tag|>"]
++                    .into_iter()
++                    .map(|value| AddedToken::from(value, true))
++                    .collect::<Vec<_>>(),
++            );
++            Self {
++                tokenizer: Arc::new(tokenizer),
++                max_context_length: AtomicUsize::new(max_context_length),
++                state_creations: AtomicUsize::new(0),
++                stream_inputs: StdMutex::new(Vec::new()),
++            }
++        }
++
++        pub(crate) fn set_max_context_length(
++            &self,
++            max_context_length: usize,
++        ) {
++            self.max_context_length.store(max_context_length, Ordering::SeqCst);
++        }
++
++        pub(crate) fn state_creation_count(&self) -> usize {
++            self.state_creations.load(Ordering::SeqCst)
++        }
++
++        pub(crate) fn stream_call_count(&self) -> usize {
++            self.stream_inputs.lock().expect("stream input lock").len()
++        }
++    }
++
++    impl BackendInstance for FakeTokenInstance {
++        type StreamConfig = ChatReplyConfig;
++        type StreamInput = StreamInput;
++        type StreamOutput = StreamOutput;
++        type StreamMetrics = Option<TokenStreamMetrics>;
++
++        fn state(&self) -> Pin<Box<dyn Future<Output = Result<Box<dyn State>, Error>> + Send + '_>> {
++            self.state_creations.fetch_add(1, Ordering::SeqCst);
++            Box::pin(async { Ok(Box::new(FakeState) as Box<dyn State>) })
++        }
++
++        fn stream<'a>(
++            &'a self,
++            input: &'a Self::StreamInput,
++            _state: &'a mut dyn State,
++            _config: Self::StreamConfig,
++            _cancel_token: CancellationToken,
++        ) -> Pin<
++            Box<
++                dyn InstanceStream<Item = Result<Self::StreamOutput, Error>, Metrics = Self::StreamMetrics> + Send + 'a,
++            >,
++        > {
++            self.stream_inputs.lock().expect("stream input lock").push(input.clone());
++            Box::pin(NoMetricsStream::<_, TokenStreamMetrics>::new(stream::iter([Ok(StreamOutput::LimitReached)])))
++        }
++
++        fn peak_memory_usage(&self) -> Option<usize> {
++            None
++        }
++    }
++
++    impl ChatTokenBackendInstance for FakeTokenInstance {
++        fn tokenizer(&self) -> Arc<Tokenizer> {
++            self.tokenizer.clone()
++        }
++
++        fn max_context_length(&self) -> Option<usize> {
++            Some(self.max_context_length.load(Ordering::SeqCst))
++        }
++
++        fn stop_token_ids(&self) -> Option<Box<[u64]>> {
++            Some(Box::new([]))
++        }
++
++        fn sampling_defaults(&self) -> SamplingParameters {
++            SamplingParameters::default()
++        }
++    }
++
++    pub(crate) fn model() -> Model {
++        Model::external(
++            "fake:model".to_string(),
++            "fake-registry".to_string(),
++            "Fake registry".to_string(),
++            "fake-backend".to_string(),
++            "Fake backend".to_string(),
++            "1".to_string(),
++            vec![ModelSpecialization::Chat {}],
++            ModelAccessibility::Remote {
++                repository: None,
++            },
++            Some(Value::from(serde_json::json!({
++                "type": "hanashi",
++                "name": "llama-3.2"
++            }))),
++        )
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::sync::Arc;
++
++    use futures::StreamExt;
++
++    use super::{
++        test_support::{FakeTokenInstance, model as test_model},
++        *,
++    };
++
++    #[test]
++    fn live_context_reservation_accepts_the_boundary_and_rejects_one_more() {
++        assert!(context_reservation_fits(12_288, 4_096, 16_384));
++        assert!(!context_reservation_fits(12_289, 4_096, 16_384));
++        assert!(!context_reservation_fits(usize::MAX, 1, usize::MAX));
++    }
++
++    #[tokio::test]
++    async fn rejected_live_context_turn_leaves_token_and_cache_state_unchanged() {
++        let instance = Arc::new(FakeTokenInstance::new(4_096));
++        let model = test_model();
++        let mut session =
++            Session::with_instance(instance.clone(), "unused".to_string(), &model).await.expect("test session");
++        let config = ChatReplyConfig {
++            token_limit: Some(1),
++            ..ChatReplyConfig::default()
++        };
++
++        let prior_messages = vec![ChatMessage::user().with_text("accepted prior turn".to_string())];
++        let prior_outputs = session
++            .stream(&prior_messages, config.clone(), CancellationToken::new())
++            .await
++            .expect("prior turn preflight")
++            .collect::<Vec<_>>()
++            .await;
++        assert_eq!(prior_outputs.len(), 1);
++        assert!(prior_outputs[0].is_ok());
++
++        let prior_encoding_state = session.encoding.state().clone();
++        let prior_input_tokens = session.input_tokens.clone();
++        let prior_state_creations = instance.state_creation_count();
++        let prior_stream_calls = instance.stream_call_count();
++
++        let mut rejected_messages = prior_encoding_state.messages.clone();
++        rejected_messages.push(ChatMessage::user().with_text("rejected overflow turn".to_string()));
++        instance.set_max_context_length(1);
++        let error = session
++            .stream(&rejected_messages, config.clone(), CancellationToken::new())
++            .await
++            .err()
++            .expect("context overflow must be rejected before streaming");
++        assert!(error.to_string().contains("exceeds the native 1-token context"));
++        assert_eq!(session.encoding.state(), &prior_encoding_state);
++        assert_eq!(session.input_tokens, prior_input_tokens);
++        assert_eq!(instance.state_creation_count(), prior_state_creations);
++        assert_eq!(instance.stream_call_count(), prior_stream_calls);
++
++        let mut replacement_messages = prior_encoding_state.messages.clone();
++        let replacement = ChatMessage::user().with_text("accepted replacement turn".to_string());
++        replacement_messages.push(replacement.clone());
++        instance.set_max_context_length(4_096);
++        let replacement_outputs = session
++            .stream(&replacement_messages, config, CancellationToken::new())
++            .await
++            .expect("replacement turn preflight")
++            .collect::<Vec<_>>()
++            .await;
++        assert_eq!(replacement_outputs.len(), 1);
++        assert!(replacement_outputs[0].is_ok());
++        assert_eq!(instance.stream_call_count(), prior_stream_calls + 1);
++        assert!(session.encoding.state().messages.contains(&replacement));
++        assert!(
++            session
++                .encoding
++                .state()
++                .messages
++                .iter()
++                .all(|message| message.text().as_deref() != Some("rejected overflow turn"))
++        );
++    }
++}
+diff --git a/crates/legacy/nagare/src/util/helpers.rs b/crates/legacy/nagare/src/util/helpers.rs
+index 08e2598a5e6481cf627587e283345a16bdc6d9be..815d4e3ede58e33ae92f40d3fbdf2d5cc596b240 100644
+--- a/crates/legacy/nagare/src/util/helpers.rs
++++ b/crates/legacy/nagare/src/util/helpers.rs
+@@ -5,6 +5,7 @@ use shoji::traits::backend::chat_message::Output;
+ 
+ use crate::chat::ChatSessionError;
+ 
++#[allow(dead_code)]
+ pub fn error_stream<'a>(
+     err: ChatSessionError
+ ) -> Pin<Box<dyn Stream<Item = Result<Output, ChatSessionError>> + Send + 'a>> {

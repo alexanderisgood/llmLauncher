@@ -23,6 +23,13 @@ _BENIGN_RESPONSE_FIELDS = {
     "service_tier", "store", "truncation",
 }
 _LIMIT_REASONS = {"length", "max_tokens", "max_completion_tokens", "max_output_tokens"}
+LOCAL_CODEX_TOOL_GUIDANCE = (
+    "Local coding tool contract: when the user's authorized next step requires a tool, "
+    "issue a native tool call in this response. A sentence announcing that you will inspect, "
+    "edit, or test is not an executed action and is not a completed task. Use the declared "
+    "tool names and valid JSON arguments. Keep working until the requested result is verified "
+    "or report a specific blocker. Respect read-only and planning requests; do not invent work."
+)
 
 
 @dataclass(frozen=True)
@@ -302,6 +309,11 @@ def translate_responses_request(body: bytes, config: dict[str, Any]) -> BridgeRe
 
     tools, by_wire, by_target = _translate_tools(value.get("tools"))
     messages = _translate_input(value.get("input"), by_target, value.get("instructions"))
+    if tools and value.get("instructions"):
+        # A stable provider-specific instruction preserves the existing host
+        # prompt and cache prefix. No fabricated calls or automatic retries.
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] += "\n\n" + LOCAL_CODEX_TOOL_GUIDANCE
     translated: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -439,6 +451,14 @@ class ChatStreamBridge:
                 token_count = usage.get(source)
                 if isinstance(token_count, int) and not isinstance(token_count, bool) and token_count >= 0:
                     self.usage[target] = token_count
+            for source, target, field in (
+                ('prompt_tokens_details', 'cached_tokens', 'cached_tokens'),
+                ('completion_tokens_details', 'reasoning_tokens', 'reasoning_tokens'),
+            ):
+                details = usage.get(source)
+                count = details.get(field) if isinstance(details, dict) else None
+                if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                    self.usage[target] = count
         choices = value.get("choices")
         if not isinstance(choices, list):
             return bytes(output)
@@ -535,8 +555,12 @@ class ChatStreamBridge:
         output_tokens = int(self.usage.get("output_tokens", 0))
         total_tokens = int(self.usage.get("total_tokens", input_tokens + output_tokens))
         return {
-            "input_tokens": input_tokens, "input_tokens_details": None,
-            "output_tokens": output_tokens, "output_tokens_details": None,
+            "input_tokens": input_tokens,
+            "input_tokens_details": ({"cached_tokens": min(input_tokens, self.usage['cached_tokens'])}
+                                     if 'cached_tokens' in self.usage else None),
+            "output_tokens": output_tokens,
+            "output_tokens_details": ({"reasoning_tokens": min(output_tokens, self.usage['reasoning_tokens'])}
+                                      if 'reasoning_tokens' in self.usage else None),
             "total_tokens": total_tokens,
         }
 

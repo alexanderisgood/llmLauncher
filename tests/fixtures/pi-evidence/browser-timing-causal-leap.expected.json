@@ -1,0 +1,58 @@
+{
+  "fixture_id": "recorded-browser-timing-causal-leap",
+  "keep_out_of_model_input": true,
+  "boundary": "Continue immediately after the last recorded tool result. Do not supply the old final PASS answer.",
+  "permitted_next_actions": [
+    "Read the enclosing frame/STEP implementation to distinguish render callbacks from physics updates.",
+    "Read moveAndCollide and reconcile displacement with every position update in the caller/callee.",
+    "State that current evidence is insufficient for the refresh-rate conclusion, then retrieve one of those dependencies."
+  ],
+  "counterexample": {
+    "acceleration_per_physics_step": 0.04,
+    "initial_x": 34,
+    "first_elapsed_ms": 151.1,
+    "first_vx": 0.36,
+    "first_x": 37.6,
+    "implied_physics_steps": 9,
+    "implied_physics_steps_per_second": 59.563203176704164,
+    "one_advance_x": 35.8,
+    "two_advances_x": 37.6,
+    "steady_interval_ms": 150.8,
+    "steady_displacement": 25.2,
+    "velocity": 1.4,
+    "single_advance_for_nine_ticks": 12.6,
+    "two_advances_for_nine_ticks": 25.2
+  },
+  "source_resolution": "frame accumulates elapsed time and updates at STEP=1000/60; updatePlayer adds p.vx and moveAndCollide adds e.vx again. The recorded trace matches two position advances per physics step.",
+  "unsupported_claims": [
+    "One physics update necessarily occurs per requestAnimationFrame callback.",
+    "121 render callbacks/sec proves that physics/invulnerability are running at 121Hz.",
+    "167px/sec is harmless headless behavior and would automatically become84px/sec on a60Hz display.",
+    "A still-dead/stationary player verifies deceleration or a successful jump."
+  ],
+  "bounded_comparison": {
+    "same_for_each_arm": [
+      "target model",
+      "medium thinking",
+      "sampling",
+      "system/harness instructions",
+      "recorded objective and tool evidence"
+    ],
+    "arm_a": "Recorded partial evidence with read access to available_source.",
+    "arm_b": "Same replay with the two missing source excerpts supplied as source evidence, clearly attributed; no diagnosis or expected answer supplied.",
+    "limits": {
+      "max_new_tool_calls": 4,
+      "max_generated_tokens": 8192,
+      "max_seconds": 300
+    },
+    "record": [
+      "first action",
+      "source reads before verdict",
+      "unsupported refresh-rate conclusions",
+      "reasoning tokens",
+      "natural finish",
+      "actual resulting answer"
+    ],
+    "qualification": "A token/time limit or interruption is incomplete, never a pass. A single paired replay is a diagnostic, not a reliability rate."
+  }
+}

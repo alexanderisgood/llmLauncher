@@ -1,0 +1,93 @@
+diff --git a/crates/uzu-engine/src/engine/language_model/stream/stream.rs b/crates/uzu-engine/src/engine/language_model/stream/stream.rs
+index 6a99d30..6ce5f08 100644
+--- a/crates/uzu-engine/src/engine/language_model/stream/stream.rs
++++ b/crates/uzu-engine/src/engine/language_model/stream/stream.rs
+@@ -126,6 +126,13 @@ fn prefill_chunk_parts(
+     }
+ }
+ 
++fn prefill_submission_boundary(
++    encoded_tokens: usize,
++    sample_last: bool,
++) -> bool {
++    !sample_last && encoded_tokens >= 8192
++}
++
+ pub struct LanguageModelStream<'a, B: Backend> {
+     model: &'a LanguageModel<B>,
+     model_state: &'a mut LanguageModelState<B>,
+@@ -164,7 +171,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
+             None
+         };
+ 
+-        let allocation_pool = Arc::new(model.engine.context.create_allocation_pool(false));
++        let mut allocation_pool = Arc::new(model.engine.context.create_allocation_pool(false));
+ 
+         let mut context_ring =
+             if let Some(suffix_repetition_length) = options.sampling_method.suffix_repetition_length() {
+@@ -221,6 +228,9 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
+             let split_logits_row = model.decoder.prefill_cache_skips_trailing_layers();
+             let hidden_feature_layer_indices =
+                 model.speculator.as_ref().map(|speculator| speculator.hidden_feature_layer_indices());
++            // Preserve the 1024-token attention chunks. Complete bounded groups
++            // before releasing their CPU constants and command-buffer resources.
++            let mut encoded_prefill_tokens = 0;
+ 
+             for (input_chunk, sample_last) in input
+                 .chunks(max_batch_size)
+@@ -241,7 +251,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
+                 let input_flat_trie_nodes = input_flat_trie.token_subtrie_ranges().collect::<Box<[GpuTrieNode]>>();
+                 let batch_dim = BatchTopology::new(&input_flat_trie_nodes, true);
+ 
+-                let decoder_output = model.decoder.encode(
++                let mut decoder_output = model.decoder.encode(
+                     &token_ids,
+                     &batch_dim,
+                     sample_last.then(|| input_chunk.len() as u32 - 1..input_chunk.len() as u32),
+@@ -249,7 +259,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
+                     &mut model_state.transformer_state,
+                     &mut encoder,
+                 )?;
+-                let logits = decoder_output.logits;
++                let logits = decoder_output.logits.take();
+ 
+                 if sample_last {
+                     let logits = logits.unwrap();
+@@ -285,7 +295,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
+                     #[cfg(not(grammar))]
+                     let bitmask = None;
+ 
+-                    output_norm = decoder_output.final_hidden;
++                    output_norm = decoder_output.final_hidden.take();
+                     let sampled_row = batch_dim.size() - 1;
+                     output_tokens = Some(
+                         model
+@@ -333,6 +343,28 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
+                 }
+ 
+                 model_state.tokens.extend(input_chunk);
++                encoded_prefill_tokens += input_chunk.len();
++
++                if prefill_submission_boundary(encoded_prefill_tokens, sample_last) {
++                    // All persistent target/draft/repetition state was accepted
++                    // above. Release chunk-local allocations before the pool, but
++                    // wait for GPU completion before releasing its backing memory.
++                    drop(decoder_output);
++                    drop(token_ids);
++                    encoder
++                        .end_encoding()
++                        .submit()
++                        .wait_until_completed()
++                        .map_err(LanguageModelStreamError::Backend)?;
++                    allocation_pool = Arc::new(model.engine.context.create_allocation_pool(false));
++                    encoder = Encoder::<B>::new_with_pool_name(
++                        &model.engine.context,
++                        allocation_pool.clone(),
++                        Some("prefill"),
++                    )
++                    .map_err(LanguageModelStreamError::Backend)?;
++                    encoded_prefill_tokens = 0;
++                }
+             }
+ 
+             let pending = Box::new([encoder.end_encoding().submit()]);

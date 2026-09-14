@@ -63,6 +63,19 @@ def digest(path: Path) -> str | None:
         return None
 
 
+def relay_sampling_policy(client: str) -> dict[str, object]:
+    return {
+        "samplingContract": {
+            "schemaVersion": 1, "controlled": True,
+            "mode": "model", "values": {},
+        },
+        "samplingEnforcement": {
+            "protocol": "responses" if client == "codex" else "chat-completions",
+            "representableFields": [], "implicitModelDefaults": False,
+        },
+    }
+
+
 def write_sparse_safetensors(path: Path, tensors: dict[str, list[int]], dtype: str = "BF16") -> None:
     bytes_per_value = {"F16": 2, "BF16": 2, "F32": 4}[dtype]
     offset = 0
@@ -284,6 +297,7 @@ class LauncherTests(unittest.TestCase):
                     "dflashReason": "No verified draft", "kv": True,
                     "agentReasoning": ["auto", "off", "low", "medium", "xhigh"],
                     "codexReasoning": ["auto", "low", "medium", "xhigh"],
+                    "implicitSamplingDefaultsVerified": True,
                 },
                 "lmstudio": {
                     "runnable": True, "reason": "LM Studio catalog model", "mtp": True,
@@ -293,6 +307,7 @@ class LauncherTests(unittest.TestCase):
                     "codexReasoning": ["auto", "low", "medium"],
                     "preferredAcceleration": "mtp", "depth": 3, "depthMax": 3,
                     "mtpMinTokens": 0, "mtpMinContinueProbability": 0.0,
+                    "implicitSamplingDefaultsVerified": True,
                 },
                 "mtplx": {
                     "runnable": True, "reason": "Verified", "mtp": True,
@@ -300,13 +315,14 @@ class LauncherTests(unittest.TestCase):
                     "kv": True, "profile": "turbo", "depth": 3, "depthMax": 3,
                     "agentReasoning": ["auto", "off", "low", "medium", "high", "xhigh"],
                     "codexReasoning": ["auto", "low", "medium", "high", "xhigh"],
+                    "implicitSamplingDefaultsVerified": True,
                 },
             },
         }]
         self.binary_patch = mock.patch.dict(
             launcher.BINARIES,
             {
-                **{name: "/usr/bin/true" for name in ("omlx", "lms", "mtplx", "pi", "opencode", "codex", "hf")},
+                **{name: "/usr/bin/true" for name in ("omlx", "lms", "mtplx", "llamacpp", "pi", "opencode", "codex", "hf")},
                 "freetoken": None,
                 "freetoken_native": None,
                 "whallm": None,
@@ -539,18 +555,194 @@ class LauncherTests(unittest.TestCase):
 
     def test_controller_source_freshness_blocks_new_work_but_not_stop(self) -> None:
         source = Path(self.temp.name) / "launcher-copy.py"
-        source.write_text("old", encoding="utf-8")
-        startup_stamp = launcher.controller_source_stamp(source)
-        self.assertIsNotNone(startup_stamp)
-        with mock.patch.object(launcher, "CONTROLLER_SOURCE_PATH", source), mock.patch.object(
-            launcher, "CONTROLLER_SOURCE_STAMP", startup_stamp,
+        sampling_source = Path(self.temp.name) / "sampling-contract-copy.py"
+        source.write_text("launcher source", encoding="utf-8")
+        sampling_source.write_text("sampling-a", encoding="utf-8")
+        sources = (source, sampling_source)
+        startup_fingerprint = launcher.controller_source_fingerprint(sources)
+        self.assertRegex(str(startup_fingerprint), r"^[0-9a-f]{64}$")
+        original = sampling_source.stat()
+        with mock.patch.object(launcher, "CONTROLLER_SOURCE_PATHS", sources), mock.patch.object(
+            launcher, "CONTROLLER_SOURCE_FINGERPRINT", startup_fingerprint,
         ):
             self.assertTrue(launcher.controller_source_is_current())
-            source.write_text("new source", encoding="utf-8")
+            # Keep the dependency's length and mtime unchanged: freshness is a
+            # content contract, not a filesystem timestamp heuristic.
+            sampling_source.write_text("sampling-b", encoding="utf-8")
+            os.utime(
+                sampling_source,
+                ns=(original.st_atime_ns, original.st_mtime_ns),
+            )
             self.assertFalse(launcher.controller_source_is_current())
+
+            handler = launcher.Handler.__new__(launcher.Handler)
+            handler.path = "/api/launch"
+            handler.headers = {
+                "Host": "127.0.0.1",
+                "X-Launcher-Token": "test-token",
+                "Content-Length": "0",
+            }
+            handler.server = mock.Mock(csrf_token="test-token")
+            handler.rfile = io.BytesIO()
+            handler.json_response = mock.Mock()
+            handler.send_error = mock.Mock()
+            with mock.patch.object(launcher, "scan_models") as scan_models:
+                handler.do_POST()
+            handler.send_error.assert_not_called()
+            handler.json_response.assert_called_once_with({
+                "ok": False,
+                "error": launcher.CONTROLLER_RESTART_MESSAGE,
+                "restartRequired": True,
+            }, HTTPStatus.CONFLICT)
+            scan_models.assert_not_called()
         self.assertIn("/api/benchmark/start", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
         self.assertIn("/api/launch", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
         self.assertIn("/api/runtime/open", launcher.CONTROLLER_FRESHNESS_REQUIRED_PATHS)
+
+    def _post_launch_with_admissions(
+        self, admissions: list[dict], payload: dict | None = None,
+    ) -> dict:
+        request = copy.deepcopy(payload or self.payload("omlx", "chat", self.models[0]))
+        encoded = json.dumps(request).encode("utf-8")
+        handler = launcher.Handler.__new__(launcher.Handler)
+        handler.path = "/api/launch"
+        handler.headers = {
+            "Host": "127.0.0.1",
+            "X-Launcher-Token": "test-token",
+            "Content-Length": str(len(encoded)),
+        }
+        handler.server = mock.Mock(csrf_token="test-token")
+        handler.rfile = io.BytesIO(encoded)
+        handler.json_response = mock.Mock()
+        handler.send_error = mock.Mock()
+        operation_lock = threading.Lock()
+        lock_states: list[bool] = []
+        call_index = 0
+
+        def dashboard(_payload: dict, _models: list[dict]) -> dict:
+            nonlocal call_index
+            acquired = operation_lock.acquire(blocking=False)
+            lock_states.append(not acquired)
+            if acquired:
+                operation_lock.release()
+            if call_index >= len(admissions):
+                raise AssertionError("Unexpected extra launch-admission check.")
+            admission = copy.deepcopy(admissions[call_index])
+            call_index += 1
+            return {"admission": admission}
+
+        launch_plan = mock.Mock()
+        launch_plan.public.return_value = {"runId": "test-launch"}
+        with (
+            mock.patch.object(launcher, "SESSION_OPERATION_LOCK", operation_lock),
+            mock.patch.object(launcher, "controller_source_is_current", return_value=True),
+            mock.patch.object(launcher, "scan_models", return_value=self.models),
+            mock.patch.object(launcher, "session_dashboard_plan", side_effect=dashboard) as planning,
+            mock.patch.object(launcher, "ensure_session_set_idle"),
+            mock.patch.object(launcher.SETUP, "is_active", return_value=False),
+            mock.patch.object(launcher.ACQUISITION, "is_active", return_value=False),
+            mock.patch.object(launcher.BENCHMARK, "is_active", return_value=False),
+            mock.patch.object(launcher.ROUTE_CHECK, "is_active", return_value=False),
+            mock.patch.object(launcher, "ane_operation_active", return_value=False),
+            mock.patch.object(launcher.RUNTIME_UPDATE, "is_active", return_value=False),
+            mock.patch.object(launcher.RUNTIME_PROMOTION, "is_active", return_value=False),
+            mock.patch.object(launcher, "normalized_request", return_value=launch_plan) as normalize,
+            mock.patch.object(launcher.MANAGER, "start") as start,
+        ):
+            handler.do_POST()
+
+        handler.send_error.assert_not_called()
+        handler.json_response.assert_called_once()
+        response = handler.json_response.call_args
+        return {
+            "body": response.args[0],
+            "status": response.args[1] if len(response.args) > 1 else HTTPStatus.OK,
+            "planning": planning,
+            "normalize": normalize,
+            "start": start,
+            "lockStates": lock_states,
+        }
+
+    def test_launch_rechecks_admission_under_operation_lock_before_start(self) -> None:
+        outcome = self._post_launch_with_admissions([
+            {
+                "launchable": True, "requiresAcknowledgement": False,
+                "detail": "Initial capacity is ready.",
+            },
+            {
+                "launchable": False, "requiresAcknowledgement": False,
+                "detail": "Fresh capacity is no longer safe.",
+            },
+        ])
+
+        self.assertEqual(outcome["status"], HTTPStatus.BAD_REQUEST)
+        self.assertFalse(outcome["body"]["ok"])
+        self.assertIn("Fresh capacity is no longer safe", outcome["body"]["error"])
+        self.assertEqual(outcome["planning"].call_count, 2)
+        self.assertEqual(outcome["lockStates"], [False, True])
+        outcome["normalize"].assert_not_called()
+        outcome["start"].assert_not_called()
+
+    def test_launch_rejects_new_fresh_acknowledgement_requirement(self) -> None:
+        outcome = self._post_launch_with_admissions([
+            {
+                "launchable": True, "requiresAcknowledgement": False,
+                "contractId": "ready-contract",
+            },
+            {
+                "launchable": True, "requiresAcknowledgement": True,
+                "contractId": "fresh-review-contract",
+                "label": "Capacity needs review",
+                "detail": "Current headroom no longer covers the protected reserve.",
+            },
+        ])
+
+        self.assertEqual(outcome["status"], HTTPStatus.BAD_REQUEST)
+        self.assertIn("approve this exact launch once", outcome["body"]["error"])
+        self.assertEqual(outcome["lockStates"], [False, True])
+        outcome["normalize"].assert_not_called()
+        outcome["start"].assert_not_called()
+
+    def test_launch_rejects_stale_fresh_acknowledgement_contract(self) -> None:
+        payload = self.payload("omlx", "chat", self.models[0])
+        payload["memoryAcknowledgement"] = "old-contract"
+        outcome = self._post_launch_with_admissions([
+            {
+                "launchable": True, "requiresAcknowledgement": True,
+                "contractId": "old-contract", "label": "Capacity review",
+                "detail": "Initial reviewed capacity.",
+            },
+            {
+                "launchable": True, "requiresAcknowledgement": True,
+                "contractId": "fresh-contract", "label": "Capacity changed",
+                "detail": "Review the fresh capacity estimate.",
+            },
+        ], payload)
+
+        self.assertEqual(outcome["status"], HTTPStatus.BAD_REQUEST)
+        self.assertIn("Capacity changed", outcome["body"]["error"])
+        self.assertEqual(outcome["lockStates"], [False, True])
+        outcome["normalize"].assert_not_called()
+        outcome["start"].assert_not_called()
+
+    def test_launch_accepts_matching_fresh_acknowledgement_contract_once(self) -> None:
+        payload = self.payload("omlx", "chat", self.models[0])
+        payload["memoryAcknowledgement"] = "reviewed-contract"
+        admission = {
+            "launchable": True, "requiresAcknowledgement": True,
+            "contractId": "reviewed-contract", "label": "Capacity review",
+            "detail": "The exact launch was reviewed.",
+        }
+        outcome = self._post_launch_with_admissions(
+            [admission, admission], payload,
+        )
+
+        self.assertEqual(outcome["status"], HTTPStatus.ACCEPTED)
+        self.assertTrue(outcome["body"]["ok"])
+        self.assertEqual(outcome["planning"].call_count, 2)
+        self.assertEqual(outcome["lockStates"], [False, True])
+        outcome["normalize"].assert_called_once()
+        outcome["start"].assert_called_once()
 
     def test_qwen38_flash_ssd_streaming_is_detected_but_fails_closed(self) -> None:
         model_path = Path(self.temp.name) / "Qwen3.8-Flash-Next-4bit"
@@ -626,7 +818,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(support["state"], "experimental")
         self.assertEqual(support["hostMemoryBytes"], 48 * 1024**3)
         self.assertEqual(support["supportFloorBytes"], 64 * 1024**3)
-        self.assertIn("64 GB", support["detail"])
+        self.assertIn("64 GiB", support["detail"])
         self.assertEqual(whallm_evidence["tier"], "upstream-measured")
         self.assertFalse(whallm_evidence["automaticEligible"])
 
@@ -859,7 +1051,9 @@ class LauncherTests(unittest.TestCase):
             payload, model, {"totalMemoryBytes": 48 * 1024**3},
         )
         self.assertTrue(estimate["sharedEngine"])
-        self.assertEqual(estimate["observedEnginePeakBytes"], launcher.WHALLM_MEASURED_PEAK_BYTES)
+        self.assertEqual(estimate["observedMlxActiveMemoryBytes"], launcher.WHALLM_MEASURED_PEAK_BYTES)
+        self.assertNotIn("observedEnginePeakBytes", estimate)
+        self.assertIn("not process RSS", estimate["basis"])
         self.assertLess(estimate["estimatedWorkingSetBytes"], 1024**3)
 
         manager = launcher.RunManager()
@@ -1050,6 +1244,31 @@ class LauncherTests(unittest.TestCase):
                 "mtpMinContinueProbability": 0.0,
             },
         }
+
+    def dflash_calibration_model(self) -> dict:
+        model = copy.deepcopy(self.models[0])
+        for backend, capability in model["backends"].items():
+            capability.update({
+                "benchmarkModelFingerprint": "ane-dflash-calibration-model",
+                "runtimeVersion": f"{backend} ANE DFlash calibration runtime",
+            })
+        omlx = model["backends"]["omlx"]
+        omlx.update({
+            "dflash": True,
+            "dflashVersion": "2",
+            "dflashReason": "Verified DFlash pair",
+            "dflashDraftPath": "/test/Qwen3.8-27B-DFlash2",
+            "dflashPairFingerprint": "ane-dflash-calibration-pair",
+            "dflashRuntimeVersion": omlx["runtimeVersion"],
+            "dflashBlockSize": 8,
+            "dflashMaxBlockSize": 8,
+            "dflashReadiness": {"runtimeRecommended": True},
+            "depth": 3,
+            "depthMax": 3,
+            "aneTuningVerified": True,
+            "aneReason": "Matching local ANE tuning result",
+        })
+        return model
 
     def flash_next_dflash_alternative_fixture(self) -> tuple[dict, dict, dict]:
         selected = copy.deepcopy(self.models[0])
@@ -1439,6 +1658,265 @@ class LauncherTests(unittest.TestCase):
             "lms 71bd99c", "0.4.21+2", changed_packs,
         ))
 
+    def test_lmstudio_assistant_drafter_requires_app_cli_and_selected_pack(self) -> None:
+        flags = (
+            "--speculative-draft-simple",
+            "--speculative-draft-model",
+            "--speculative-draft-max-tokens",
+            "--speculative-draft-min-tokens",
+            "--speculative-draft-min-continue-probability",
+        )
+        app = {
+            "available": True,
+            "bundleId": "ai.elementlabs.lmstudio",
+            "version": "0.4.22+1",
+        }
+        engine_name = "llama.cpp-mac-arm64-apple-metal-advsimd"
+        packs = [{
+            "name": f"{engine_name}-2.29.1",
+            "engineName": engine_name,
+            "kind": "llama.cpp",
+            "version": "2.29.1",
+            "manifestContractVerified": True,
+            "contractFingerprint": "a" * 64,
+        }]
+        preference = {
+            "ready": True,
+            "name": engine_name,
+            "version": "2.29.1",
+            "sourceFingerprint": "b" * 64,
+        }
+        with mock.patch.object(
+            launcher, "command_help", return_value="\n".join(flags),
+        ):
+            ready = launcher.lmstudio_assistant_drafter_runtime_contract(
+                "/opt/lms", "lms fixture", app, packs, preference,
+            )
+            old_app = launcher.lmstudio_assistant_drafter_runtime_contract(
+                "/opt/lms", "lms fixture", {**app, "version": "0.4.21+9"},
+                packs, preference,
+            )
+            wrong_app = launcher.lmstudio_assistant_drafter_runtime_contract(
+                "/opt/lms", "lms fixture",
+                {**app, "bundleId": "example.untrusted"}, packs, preference,
+            )
+            old_pack = launcher.lmstudio_assistant_drafter_runtime_contract(
+                "/opt/lms", "lms fixture", app,
+                [{**packs[0], "version": "2.28.2"}],
+                {**preference, "version": "2.28.2"},
+            )
+            unverified_pack = launcher.lmstudio_assistant_drafter_runtime_contract(
+                "/opt/lms", "lms fixture", app,
+                [{**packs[0], "manifestContractVerified": False}],
+                preference,
+            )
+            wrong_preference = launcher.lmstudio_assistant_drafter_runtime_contract(
+                "/opt/lms", "lms fixture", app, packs,
+                {**preference, "name": "different-engine"},
+            )
+        self.assertTrue(ready["ready"])
+        self.assertRegex(str(ready["runtimeFingerprint"]), r"^[0-9a-f]{64}$")
+        self.assertFalse(old_app["ready"])
+        self.assertFalse(wrong_app["ready"])
+        self.assertFalse(old_pack["ready"])
+        self.assertFalse(unverified_pack["ready"])
+        self.assertFalse(wrong_preference["ready"])
+        for omitted in flags:
+            with self.subTest(omitted=omitted), mock.patch.object(
+                launcher, "command_help",
+                return_value="\n".join(flag for flag in flags if flag != omitted),
+            ):
+                blocked = launcher.lmstudio_assistant_drafter_runtime_contract(
+                    "/opt/lms", "lms fixture", app, packs, preference,
+                )
+            self.assertFalse(blocked["ready"])
+            self.assertFalse(blocked["cliReady"])
+
+    def test_lmstudio_llamacpp_pack_inventory_requires_declared_files(self) -> None:
+        root = Path(self.temp.name) / "lmstudio-packs"
+        engine_name = "llama.cpp-mac-arm64-apple-metal-advsimd"
+        pack = root / f"{engine_name}-2.29.1"
+        pack.mkdir(parents=True)
+        (pack / "llama-server").write_bytes(b"server fixture")
+        (pack / "llama-server").chmod(0o700)
+        (pack / "llm_engine.node").write_bytes(b"binding fixture")
+        manifest_path = pack / "backend-manifest.json"
+        manifest = {
+            "version": "2.29.1",
+            "engine": "llama.cpp",
+            "extension_type": "engine",
+            "supported_model_formats": ["gguf"],
+            "engine_protocol_server": {
+                "runtime_kind": "llama-server",
+                "executable_relative_path": "llama-server",
+            },
+            "target_libraries": [{"name": "llm_engine.node"}],
+            "name": engine_name,
+        }
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        (pack / "engine-protocol-server-artifacts.json").write_text(json.dumps({
+            "schema_version": 1,
+            "runtime_kind": "llama-server",
+            "executable_relative_path": "llama-server",
+            "files": [{"relative_path": "llama-server", "executable": True}],
+        }), encoding="utf-8")
+
+        discovered = launcher.lmstudio_runtime_packs(root)
+
+        self.assertEqual(len(discovered), 1)
+        self.assertTrue(discovered[0]["manifestContractVerified"])
+        self.assertEqual(discovered[0]["engineName"], engine_name)
+        self.assertRegex(discovered[0]["contractFingerprint"], r"^[0-9a-f]{64}$")
+
+        manifest["version"] = "2.29.0"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        changed = launcher.lmstudio_runtime_packs(root)
+        self.assertFalse(changed[0]["manifestContractVerified"])
+        self.assertIsNone(changed[0]["contractFingerprint"])
+
+    def test_lmstudio_assistant_pair_requires_exact_current_vocabulary_receipts(self) -> None:
+        root = Path(self.temp.name) / "lmstudio-models"
+        target = root / "owner" / "target"
+        draft = root / "owner" / "draft"
+        target.mkdir(parents=True)
+        draft.mkdir(parents=True)
+        target_file = target / "target-q4.gguf"
+        draft_file = draft / "draft-q8.gguf"
+        target_file.write_bytes(b"t" * 1_000_001)
+        draft_file.write_bytes(b"d" * 1_000_003)
+        shared_hash = "1" * 64
+        target_vocab = {
+            "tokenCount": 4,
+            "startTokenId": 0,
+            "maxVocabSizeDifference": 1,
+            "prefixHashes": [
+                {"endTokenIdExclusive": 3, "hash": "2" * 64},
+                {"endTokenIdExclusive": 4, "hash": shared_hash},
+            ],
+        }
+        draft_vocab = {
+            "tokenCount": 5,
+            "startTokenId": 0,
+            "maxVocabSizeDifference": 1,
+            "prefixHashes": [
+                {"endTokenIdExclusive": 4, "hash": shared_hash},
+                {"endTokenIdExclusive": 5, "hash": "3" * 64},
+            ],
+        }
+
+        def catalog_entry(
+            folder: Path, artifact: Path, indexed: str, load_key: str,
+            architecture: str, vocabulary: dict,
+        ) -> dict:
+            return {
+                "domain": "llm",
+                "format": "gguf",
+                "defaultIdentifier": load_key,
+                "indexedModelIdentifier": indexed,
+                "concreteModelDirAbsolutePath": str(folder),
+                "selfFiles": [{
+                    "filename": artifact.name,
+                    "absPath": str(artifact),
+                    "sizeBytes": artifact.stat().st_size,
+                }],
+                "sizeBytes": artifact.stat().st_size,
+                "metadata": {"gguf": {
+                    "arch": architecture,
+                    "draftSpeculationVocab": vocabulary,
+                }},
+            }
+
+        target_id = "owner/target/target-q4.gguf"
+        draft_id = "owner/draft/draft-q8.gguf"
+        index_path = Path(self.temp.name) / "model-index-cache.json"
+        index_document = {"models": [
+            catalog_entry(
+                target, target_file, target_id, "owner/target", "qwen3_5",
+                target_vocab,
+            ),
+            catalog_entry(
+                draft, draft_file, draft_id, "owner/draft", "qwen3_5_dflash",
+                draft_vocab,
+            ),
+            {
+                "domain": "llm", "format": "safetensors",
+                "defaultIdentifier": "owner/arbitrary-mlx",
+            },
+        ]}
+        index_path.write_text(json.dumps(index_document), encoding="utf-8")
+        compatibility_path = Path(self.temp.name) / "draft-compatibility.json"
+        compatibility_path.write_text(json.dumps({
+            "json": {"map": [[target_id, [{
+                "engineType": "llama.cpp",
+                "oldestEngineVersion": "2.29.1",
+                "compatibleDraftModelIdentifiers": [draft_id],
+            }]]]},
+            "meta": {"values": {"map": ["map"]}},
+        }), encoding="utf-8")
+        catalog = launcher.lmstudio_gguf_catalog(index_path, root)
+        receipts = launcher.lmstudio_draft_compatibility_receipts(
+            compatibility_path,
+        )
+        runtime = {
+            "ready": True,
+            "selectedPackVersion": "2.29.1",
+            "runtimeFingerprint": "4" * 64,
+        }
+
+        readiness = launcher.lmstudio_assistant_drafter_readiness(
+            target, catalog, receipts, runtime,
+        )
+
+        self.assertEqual(len(catalog["entries"]), 2)
+        self.assertTrue(readiness["foundationReady"])
+        self.assertTrue(readiness["pairReady"])
+        self.assertEqual(readiness["targetModelKey"], "owner/target")
+        self.assertEqual(readiness["targetIndexedIdentifier"], target_id)
+        self.assertRegex(readiness["targetArtifactFingerprint"], r"^[0-9a-f]{64}$")
+        self.assertEqual(readiness["candidates"][0]["family"], "dflash")
+        self.assertEqual(
+            readiness["candidates"][0]["draftModelKey"], "owner/draft",
+        )
+        self.assertRegex(
+            readiness["candidates"][0]["pairFingerprint"], r"^[0-9a-f]{64}$",
+        )
+        self.assertFalse(readiness["selectable"])
+        self.assertFalse(readiness["benchmarkEligible"])
+        self.assertFalse(readiness["automaticEligible"])
+        self.assertTrue(readiness["receiptRequired"])
+        self.assertTrue(all(
+            candidate[key] is False
+            for candidate in readiness["candidates"]
+            for key in ("selectable", "benchmarkEligible", "automaticEligible")
+        ))
+
+        os.utime(compatibility_path, ns=(1, 1))
+        stale_receipts = launcher.lmstudio_draft_compatibility_receipts(
+            compatibility_path,
+        )
+        stale = launcher.lmstudio_assistant_drafter_readiness(
+            target, catalog, stale_receipts, runtime,
+        )
+        self.assertFalse(stale["pairReady"])
+        self.assertFalse(stale["foundationReady"])
+
+        index_document["models"][1]["metadata"]["gguf"][
+            "draftSpeculationVocab"
+        ]["prefixHashes"][0]["hash"] = "5" * 64
+        index_path.write_text(json.dumps(index_document), encoding="utf-8")
+        mismatched_catalog = launcher.lmstudio_gguf_catalog(index_path, root)
+        mismatch = launcher.lmstudio_assistant_drafter_readiness(
+            target, mismatched_catalog, receipts, runtime,
+        )
+        self.assertFalse(mismatch["pairReady"])
+        self.assertFalse(mismatch["foundationReady"])
+
+        too_old = launcher.lmstudio_assistant_drafter_readiness(
+            target, catalog, receipts,
+            {**runtime, "selectedPackVersion": "2.28.2"},
+        )
+        self.assertFalse(too_old["pairReady"])
+
     def test_lmstudio_mtp_model_requires_audited_sidecar_and_cli_contract(self) -> None:
         fake_home = (Path(self.temp.name) / "home").resolve()
         target = fake_home / ".lmstudio" / "models" / "owner" / "Qwen-MTP"
@@ -1477,6 +1955,9 @@ class LauncherTests(unittest.TestCase):
         blocked_cap = blocked_model["backends"]["lmstudio"]
         self.assertFalse(blocked_cap["mtp"])
         self.assertFalse(blocked_cap["mtpRuntimeVerified"])
+        self.assertFalse(blocked_cap["assistantDrafter"]["selectable"])
+        self.assertFalse(blocked_cap["assistantDrafter"]["benchmarkEligible"])
+        self.assertFalse(blocked_cap["assistantDrafter"]["automaticEligible"])
         self.assertEqual(blocked_cap["depthMax"], 1)
         self.assertIn("complete load-time Draft MTP", blocked_cap["mtpReason"])
 
@@ -1877,7 +2358,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertFalse(launcher._local_benchmark_record_verified(
                     capability, malformed, job["evidence"],
                 ))
-        for unsupported_version in (0, 3, True):
+        for unsupported_version in (0, 4, True):
             with self.subTest(unsupported_tuner_version=unsupported_version):
                 unsupported = copy.deepcopy(record)
                 unsupported["tuningSweep"]["version"] = unsupported_version
@@ -2213,7 +2694,7 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(launcher._local_benchmark_record_verified(
             capability, malformed_stop, job["evidence"],
         ))
-        for unsupported_version in (0, 3, True):
+        for unsupported_version in (0, 4, True):
             with self.subTest(unsupported_tuner_version=unsupported_version):
                 unsupported = copy.deepcopy(record)
                 unsupported["tuningSweep"]["version"] = unsupported_version
@@ -3096,9 +3577,55 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(relayed["reasoning_effort"], "xhigh")
         auto_relay = json.loads(session_proxy.transform_chat_request(json.dumps({
             "model": "served-model", "reasoning_effort": "ultra", "thinking_mode": "thinking",
+            "thinking_budget": 999, "thinking_budget_tokens": 999,
+            "reasoning_budget_tokens": 999, "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "reasoning": {"effort": "off"},
         }).encode(), {**config, "reasoning": "auto"}))
-        self.assertNotIn("thinking_mode", auto_relay)
-        self.assertNotIn("reasoning_effort", auto_relay)
+        for key in session_proxy.REASONING_OVERRIDE_FIELDS:
+            self.assertNotIn(key, auto_relay)
+        omlx_relay = json.loads(session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "messages": [{"role": "user", "content": "hello"}],
+            "reasoning_effort": "off", "thinking_mode": "chat",
+            "thinking_budget": 1, "thinking_budget_tokens": 1,
+            "reasoning_budget_tokens": 1, "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "reasoning": {"effort": "off"},
+        }).encode(), {
+            **config, "backend": "omlx", "reasoning": "auto", "contextLimit": 8_192,
+        }))
+        for key in session_proxy.REASONING_OVERRIDE_FIELDS:
+            self.assertNotIn(key, omlx_relay)
+        for media_content in (
+            {"type": "image_url", "image_url": {"url": "https://example.test/image.png"}},
+            {"type": "input_image", "image_url": "data:image/png;base64,AA=="},
+            {"type": "input_file", "file_data": "UEsDBA=="},
+        ):
+            with self.subTest(media_content=media_content):
+                with self.assertRaisesRegex(ValueError, "media or file"):
+                    session_proxy.transform_chat_request(json.dumps({
+                        "model": "served-model", "messages": [{
+                            "role": "user", "content": [media_content],
+                        }],
+                    }).encode(), {
+                        **config, "backend": "omlx", "reasoning": "auto",
+                        "contextLimit": 8_192,
+                    })
+        for unbounded_chat_context in (
+            {"modalities": ["text", "audio"]},
+            {"audio": {"format": "wav", "voice": "alloy"}},
+            {"messages": [{
+                "role": "assistant", "audio": {"id": "audio-hidden"},
+            }]},
+        ):
+            with self.subTest(unbounded_chat_context=unbounded_chat_context):
+                with self.assertRaisesRegex(ValueError, "context safety"):
+                    session_proxy.transform_chat_request(json.dumps({
+                        "model": "served-model", **unbounded_chat_context,
+                    }).encode(), {
+                        **config, "backend": "omlx", "reasoning": "auto",
+                        "contextLimit": 8_192,
+                    })
         with self.assertRaisesRegex(ValueError, "invalid reasoning effort"):
             session_proxy.transform_chat_request(
                 b'{"model":"served-model"}', {**config, "reasoning": "ultra"},
@@ -3189,7 +3716,7 @@ class LauncherTests(unittest.TestCase):
             "model": "served-model", "max_completion_tokens": 4_096,
         }).encode(), config))
         self.assertEqual(non_llama_modern_limit["max_tokens"], 256)
-        self.assertEqual(non_llama_modern_limit["max_completion_tokens"], 4_096)
+        self.assertNotIn("max_completion_tokens", non_llama_modern_limit)
 
         pi_plan = make_plan("xhigh", "pi")
         launcher.build_pi_client(pi_plan, launcher.ClientRoute(
@@ -3202,6 +3729,87 @@ class LauncherTests(unittest.TestCase):
         self.assertIsNone(provider["model"]["thinkingLevelMap"]["minimal"])
         self.assertEqual(provider["model"]["thinkingLevelMap"]["xhigh"], "xhigh")
 
+    def test_session_relay_collapses_output_limit_aliases_for_every_backend(self) -> None:
+        max_tokens_backends = (
+            "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference",
+            "whallm", "llamacpp",
+        )
+        cases = (
+            ({}, 256),
+            ({"max_tokens": 192}, 192),
+            ({"max_completion_tokens": 4_096}, 256),
+            ({"max_tokens": 192, "max_completion_tokens": 128}, 128),
+            ({"max_tokens": None, "max_completion_tokens": None}, 256),
+        )
+        for backend in max_tokens_backends:
+            config = {
+                "servedModel": "served-model", "outputLimit": 256,
+                "backend": backend, "reasoning": "auto",
+            }
+            for aliases, expected in cases:
+                with self.subTest(backend=backend, aliases=aliases):
+                    transformed = json.loads(session_proxy.transform_chat_request(
+                        json.dumps({
+                            "model": "served-model", "messages": [], **aliases,
+                        }).encode(),
+                        config,
+                    ))
+                    self.assertEqual(transformed["max_tokens"], expected)
+                    self.assertNotIn("max_completion_tokens", transformed)
+
+        uzu_config = {
+            "servedModel": "served-model", "outputLimit": 256,
+            "contextLimit": 16_384, "backend": "uzu", "reasoning": "auto",
+        }
+        for aliases, expected in cases:
+            with self.subTest(backend="uzu", aliases=aliases):
+                transformed = json.loads(session_proxy.transform_chat_request(
+                    json.dumps({
+                        "model": "served-model", "messages": [], **aliases,
+                    }).encode(),
+                    uzu_config,
+                ))
+                self.assertEqual(transformed["max_completion_tokens"], expected)
+                self.assertNotIn("max_tokens", transformed)
+
+        for backend in (*max_tokens_backends, "uzu"):
+            config = uzu_config if backend == "uzu" else {
+                "servedModel": "served-model", "outputLimit": 256,
+                "backend": backend, "reasoning": "auto",
+            }
+            for alias in ("max_tokens", "max_completion_tokens"):
+                for invalid in (False, 0, -1, "128", 128.0):
+                    with self.subTest(backend=backend, alias=alias, invalid=invalid):
+                        with self.assertRaisesRegex(ValueError, f"invalid {alias}"):
+                            session_proxy.transform_chat_request(json.dumps({
+                                "model": "served-model", "messages": [], alias: invalid,
+                            }).encode(), config)
+
+        bounded_omlx = {
+            "servedModel": "served-model", "outputLimit": 4_096,
+            "contextLimit": 8_192, "backend": "omlx", "reasoning": "auto",
+        }
+        bounded_encoded = session_proxy.transform_chat_request(json.dumps({
+            "model": "served-model", "messages": [{
+                "role": "user", "content": "x" * 5_000,
+            }],
+        }).encode(), bounded_omlx)
+        bounded_value = json.loads(bounded_encoded)
+        self.assertLess(bounded_value["max_tokens"], 4_096)
+        self.assertLessEqual(
+            len(bounded_encoded)
+            + codex_proxy.OMLX_PROMPT_FIXED_RESERVE_TOKENS
+            + codex_proxy.OMLX_PROMPT_ITEM_RESERVE_TOKENS
+            + bounded_value["max_tokens"],
+            bounded_omlx["contextLimit"],
+        )
+        with self.assertRaisesRegex(ValueError, "already fills"):
+            session_proxy.transform_chat_request(json.dumps({
+                "model": "served-model", "messages": [{
+                    "role": "user", "content": "x" * 7_500,
+                }],
+            }).encode(), bounded_omlx)
+
     def test_session_relay_config_accepts_every_launcher_response_limit(self) -> None:
         home = Path(self.temp.name) / "relay-home"
         run_dir = (
@@ -3209,6 +3817,7 @@ class LauncherTests(unittest.TestCase):
             / "runs" / "relay-config-test"
         )
         run_dir.mkdir(parents=True)
+        run_dir.chmod(0o700)
         config_path = run_dir / "session-proxy.json"
         base = {
             "version": 2,
@@ -3226,6 +3835,7 @@ class LauncherTests(unittest.TestCase):
                 "id": str(uuid.uuid4()),
                 "client": "pi",
                 "key": "surface-" + "c" * 32,
+                **relay_sampling_policy("pi"),
             }],
         }
 
@@ -3246,11 +3856,22 @@ class LauncherTests(unittest.TestCase):
             })["outputLimit"],
             256,
         )
+        self.assertEqual(
+            load({
+                "backend": "omlx", "contextLimit": 16_384,
+                "reasoningBudgetMessage": None,
+            })["contextLimit"],
+            16_384,
+        )
         for invalid in (
             {"outputLimit": 255},
             {"outputLimit": "512"},
             {"listenPort": 1_023},
             {"reasoningBudgetMessage": "wrong"},
+            {
+                "backend": "omlx", "contextLimit": None,
+                "reasoningBudgetMessage": None,
+            },
         ):
             with mock.patch.object(session_proxy.sys, "stderr", io.StringIO()):
                 with self.assertRaises(SystemExit):
@@ -3904,6 +4525,21 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(transformed["thinking_budget"], 4_096)
         self.assertEqual(transformed["chat_template_kwargs"]["reasoning_effort"], "medium")
         self.assertTrue(transformed["chat_template_kwargs"]["enable_thinking"])
+        canonical = json.loads(codex_proxy.transform_response_request(json.dumps({
+            "model": "test", "reasoning_effort": "off", "enable_thinking": False,
+            "thinking_mode": "chat", "thinking_budget_tokens": 1,
+            "reasoning_budget_tokens": 1,
+            "chat_template_kwargs": {"enable_thinking": False, "custom": "override"},
+        }).encode(), base))
+        for key in (
+            "reasoning_effort", "enable_thinking", "thinking_mode",
+            "thinking_budget_tokens", "reasoning_budget_tokens",
+        ):
+            self.assertNotIn(key, canonical)
+        self.assertEqual(canonical["thinking_budget"], 4_096)
+        self.assertEqual(canonical["chat_template_kwargs"], {
+            "enable_thinking": True, "reasoning_effort": "medium",
+        })
         lmstudio = dict(base, backend="lmstudio")
         transformed = json.loads(codex_proxy.transform_response_request(b'{"model":"test","max_output_tokens":2048,"reasoning":{"summary":"auto"}}', lmstudio))
         self.assertEqual(transformed["max_output_tokens"], 2_048)
@@ -3922,6 +4558,20 @@ class LauncherTests(unittest.TestCase):
         ))
         self.assertEqual(transformed["reasoning"], {"summary": "concise"})
         self.assertNotIn("thinking_budget", transformed)
+        automatic_omlx = dict(base, reasoning="auto")
+        transformed = json.loads(codex_proxy.transform_response_request(json.dumps({
+            "model": "test", "reasoning": {"effort": "xhigh", "summary": "concise"},
+            "reasoning_effort": "off", "enable_thinking": False,
+            "thinking_mode": "chat", "thinking_budget": 9999,
+            "thinking_budget_tokens": 9999, "reasoning_budget_tokens": 9999,
+            "chat_template_kwargs": {"enable_thinking": False, "reasoning_effort": "off"},
+        }).encode(), automatic_omlx))
+        self.assertEqual(transformed["reasoning"], {"summary": "concise"})
+        for key in (
+            "reasoning_effort", "enable_thinking", "thinking_mode", "thinking_budget",
+            "thinking_budget_tokens", "reasoning_budget_tokens", "chat_template_kwargs",
+        ):
+            self.assertNotIn(key, transformed)
         for ceiling in (2, 128, 639, 640):
             bounded = json.loads(codex_proxy.transform_response_request(
                 json.dumps({"model": "test", "max_output_tokens": ceiling}).encode(), base
@@ -3930,6 +4580,100 @@ class LauncherTests(unittest.TestCase):
             self.assertLess(bounded["thinking_budget"], bounded["max_output_tokens"])
         with self.assertRaisesRegex(ValueError, "too small"):
             codex_proxy.transform_response_request(b'{"model":"test","max_output_tokens":1}', base)
+
+        bounded_config = {**base, "contextLimit": 8_192}
+        bounded_body = json.dumps({
+            "model": "test", "input": "x" * 5_000,
+            "max_output_tokens": 4_096,
+        }).encode()
+        bounded_encoded = codex_proxy.transform_response_request(
+            bounded_body, bounded_config,
+        )
+        bounded_value = json.loads(bounded_encoded)
+        self.assertLess(bounded_value["max_output_tokens"], 4_096)
+        self.assertLessEqual(
+            len(bounded_encoded)
+            + codex_proxy.OMLX_PROMPT_FIXED_RESERVE_TOKENS
+            + codex_proxy.OMLX_PROMPT_ITEM_RESERVE_TOKENS
+            + bounded_value["max_output_tokens"],
+            bounded_config["contextLimit"],
+        )
+        self.assertLessEqual(
+            bounded_value["thinking_budget"],
+            bounded_value["max_output_tokens"] // 2,
+        )
+        with self.assertRaisesRegex(ValueError, "already fills"):
+            codex_proxy.transform_response_request(json.dumps({
+                "model": "test", "input": "x" * 7_500,
+            }).encode(), bounded_config)
+        for hidden_context in (
+            {"previous_response_id": "resp-hidden"},
+            {"conversation": "conv-hidden"},
+            {"prompt": {"id": "pmpt-hidden"}},
+            {"input": [{"type": "item_reference", "id": "item-hidden"}]},
+            {"tools": [{
+                "type": "file_search", "vector_store_ids": ["vs-hidden"],
+            }]},
+            {"tools": [{
+                "type": "web_search_preview_2025_03_11",
+            }]},
+            {"tools": [{
+                "type": "mcp", "server_label": "hidden-mcp",
+                "server_url": "https://example.test/mcp",
+            }]},
+            {"input": [{"type": "message", "role": "user", "content": [{
+                "type": "input_image", "image_url": "https://example.test/large.png",
+            }]}]},
+            {"input": [{"type": "message", "role": "user", "content": [{
+                "type": "input_file", "file_id": "file-hidden",
+            }]}]},
+        ):
+            with self.subTest(hidden_context=hidden_context):
+                with self.assertRaisesRegex(ValueError, "context safety"):
+                    codex_proxy.transform_response_request(json.dumps({
+                        "model": "test", **hidden_context,
+                    }).encode(), bounded_config)
+        with self.assertRaisesRegex(ValueError, "media or file"):
+            codex_proxy.transform_response_request(json.dumps({
+                "model": "test", "input": [{
+                    "type": "message", "role": "user", "content": [{
+                        "type": "input_image", "image_url": "data:image/png;base64,AA==",
+                    }],
+                }],
+            }).encode(), bounded_config)
+
+    def test_codex_proxy_config_requires_selected_omlx_context(self) -> None:
+        home = Path(self.temp.name) / "codex-relay-home"
+        run_dir = (
+            home / "Library" / "Application Support" / "LLM Launcher"
+            / "runs" / "codex-context-test"
+        )
+        run_dir.mkdir(parents=True)
+        run_dir.chmod(0o700)
+        config_path = run_dir / "codex-proxy.json"
+        base = {
+            "listenPort": 18_181, "upstreamPort": 18_182,
+            "outputLimit": 4_096, "backend": "omlx",
+            "contextLimit": 16_384, "reasoning": "auto",
+            "clientKey": "client-" + "a" * 32,
+            "upstreamKey": "upstream-" + "b" * 32,
+            "servedModel": "served-model",
+            **relay_sampling_policy("codex"),
+        }
+
+        def load(context_limit: object) -> dict[str, object]:
+            config_path.write_text(json.dumps({
+                **base, "contextLimit": context_limit,
+            }), encoding="utf-8")
+            config_path.chmod(0o600)
+            with mock.patch.object(codex_proxy.Path, "home", return_value=home):
+                return codex_proxy.load_config(config_path)
+
+        self.assertEqual(load(16_384)["contextLimit"], 16_384)
+        for invalid in (None, True, 1_023, 2_000_001, []):
+            with mock.patch.object(codex_proxy.sys, "stderr", io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    load(invalid)
 
     def test_responses_limit_guard_corrects_streamed_and_json_completions(self) -> None:
         content = (
@@ -3999,7 +4743,9 @@ class LauncherTests(unittest.TestCase):
         body = json.loads(bridged.body)
         self.assertEqual(body["model"], "served-model")
         self.assertEqual(body["max_tokens"], 2_048)
-        self.assertEqual(body["messages"][0], {"role": "system", "content": "Follow the local contract."})
+        self.assertEqual(body["messages"][0]["role"], "system")
+        self.assertTrue(body["messages"][0]["content"].startswith("Follow the local contract.\n\n"))
+        self.assertIn("Local coding tool contract:", body["messages"][0]["content"])
         self.assertEqual(body["messages"][1]["role"], "system")
         self.assertEqual(body["messages"][2]["role"], "user")
         namespace_wire = bridged.by_target[("workspace", "inspect")]
@@ -4172,6 +4918,7 @@ class LauncherTests(unittest.TestCase):
         except PermissionError:
             self.skipTest("this sandbox does not permit loopback sockets")
         recorded: list[dict] = []
+        recorded_headers: list[dict[str, str]] = []
 
         class Upstream(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: object) -> None:
@@ -4179,6 +4926,9 @@ class LauncherTests(unittest.TestCase):
 
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
+                recorded_headers.append({
+                    key.casefold(): value for key, value in self.headers.items()
+                })
                 recorded.append(json.loads(self.rfile.read(length)))
                 frames = (
                     b'event: response.output_text.delta\n'
@@ -4190,6 +4940,11 @@ class LauncherTests(unittest.TestCase):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(frames)))
+                self.send_header("Content-MD5", "stale-md5")
+                self.send_header("Digest", "sha-256=stale")
+                self.send_header("ETag", '"stale"')
+                self.send_header("Trailer", "Digest")
+                self.send_header("X-Stable", "preserved")
                 self.end_headers()
                 self.wfile.write(frames)
 
@@ -4214,16 +4969,29 @@ class LauncherTests(unittest.TestCase):
             }).encode()
             connection.request("POST", "/v1/responses", body=payload, headers={
                 "Authorization": "Bearer client-secret", "Content-Type": "application/json",
+                "Content-MD5": "stale-request-md5",
+                "Digest": "sha-256=stale-request",
+                "Content-Digest": "sha-256=:c3RhbGU=:",
+                "Repr-Digest": "sha-256=:c3RhbGU=:",
+                "ETag": '"stale-request"',
             })
             response = connection.getresponse()
             delivered = response.read()
             self.assertEqual(response.status, 200)
-            self.assertIsNone(response.getheader("Content-Length"))
+            for stale_header in (
+                "Content-Length", "Content-MD5", "Digest", "ETag", "Trailer",
+            ):
+                self.assertIsNone(response.getheader(stale_header))
+            self.assertEqual(response.getheader("X-Stable"), "preserved")
             self.assertIn(b"response.output_text.delta", delivered)
             self.assertIn(b"response.incomplete", delivered)
             self.assertNotIn(b"response.completed", delivered)
             self.assertIn(b'"reason":"max_output_tokens"', delivered)
             self.assertEqual(recorded[0]["max_output_tokens"], 1_024)
+            for stale_request_header in (
+                "content-md5", "digest", "content-digest", "repr-digest", "etag",
+            ):
+                self.assertNotIn(stale_request_header, recorded_headers[0])
         finally:
             connection.close()
             proxy.shutdown()
@@ -4241,9 +5009,11 @@ class LauncherTests(unittest.TestCase):
     def test_session_relay_scheduler_is_fcfs_cancellable_and_content_free(self) -> None:
         chat = {
             "id": str(uuid.uuid4()), "client": "chat", "key": "chat-" + "a" * 32,
+            **relay_sampling_policy("chat"),
         }
         pi = {
             "id": str(uuid.uuid4()), "client": "pi", "key": "pi-" + "b" * 32,
+            **relay_sampling_policy("pi"),
         }
         registry = session_proxy.SurfaceRegistry([chat])
         registry.register(pi)
@@ -4284,7 +5054,7 @@ class LauncherTests(unittest.TestCase):
         connection = mock.Mock()
         scheduler.set_connection(second, connection)
         self.assertTrue(scheduler.cancel(second))
-        connection.close.assert_called_once()
+        connection.cancel.assert_called_once()
         scheduler.finish(second, "cancelled")
 
         third = scheduler.begin(chat, "chat-completions")
@@ -4298,6 +5068,20 @@ class LauncherTests(unittest.TestCase):
         ])
         self.assertFalse(final["privacy"]["storesPromptText"])
         self.assertFalse(final["privacy"]["persistent"])
+
+        surface_scheduler = session_proxy.RequestScheduler(1)
+        active_chat = surface_scheduler.begin(chat, "chat-completions")
+        self.assertTrue(surface_scheduler.await_turn(active_chat))
+        queued_chat = surface_scheduler.begin(chat, "chat-completions")
+        active_connection = mock.Mock()
+        surface_scheduler.set_connection(active_chat, active_connection)
+        self.assertEqual(surface_scheduler.cancel_surface(chat["id"]), 2)
+        active_connection.cancel.assert_called_once()
+        self.assertFalse(surface_scheduler.await_turn(queued_chat))
+        surface_scheduler.finish(active_chat, "cancelled")
+        surface_final = surface_scheduler.snapshot(registry.public())
+        self.assertEqual(surface_final["activeCount"], 0)
+        self.assertEqual(surface_final["queuedCount"], 0)
 
     def test_session_relay_reports_only_runtime_usage_tps_without_text(self) -> None:
         metrics = session_proxy.ResponseMetrics("chat-completions", "text/event-stream")
@@ -4379,6 +5163,51 @@ class LauncherTests(unittest.TestCase):
         self.assertIn(b'"finish_reason":"stop"', unchanged)
         self.assertNotIn(b'"finish_reason":"length"', unchanged)
 
+        non_stream_payload = json.dumps({
+            "choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 64, "completion_tokens": 16_384},
+        }).encode()
+        non_stream = session_proxy.ChatCompletionLimitGuard(16_384, streaming=False)
+        self.assertEqual(non_stream.feed(non_stream_payload[:19]), b"")
+        self.assertEqual(non_stream.feed(non_stream_payload[19:]), b"")
+        corrected_json = json.loads(non_stream.finish())
+        self.assertEqual(corrected_json["choices"][0]["finish_reason"], "length")
+
+        large_non_stream_payload = json.dumps({
+            "choices": [{
+                "message": {"content": "x" * (300 * 1024)},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 64, "completion_tokens": 16_384},
+        }).encode()
+        self.assertGreater(
+            len(large_non_stream_payload), session_proxy.MAX_LIMIT_GUARD_BUFFER,
+        )
+        large_non_stream = session_proxy.ChatCompletionLimitGuard(
+            16_384, streaming=False,
+        )
+        self.assertEqual(large_non_stream.feed(large_non_stream_payload), b"")
+        large_corrected_json = json.loads(large_non_stream.finish())
+        self.assertEqual(
+            large_corrected_json["choices"][0]["finish_reason"], "length",
+        )
+
+        non_stream_below = session_proxy.ChatCompletionLimitGuard(16_384, streaming=False)
+        below_payload = non_stream_payload.replace(b"16384", b"12000")
+        self.assertEqual(non_stream_below.feed(below_payload), b"")
+        self.assertEqual(non_stream_below.finish(), below_payload)
+
+        multi_choice_payload = json.dumps({
+            "choices": [
+                {"message": {"content": "one"}, "finish_reason": "stop"},
+                {"message": {"content": "two"}, "finish_reason": "stop"},
+            ],
+            "usage": {"prompt_tokens": 64, "completion_tokens": 16_384},
+        }).encode()
+        multi_choice = session_proxy.ChatCompletionLimitGuard(16_384, streaming=False)
+        self.assertEqual(multi_choice.feed(multi_choice_payload), b"")
+        self.assertEqual(multi_choice.finish(), multi_choice_payload)
+
     def test_session_relay_delivers_corrected_output_limit_to_pi(self) -> None:
         self.port_patch.stop()
         self.port_patch_active = False
@@ -4392,6 +5221,10 @@ class LauncherTests(unittest.TestCase):
             self.skipTest("this sandbox does not permit loopback sockets")
 
         recorded: list[dict[str, object]] = []
+        recorded_headers: list[dict[str, str]] = []
+        large_frame = b"data: " + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"function": {"arguments": "x" * (session_proxy.MAX_LIMIT_GUARD_BUFFER + 32768)}},
+        ]}}]}).encode() + b"\n\n"
 
         class Upstream(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: object) -> None:
@@ -4399,20 +5232,48 @@ class LauncherTests(unittest.TestCase):
 
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
+                recorded_headers.append({
+                    key.casefold(): value for key, value in self.headers.items()
+                })
                 recorded.append(json.loads(self.rfile.read(length)))
+                if "mode=json" in self.path:
+                    payload = json.dumps({
+                        "choices": [{
+                            "index": 0, "message": {"content": "bounded"},
+                            "finish_reason": "stop",
+                        }],
+                        "usage": {"prompt_tokens": 20, "completion_tokens":
+                                  4 if "mode=json-unchanged" in self.path else 8},
+                    }).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.send_header("Content-MD5", "stale-md5")
+                    self.send_header("Digest", "sha-256=stale")
+                    self.send_header("ETag", '"stale"')
+                    self.send_header("Trailer", "Digest")
+                    self.send_header("X-Stable", "preserved")
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
                 frames = (
                     b'data: {"choices":[{"index":0,"delta":{"reasoning_content":"bounded"}}]}\n\n'
                     b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
                     b'data: {"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":8}}\n\n'
                     b'data: [DONE]\n\n'
                 )
+                if "mode=large-event" in self.path:
+                    frames = large_frame + frames
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(frames)))
                 self.end_headers()
                 self.wfile.write(frames)
 
-        pi = {"id": str(uuid.uuid4()), "client": "pi", "key": "pi-" + "g" * 32}
+        pi = {
+            "id": str(uuid.uuid4()), "client": "pi", "key": "pi-" + "g" * 32,
+            **relay_sampling_policy("pi"),
+        }
         upstream = ThreadingHTTPServer(("127.0.0.1", upstream_port), Upstream)
         relay = ThreadingHTTPServer(("127.0.0.1", relay_port), session_proxy.ProxyHandler)
         relay.config = {
@@ -4429,6 +5290,7 @@ class LauncherTests(unittest.TestCase):
         upstream_thread.start()
         relay_thread.start()
         connection = http.client.HTTPConnection("127.0.0.1", relay_port, timeout=3)
+        json_connection: http.client.HTTPConnection | None = None
         try:
             payload = json.dumps({
                 "model": "served-model", "stream": True, "max_tokens": 99,
@@ -4437,6 +5299,11 @@ class LauncherTests(unittest.TestCase):
             connection.request("POST", "/v1/chat/completions", body=payload, headers={
                 "Authorization": f"Bearer {pi['key']}",
                 "Content-Type": "application/json",
+                "Content-MD5": "stale-request-md5",
+                "Digest": "sha-256=stale-request",
+                "Content-Digest": "sha-256=:c3RhbGU=:",
+                "Repr-Digest": "sha-256=:c3RhbGU=:",
+                "ETag": '"stale-request"',
             })
             response = connection.getresponse()
             delivered = response.read()
@@ -4446,8 +5313,65 @@ class LauncherTests(unittest.TestCase):
             self.assertNotIn(b'"finish_reason":"stop"', delivered)
             self.assertEqual(recorded[0]["max_tokens"], 8)
             self.assertEqual(recorded[0]["stream_options"], {"include_usage": True})
+            for stale_request_header in (
+                "content-md5", "digest", "content-digest", "repr-digest", "etag",
+            ):
+                self.assertNotIn(stale_request_header, recorded_headers[0])
+
+            json_connection = http.client.HTTPConnection("127.0.0.1", relay_port, timeout=3)
+            json_payload = json.dumps({
+                "model": "served-model", "stream": False, "max_tokens": 99,
+                "messages": [{"role": "user", "content": "hard task"}],
+            }).encode()
+            json_connection.request(
+                "POST", "/v1/chat/completions?mode=json", body=json_payload,
+                headers={
+                    "Authorization": f"Bearer {pi['key']}",
+                    "Content-Type": "application/json",
+                },
+            )
+            json_response = json_connection.getresponse()
+            json_wire = json_response.read()
+            self.assertTrue(
+                json_wire,
+                f"empty non-stream relay response: {json_response.status} {json_response.getheaders()}",
+            )
+            try:
+                json_delivered = json.loads(json_wire)
+            except json.JSONDecodeError as error:
+                self.fail(f"invalid non-stream relay body: {json_wire[:500]!r} ({error})")
+            self.assertEqual(json_response.status, 200)
+            for stale_header in (
+                "Content-Length", "Content-MD5", "Digest", "ETag", "Trailer",
+            ):
+                self.assertIsNone(json_response.getheader(stale_header))
+            self.assertEqual(json_response.getheader("X-Stable"), "preserved")
+            self.assertEqual(json_delivered["choices"][0]["finish_reason"], "length")
+            self.assertEqual(recorded[1]["max_tokens"], 8)
+            json_connection.request(
+                "POST", "/v1/chat/completions?mode=json-unchanged", body=json_payload,
+                headers={"Authorization": f"Bearer {pi['key']}", "Content-Type": "application/json"},
+            )
+            unchanged_response = json_connection.getresponse()
+            unchanged = json.loads(unchanged_response.read())
+            self.assertEqual(unchanged_response.status, 200)
+            self.assertEqual(unchanged["choices"][0]["finish_reason"], "stop")
+            self.assertEqual(unchanged["choices"][0]["message"]["content"], "bounded")
+            self.assertEqual(unchanged["usage"]["completion_tokens"], 4)
+            json_connection.request(
+                "POST", "/v1/chat/completions?mode=large-event", body=payload,
+                headers={"Authorization": f"Bearer {pi['key']}", "Content-Type": "application/json"},
+            )
+            large_response = json_connection.getresponse()
+            large_wire = large_response.read()
+            self.assertEqual(large_response.status, 200)
+            self.assertTrue(large_wire.startswith(large_frame), "Large tool data must be relayed byte-for-byte")
+            self.assertIn(b'"finish_reason":"length"', large_wire[len(large_frame):])
+            self.assertTrue(large_wire.endswith(b"data: [DONE]\n\n"))
         finally:
             connection.close()
+            if json_connection is not None:
+                json_connection.close()
             relay.shutdown()
             upstream.shutdown()
             relay.server_close()
@@ -4488,7 +5412,10 @@ class LauncherTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(frames)
 
-        codex = {"id": str(uuid.uuid4()), "client": "codex", "key": "codex-" + "g" * 32}
+        codex = {
+            "id": str(uuid.uuid4()), "client": "codex", "key": "codex-" + "g" * 32,
+            **relay_sampling_policy("codex"),
+        }
         upstream = ThreadingHTTPServer(("127.0.0.1", upstream_port), Upstream)
         relay = ThreadingHTTPServer(("127.0.0.1", relay_port), session_proxy.ProxyHandler)
         relay.config = {
@@ -4683,8 +5610,10 @@ prompt_count = 0
 for line in sys.stdin:
     command = json.loads(line.rstrip("\\r\\n"))
     kind = command.get("type")
-    if kind == "get_messages":
-        print(json.dumps({"type":"response","command":"get_messages","success":True,"data":{"messages":[{"role":"user","content":"Earlier question"},{"role":"assistant","content":[{"type":"thinking","thinking":"Earlier thought"},{"type":"text","text":"Earlier answer"}]}]}}), flush=True)
+    if kind == "get_entries":
+        messages=[{"role":"user","content":"Earlier question"},{"role":"assistant","content":[{"type":"thinking","thinking":"Earlier thought"},{"type":"text","text":"Earlier answer"}]}]
+        entries=[{"id":str(i),"parentId":str(i-1) if i else None,"type":"message","message":m} for i,m in enumerate(messages)]
+        print(json.dumps({"type":"response","command":"get_entries","success":True,"data":{"entries":entries,"leafId":"1"}}), flush=True)
     elif kind == "get_state":
         print(json.dumps({"type":"response","command":"get_state","success":True,"data":{"isStreaming":False,"pendingMessageCount":0}}), flush=True)
     elif kind == "prompt":
@@ -4869,6 +5798,83 @@ for line in sys.stdin:
         self.assertIn(b"RECOVERED RESPONSE", string_final)
         self.assertIn(b"string-form final answer", string_final)
 
+    def test_pi_rpc_message_end_preserves_complete_streamed_blocks(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+
+        launcher.pi_rpc_event_output(console, {"type": "agent_start"})
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start", "message": {"role": "assistant", "content": []},
+        })
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_update", "assistantMessageEvent": {
+                "type": "thinking_delta", "contentIndex": 0,
+                "delta": "complete streamed thought",
+            },
+        })
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_update", "assistantMessageEvent": {
+                "type": "text_delta", "contentIndex": 1,
+                "delta": "complete streamed answer",
+            },
+        })
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop", "content": [
+                    {"type": "thinking", "thinking": ""},
+                    {"type": "text", "text": "complete streamed"},
+                ],
+            },
+        })
+
+        latest = {
+            event["itemId"]: event["text"] for event in console.rpc_timeline_events
+        }
+        self.assertEqual(
+            latest["live:1:assistant:1:thinking:0"], "complete streamed thought",
+        )
+        self.assertEqual(
+            latest["live:1:assistant:1:answer:1"], "complete streamed answer",
+        )
+        self.assertEqual(console.rpc_last_assistant["thinkingCharacters"], 25)
+        self.assertEqual(console.rpc_last_assistant["textCharacters"], 24)
+        self.assertTrue(console.rpc_queue_advance_allowed)
+        self.assertNotIn(b"NO FINAL ANSWER", launcher.pi_rpc_event_output(
+            console, {"type": "agent_settled"},
+        ))
+
+        launcher.pi_rpc_event_output(console, {"type": "agent_start"})
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start", "message": {"role": "assistant", "content": []},
+        })
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_update", "assistantMessageEvent": {
+                "type": "text_delta", "contentIndex": 0,
+                "delta": "answer omitted from closing snapshot",
+            },
+        })
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop", "content": [],
+            },
+        })
+        latest = {
+            event["itemId"]: event["text"] for event in console.rpc_timeline_events
+        }
+        self.assertEqual(
+            latest["live:2:assistant:1:answer:0"],
+            "answer omitted from closing snapshot",
+        )
+        self.assertGreater(console.rpc_last_assistant["textCharacters"], 0)
+        self.assertTrue(console.rpc_queue_advance_allowed)
+
     def test_pi_rpc_transcript_never_executes_model_supplied_terminal_controls(self) -> None:
         process = mock.Mock()
         process.poll.return_value = None
@@ -4890,6 +5896,778 @@ for line in sys.stdin:
         self.assertIn("and this", rendered.decode("utf-8"))
         self.assertNotIn(b"\x1b[2J", rendered)
         self.assertIn("␛[2J", rendered.decode("utf-8"))
+
+    def test_pi_rpc_timeline_is_bounded_by_whole_events(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+
+        with (
+            mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENTS", 10),
+            mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_TEXT_BYTES", 12),
+        ):
+            console.append_timeline("answer", "first!")
+            console.append_timeline("thinking", "second")
+            console.append_timeline("answer", "third!")
+
+        self.assertEqual(
+            [(event["revision"], event["text"]) for event in console.rpc_timeline_events],
+            [(2, "second"), (3, "third!")],
+        )
+        self.assertEqual(console.rpc_timeline_text_bytes, 12)
+        replay = console.timeline_slice(0)
+        self.assertTrue(replay["timelineReset"])
+        self.assertEqual(replay["timelineBaseRevision"], 2)
+        self.assertEqual(
+            [event["revision"] for event in replay["timelineEvents"]], [2, 3],
+        )
+        self.assertTrue(all(isinstance(event["text"], str) for event in replay["timelineEvents"]))
+
+    def test_pi_rpc_semantic_reads_omit_raw_only_for_matching_clients(self) -> None:
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(owner_run_id=plan.run_id, plan=plan,
+            process=mock.Mock(), master_fd=1, cols=100, rows=30, protocol="pi-rpc")
+        console.append(b"raw terminal redraw\r\n" * 10000)
+        console.append_timeline("answer", "Readable answer")
+        with mock.patch.object(launcher.base64, "b64encode", side_effect=AssertionError("Unneeded raw encoding")):
+            semantic = console.output_slice(0, 0, timeline_version=launcher.PI_RPC_TIMELINE_VERSION)
+        self.assertTrue(semantic["terminalOmitted"])
+        self.assertEqual(semantic["data"], "")
+        self.assertEqual(semantic["nextOffset"], len(console.output))
+        self.assertEqual(semantic["timelineEvents"][0]["text"], "Readable answer")
+        for version in (None, True, "1", launcher.PI_RPC_TIMELINE_VERSION + 1):
+            raw = console.output_slice(0, 0, timeline_version=version)
+            self.assertFalse(raw["terminalOmitted"])
+            self.assertEqual(base64.b64decode(raw["data"]), bytes(console.output[:launcher.AGENT_CONSOLE_MAX_READ]))
+        # An old client can still replay the same retained bytes after any number
+        # of semantic reads; negotiation does not modify the server's history.
+        self.assertGreater(len(console.output), 0)
+        console.protocol = "pty"
+        raw = console.output_slice(0, 0, timeline_version=launcher.PI_RPC_TIMELINE_VERSION)
+        self.assertFalse(raw["terminalOmitted"])
+        self.assertTrue(raw["data"])
+
+    def test_pi_rpc_timeline_read_revision_reset_and_replay_contract(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENTS", 2):
+            console.append_timeline("user", "one")
+            console.append_timeline("answer", "two")
+            console.append_timeline("notice", "three")
+
+        manager = launcher.RunManager()
+        manager.plan = plan
+        manager.state = {
+            "phase": "running", "message": "Running", "run": plan.public(), "events": [],
+        }
+        manager.agent_consoles[plan.run_id] = console
+        console.rpc_last_state_probe_at = time.monotonic()
+        payload = {
+            "ownerRunId": plan.run_id, "surfaceId": plan.run_id, "offset": 0,
+        }
+
+        reset = manager.read_agent_console({**payload, "timelineRevision": 0})
+        self.assertEqual(reset["timelineVersion"], 1)
+        self.assertEqual(reset["timelineBaseRevision"], 1)
+        self.assertEqual(reset["timelineRevision"], 3)
+        self.assertEqual(reset["nextTimelineRevision"], 3)
+        self.assertTrue(reset["timelineReset"])
+        self.assertEqual(
+            [event["revision"] for event in reset["timelineEvents"]], [1, 2, 3],
+        )
+
+        incremental = manager.read_agent_console({**payload, "timelineRevision": 2})
+        self.assertFalse(incremental["timelineReset"])
+        self.assertEqual(
+            [event["revision"] for event in incremental["timelineEvents"]], [3],
+        )
+        incremental["timelineEvents"][0]["text"] = "mutated caller copy"
+        reread = manager.read_agent_console({**payload, "timelineRevision": 2,
+            "timelineVersion": launcher.PI_RPC_TIMELINE_VERSION})
+        self.assertEqual(reread["timelineEvents"][0]["text"], "three")
+        self.assertTrue(reread["terminalOmitted"])
+        caught_up = manager.read_agent_console({**payload, "timelineRevision": 3})
+        self.assertFalse(caught_up["timelineReset"])
+        self.assertEqual(caught_up["timelineEvents"], [])
+        future = manager.read_agent_console({**payload, "timelineRevision": 99})
+        self.assertTrue(future["timelineReset"])
+        self.assertEqual(
+            [event["revision"] for event in future["timelineEvents"]], [1, 2, 3],
+        )
+        public = console.public()
+        self.assertEqual(public["timelineVersion"], 1)
+        self.assertEqual(public["timelineBaseRevision"], 2)
+        self.assertEqual(public["timelineRevision"], 3)
+        self.assertNotIn("timelineEvents", public)
+
+    def test_pi_rpc_replay_retains_completed_items_when_token_journal_rolls_over(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc")
+        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENTS", 8):
+            console.append_timeline("user", "Fix the cache", item_id="user:1", operation="replace")
+            console.append_timeline("toolResult", "8 tests passed", item_id="test:1", operation="replace")
+            console.append_timeline("thinking", "", item_id="thinking:1", operation="replace")
+            # Many token events for one short message must not evict unrelated
+            # completed items from a fresh-tab or missed-poll replay.
+            for _ in range(80):
+                console.append_timeline("thinking", "🙂", item_id="thinking:1", operation="append")
+            console.append_timeline("answer", "Fixed the cache", item_id="answer:1", operation="replace")
+            console.append_timeline("user", "Explain expiry", item_id="user:2", operation="replace")
+            console.append_timeline("answer", "Expiry is inclusive", item_id="answer:2", operation="replace")
+        replay = console.timeline_slice(0)
+        self.assertTrue(replay["timelineReset"])
+        self.assertTrue(any(event["kind"] == "toolResult" for event in replay["timelineEvents"]))
+        self.assertEqual([event["revision"] for event in replay["timelineEvents"]],
+            sorted(event["revision"] for event in replay["timelineEvents"]))
+        # An update to an older item must keep chronological placement in a
+        # reset while its synthetic snapshot revisions stay monotonic.
+        console.append_timeline("toolResult", "8 tests passed (complete)", item_id="test:1", operation="replace")
+        replay = console.timeline_slice(0)
+        cursor = replay["nextTimelineRevision"]
+        console.append_timeline("answer", ".", item_id="answer:2", operation="append")
+        incremental = console.timeline_slice(cursor)
+        self.assertFalse(incremental["timelineReset"])
+        check = subprocess.run([shutil.which("node"), "-e",
+            "const a=require('node:assert/strict'),t=require('./pi_timeline.js');"
+            "const [reset,delta]=JSON.parse(require('node:fs').readFileSync(0,'utf8'));"
+            "let s=t.applyTimelineEnvelope(t.emptyTimeline(),reset).state;"
+            "a.deepEqual(s.items.map(x=>x.kind),['user','toolResult','thinking','answer','user','answer']);"
+            "a.equal(s.items[1].text,'8 tests passed (complete)');a.equal(s.items[2].text,'🙂'.repeat(80));"
+            "s=t.applyTimelineEnvelope(s,delta).state;a.equal(s.items.at(-1).text,'Expiry is inclusive.');"
+            "a.equal(t.applyTimelineEnvelope(s,delta).state.items.at(-1).text,'Expiry is inclusive.');"],
+            input=json.dumps([replay, incremental]),text=True,capture_output=True,cwd=ROOT,timeout=10)
+        self.assertEqual(check.returncode,0,check.stderr)
+
+    def test_pi_rpc_materialized_replay_stays_bounded_and_private(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc")
+        with mock.patch.multiple(launcher, PI_RPC_TIMELINE_MAX_EVENTS=2,
+            PI_RPC_TIMELINE_MAX_REPLAY_ITEMS=3, PI_RPC_TIMELINE_MAX_TEXT_BYTES=120,
+            PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES=12):
+            for index in range(8):
+                console.append_timeline("answer", "🙂" * 3, item_id=f"a:{index}", operation="replace")
+            for _ in range(50):
+                console.append_timeline("answer", "🙂", item_id="a:7", operation="append")
+            self.assertLessEqual(len(console.rpc_timeline_items),3)
+            self.assertLessEqual(console.rpc_timeline_item_text_bytes,120)
+            self.assertEqual(console.rpc_timeline_item_text_bytes,
+                sum(launcher.timeline_event_text_bytes(item) for item in console.rpc_timeline_items.values()))
+            journal = copy.deepcopy(console.rpc_timeline_events)
+            replay = console.timeline_slice(0)
+            self.assertTrue(replay["timelineReset"])
+            self.assertEqual(console.rpc_timeline_events,journal)
+            for item in replay["timelineEvents"]:
+                self.assertLessEqual(len(item["text"].encode()),12)
+                self.assertNotIn("�",item["text"])
+                self.assertLessEqual(item.get("title", "").count("Earlier text omitted"),1)
+            replay["timelineEvents"][0]["text"] = "tampered caller copy"
+            self.assertNotIn("tampered",json.dumps(console.timeline_slice(0)))
+            self.assertNotIn("rpc_timeline_items",console.public())
+            self.assertNotIn("timelineEvents",console.public())
+
+    def test_pi_rpc_timeline_sanitizes_unsafe_model_text(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+
+        console.append_timeline(
+            "answer", "keep\x1b[2J\x00\x7fend\rnext",
+            title="bad\x1b[31m\x01title", item_id="unsafe\nitem", operation="replace",
+        )
+        event = console.rpc_timeline_events[0]
+        self.assertEqual(event["kind"], "answer")
+        self.assertIn("keep␛[2J", event["text"])
+        self.assertIn("�", event["text"])
+        self.assertIn("\nnext", event["text"])
+        self.assertNotIn("\x1b", event["text"] + event["title"])
+        self.assertNotIn("\x00", event["text"] + event["title"])
+        self.assertNotIn("\x7f", event["text"] + event["title"])
+        self.assertLessEqual(
+            len(event["text"].encode("utf-8")),
+            launcher.PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES,
+        )
+        self.assertEqual(event["operation"], "replace")
+
+    def test_pi_rpc_timeline_deduplicates_late_history_and_recovers_final_suffix(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+
+        launcher.pi_rpc_event_output(console, {"type": "agent_start"})
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start",
+            "message": {"role": "user", "content": "Race question"},
+        })
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start",
+            "message": {"role": "assistant", "content": []},
+        })
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "text_delta", "contentIndex": 0, "delta": "Race ",
+            },
+        })
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_end",
+            "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": "Race answer"}],
+            },
+        })
+        before_history = len(console.rpc_timeline_events)
+        launcher.pi_rpc_event_output(console, {
+            "type": "response", "command": "get_messages", "success": True,
+            "data": {"messages": [
+                {"role": "user", "content": "Race question"},
+                {"role": "assistant", "content": [{"type": "text", "text": "Race answer"}]},
+            ]},
+        })
+        self.assertEqual(len(console.rpc_timeline_events), before_history)
+
+        answer_events = [
+            event for event in console.rpc_timeline_events if event["kind"] == "answer"
+        ]
+        self.assertEqual(
+            [(event["operation"], event["text"]) for event in answer_events],
+            [("replace", "Race "), ("replace", "Race answer")],
+        )
+        self.assertEqual(answer_events[-1]["text"], "Race answer")
+        self.assertEqual(
+            [event["text"] for event in console.rpc_timeline_events if event["kind"] == "user"],
+            ["Race question"],
+        )
+
+        launcher.pi_rpc_event_output(console, {"type": "agent_start"})
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start",
+            "message": {"role": "assistant", "content": []},
+        })
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "text_delta", "contentIndex": 0, "delta": "Wrong draft",
+            },
+        })
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_end",
+            "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": "Correct recovered answer"}],
+            },
+        })
+        recovered = [
+            event for event in console.rpc_timeline_events
+            if event.get("itemId") == "live:2:assistant:1:answer:0"
+        ]
+        self.assertEqual(
+            [(event["operation"], event["text"]) for event in recovered],
+            [("replace", "Wrong draft"), ("replace", "Correct recovered answer")],
+        )
+
+    def test_pi_rpc_live_timeline_reset_reconstructs_after_delta_eviction(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        launcher.pi_rpc_event_output(console, {"type": "agent_start"})
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start",
+            "message": {"role": "assistant", "content": []},
+        })
+        fragments = [f"{index:02d}," for index in range(25)]
+        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENTS", 8):
+            for fragment in fragments:
+                launcher.pi_rpc_event_output(console, {
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "text_delta", "contentIndex": 0, "delta": fragment,
+                    },
+                })
+
+        replay = console.timeline_slice(0)
+        self.assertTrue(replay["timelineReset"])
+        self.assertLessEqual(len(replay["timelineEvents"]), 8)
+        item_id = "live:1:assistant:1:answer:0"
+        reconstructed = ""
+        for event in replay["timelineEvents"]:
+            if event.get("itemId") != item_id:
+                continue
+            reconstructed = (
+                event["text"] if event.get("operation") == "replace"
+                else reconstructed + event["text"]
+            )
+        self.assertEqual(reconstructed, "".join(fragments))
+        self.assertEqual(
+            replay["timelineEvents"][0]["operation"], "replace",
+            "the retained suffix must begin with a reconstructable item snapshot",
+        )
+
+    def test_pi_rpc_completed_final_snapshot_reconstructs_after_stream_eviction(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        launcher.pi_rpc_event_output(console, {"type": "agent_start"})
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start",
+            "message": {"role": "assistant", "content": []},
+        })
+        final_text = "".join(f"{index:02d}," for index in range(25))
+        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENTS", 8):
+            for fragment in (final_text[index:index + 3] for index in range(0, len(final_text), 3)):
+                launcher.pi_rpc_event_output(console, {
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "text_delta", "contentIndex": 0, "delta": fragment,
+                    },
+                })
+            revision_before_final = console.rpc_timeline_revision
+            launcher.pi_rpc_event_output(console, {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant", "stopReason": "stop",
+                    "content": [{"type": "text", "text": final_text}],
+                },
+            })
+
+        self.assertEqual(console.rpc_timeline_revision, revision_before_final + 1)
+        final_event = console.rpc_timeline_events[-1]
+        self.assertEqual(final_event["operation"], "replace")
+        self.assertEqual(final_event["text"], final_text)
+        replay = console.timeline_slice(0)
+        self.assertTrue(replay["timelineReset"])
+        reconstructed = ""
+        for event in replay["timelineEvents"]:
+            if event.get("itemId") != "live:1:assistant:1:answer:0":
+                continue
+            reconstructed = (
+                event["text"] if event.get("operation") == "replace"
+                else reconstructed + event["text"]
+            )
+        self.assertEqual(reconstructed, final_text)
+
+    def test_pi_rpc_live_timeline_keeps_latest_text_within_utf8_budget(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        launcher.pi_rpc_event_output(console, {"type": "agent_start"})
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start",
+            "message": {"role": "assistant", "content": []},
+        })
+        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES", 12):
+            for _index in range(20):
+                launcher.pi_rpc_event_output(console, {
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "text_delta", "contentIndex": 0, "delta": "é",
+                    },
+                })
+            capped_revision = console.rpc_timeline_revision
+            launcher.pi_rpc_event_output(console, {
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "text_delta", "contentIndex": 0, "delta": "more",
+                },
+            })
+        self.assertGreater(console.rpc_timeline_revision, capped_revision)
+        item_text = console.rpc_timeline_message_blocks["live:1:assistant:1:answer:0"]
+        self.assertEqual(len(item_text.encode("utf-8")), 12)
+        self.assertTrue(item_text.endswith("more"))
+        self.assertIn("Earlier text omitted", console.rpc_timeline_events[-1]["title"])
+        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES", 12):
+            for delta in ["🙂" * 4, "x", "y"]:
+                launcher.pi_rpc_append_timeline_delta(
+                    console, "answer", delta, title="", item_id="unicode-overflow",
+                )
+            self.assertIn("Earlier text omitted", console.rpc_timeline_events[-1]["title"])
+
+        # Final snapshots and session-history replay must retain the same tail,
+        # not replace a successfully streamed ending with the first 64 KiB.
+        long_text = "start-" + "🙂" * 20_000 + "-final-suffix"
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": long_text}],
+            },
+        })
+        final = console.rpc_timeline_events[-1]
+        self.assertTrue(final["text"].endswith("-final-suffix"))
+        self.assertIn("Earlier text omitted", final["title"])
+        self.assertLessEqual(len(final["text"].encode()), launcher.PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES)
+        self.assertNotIn("�", final["text"])
+        for message in [
+            {"content": long_text},
+            {"content": [{"type": "text", "text": long_text}]},
+            {"content": [{"type": "thinking", "thinking": long_text}]},
+        ]:
+            part = launcher.pi_rpc_timeline_message_parts(message)[0]
+            self.assertTrue(part[1].endswith("-final-suffix"))
+            self.assertIn("Earlier text omitted", part[2])
+
+    def test_pi_rpc_timeline_covers_tools_queue_and_recovery_notices(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        for event in (
+            {"type": "agent_start"},
+            {"type": "tool_execution_start", "toolCallId": "call-1", "toolName": "search"},
+            {
+                "type": "tool_execution_end", "toolCallId": "call-1",
+                "toolName": "search", "result": {"content": [{"type": "text", "text": "found"}]},
+            },
+            {"type": "queue_update", "steering": ["next"], "followUp": []},
+            {"type": "compaction_start"},
+            {"type": "auto_retry_start", "errorMessage": "temporary failure"},
+            {
+                "type": "extension_ui_request", "id": "ask-1", "method": "confirm",
+                "title": "Continue?", "message": "Proceed?",
+            },
+            {
+                "type": "message_end", "message": {
+                    "role": "assistant", "stopReason": "aborted",
+                    "errorMessage": "stopped safely", "content": [],
+                },
+            },
+        ):
+            launcher.pi_rpc_event_output(console, event)
+
+        kinds = {event["kind"] for event in console.rpc_timeline_events}
+        self.assertTrue({"toolCall", "toolResult", "queue", "notice"}.issubset(kinds))
+        self.assertEqual(
+            [event["revision"] for event in console.rpc_timeline_events],
+            list(range(1, len(console.rpc_timeline_events) + 1)),
+        )
+        self.assertTrue(all(event["kind"] in launcher.PI_RPC_TIMELINE_KINDS for event in console.rpc_timeline_events))
+        self.assertTrue(all(
+            event.get("operation") in {None, "append", "replace"}
+            for event in console.rpc_timeline_events
+        ))
+
+    def test_pi_rpc_timeline_keeps_one_tool_card_with_arguments_and_status(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        events = (
+            {"type": "agent_start"},
+            {
+                "type": "message_start",
+                "message": {"id": "assistant-1", "role": "assistant", "content": []},
+            },
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "toolcall_end", "contentIndex": 0,
+                    "toolCall": {
+                        "id": "call-1", "name": "read",
+                        "arguments": {"path": "README.md"},
+                    },
+                },
+            },
+            {
+                "type": "tool_execution_start",
+                "toolCallId": "call-1", "toolName": "read",
+            },
+            {
+                "type": "tool_execution_end",
+                "toolCallId": "call-1", "toolName": "read",
+                "result": {"content": [{"type": "text", "text": "file contents"}]},
+            },
+            {
+                "type": "message_end",
+                "message": {
+                    "id": "assistant-1", "role": "assistant", "stopReason": "stop",
+                    "content": [{
+                        "type": "toolCall", "id": "call-1", "name": "read",
+                        "arguments": {"path": "README.md"},
+                    }],
+                },
+            },
+        )
+        for event in events:
+            launcher.pi_rpc_event_output(console, event)
+
+        tool_events = [
+            event for event in console.rpc_timeline_events
+            if event["kind"] == "toolCall"
+        ]
+        self.assertGreaterEqual(len(tool_events), 4)
+        self.assertEqual(len({event["itemId"] for event in tool_events}), 1)
+        self.assertTrue(all(event["operation"] == "replace" for event in tool_events))
+        self.assertIn("README.md", tool_events[-1]["text"])
+        self.assertEqual(tool_events[-1]["title"], "Completed · read")
+        self.assertNotEqual(tool_events[-1]["text"], "Running")
+        tool_results = [
+            event for event in console.rpc_timeline_events
+            if event["kind"] == "toolResult"
+        ]
+        self.assertEqual(len(tool_results), 1)
+        self.assertEqual(
+            tool_results[0]["itemId"], f"{tool_events[-1]['itemId']}:result",
+        )
+        self.assertEqual(tool_results[0]["text"], "file contents")
+
+    def test_pi_rpc_no_id_agent_loop_keeps_each_assistant_message_and_tool(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        launcher.pi_rpc_event_output(console, {"type": "agent_start"})
+        for ordinal in (1, 2):
+            launcher.pi_rpc_event_output(console, {
+                "type": "message_start",
+                "message": {"role": "assistant", "content": []},
+            })
+            launcher.pi_rpc_event_output(console, {
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "text_delta", "contentIndex": 0,
+                    "delta": f"answer {ordinal}",
+                },
+            })
+            launcher.pi_rpc_event_output(console, {
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "toolcall_end", "contentIndex": 1,
+                    "toolCall": {
+                        "name": "read", "arguments": {"ordinal": ordinal},
+                    },
+                },
+            })
+            launcher.pi_rpc_event_output(console, {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant", "stopReason": "stop",
+                    "content": [
+                        {"type": "text", "text": f"answer {ordinal}"},
+                        {
+                            "type": "toolCall", "name": "read",
+                            "arguments": {"ordinal": ordinal},
+                        },
+                    ],
+                },
+            })
+
+        final_answers = {
+            event["itemId"]: event["text"]
+            for event in console.rpc_timeline_events
+            if event["kind"] == "answer" and event["operation"] == "replace"
+            and event["text"].startswith("answer ")
+        }
+        self.assertEqual(
+            final_answers,
+            {
+                "live:1:assistant:1:answer:0": "answer 1",
+                "live:1:assistant:2:answer:0": "answer 2",
+            },
+        )
+        final_tools = [
+            event for event in console.rpc_timeline_events
+            if event["kind"] == "toolCall" and event["operation"] == "replace"
+        ]
+        self.assertEqual(
+            {event["itemId"] for event in final_tools},
+            {
+                "live:1:assistant:1:toolCall:1",
+                "live:1:assistant:2:toolCall:1",
+            },
+        )
+        self.assertEqual(
+            {json.loads(event["text"])["ordinal"] for event in final_tools},
+            {1, 2},
+        )
+
+    def test_pi_rpc_transient_message_and_tool_text_have_global_caps(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+        console = launcher.AgentConsole(
+            owner_run_id=plan.run_id, plan=plan, process=process,
+            master_fd=1, cols=100, rows=30, protocol="pi-rpc",
+        )
+        launcher.pi_rpc_event_output(console, {"type": "agent_start"})
+        launcher.pi_rpc_event_output(console, {
+            "type": "message_start",
+            "message": {"role": "assistant", "content": []},
+        })
+        with (
+            mock.patch.object(launcher, "AGENT_CONSOLE_MAX_BUFFER", 128),
+            mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_TEXT_BYTES", 96),
+            mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES", 32),
+        ):
+            for index in range(100):
+                launcher.pi_rpc_event_output(console, {
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "text_delta", "contentIndex": index,
+                        "delta": "x" * 40,
+                    },
+                })
+            for index in range(100):
+                launcher.pi_rpc_event_output(console, {
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "toolcall_end", "contentIndex": index,
+                        "toolCall": {
+                            "name": f"tool-{index}",
+                            "arguments": {"value": "y" * 40},
+                        },
+                    },
+                })
+
+        self.assertLessEqual(len(console.rpc_message_blocks), 64)
+        self.assertLessEqual(
+            sum(len(value.encode("utf-8")) for value in console.rpc_message_blocks.values()),
+            128,
+        )
+        self.assertLessEqual(len(console.rpc_timeline_message_blocks), 64)
+        self.assertLessEqual(
+            sum(
+                len(value.encode("utf-8"))
+                for value in console.rpc_timeline_message_blocks.values()
+            ),
+            96,
+        )
+        self.assertLessEqual(len(console.rpc_timeline_tool_text), 64)
+        self.assertLessEqual(
+            sum(len(value.encode("utf-8")) for value in console.rpc_timeline_tool_text.values()),
+            96,
+        )
+
+    def test_pi_rpc_reader_bounds_oversize_jsonl_and_recovers_at_newline(self) -> None:
+        plan = launcher.normalized_request({
+            **self.payload("mtplx", "pi", self.models[0]), "agentHost": "console",
+        }, self.models)
+
+        def read_payload(payload: bytes) -> launcher.AgentConsole:
+            process = mock.Mock()
+            process.wait.return_value = 0
+            process.poll.return_value = 0
+            read_fd, write_fd = os.pipe()
+            console = launcher.AgentConsole(
+                owner_run_id=plan.run_id, plan=plan, process=process,
+                master_fd=read_fd, cols=100, rows=30, protocol="pi-rpc",
+            )
+            manager = launcher.RunManager()
+            manager.plan = plan
+            manager.state = {
+                "phase": "running", "message": "Running",
+                "run": plan.public(), "events": [],
+            }
+            manager.agent_consoles[plan.run_id] = console
+            os.write(write_fd, payload)
+            os.close(write_fd)
+            with mock.patch.object(launcher, "PI_RPC_MAX_JSON_LINE_BYTES", 128):
+                manager._read_agent_console(console)
+            return console
+
+        no_newline = read_payload(b"x" * 512)
+        oversize_errors = [
+            event for event in no_newline.rpc_timeline_events
+            if event.get("title") == "Oversized Pi event"
+        ]
+        self.assertEqual(len(oversize_errors), 1)
+        self.assertEqual(no_newline.rpc_line_buffer, bytearray())
+        self.assertFalse(no_newline.rpc_discarding_oversize_line)
+        self.assertLessEqual(len(no_newline.output), launcher.AGENT_CONSOLE_MAX_BUFFER)
+
+        valid_event = json.dumps({
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "text_delta", "contentIndex": 0, "delta": "recovered",
+            },
+        }, separators=(",", ":")).encode("utf-8")
+        self.assertLessEqual(len(valid_event), 128)
+        recovered = read_payload(b"x" * 512 + b"\n" + valid_event + b"\n")
+        self.assertEqual(
+            len([
+                event for event in recovered.rpc_timeline_events
+                if event.get("title") == "Oversized Pi event"
+            ]),
+            1,
+        )
+        self.assertIn(
+            "recovered",
+            [
+                event["text"] for event in recovered.rpc_timeline_events
+                if event["kind"] == "answer"
+            ],
+        )
+        self.assertEqual(recovered.rpc_line_buffer, bytearray())
+        self.assertFalse(recovered.rpc_discarding_oversize_line)
 
     def test_pi_rpc_reader_keeps_a_final_json_line_without_newline(self) -> None:
         plan = launcher.normalized_request({
@@ -5325,6 +7103,24 @@ for line in sys.stdin:
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Agent Console tab recovery", result.stdout)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Pi timeline test")
+    def test_hub_console_javascript_pi_timeline_core(self) -> None:
+        result = subprocess.run(
+            [str(shutil.which("node")), str(ROOT / "tests" / "test_pi_timeline.js")],
+            cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Pi semantic timeline", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Hub Console input test")
+    def test_hub_console_javascript_reliable_input_core(self) -> None:
+        result = subprocess.run(
+            [str(shutil.which("node")), str(ROOT / "tests" / "test_agent_console_input.js")],
+            cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Reliable Pi Hub input validation", result.stdout)
+
     def test_session_relay_queues_surfaces_and_cancels_waiting_http_work(self) -> None:
         self.port_patch.stop()
         self.port_patch_active = False
@@ -5360,8 +7156,14 @@ for line in sys.stdin:
                 self.end_headers()
                 self.wfile.write(body)
 
-        chat = {"id": str(uuid.uuid4()), "client": "chat", "key": "chat-" + "c" * 32}
-        pi = {"id": str(uuid.uuid4()), "client": "pi", "key": "pi-" + "d" * 32}
+        chat = {
+            "id": str(uuid.uuid4()), "client": "chat", "key": "chat-" + "c" * 32,
+            **relay_sampling_policy("chat"),
+        }
+        pi = {
+            "id": str(uuid.uuid4()), "client": "pi", "key": "pi-" + "d" * 32,
+            **relay_sampling_policy("pi"),
+        }
         control_key = "control-" + "e" * 32
         upstream = ThreadingHTTPServer(("127.0.0.1", upstream_port), Upstream)
         relay = ThreadingHTTPServer(("127.0.0.1", relay_port), session_proxy.ProxyHandler)
@@ -5490,7 +7292,10 @@ for line in sys.stdin:
                 self.end_headers()
                 self.wfile.write(frames)
 
-        codex = {"id": str(uuid.uuid4()), "client": "codex", "key": "codex-" + "a" * 32}
+        codex = {
+            "id": str(uuid.uuid4()), "client": "codex", "key": "codex-" + "a" * 32,
+            **relay_sampling_policy("codex"),
+        }
         upstream = ThreadingHTTPServer(("127.0.0.1", upstream_port), Upstream)
         relay = ThreadingHTTPServer(("127.0.0.1", relay_port), session_proxy.ProxyHandler)
         relay.config = {
@@ -5562,6 +7367,9 @@ for line in sys.stdin:
         self.assertIn("--paged-kv-quantization", plan.engine_argv)
         self.assertEqual(plan.engine_argv[plan.engine_argv.index("--paged-kv-quantization") + 1], "q8")
         self.assertIn("MTPLX_TOOL_RESULT_COMPACT_THRESHOLD_CHARS", plan.engine_env)
+        self.assertEqual(plan.engine_env["MTPLX_ALLOW_SWAP"], "0")
+        self.assertEqual(plan.engine_env["MTPLX_ASYNC_AR"], "0")
+        self.assertEqual(plan.engine_env["MTPLX_FUSED_MOE_VERIFY"], "0")
 
         lm_payload = self.payload("lmstudio", "codex", model, mode="fastest")
         lm_payload["options"]["depth"] = 8
@@ -5580,6 +7388,25 @@ for line in sys.stdin:
         for key in ("temperature", "top_p", "top_k"):
             self.assertEqual(custom_settings["models"][omlx_custom.model["servedId"]][key], model["defaultSampling"][key])
             self.assertEqual(fast_settings["models"][omlx_fast.model["servedId"]][key], model["defaultSampling"][key])
+
+    def test_mtplx_launcher_env_overrides_inherited_swap_overcommit(self) -> None:
+        model = self.model_for("mtplx", "optimized-speed")
+        with mock.patch.dict(os.environ, {"MTPLX_ALLOW_SWAP": "1"}):
+            plan = launcher.normalized_request(
+                self.payload("mtplx", "pi", model), self.models,
+            )
+            effective_env = os.environ.copy()
+            effective_env.update(plan.engine_env)
+
+        self.assertEqual(plan.engine_env["MTPLX_ALLOW_SWAP"], "0")
+        self.assertEqual(effective_env["MTPLX_ALLOW_SWAP"], "0")
+        self.assertNotIn("--allow-swap", plan.engine_argv)
+        for operator_setting in (
+            "MTPLX_CONTEXT_COPY",
+            "MTPLX_LAZY_TARGET_DISTRIBUTIONS",
+            "MTPLX_BATCH_TARGET_ARRAYS",
+        ):
+            self.assertNotIn(operator_setting, plan.engine_env)
 
     def test_visible_optimizer_is_side_effect_free_and_dflash_fails_closed(self) -> None:
         model = self.model_for("mtplx", "optimized-speed")
@@ -5624,6 +7451,7 @@ for line in sys.stdin:
                 "scope": "local", "winner": "dflash2", "qualityPassed": True,
                 "baselinePassed": True, "winnerSpeedup": 1.2,
                 "worstCaseSpeedup": 1.1, "endToEndSpeedup": 1.2,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
                 "pairFingerprint": "pair-123", "modelFingerprint": "model-123",
                 "hardwareFingerprint": launcher.hardware_fingerprint(),
                 "runtimeVersion": "omlx 0.6.3rc1", "contextMin": 8_192,
@@ -5641,19 +7469,23 @@ for line in sys.stdin:
             "depth": 5, "depthMax": 8,
         })
 
+        benchmark_evidence = launcher.optimizer_evidence(
+            model, 16_384, 16_384, "pi", "medium", "q8", {},
+            sampling_contract_document=launcher.build_sampling_contract(
+                "model", model_defaults=model.get("defaultSampling"),
+            ).as_dict(),
+        )
+        omlx["dflashBenchmark"]["samplingFingerprint"] = benchmark_evidence[
+            "samplingFingerprint"
+        ]
+        omlx["dflashBenchmark"].update(
+            launcher.sampling_record_evidence(benchmark_evidence),
+        )
         omlx["localBenchmark"] = json.loads(json.dumps(omlx["dflashBenchmark"]))
-        benchmark_evidence = {
-            "context": 16_384, "output": 16_384, "client": "pi",
-            "reasoning": "medium", "kv": "q8", "samplingFingerprint": "sampling-123",
-        }
-        accepted = launcher.fastest_safe_options(
+        rejected_quantized_dflash = launcher.fastest_safe_options(
             "omlx", omlx, current, benchmark_evidence,
         )
-        self.assertEqual(accepted["options"]["acceleration"], "dflash")
-        self.assertEqual(accepted["options"]["depth"], 5)
-        self.assertEqual(accepted["options"]["dflashDraftQuant"], "q4")
-        self.assertEqual(accepted["options"]["dflashVerify"], "dflash")
-        self.assertEqual(accepted["evidenceTier"], "local-benchmark")
+        self.assertNotEqual(rejected_quantized_dflash["options"]["acceleration"], "dflash")
 
         wrong_context = launcher.fastest_safe_options(
             "omlx", omlx, current, dict(benchmark_evidence, context=131_072),
@@ -5998,18 +7830,40 @@ for line in sys.stdin:
             b'data: {"choices":[],"usage":{"prompt_tokens":8000,"completion_tokens":512}}\n',
             b'data: [DONE]\n',
         ])
+        truncated_replies = []
         with mock.patch.object(
             launcher.urllib.request, "urlopen", return_value=response_limited,
         ):
             truncated = launcher.run_benchmark_completion(
                 plan, "synthetic", 512, {"temperature": 0}, threading.Event(),
+                reply_observer=truncated_replies.append,
             )
+        self.assertEqual(truncated_replies, [])
         self.assertTrue(truncated["reasoningObserved"])
         self.assertTrue(truncated["answerObserved"])
         self.assertEqual(truncated["finishReason"], "length")
+        self.assertEqual(truncated["reasoningCharacters"], len("reasoning"))
+        self.assertEqual(truncated["answerCharacters"], len("partial answer"))
+        self.assertNotIn("partial answer", json.dumps(truncated))
         self.assertEqual(truncated["terminalState"], "truncated")
         self.assertFalse(truncated["terminalComplete"])
         self.assertTrue(truncated["responseLimitReached"])
+
+        replayed = []
+        response_for_replay = Response([
+            b'data: {"choices":[{"delta":{"reasoning_content":" exact reasoning "}}]}\n',
+            b'data: {"choices":[{"delta":{"content":" exact answer "},"finish_reason":"stop"}]}\n',
+            b'data: {"choices":[],"usage":{"prompt_tokens":8000,"completion_tokens":128}}\n',
+            b'data: [DONE]\n',
+        ])
+        with mock.patch.object(launcher.urllib.request, "urlopen", return_value=response_for_replay):
+            replay_sample = launcher.run_benchmark_completion(
+                plan, "synthetic", 512, {}, threading.Event(), reply_observer=replayed.append,
+            )
+        self.assertEqual(replayed, [{"role": "assistant", "content": " exact answer ",
+                                    "reasoning_content": " exact reasoning "}])
+        self.assertNotIn("exact answer", json.dumps(replay_sample))
+        self.assertNotIn("exact reasoning", json.dumps(replay_sample))
 
         qualification_record = {
             "kind": "route-qualification",
@@ -6543,6 +8397,16 @@ for line in sys.stdin:
         self.assertEqual(incomplete_responses["terminalState"], "incomplete")
 
     def test_route_check_manager_passes_or_fails_closed_and_always_stops(self) -> None:
+        live_admission = mock.patch.object(
+            launcher, "require_live_model_load_admission",
+            return_value={
+                "decision": "ready", "launchable": True,
+                "requiresAcknowledgement": False,
+            },
+        )
+        live_admission.start()
+        self.addCleanup(live_admission.stop)
+
         class FakeRunManager:
             def __init__(self) -> None:
                 self.plan = None
@@ -6708,6 +8572,74 @@ for line in sys.stdin:
         text_result = text_fake_manager.snapshot()
         self.assertEqual(text_result["result"]["verdict"], "fail")
         self.assertFalse(text_result["result"]["receipt"]["ready"])
+
+    def test_benchmark_and_runtime_promotion_recheck_capacity_before_load(self) -> None:
+        payload = self.payload("omlx", "chat", self.models[0])
+        base_job = launcher.validated_benchmark_request(payload, self.models)
+        for promotion in (False, True):
+            with self.subTest(runtime_promotion=promotion):
+                manager = launcher.BenchmarkManager(launcher.RunManager())
+                manager.state = {
+                    "phase": "queued", "message": "queued", "progress": 0.0,
+                    "job": {}, "modes": {}, "engines": {},
+                    "result": None, "events": [],
+                }
+                job = copy.deepcopy(base_job)
+                if promotion:
+                    job.update({
+                        "runtimePromotionId": "promotion-plan",
+                        "_runtimeBinary": "/usr/bin/true",
+                    })
+                normalized = mock.Mock(spec=launcher.LaunchPlan)
+                blocked = RuntimeError("Capacity changed immediately before model load")
+                with mock.patch.object(
+                    launcher, "normalized_request", return_value=normalized,
+                ), mock.patch.object(
+                    launcher, "require_live_model_load_admission",
+                    side_effect=blocked,
+                ) as admission, mock.patch.object(
+                    launcher, "dispose_plan_secrets",
+                ) as dispose, mock.patch.object(
+                    manager.run_manager, "start",
+                ) as start:
+                    with self.assertRaisesRegex(RuntimeError, "Capacity changed"):
+                        manager._measure_mode(job, self.models, "ar", 0, 4)
+                start.assert_not_called()
+                dispose.assert_called_once_with(normalized)
+                self.assertEqual(
+                    admission.call_args.kwargs["purpose"],
+                    "runtime-promotion" if promotion else "benchmark",
+                )
+
+    def test_route_check_rechecks_capacity_in_worker_before_load(self) -> None:
+        model = self.model_for("mtplx")
+        plan = launcher.normalized_request(
+            self.payload("mtplx", "chat", model), self.models,
+            purpose="route-check",
+        )
+        run_manager = launcher.RunManager()
+        manager = launcher.RouteCheckManager(run_manager)
+        manager.active_plan = plan
+        manager.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {}, "checks": [{
+                "id": "model", "label": "Exact model discovery",
+                "status": "pending", "detail": "pending",
+            }],
+            "result": None, "events": [],
+        }
+        with mock.patch.object(
+            launcher, "require_live_model_load_admission",
+            side_effect=RuntimeError("Capacity changed before Route Check load"),
+        ) as admission, mock.patch.object(
+            launcher, "dispose_plan_secrets",
+        ) as dispose, mock.patch.object(run_manager, "start") as start:
+            manager._worker(plan)
+        self.assertEqual(manager.snapshot()["phase"], "failed")
+        self.assertIn("Capacity changed", manager.snapshot()["message"])
+        start.assert_not_called()
+        dispose.assert_called_once_with(plan)
+        self.assertEqual(admission.call_args.kwargs["purpose"], "route-check")
 
     def test_benchmark_resource_sampler_reports_memory_headroom_and_public_thermal_state(self) -> None:
         total = 50 * 1024**3
@@ -7208,19 +9140,48 @@ for line in sys.stdin:
         self.assertIsNone(selected["dflash_draft_quant_weight_bits"])
         self.assertEqual(selected["dflash_draft_sink_size"], 0)
         self.assertEqual(selected["dflash_verify_mode"], "adaptive")
+        self.assertEqual(selected["dflash_in_memory_cache_max_entries"], 1)
+        self.assertEqual(selected["dflash_in_memory_cache_max_bytes"], 8 * 1024**3)
         self.assertFalse(selected["mtp_enabled"])
+
+        for context, known_geometry, expected_gib in (
+            (65_536, True, 8), (131_072, True, 8), (131_072, False, 8),
+        ):
+            with self.subTest(snapshot_context=context, known_geometry=known_geometry):
+                snapshot_plan = copy.deepcopy(plan)
+                snapshot_plan.context = context
+                snapshot_plan.run_dir = plan.run_dir / f"snapshot-{context}-{known_geometry}"
+                snapshot_plan.model["memoryGeometry"] = {
+                    "ready": known_geometry, "fullAttentionLayers": 16,
+                    "kvHeads": 4, "headDimension": 256,
+                }
+                # Quantized DFlash snapshots use packed arrays; the minimum
+                # logical retention cap remains 8 GiB and allocates no memory.
+                snapshot_plan.options["kv"] = "q4"
+                with mock.patch.object(launcher, "command_version", return_value="omlx 0.6.4"):
+                    launcher.build_omlx(snapshot_plan, cap)
+                snapshot_config = json.loads((snapshot_plan.run_dir / "omlx" / "model_settings.json").read_text())
+                snapshot_settings = snapshot_config["models"][snapshot_plan.model["servedId"]]
+                self.assertEqual(snapshot_settings["dflash_in_memory_cache_max_entries"], 1)
+                self.assertEqual(snapshot_settings["dflash_in_memory_cache_max_bytes"], expected_gib * 1024**3)
+                self.assertEqual(snapshot_plan.engine_env["LLM_LAUNCHER_DFLASH_KV"], "q4")
+                self.assertIn(str(launcher.APP_DIR / "omlx_hub_runtime.py"), snapshot_plan.engine_argv)
 
         cap.update({
             "preferredAcceleration": "dflash", "dflashPreferred": True,
             "dflashBenchmarkVerified": True,
         })
         evidence = launcher.optimizer_evidence(
-            preview_target, 131_072, 16_384, "pi", "auto", "off",
+            preview_target, 131_072, 16_384, "pi", "auto", "off", {},
+            sampling_contract_document=launcher.build_sampling_contract(
+                "model", model_defaults=preview_target.get("defaultSampling"),
+            ).as_dict(),
         )
         cap["dflashBenchmark"] = {
             "scope": "local", "winner": "dflash2", "qualityPassed": True,
             "baselinePassed": True, "winnerSpeedup": 1.15,
             "worstCaseSpeedup": 1.08, "endToEndSpeedup": 1.15,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
             "modelFingerprint": cap["benchmarkModelFingerprint"],
             "hardwareFingerprint": launcher.hardware_fingerprint(),
             "pairFingerprint": cap["dflashPairFingerprint"],
@@ -7236,6 +9197,7 @@ for line in sys.stdin:
             "comparedModes": ["ar", "dflash2"],
             "modes": {"ar": {}, "dflash2": {}},
         }
+        cap["dflashBenchmark"].update(launcher.sampling_record_evidence(evidence))
         cap["localBenchmark"] = json.loads(json.dumps(cap["dflashBenchmark"]))
         cap["preferredAccelerationSource"] = "local-benchmark"
         cap["fallbackAcceleration"] = "off"
@@ -7564,10 +9526,25 @@ for line in sys.stdin:
         self.assertEqual(pi_data["model"]["maxTokens"], pi_plan.output)
         oc_plan = launcher.normalized_request(self.payload("mtplx", "opencode", model), self.models)
         overlay = json.loads(oc_plan.client_env["OPENCODE_CONFIG_CONTENT"])
+        model_settings = next(iter(next(iter(overlay["provider"].values()))["models"].values()))
+        self.assertTrue(model_settings["tool_call"])
+        self.assertTrue(model_settings["reasoning"])
+        self.assertEqual(model_settings["interleaved"], {"field": "reasoning_content"})
         self.assertIn("plugin", overlay)
         plugin_path = Path(overlay["plugin"][0].removeprefix("file://"))
         self.assertTrue(plugin_path.is_file())
         self.assertIn("x-mtplx-session-id", plugin_path.read_text(encoding="utf-8"))
+
+    def test_mtplx_thinking_levels_change_real_guard_budget(self) -> None:
+        model = self.model_for("mtplx", "optimized-speed")
+        observed = []
+        for level in ("medium", "high", "xhigh"):
+            payload = self.payload("mtplx", "pi", model)
+            payload.update(reasoning=level, output=32768, context=131072)
+            plan = launcher.normalized_request(payload, self.models)
+            observed.append(int(plan.engine_env["MTPLX_THINKING_BUDGET"]))
+            self.assertEqual(plan.engine_argv[plan.engine_argv.index("--reasoning") + 1], "on")
+        self.assertEqual(observed, [4096, 8192, 16384])
 
     def test_paths_are_single_arguments_and_output_needs_prompt_room(self) -> None:
         model = self.model_for("mtplx", "optimized-speed")
@@ -7988,7 +9965,23 @@ for line in sys.stdin:
         self.assertFalse(model["backends"]["omlx"]["mtp"])
         self.assertFalse(model["backends"]["lmstudio"]["runnable"])
         self.assertFalse(model["backends"]["mtplx"]["runnable"])
-        self.assertEqual(model["memoryGeometry"]["fullBytesPerToken"], 27_936)
+        self.assertEqual(model["memoryGeometry"]["indexerCompressRatio"], 4)
+        self.assertEqual(model["memoryGeometry"]["rawIndexBytesPerTokenPerLayer"], 280)
+        self.assertEqual(model["memoryGeometry"]["pooledIndexBytesPerTokenPerLayer"], 64)
+        self.assertEqual(model["memoryGeometry"]["qsaAllocationStepTokens"], 8_192)
+        self.assertEqual(model["memoryGeometry"]["fullBytesPerToken"], 28_704)
+        self.assertEqual(
+            launcher.qwen4_qsa_allocation_high_water_tokens(16_384, 8_192),
+            16_384,
+        )
+        self.assertEqual(
+            launcher.qwen4_qsa_allocation_high_water_tokens(32_768, 8_192),
+            49_152,
+        )
+        self.assertEqual(
+            launcher.qwen4_qsa_allocation_high_water_tokens(65_536, 8_192),
+            114_688,
+        )
         payload = self.payload("omlx", "chat", model)
         payload["reasoning"] = "medium"
         optimized = launcher.fastest_safe_options(
@@ -8086,10 +10079,12 @@ for line in sys.stdin:
             },
             idle_hub, idle_operation,
         )
-        self.assertEqual(prepared_capped_admission["decision"], "system-setting")
-        self.assertLess(
-            prepared_capped_admission["estimate"]["estimatedWorkingSetBytes"],
-            44.01 * 1024**3,
+        self.assertFalse(prepared_capped_admission["launchable"])
+        self.assertEqual(prepared_capped_admission["decision"], "configuration")
+        self.assertEqual(prepared_capped_admission["label"], "Reduce Qwen memory")
+        self.assertGreater(
+            prepared_capped_admission["estimate"]["requiredHeadroomBytes"],
+            48 * 1024**3,
         )
         prepared_42_gib_admission = launcher.session_memory_admission(
             preparation["request"], capacity_models,
@@ -8101,7 +10096,8 @@ for line in sys.stdin:
             idle_hub, idle_operation,
         )
         self.assertFalse(prepared_42_gib_admission["launchable"])
-        self.assertEqual(prepared_42_gib_admission["decision"], "system-setting")
+        self.assertEqual(prepared_42_gib_admission["decision"], "configuration")
+        self.assertEqual(prepared_42_gib_admission["label"], "Reduce Qwen memory")
         prepared_44_gib_admission = launcher.session_memory_admission(
             preparation["request"], capacity_models,
             {
@@ -8112,7 +10108,8 @@ for line in sys.stdin:
             idle_hub, idle_operation,
         )
         self.assertFalse(prepared_44_gib_admission["launchable"])
-        self.assertEqual(prepared_44_gib_admission["decision"], "system-setting")
+        self.assertEqual(prepared_44_gib_admission["decision"], "configuration")
+        self.assertEqual(prepared_44_gib_admission["label"], "Reduce Qwen memory")
         prepared_ready_admission = launcher.session_memory_admission(
             preparation["request"], capacity_models,
             {
@@ -8122,12 +10119,24 @@ for line in sys.stdin:
             },
             idle_hub, idle_operation,
         )
-        self.assertTrue(prepared_ready_admission["launchable"])
-        self.assertEqual(prepared_ready_admission["decision"], "ready")
+        self.assertFalse(prepared_ready_admission["launchable"])
+        self.assertEqual(prepared_ready_admission["decision"], "configuration")
+        self.assertEqual(prepared_ready_admission["label"], "Reduce Qwen memory")
         self.assertEqual(
             prepared_ready_admission["estimate"]["requiredMetalWiredLimitBytes"],
             45 * 1024**3,
         )
+        with self.assertRaisesRegex(RuntimeError, "Reduce Qwen memory"):
+            launcher.require_live_model_load_admission(
+                preparation["request"], capacity_models,
+                purpose="runtime-promotion",
+                resource_snapshot={
+                    "memoryAvailable": True, "totalBytes": 48 * 1024**3,
+                    "freePercent": 93.75,
+                    "metalWiredLimitBytes": 45 * 1024**3,
+                },
+                hub=idle_hub, operation=idle_operation,
+            )
         canonical_high_profile = launcher.validated_launch_profile_request(
             capacity_high_payload, capacity_models,
         )
@@ -8143,6 +10152,10 @@ for line in sys.stdin:
         self.assertFalse(balanced_admission["launchable"])
         self.assertEqual(balanced_admission["decision"], "configuration")
         self.assertEqual(balanced_admission["label"], "Choose Qwen high-memory mode")
+
+        fitting_capacity_model = copy.deepcopy(capacity_model)
+        fitting_capacity_model["qwen4Ple"]["residentBytes"] = 37 * 1024**3
+        fitting_capacity_models = [fitting_capacity_model]
 
         mixed_2bit_model = copy.deepcopy(capacity_model)
         mixed_2bit_model["name"] = "Qwen3.8-Flash-Next-MLX-Mixed-2bit"
@@ -8182,7 +10195,7 @@ for line in sys.stdin:
             oversized_admission["estimate"]["estimatedWorkingSetBytes"],
             oversized_admission["estimate"]["memoryGuardHardWatermarkBytes"],
         )
-        unknown_geometry_model = copy.deepcopy(capacity_model)
+        unknown_geometry_model = copy.deepcopy(fitting_capacity_model)
         unknown_geometry_model["memoryGeometry"]["ready"] = False
         unknown_geometry_admission = launcher.session_memory_admission(
             capacity_high_payload, [unknown_geometry_model],
@@ -8196,7 +10209,7 @@ for line in sys.stdin:
         self.assertFalse(unknown_geometry_admission["launchable"])
         self.assertEqual(unknown_geometry_admission["label"], "KV capacity unavailable")
         unknown_admission = launcher.session_memory_admission(
-            capacity_high_payload, capacity_models,
+            capacity_high_payload, fitting_capacity_models,
             {
                 "memoryAvailable": False, "totalMemoryBytes": 48 * 1024**3,
                 "headroomBytes": None, "metalWiredLimitBytes": 42 * 1024**3,
@@ -8206,8 +10219,22 @@ for line in sys.stdin:
         self.assertFalse(unknown_admission["launchable"])
         self.assertFalse(unknown_admission["requiresAcknowledgement"])
         self.assertEqual(unknown_admission["decision"], "unknown")
+        missing_total_admission = launcher.session_memory_admission(
+            capacity_high_payload, fitting_capacity_models,
+            {
+                "memoryAvailable": True, "totalMemoryBytes": None,
+                "headroomBytes": 47 * 1024**3,
+                "metalWiredLimitBytes": 42 * 1024**3,
+            },
+            idle_hub, idle_operation,
+        )
+        self.assertFalse(missing_total_admission["launchable"])
+        self.assertEqual(missing_total_admission["decision"], "unknown")
+        self.assertEqual(
+            missing_total_admission["label"], "Physical memory unavailable",
+        )
         low_headroom_admission = launcher.session_memory_admission(
-            capacity_high_payload, capacity_models,
+            capacity_high_payload, fitting_capacity_models,
             {
                 "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
                 "headroomBytes": 1, "metalWiredLimitBytes": 42 * 1024**3,
@@ -8219,10 +10246,10 @@ for line in sys.stdin:
         self.assertEqual(low_headroom_admission["decision"], "pressure")
         self.assertEqual(low_headroom_admission["label"], "Free memory before launch")
         capped_admission = launcher.session_memory_admission(
-            capacity_high_payload, capacity_models,
+            capacity_high_payload, fitting_capacity_models,
             {
                 "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
-                "headroomBytes": 20 * 1024**3, "metalWiredLimitBytes": 0,
+                "headroomBytes": 47 * 1024**3, "metalWiredLimitBytes": 0,
             },
             idle_hub, idle_operation,
         )
@@ -8230,22 +10257,22 @@ for line in sys.stdin:
         self.assertEqual(capped_admission["decision"], "system-setting")
         self.assertIn("separate from the 45 GiB oMLX process guard", capped_admission["detail"])
         undersized_metal_admission = launcher.session_memory_admission(
-            capacity_high_payload, capacity_models,
+            capacity_high_payload, fitting_capacity_models,
             {
                 "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
-                "headroomBytes": 20 * 1024**3,
-                "metalWiredLimitBytes": 42 * 1024**3,
+                "headroomBytes": 47 * 1024**3,
+                "metalWiredLimitBytes": 41 * 1024**3,
             },
             idle_hub, idle_operation,
         )
         self.assertFalse(undersized_metal_admission["launchable"])
         self.assertEqual(undersized_metal_admission["decision"], "system-setting")
         high_admission = launcher.session_memory_admission(
-            capacity_high_payload, capacity_models,
+            capacity_high_payload, fitting_capacity_models,
             {
                 "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
-                "headroomBytes": 20 * 1024**3,
-                "metalWiredLimitBytes": 45 * 1024**3,
+                "headroomBytes": 47 * 1024**3,
+                "metalWiredLimitBytes": 42 * 1024**3,
             },
             idle_hub, idle_operation,
         )
@@ -8259,7 +10286,7 @@ for line in sys.stdin:
         )
         self.assertEqual(
             high_admission["estimate"]["requiredMetalWiredLimitBytes"],
-            45 * 1024**3,
+            42 * 1024**3,
         )
 
         balanced_evidence = launcher.optimizer_evidence(
@@ -8307,7 +10334,9 @@ for line in sys.stdin:
         self.assertEqual(estimate["checkpointBytes"], sum(
             path.stat().st_size for path in model_path.glob("model*.safetensors")
         ))
-        self.assertEqual(estimate["kvCacheBytes"], 27_936 * 32_768)
+        self.assertEqual(estimate["allocatedContextTokens"], 49_152)
+        self.assertEqual(estimate["contextAllocationStepTokens"], 8_192)
+        self.assertEqual(estimate["kvCacheBytes"], 28_704 * 49_152)
         self.assertNotIn("ssdStreamedBytes", estimate)
         index = (ROOT / "index.html").read_text(encoding="utf-8")
         script = (ROOT / "app.js").read_text(encoding="utf-8")
@@ -8324,6 +10353,49 @@ for line in sys.stdin:
             script,
         )
         self.assertIn('["Required Metal limit", formatGiB(estimate.requiredMetalWiredLimitBytes)]', script)
+
+    def test_live_model_load_admission_is_strict_for_automation_but_keeps_session_review(self) -> None:
+        request = self.payload("omlx", "chat", self.models[0])
+        reviewed = {
+            "decision": "review", "label": "OS reserve would be tight",
+            "detail": "The interactive load needs a one-time review.",
+            "launchable": True, "requiresAcknowledgement": True,
+            "contractId": "review-contract",
+        }
+        approval = {"memoryAcknowledgement": "review-contract"}
+        common = {
+            "resource_snapshot": {}, "hub": {"phase": "idle"},
+            "operation": {"active": False},
+        }
+        with mock.patch.object(
+            launcher, "session_memory_admission", return_value=reviewed,
+        ):
+            for purpose in (
+                "benchmark", "runtime-promotion", "route-check", "ane-tune",
+            ):
+                with self.subTest(purpose=purpose), self.assertRaisesRegex(
+                    RuntimeError, "cannot use a memory acknowledgement",
+                ):
+                    launcher.require_live_model_load_admission(
+                        request, self.models, purpose=purpose,
+                        approval_payload=approval, **common,
+                    )
+            accepted = launcher.require_live_model_load_admission(
+                request, self.models, purpose="session-set",
+                approval_payload=approval, **common,
+            )
+        self.assertEqual(accepted["contractId"], "review-contract")
+
+        with mock.patch.object(
+            launcher, "route_qualification_memory_admission",
+            return_value=reviewed,
+        ) as specialized, self.assertRaisesRegex(
+            RuntimeError, "route qualification model load",
+        ):
+            launcher.require_live_model_load_admission(
+                request, self.models, purpose="route-qualification", **common,
+            )
+        specialized.assert_called_once()
 
     def test_incomplete_numbered_acquisition_never_scans_ready(self) -> None:
         path = Path(self.temp.name) / "partial-acquisition"
@@ -9405,6 +11477,35 @@ for line in sys.stdin:
         launcher.dispose_llamacpp_plan_bearers(plan)
         self.assertTrue(log_file.exists())
 
+    def test_generic_plan_cleanup_removes_proxy_handoffs_for_every_backend(self) -> None:
+        run_dir = self.state / "generic-proxy-cleanup"
+        run_dir.mkdir(parents=True, mode=0o700)
+        plan = launcher.LaunchPlan(
+            "generic-proxy-cleanup", "omlx", "chat",
+            {"id": "generic-model", "name": "Generic fixture"},
+            self.temp.name, 4_096, 512, "auto", 18_128, "custom", {},
+            run_dir=run_dir,
+        )
+        plan.secrets.update({
+            "apiKey": "upstream-" + "a" * 32,
+            "clientApiKey": "client-" + "c" * 32,
+            "proxyControlKey": "control-" + "p" * 32,
+        })
+        configs = [
+            run_dir / "session-proxy.json",
+            run_dir / "codex-proxy.json",
+        ]
+        for config in configs:
+            launcher.atomic_json(config, {"upstreamKey": plan.secrets["apiKey"]})
+
+        launcher.dispose_plan_secrets(plan)
+        launcher.dispose_plan_secrets(plan)
+
+        self.assertTrue(all(not config.exists() for config in configs))
+        self.assertFalse(
+            {"apiKey", "clientApiKey", "proxyControlKey"} & set(plan.secrets),
+        )
+
     def test_llamacpp_preview_and_rejected_benchmark_dispose_unowned_bearers(self) -> None:
         def unowned_plan(name: str) -> launcher.LaunchPlan:
             run_dir = self.state / name
@@ -10390,6 +12491,16 @@ for line in sys.stdin:
             launcher.normalized_request(payload, [model])
 
     def test_ane_manager_accepts_only_traced_upstream_completion(self) -> None:
+        live_admission = mock.patch.object(
+            launcher, "require_live_model_load_admission",
+            return_value={
+                "decision": "ready", "launchable": True,
+                "requiresAcknowledgement": False,
+            },
+        )
+        live_admission.start()
+        self.addCleanup(live_admission.stop)
+
         class FakeRunManager:
             def __init__(self) -> None:
                 self.plan = None
@@ -10518,6 +12629,32 @@ for line in sys.stdin:
         self.assertTrue(cpu_status["result"]["cpuAssist"])
         self.assertEqual(cpu_status["result"]["cpuFloatDtype"], "F16")
 
+    def test_ane_worker_rechecks_live_capacity_before_loading_model(self) -> None:
+        plan = launcher.normalized_request(
+            self.payload("omlx", "chat", self.models[0]), self.models,
+            purpose="ane-tune",
+        )
+        run_manager = launcher.RunManager()
+        manager = launcher.ANETunerManager(run_manager)
+        manager.active_plan = plan
+        manager.state = {
+            "phase": "queued", "message": "queued", "progress": 0.0,
+            "job": {}, "results": [], "recommendation": None,
+            "result": None, "events": [],
+        }
+        with mock.patch.object(
+            launcher, "require_live_model_load_admission",
+            side_effect=RuntimeError("Capacity changed before ANE load"),
+        ) as admission, mock.patch.object(
+            launcher, "dispose_plan_secrets",
+        ) as dispose, mock.patch.object(run_manager, "start") as start:
+            manager._worker(plan, {"id": "ane-job"})
+        self.assertEqual(manager.snapshot()["phase"], "failed")
+        self.assertIn("Capacity changed", manager.snapshot()["message"])
+        start.assert_not_called()
+        dispose.assert_called_once_with(plan)
+        self.assertEqual(admission.call_args.kwargs["purpose"], "ane-tune")
+
     def test_best_engine_requires_complete_comparable_matrix_and_clears_noise_floor(self) -> None:
         model = json.loads(json.dumps(self.models[0]))
         payload = self.payload("omlx", "pi", model)
@@ -10527,6 +12664,9 @@ for line in sys.stdin:
         machine = "cross-engine-mac"
         evidence = launcher.optimizer_evidence(
             model, payload["context"], payload["output"], "pi", "auto", "off", {},
+            sampling_contract_document=launcher.build_sampling_contract(
+                "model", model_defaults=model.get("defaultSampling"),
+            ).as_dict(),
         )
         memory_delta = {"omlx": 3 * 1024**3, "lmstudio": 1 * 1024**3, "mtplx": 2 * 1024**3}
         thermal_state = {"omlx": 0, "lmstudio": 1, "mtplx": 0}
@@ -10597,9 +12737,11 @@ for line in sys.stdin:
                     ),
                 ),
                 "qualityFingerprint": "a" * 64, "qualityCompletionTokens": 64,
+                "probeContract": copy.deepcopy(launcher.BENCHMARK_PROBE_CONTRACT),
                 "baselinePassed": True, "qualityPassed": True, "allQualityPassed": True,
                 "winner": "mtp", "winnerSpeedup": 1.1, "worstCaseSpeedup": 1.05,
                 "endToEndSpeedup": 1.1,
+                **launcher.sampling_record_evidence(evidence),
             }
             mtp_settings = (
                 {
@@ -10633,6 +12775,21 @@ for line in sys.stdin:
         self.assertEqual(result["options"]["fan"], "smart")
         self.assertNotIn("engineEvidenceBinding", result)
         self.assertNotIn("evidenceBinding", result["engineDecision"])
+
+        # Old or altered correctness sampling must not drive the same automatic
+        # choice, even if all performance numbers and fingerprints still match.
+        for backend in ("omlx", "lmstudio", "mtplx"):
+            for contract in (None, {"version": "unverified"}):
+                outdated = copy.deepcopy(model)
+                cap = outdated["backends"][backend]
+                for receipt in [cap["localBenchmark"], *cap["localBenchmarks"]]:
+                    if contract is None:
+                        receipt.pop("probeContract", None)
+                    else:
+                        receipt["probeContract"] = contract
+                with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+                    rejected = launcher.best_engine_request(fastest_payload, [outdated])
+                self.assertNotEqual(rejected["engineEvidenceTier"], "cross-engine-local-benchmark")
 
         separated_runs = json.loads(json.dumps(model))
         for backend in ("omlx", "lmstudio", "mtplx"):
@@ -10721,6 +12878,7 @@ for line in sys.stdin:
                 current_tie_payload, [tied_current],
             )
         self.assertEqual(current_tie["engineEvidenceTier"], "cross-engine-noise-floor")
+        self.assertEqual(current_tie["settingsEvidenceTier"], "local-benchmark")
         self.assertEqual(current_tie["backend"], "omlx")
         self.assertEqual(current_tie["options"]["depth"], 3)
 
@@ -10778,6 +12936,7 @@ for line in sys.stdin:
         self.assertEqual(reused_result["backend"], "omlx")
         self.assertFalse(reused_result["engineChanged"])
         self.assertEqual(reused_result["engineEvidenceTier"], "cross-engine-noise-floor")
+        self.assertEqual(reused_result["settingsEvidenceTier"], "local-benchmark")
         self.assertEqual(reused_result["engineNextAction"]["id"], "keep-current")
 
         tied_history_records = []
@@ -10882,6 +13041,9 @@ for line in sys.stdin:
         tampered_settings = copy.deepcopy(latest_complete)
         tampered_settings[0]["modeSettings"]["mtp"]["depth"] = 99
         rejected_shootouts.append(("tampered winning settings", tampered_settings))
+        old_sampling = copy.deepcopy(latest_complete)
+        old_sampling[0].pop("probeContract")
+        rejected_shootouts.append(("unverified correctness sampling", old_sampling))
         for label, rejected_records in rejected_shootouts:
             with self.subTest(label=label), mock.patch.object(
                 launcher, "hardware_fingerprint", return_value=machine,
@@ -10895,6 +13057,10 @@ for line in sys.stdin:
                 rejected_history["receipt"]["state"], {"trusted-engine", "tie"},
             )
             self.assertNotIn("evidenceBinding", rejected_history["receipt"])
+            if label == "unverified correctness sampling":
+                self.assertIn("Correctness sampling re-test required", [
+                    reason["label"] for reason in rejected_history["otherEvidence"]["reasons"]
+                ])
             self.assertFalse(any(
                 run.get("trustedWinner") is True for run in rejected_history["runs"]
             ))
@@ -10926,6 +13092,27 @@ for line in sys.stdin:
         })
         self.assertEqual(missing_history["receipt"]["state"], "missing")
         self.assertFalse(missing_history["receipt"]["fresh"])
+        self.assertIsNone(route_history["reviewResult"])
+        self.assertEqual(route_history["currentRouteRuns"][0]["suite"], "quick")
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value=machine):
+            reviewed = launcher.benchmark_history_request(
+                dict(payload, suite="quick", enginePreference="fastest", reviewRecordId="route-only"),
+                [model], [route_record], now=datetime(2026, 8, 23, tzinfo=timezone.utc),
+            )
+            self.assertEqual(reviewed["reviewResult"], route_record)
+            self.assertIsNot(reviewed["reviewResult"], route_record)
+            for record_id in ["missing", "", None, {}, "x" * 129]:
+                with self.subTest(review_id=record_id), self.assertRaises(ValueError):
+                    launcher.benchmark_history_request(
+                        dict(payload, suite="quick", enginePreference="fastest", reviewRecordId=record_id),
+                        [model], [route_record], now=datetime(2026, 8, 23, tzinfo=timezone.utc),
+                    )
+            invalid = dict(route_record, qualityPassed=False)
+            with self.assertRaises(ValueError):
+                launcher.benchmark_history_request(
+                    dict(payload, suite="quick", enginePreference="fastest", reviewRecordId="route-only"),
+                    [model], [invalid], now=datetime(2026, 8, 23, tzinfo=timezone.utc),
+                )
 
         unequal_thermal_start = json.loads(json.dumps(model))
         for key in ("localBenchmark",):
@@ -11057,6 +13244,9 @@ for line in sys.stdin:
 
             evidence = launcher.optimizer_evidence(
                 model, payload["context"], payload["output"], "pi", "auto", "off", {},
+                sampling_contract_document=launcher.build_sampling_contract(
+                    "model", model_defaults=model.get("defaultSampling"),
+                ).as_dict(),
             )
             launcher.add_benchmark_engine_evidence(
                 evidence, model, payload["options"], list(launcher.SSD_STREAMING_BACKENDS),
@@ -11104,6 +13294,7 @@ for line in sys.stdin:
                     "ssdStreaming": True, "ssdComparisonIdentity": identity,
                     "shootoutId": "ssd-complete-shootout",
                     "shootoutExecutionOrder": ["swiftlm", "mference"],
+                    **launcher.sampling_record_evidence(evidence),
                 }
                 capability["localBenchmark"] = value
                 capability["localBenchmarks"] = [value]
@@ -11163,7 +13354,8 @@ for line in sys.stdin:
         model["backends"]["lmstudio"]["mtp"] = False
         payload = self.payload("omlx", "pi", model)
         payload.update({"suite": "quick", "reasoning": "auto", "scope": "engines"})
-        shootout = launcher.validated_engine_shootout_request(payload, [model])
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value="shootout-mac"):
+            shootout = launcher.validated_engine_shootout_request(payload, [model])
         self.assertEqual([job["backend"] for job in shootout["jobs"]], shootout["executionOrder"])
         self.assertEqual(set(shootout["executionOrder"]), {"omlx", "lmstudio", "mtplx"})
         self.assertEqual(next(job for job in shootout["jobs"] if job["backend"] == "lmstudio")["modes"], ["ar"])
@@ -11249,10 +13441,12 @@ for line in sys.stdin:
         self.assertEqual(status["result"]["persistence"]["recordCount"], 3)
         self.assertEqual(status["result"]["recommendedBackend"], "mtplx")
         self.assertEqual(status["result"]["profiles"]["throughput"]["backend"], "mtplx")
-        self.assertEqual(status["result"]["profiles"]["responsive"]["backend"], "mtplx")
-        self.assertEqual(status["result"]["profiles"]["memory"]["backend"], "lmstudio")
-        self.assertTrue(status["result"]["profiles"]["memory"]["trustedWinner"])
-        self.assertEqual(status["result"]["profiles"]["thermal"]["backend"], "mtplx")
+        for preference in set(launcher.ENGINE_PREFERENCE_LABELS) - {"throughput"}:
+            profile = status["result"]["profiles"][preference]
+            self.assertEqual(profile["backend"], "omlx")
+            self.assertFalse(profile["trustedWinner"])
+            self.assertEqual(profile["evidenceTier"], "incomplete-cross-engine-matrix")
+            self.assertNotIn("evidenceBinding", profile)
         lmstudio_result = next(
             item for item in status["result"]["engines"]
             if item["backend"] == "lmstudio"
@@ -11265,6 +13459,32 @@ for line in sys.stdin:
         records = saved.call_args.args[0]
         self.assertEqual(len(records), 3)
         self.assertEqual({record["shootoutId"] for record in records}, {shootout["id"]})
+        expected_record_ids = {
+            str(record["backend"]): str(record["id"])
+            for record in records
+        }
+        expected_binding = {
+            "scope": "engine",
+            "suite": "quick",
+            "preference": "throughput",
+            "shootoutId": shootout["id"],
+            "recordIds": expected_record_ids,
+        }
+        selected_binding = status["result"]["profiles"]["throughput"]["evidenceBinding"]
+        self.assertEqual(selected_binding, expected_binding)
+        self.assertEqual(status["result"]["decision"]["evidenceBinding"], selected_binding)
+        self.assertEqual(status["result"]["evidenceBinding"], selected_binding)
+        self.assertEqual(
+            status["result"]["persistence"]["evidenceBinding"], selected_binding,
+        )
+        self.assertIsNot(
+            status["result"]["decision"]["evidenceBinding"], selected_binding,
+        )
+        self.assertIsNot(status["result"]["evidenceBinding"], selected_binding)
+        self.assertIsNot(
+            status["result"]["persistence"]["evidenceBinding"],
+            status["result"]["evidenceBinding"],
+        )
         self.assertTrue(all(record["shootoutExecutionOrder"] == shootout["executionOrder"] for record in records))
         self.assertTrue(all(
             record["comparisonContractVersion"] == launcher.BENCHMARK_COMPARISON_CONTRACT_VERSION
@@ -11281,6 +13501,38 @@ for line in sys.stdin:
             if item["backend"] == "mtplx"
         )
         self.assertEqual(mtplx_result["routeSettingsLabel"], "MTP depth D2")
+        expected_settings_search = {
+            "version": 1, "kind": "runtime-and-route",
+            "label": "Runtime and acceleration settings", "strategy": "staged",
+            "selectedSetupLabel": "Sustained profile · automatic cooling · MTP depth D2",
+            "testedSetupCount": 8, "maximumSetupCount": 8,
+            "testedCandidateCount": 5, "maximumCandidateCount": 5,
+            "referenceSetupCount": 3, "rejectedFasterCandidateCount": 0,
+            "axes": ["Runtime profile", "MTP draft depth"],
+        }
+        self.assertEqual(mtplx_result["settingsSearch"], expected_settings_search)
+        self.assertNotIn("mtpDepthSweep", mtplx_result)
+        self.assertNotIn("tuningSweep", mtplx_result)
+        self.assertNotIn("mtplxOperatorSweep", mtplx_result)
+        ranked_mtplx = next(
+            item for item in status["result"]["profiles"]["throughput"]["comparedEngines"]
+            if item["backend"] == "mtplx"
+        )
+        self.assertEqual(ranked_mtplx["settingsSearch"], expected_settings_search)
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="shootout-mac",
+        ):
+            history = launcher.benchmark_history_request(
+                payload, [model], records=records,
+            )
+        history_mtplx = next(
+            item for item in history["runs"][0]["engines"]
+            if item["backend"] == "mtplx"
+        )
+        self.assertEqual(history_mtplx["settingsSearch"], expected_settings_search)
+        self.assertEqual(
+            history["receipt"]["settingsSearch"], expected_settings_search,
+        )
         mtplx_job = next(job for job in shootout["jobs"] if job["backend"] == "mtplx")
         mtplx_capability = model["backends"]["mtplx"]
         with mock.patch.object(launcher, "hardware_fingerprint", return_value="shootout-mac"):
@@ -11298,6 +13550,131 @@ for line in sys.stdin:
         self.assertTrue(any(
             "exact MTPLX draft depth" in item for item in optimised["rationale"]
         ))
+
+        # A preset can lose in AR yet win once acceleration is enabled. The
+        # second stage must measure that interaction, not pick from AR alone.
+        settings_manager = launcher.BenchmarkManager(launcher.RunManager())
+        measured_setups = []
+
+        def interacting_measurement(job, models, mode, completed, total, gate, **kwargs):
+            result, count = measured(job, models, mode, completed, total, gate, **kwargs)
+            profile = job["options"]["profile"]
+            measured_setups.append((profile, mode, job.get("_benchmarkMtpDepth")))
+            factor = (1.25 if mode == "ar" else 0.5) if profile == "turbo" else 1.0
+            for sample in result["samples"]:
+                for key in ("ttftSeconds", "totalSeconds"):
+                    sample[key] *= factor
+                for key in ("decodeTokensPerSecond", "endToEndTokensPerSecond"):
+                    sample[key] /= factor
+            result["medianTTFT"] *= factor
+            result["medianDecodeTokensPerSecond"] /= factor
+            result["medianEndToEndTokensPerSecond"] /= factor
+            return result, count
+
+        with mock.patch.object(settings_manager, "_wait_for_resource_baseline", return_value=ready_gate), mock.patch.object(
+            settings_manager, "_measure_mode", side_effect=interacting_measurement,
+        ), mock.patch.object(launcher, "hardware_fingerprint", return_value="shootout-mac"):
+            switched, completed, _ = settings_manager._shootout_settings_search(
+                mtplx_job, [model], 0, 32, None,
+            )
+            self.assertEqual(completed, 32)
+            self.assertEqual(len(measured_setups), 8)
+            self.assertEqual(switched["engineSettings"]["profile"], "turbo")
+            self.assertEqual(switched["winner"], "mtp")
+            self.assertEqual(switched["settings"], {"depth": 2})
+            sweep = switched["engineSettingsSweep"]
+            self.assertNotEqual(sweep["selectedCandidateKey"], sweep["tuningReferenceKey"])
+            self.assertEqual(
+                {profile for profile, mode, _ in measured_setups if mode == "ar"},
+                {"sustained", "turbo", "performance-cold"},
+            )
+            with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+                launcher, "STATE_DIR", Path(directory),
+            ):
+                launcher.save_benchmark_records([switched])
+                restored = launcher.load_benchmark_records()[0]
+            self.assertEqual(restored, switched)
+            self.assertTrue(launcher._local_benchmark_record_verified(
+                mtplx_capability, restored, mtplx_job["evidence"],
+            ))
+            applied = launcher._optimizer_with_forced_record(
+                payload, [model], model, "mtplx", restored, mtplx_job["evidence"],
+            )
+            self.assertEqual(applied["options"]["profile"], "turbo")
+            self.assertEqual(applied["options"]["acceleration"], "mtp")
+            self.assertEqual(applied["options"]["depth"], 2)
+            complete_records = [
+                restored if record["backend"] == "mtplx" else copy.deepcopy(record)
+                for record in records
+            ]
+            complete_result = manager._build_shootout_result(shootout, complete_records, [model])
+            with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+                launcher, "STATE_DIR", Path(directory),
+            ):
+                launcher.save_benchmark_records(complete_records)
+                reloaded_model = copy.deepcopy(model)
+                for backend, capability in reloaded_model["backends"].items():
+                    history = launcher.matching_benchmark_records(
+                        launcher.load_benchmark_records(), backend,
+                        capability["benchmarkModelFingerprint"], capability["runtimeVersion"],
+                        capability, "shootout-mac",
+                    )
+                    capability["localBenchmarks"] = launcher.latest_benchmark_records_by_identity(history)
+                    capability["localBenchmark"] = history[-1] if history else None
+                apply_request = copy.deepcopy(shootout["request"])
+                apply_request["evidenceBinding"] = complete_result["evidenceBinding"]
+                first = launcher.best_engine_request(apply_request, [reloaded_model])
+                self.assertEqual(first["backend"], "mtplx")
+                self.assertEqual(first["options"]["profile"], "turbo")
+                self.assertFalse(first["engineNextAction"]["requiresCalibration"])
+                apply_request.update({"backend": first["backend"], "options": first["options"]})
+                reused = launcher.best_engine_request(apply_request, [reloaded_model])
+                self.assertEqual(reused["engineNextAction"]["id"], "keep-current")
+                # Browser refresh loses the in-memory binding. The persisted
+                # matrix must still be discoverable from the applied controls.
+                unbound_request = copy.deepcopy(apply_request)
+                unbound_request.pop("evidenceBinding")
+                unbound = launcher.best_engine_request(unbound_request, [reloaded_model])
+                self.assertEqual(unbound["engineNextAction"]["id"], "keep-current")
+                inventory = launcher.save_launch_profile({
+                    "name": "Measured Turbo", "enginePolicy": "measured",
+                    "enginePreference": "throughput", "request": apply_request,
+                    "evidenceBinding": complete_result["evidenceBinding"],
+                }, [reloaded_model])
+                saved_profile = next(item for item in inventory["profiles"] if item["name"] == "Measured Turbo")
+                self.assertTrue(saved_profile["ready"], saved_profile["reason"])
+                self.assertEqual(saved_profile["request"]["options"]["profile"], "turbo")
+                self.assertEqual(saved_profile["request"]["options"]["depth"], 2)
+            changed_safety = copy.deepcopy(mtplx_job["evidence"])
+            changed_safety["engineSettings"]["fan"] = "max"
+            changed_safety["engineSettingsByBackend"]["mtplx"]["fan"] = "max"
+            self.assertFalse(launcher._local_benchmark_record_verified(
+                mtplx_capability, restored, changed_safety,
+            ))
+            for field, invalid in (("records", {}), ("selectedCandidateKey", "missing"),
+                                   ("maximumModelLoads", True), ("searchedAxes", ["fan"]),
+                                   ("complete", False)):
+                bad = copy.deepcopy(restored)
+                bad["engineSettingsSweep"][field] = invalid
+                self.assertFalse(launcher._local_benchmark_record_verified(
+                    mtplx_capability, bad, mtplx_job["evidence"],
+                ), field)
+        real_best_engine_request = launcher.best_engine_request
+
+        def tampered_apply_reference(request, enriched_models):
+            decision = real_best_engine_request(request, enriched_models)
+            binding = decision.get("engineEvidenceBinding")
+            if isinstance(binding, dict):
+                binding["shootoutId"] = "different-shootout"
+            return decision
+
+        with mock.patch.object(
+            launcher, "best_engine_request", side_effect=tampered_apply_reference,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="shootout-mac",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "inconsistent apply reference"):
+                manager._build_shootout_result(shootout, records, [model])
         tampered = copy.deepcopy(mtplx_record)
         tampered["mtpDepthSweep"]["candidates"].pop()
         with mock.patch.object(launcher, "hardware_fingerprint", return_value="shootout-mac"):
@@ -11337,6 +13714,13 @@ for line in sys.stdin:
         mismatch[1]["qualityCompletionTokens"] = 63
         mismatch[1]["modes"][mismatch[1]["winner"]]["samples"][0]["promptTokens"] += 38
         mismatch[1]["modes"][mismatch[1]["winner"]]["samples"][0]["completionTokens"] -= 1
+        # This fixture represents a different engine's real output, not a
+        # corrupted copy of the selected nested settings record.
+        for nested in mismatch[1]["engineSettingsSweep"]["records"].values():
+            nested["qualityFingerprint"] = "c" * 64
+            nested["qualityCompletionTokens"] = 63
+            nested["modes"][nested["winner"]]["samples"][0]["promptTokens"] += 38
+            nested["modes"][nested["winner"]]["samples"][0]["completionTokens"] -= 1
         with mock.patch.object(launcher, "hardware_fingerprint", return_value="shootout-mac"):
             varied = manager._build_shootout_result(shootout, mismatch, [model])
         self.assertTrue(varied["matrixQualityPassed"])
@@ -11380,7 +13764,9 @@ for line in sys.stdin:
             side_effect=RuntimeError("synthetic final result failure"),
         ) as build_result, mock.patch.object(
             launcher, "save_benchmark_records",
-        ) as invalid_save:
+        ) as invalid_save, mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="shootout-mac",
+        ):
             failed_finalization._shootout_worker(shootout, [model])
         self.assertEqual(failed_finalization.snapshot()["phase"], "failed")
         build_result.assert_called_once()
@@ -11425,9 +13811,16 @@ for line in sys.stdin:
             update = launcher.audited_runtime_release("mtplx", "mtplx 2.8.3 (2.8.3)")
             affected = launcher.audited_runtime_release("mtplx", "mtplx 2.9.0")
             patched = launcher.audited_runtime_release("mtplx", "mtplx 2.10.0")
-            newer = launcher.audited_runtime_release("mtplx", "mtplx 2.11.0")
+            previous_patch = launcher.audited_runtime_release("mtplx", "mtplx 2.10.1")
+            prior_release = launcher.audited_runtime_release("mtplx", "mtplx 2.10.2")
+            retracted = launcher.audited_runtime_release("mtplx", "mtplx 2.11.0")
+            affected_2111 = launcher.audited_runtime_release("mtplx", "mtplx 2.11.1")
+            mtplx_current = launcher.audited_runtime_release("mtplx", "mtplx 2.11.2")
+            newer = launcher.audited_runtime_release("mtplx", "mtplx 2.11.3")
             swift_current = launcher.audited_runtime_release("swiftlm", "SwiftLM b709")
             swift_previous = launcher.audited_runtime_release("swiftlm", "SwiftLM b648")
+            whallm_current = launcher.audited_runtime_release("whallm", "Whallm 1.1.4")
+            whallm_previous = launcher.audited_runtime_release("whallm", "Whallm 1.1.2")
             unknown = launcher.audited_runtime_release("lms", "CLI commit: abc123")
             missing = launcher.audited_runtime_release("lms", None)
         self.assertEqual(current["state"], "current")
@@ -11439,14 +13832,39 @@ for line in sys.stdin:
         self.assertTrue(affected["needsReview"])
         self.assertEqual(patched["activeAdvisory"]["affectedVersion"], "2.10.0")
         self.assertTrue(patched["updateAvailable"])
+        self.assertEqual(previous_patch["activeAdvisory"]["affectedVersion"], "2.10.1")
+        self.assertTrue(previous_patch["updateAvailable"])
+        self.assertEqual(prior_release["activeAdvisory"]["affectedVersion"], "2.10.2")
+        self.assertTrue(prior_release["updateAvailable"])
+        self.assertEqual(retracted["state"], "update-available")
+        self.assertEqual(retracted["activeAdvisory"]["affectedVersion"], "2.11.0")
+        self.assertIn("mis-stamped", retracted["activeAdvisory"]["detail"])
+        self.assertTrue(affected_2111["updateAvailable"])
+        self.assertEqual(affected_2111["activeAdvisory"]["affectedVersion"], "2.11.1")
+        self.assertTrue(mtplx_current["catalogCurrent"])
+        self.assertEqual(mtplx_current["releasedAt"], "2026-09-06T14:04:18Z")
         self.assertEqual(newer["state"], "newer-unreviewed")
+        self.assertIsNone(newer["activeAdvisory"])
         self.assertTrue(swift_current["catalogCurrent"])
         self.assertTrue(swift_previous["updateAvailable"])
+        self.assertTrue(whallm_current["catalogCurrent"])
+        self.assertEqual(whallm_current["activeAdvisory"]["affectedVersion"], "1.1.4")
+        self.assertEqual(whallm_current["releasedAt"], "2026-09-03T17:49:37Z")
+        self.assertEqual(
+            whallm_current["highlights"][0]["label"],
+            "M5 Pro MLX active memory",
+        )
+        self.assertTrue(whallm_previous["updateAvailable"])
+        self.assertEqual(whallm_previous["activeAdvisory"]["affectedVersion"], "1.1.2")
         self.assertEqual(unknown["state"], "unknown-local-version")
         self.assertEqual(missing["state"], "not-installed")
         self.assertEqual(update["auditedAt"], launcher.RUNTIME_RELEASE_CATALOG_AUDITED_AT)
-        self.assertEqual(update["releaseUrl"], "https://github.com/youssofal/MTPLX/releases/tag/v2.10.1")
-        self.assertEqual(launcher.RUNTIME_RELEASE_CATALOG_AUDITED_AT, "2026-08-31")
+        self.assertEqual(update["releaseUrl"], "https://github.com/youssofal/MTPLX/releases/tag/v2.11.2")
+        self.assertEqual(
+            update["commit"],
+            "21be78b3f51820eecef020e5e4855c0715eaf9a5",
+        )
+        self.assertEqual(launcher.RUNTIME_RELEASE_CATALOG_AUDITED_AT, "2026-09-07")
         self.assertEqual(launcher.RUNTIME_UPDATE_CATALOG["stable"]["version"], "0.6.4")
         self.assertEqual(
             launcher.RUNTIME_UPDATE_CATALOG["stable"]["sha256"],
@@ -11470,7 +13888,7 @@ for line in sys.stdin:
         old_model["backends"]["mtplx"]["runtimeVersion"] = "mtplx 2.8.3 (2.8.3)"
         advisory = launcher.launch_runtime_advisory("mtplx", old_model)
         self.assertEqual(advisory["id"], "mtplx-long-agent-update")
-        self.assertIn("visible answer", advisory["detail"])
+        self.assertIn("warm-turn", advisory["detail"])
         request = self.payload("mtplx", "pi", old_model)
         request["agentHost"] = "console"
         plan = launcher.normalized_request(request, [old_model])
@@ -11480,9 +13898,44 @@ for line in sys.stdin:
             advisory,
         )
 
+        prior_patch_model = json.loads(json.dumps(old_model))
+        prior_patch_model["backends"]["mtplx"]["runtimeVersion"] = "mtplx 2.10.1 (2.10.1)"
+        self.assertIn("postcommit", launcher.launch_runtime_advisory("mtplx", prior_patch_model)["detail"])
+
+        previous_release_model = json.loads(json.dumps(old_model))
+        previous_release_model["backends"]["mtplx"]["runtimeVersion"] = "mtplx 2.10.2 (2.10.2)"
+        self.assertIn(
+            "2.11.2",
+            launcher.launch_runtime_advisory("mtplx", previous_release_model)["detail"],
+        )
+
         fixed_model = json.loads(json.dumps(old_model))
-        fixed_model["backends"]["mtplx"]["runtimeVersion"] = "mtplx 2.10.1 (2.10.1)"
+        fixed_model["backends"]["mtplx"]["runtimeVersion"] = "mtplx 2.11.2 (2.11.2)"
         self.assertIsNone(launcher.launch_runtime_advisory("mtplx", fixed_model))
+
+    def test_mtplx_2111_does_not_reuse_prior_runtime_benchmark_evidence(self) -> None:
+        prior = {
+            "probeContract": copy.deepcopy(launcher.BENCHMARK_PROBE_CONTRACT),
+            "scope": "local",
+            "backend": "mtplx",
+            "modelFingerprint": "same-mtplx-model",
+            "runtimeVersion": "mtplx 2.10.2 (2.10.2)",
+            "hardwareFingerprint": "same-mac",
+        }
+        self.assertEqual(
+            launcher.matching_benchmark_records(
+                [prior], "mtplx", "same-mtplx-model",
+                "mtplx 2.10.2 (2.10.2)", {}, "same-mac",
+            ),
+            [prior],
+        )
+        self.assertEqual(
+            launcher.matching_benchmark_records(
+                [prior], "mtplx", "same-mtplx-model",
+                "mtplx 2.11.1 (2.11.1)", {}, "same-mac",
+            ),
+            [],
+        )
 
     def test_mtplx_290_turbo_benchmark_evidence_requires_retest(self) -> None:
         legacy = {"backend": "mtplx", "runtimeVersion": "mtplx 2.9.0"}
@@ -11786,6 +14239,28 @@ for line in sys.stdin:
         self.assertFalse(final_path_failed["verified"])
         self.assertEqual(final_path_failed["state"], "final-path-failed")
 
+    def test_runtime_smoke_requires_and_records_dflash_budget_patch(self) -> None:
+        target = Path(self.temp.name) / "runtime"
+        (target / "bin").mkdir(parents=True)
+        for name in ("omlx", "python"):
+            path = target / "bin" / name
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o700)
+        manager = launcher.RuntimeUpdateManager(launcher.RunManager(), launcher.BenchmarkManager(launcher.RunManager()))
+        release = {"version": "0.6.4"}
+        receipt = {"id": "dflash-thinking-budget-v1", "applied": False}
+        with mock.patch.object(launcher.dflash_budget_patch, "inspect", return_value=(None, None, receipt)), mock.patch.object(
+            manager, "_run_capture",
+        ) as run:
+            with self.assertRaisesRegex(RuntimeError, "missing.*thinking-budget patch"):
+                manager._smoke_runtime(target, release)
+            run.assert_not_called()
+        receipt = dict(receipt, applied=True)
+        with mock.patch.object(launcher.dflash_budget_patch, "inspect", return_value=(None, None, receipt)), mock.patch.object(
+            manager, "_run_capture", side_effect=[(0, "oMLX 0.6.4"), (0, "0.6.4"), (0, "No broken requirements found."), (0, "serve")],
+        ), mock.patch.object(launcher, "omlx_qwen_kernel_status", return_value={"ready": True}):
+            self.assertEqual(manager._smoke_runtime(target, release)["localPatches"], [receipt])
+
     def test_runtime_verification_writes_manifest_without_switching_selection(self) -> None:
         managed_root = Path(self.temp.name) / "runtimes"
         update_root = Path(self.temp.name) / "runtime-updates"
@@ -11833,6 +14308,7 @@ for line in sys.stdin:
 
     def test_runtime_promotion_plan_binds_two_exact_copies_without_side_effects(self) -> None:
         model = copy.deepcopy(self.models[0])
+        self._prepare_runtime_promotion_model(model)
         model["backends"]["omlx"].update({
             "benchmarkModelFingerprint": "a" * 64,
             "runtimeVersion": "omlx 0.6.3rc2",
@@ -11866,8 +14342,24 @@ for line in sys.stdin:
         with mock.patch.object(launcher, "runtime_candidate_details", return_value=details), mock.patch.object(
             launcher, "hardware_fingerprint", return_value="promotion-mac",
         ):
-            plan = launcher.build_runtime_promotion_plan(payload, [model])
+            plan = launcher.build_runtime_promotion_plan(
+                payload, [model],
+                resource_snapshot=self._runtime_promotion_ready_resource(),
+            )
+            blocked_plan = launcher.build_runtime_promotion_plan(
+                payload, [model],
+                resource_snapshot={
+                    "memoryAvailable": True,
+                    "totalBytes": 48 * 1024**3,
+                    "freePercent": 1.0,
+                    "metalWiredLimitBytes": 0,
+                },
+            )
         self.assertTrue(plan["canStart"])
+        self.assertEqual(plan["memoryAdmission"]["decision"], "ready")
+        self.assertEqual(blocked_plan["id"], plan["id"])
+        self.assertFalse(blocked_plan["canStart"])
+        self.assertNotEqual(blocked_plan["memoryAdmission"]["decision"], "ready")
         self.assertEqual(plan["selected"]["id"], "selected-copy")
         self.assertEqual(plan["candidate"]["id"], "candidate-copy")
         self.assertTrue(plan["candidate"]["officialVerified"])
@@ -11877,6 +14369,20 @@ for line in sys.stdin:
         self.assertEqual(plan["workload"]["modelLoads"], 2)
         self.assertEqual(plan["executionOrder"], ["selected", "candidate"])
         self.assertFalse(launcher.runtime_promotion_store_path().exists())
+
+        manager = launcher.RuntimePromotionManager(launcher.RunManager())
+        manager.plans[plan["id"]] = {
+            "expires": time.time() + 60,
+            "request": copy.deepcopy(payload),
+            "plan": copy.deepcopy(plan),
+        }
+        with mock.patch.object(
+            launcher, "build_runtime_promotion_plan", return_value=blocked_plan,
+        ), self.assertRaisesRegex(ValueError, "capacity|memory|headroom|reserve"):
+            manager._validated_start_plan({
+                "planId": plan["id"], "confirmation": plan["confirmation"],
+                "reviewed": True,
+            }, [model])
 
         details[1]["managedVerification"] = {"verified": False}
         with mock.patch.object(launcher, "runtime_candidate_details", return_value=details), self.assertRaisesRegex(
@@ -11905,6 +14411,22 @@ for line in sys.stdin:
         self.assertEqual(plan.runtime_binary, str(target.resolve()))
         self.assertEqual(plan.engine_argv[0], str(target.resolve()))
         self.assertEqual(launcher.BINARIES["omlx"], selected_before)
+
+    @staticmethod
+    def _prepare_runtime_promotion_model(model: dict) -> None:
+        model["memoryGeometry"] = {
+            "ready": True, "layers": 8, "fullAttentionLayers": 8,
+            "kvHeads": 8, "headDimension": 64,
+        }
+
+    @staticmethod
+    def _runtime_promotion_ready_resource() -> dict:
+        return {
+            "memoryAvailable": True,
+            "totalBytes": 128 * 1024**3,
+            "freePercent": 95.0,
+            "metalWiredLimitBytes": 0,
+        }
 
     @staticmethod
     def _runtime_promotion_fixture_result(speed: float, cooldown: str, quality: str = "a") -> dict:
@@ -11942,6 +14464,7 @@ for line in sys.stdin:
 
     def test_runtime_promotion_result_requires_quality_speed_and_resource_guards(self) -> None:
         model = copy.deepcopy(self.models[0])
+        self._prepare_runtime_promotion_model(model)
         model["backends"]["omlx"].update({
             "benchmarkModelFingerprint": "b" * 64,
             "runtimeVersion": "omlx 0.6.2",
@@ -11960,7 +14483,10 @@ for line in sys.stdin:
         with mock.patch.object(launcher, "runtime_candidate_details", return_value=details), mock.patch.object(
             launcher, "hardware_fingerprint", return_value="promotion-mac",
         ):
-            plan = launcher.build_runtime_promotion_plan(payload, [model])
+            plan = launcher.build_runtime_promotion_plan(
+                payload, [model],
+                resource_snapshot=self._runtime_promotion_ready_resource(),
+            )
             trusted = launcher.build_runtime_promotion_result(plan, {
                 "selected": self._runtime_promotion_fixture_result(100, "reference-ready"),
                 "candidate": self._runtime_promotion_fixture_result(110, "ready"),
@@ -11988,6 +14514,7 @@ for line in sys.stdin:
 
     def test_runtime_promotion_worker_saves_only_complete_evidence_and_never_selects(self) -> None:
         model = copy.deepcopy(self.models[0])
+        self._prepare_runtime_promotion_model(model)
         model["backends"]["omlx"].update({
             "benchmarkModelFingerprint": "d" * 64,
             "runtimeVersion": "omlx 0.6.2",
@@ -12006,7 +14533,10 @@ for line in sys.stdin:
         with mock.patch.object(launcher, "runtime_candidate_details", return_value=details), mock.patch.object(
             launcher, "hardware_fingerprint", return_value="promotion-worker-mac",
         ):
-            plan = launcher.build_runtime_promotion_plan(payload, [model])
+            plan = launcher.build_runtime_promotion_plan(
+                payload, [model],
+                resource_snapshot=self._runtime_promotion_ready_resource(),
+            )
         manager = launcher.RuntimePromotionManager(launcher.RunManager())
         manager.state = {
             "phase": "queued", "message": "Queued", "progress": 0.0,
@@ -12044,6 +14574,7 @@ for line in sys.stdin:
 
     def test_runtime_promotion_worker_discards_partial_evidence_after_failure(self) -> None:
         model = copy.deepcopy(self.models[0])
+        self._prepare_runtime_promotion_model(model)
         model["backends"]["omlx"].update({
             "benchmarkModelFingerprint": "f" * 64,
             "runtimeVersion": "omlx 0.6.2",
@@ -12062,7 +14593,10 @@ for line in sys.stdin:
         with mock.patch.object(launcher, "runtime_candidate_details", return_value=details), mock.patch.object(
             launcher, "hardware_fingerprint", return_value="promotion-failure-mac",
         ):
-            plan = launcher.build_runtime_promotion_plan(payload, [model])
+            plan = launcher.build_runtime_promotion_plan(
+                payload, [model],
+                resource_snapshot=self._runtime_promotion_ready_resource(),
+            )
         manager = launcher.RuntimePromotionManager(launcher.RunManager())
         manager.state = {
             "phase": "queued", "message": "Queued", "progress": 0.0,
@@ -12220,13 +14754,55 @@ for line in sys.stdin:
         deleted = launcher.delete_launch_profile({"id": profile["id"]}, self.models)
         self.assertEqual(deleted["profiles"], [])
 
+    def test_profiles_preserve_fixed_omlx_controls_when_another_engine_wins(self) -> None:
+        model = copy.deepcopy(self.models[0])
+        model["backends"]["omlx"]["aneTuningVerified"] = True
+        request = self.payload("mtplx", "pi", model)
+        request["options"].update({"anePrefill": "tuned", "memoryGuard": "balanced"})
+        binding = {
+            "scope": "engine", "suite": "quick", "preference": "throughput",
+            "shootoutId": "profile-fixed-controls",
+            "recordIds": {"omlx": "profile-omlx", "mtplx": "profile-mtplx"},
+        }
+        with mock.patch.object(launcher, "best_engine_request", return_value={
+            "backend": "mtplx", "engineEvidenceTier": "cross-engine-local-benchmark",
+            "engineEvidenceBinding": binding,
+        }):
+            inventory = launcher.save_launch_profile({
+                "name": "Fixed comparison controls", "enginePolicy": "measured",
+                "request": request, "evidenceBinding": binding,
+            }, [model])
+            self.assertTrue(inventory["profiles"][0]["ready"])
+            reloaded = launcher.launch_profile_inventory([model])["profiles"][0]
+        self.assertTrue(reloaded["ready"], reloaded["reason"])
+        self.assertEqual(reloaded["request"]["backend"], "mtplx")
+        self.assertEqual(reloaded["request"]["options"]["anePrefill"], "tuned")
+        self.assertEqual(reloaded["request"]["options"]["memoryGuard"], "balanced")
+        model["backends"]["omlx"]["aneTuningVerified"] = False
+        fixed = launcher.validated_launch_profile_request(request, [model])
+        self.assertNotIn("anePrefill", fixed["options"],
+                         "Unrelated runtime controls must not change a fixed route's identity")
+        bad = copy.deepcopy(request)
+        bad["options"]["anePrefill"] = "unverified"
+        with self.assertRaisesRegex(ValueError, "ANE prefill"):
+            launcher.validated_launch_profile_request(bad, [model], preserve_comparison_controls=True)
+
     def test_auto_launch_profiles_recheck_measured_engine_evidence_and_fail_closed(self) -> None:
         request = self.payload("mtplx", "pi", self.models[0])
+        binding = {
+            "scope": "engine", "suite": "quick", "preference": "responsive",
+            "shootoutId": "measured-profile-shootout",
+            "recordIds": {
+                "mtplx": "measured-profile-mtplx",
+                "omlx": "measured-profile-omlx",
+            },
+        }
         measured_result = {
             "backend": "omlx", "engineChanged": True,
             "engineEvidenceTier": "cross-engine-local-benchmark",
             "engineEvidenceLabel": "Fastest total · locally measured",
             "engineRationale": ["oMLX completed the matching local workload fastest."],
+            "engineEvidenceBinding": binding,
         }
         with mock.patch.object(launcher, "best_engine_request", return_value=measured_result) as measured:
             inventory = launcher.save_launch_profile({
@@ -12239,6 +14815,7 @@ for line in sys.stdin:
         self.assertTrue(profile["ready"])
         self.assertTrue(profile["resolution"]["trustedWinner"])
         self.assertEqual(profile["resolution"]["backend"], "omlx")
+        self.assertEqual(profile["evidenceBinding"], binding)
         self.assertEqual(measured.call_args.args[0]["enginePreference"], "responsive")
 
         with mock.patch.dict(launcher.BINARIES, {"mtplx": None}):
@@ -12274,6 +14851,16 @@ for line in sys.stdin:
             "sampling": "custom", "temperature": 0.2,
             "topP": 0.9, "topK": 20, "seed": 7,
         }
+        attached.chat = launcher.validated_chat_settings(
+            attached.model, {"chat": attached.chat}, "chat",
+        )
+        attached.sampling_contract = launcher.sampling_contract_from_settings(
+            attached.model, attached.chat,
+        )
+        attached.sampling_enforcement = launcher.sampling_route_enforcement(
+            attached.backend, "chat", attached.model["backends"][attached.backend],
+            attached.sampling_contract,
+        )
         manager = launcher.RunManager()
         manager.plan = owner
         manager.state = {
@@ -12590,6 +15177,44 @@ for line in sys.stdin:
         self.assertIn("loaded one model", final["message"])
         start.assert_called_once()
 
+    def test_session_set_rechecks_capacity_immediately_before_model_load(self) -> None:
+        request = self.payload("mtplx", "chat", self.model_for("mtplx"))
+        launch_plan = launcher.normalized_request(request, self.models)
+        opening = {
+            "ready": True, "mode": "launch",
+            "confirmation": "session-set:live-capacity",
+            "admission": {
+                "decision": "ready", "launchable": True,
+                "requiresAcknowledgement": False,
+            },
+            "requiresExperimentalApproval": False,
+            "ownerRunId": None,
+            "_record": {"baseRequest": request},
+            "_restartSurfaceIds": [], "_missingRequests": [],
+        }
+        run_manager = launcher.RunManager()
+        runner = launcher.SessionSetRunner(run_manager)
+        payload = {
+            "confirmation": opening["confirmation"],
+            "memoryAcknowledgement": "reviewed-live-contract",
+        }
+        with mock.patch.object(
+            launcher, "build_session_set_open_plan", return_value=opening,
+        ), mock.patch.object(
+            launcher, "normalized_request", return_value=launch_plan,
+        ), mock.patch.object(
+            launcher, "require_live_model_load_admission",
+            side_effect=ValueError("Capacity changed before Session Set load"),
+        ) as admission, mock.patch.object(
+            launcher, "dispose_plan_secrets",
+        ) as dispose, mock.patch.object(run_manager, "start") as start:
+            with self.assertRaisesRegex(ValueError, "Capacity changed"):
+                runner.start(payload, self.models)
+        start.assert_not_called()
+        dispose.assert_called_once_with(launch_plan)
+        self.assertEqual(admission.call_args.kwargs["purpose"], "session-set")
+        self.assertIs(admission.call_args.kwargs["approval_payload"], payload)
+
     def test_active_session_set_owns_operation_sequencing(self) -> None:
         active_runner = mock.Mock()
         active_runner.is_active.return_value = True
@@ -12618,9 +15243,9 @@ for line in sys.stdin:
         self.assertTrue(plan["ready"])
         self.assertEqual(plan["action"], "measure")
         self.assertEqual(plan["eligibleEngineCount"], 3)
-        self.assertEqual(plan["routeCount"], 17)
-        self.assertEqual(plan["modelReloadCount"], 17)
-        self.assertEqual(plan["measuredRequestCount"], 102)
+        self.assertEqual(plan["routeCount"], 29)
+        self.assertEqual(plan["modelReloadCount"], 29)
+        self.assertEqual(plan["measuredRequestCount"], 174)
         self.assertTrue(plan["countsAreMaximum"])
         self.assertEqual(plan["request"]["reasoning"], "auto")
         self.assertEqual(plan["request"]["options"]["fan"], "smart")
@@ -12645,14 +15270,14 @@ for line in sys.stdin:
         self.assertIn("model-controlled reasoning", lmstudio["reason"])
         self.assertNotIn("no reasoning", lmstudio["reason"].lower())
         self.assertEqual(lmstudio["settingsLabel"], "Full GPU · 1 request lane")
-        self.assertEqual(lmstudio["measurementRouteCount"], 11)
+        self.assertEqual(lmstudio["measurementRouteCount"], 13)
         self.assertEqual(
             [item["label"] for item in lmstudio["modes"]], ["AR", "MTP tuned ≤10"],
         )
         self.assertIn("up to 10 bounded MTP", lmstudio["modeDetail"])
         mtplx = next(item for item in plan["engines"] if item["backend"] == "mtplx")
         self.assertEqual(mtplx["settingsLabel"], "Sustained profile · automatic cooling")
-        self.assertEqual(mtplx["measurementRouteCount"], 4)
+        self.assertEqual(mtplx["measurementRouteCount"], 8)
         self.assertEqual(
             [item["label"] for item in mtplx["modes"]], ["AR", "MTP D1–D3"],
         )
@@ -14302,6 +16927,10 @@ for line in sys.stdin:
         }
 
         def measured_result(*_args: object, **kwargs: object) -> dict[str, object]:
+            prompt = _args[1] if len(_args) > 1 else None
+            if isinstance(prompt, list) and len(prompt) >= 4:
+                self.assertIn("prompt tokens", manager.snapshot()["message"])
+                self.assertIn("TPS updates", manager.snapshot()["message"])
             value = copy.deepcopy(sample)
             if kwargs.get("correctness_expected") is not None:
                 value["thinkingBudgetTokensRequested"] = 0
@@ -14425,6 +17054,31 @@ for line in sys.stdin:
         self.assertEqual(group["processGroupMemberCount"], 2)
         self.assertEqual(group["processGroupPhysicalFootprintBytes"], 2_030)
         self.assertEqual(group["processGroupLifetimePeakPhysicalFootprintBytes"], 4_060)
+
+    def test_darwin_footprint_keeps_current_when_kernel_peak_temporarily_lags(self) -> None:
+        for current, peak, returncode, available in (
+            (26_575_136, 26_542_368, 0, True),
+            (10, 20, 0, True),
+            (0, 20, 0, False),
+            (10, 0, 0, False),
+            (10, 20, -1, False),
+        ):
+            with self.subTest(current=current, peak=peak, returncode=returncode):
+                def read(_pid, _flavor, pointer):
+                    value = pointer._obj
+                    value.ri_phys_footprint = current
+                    value.ri_lifetime_max_phys_footprint = peak
+                    return returncode
+                library = mock.Mock()
+                library.proc_pid_rusage.side_effect = read
+                with mock.patch.object(launcher.sys, "platform", "darwin"), mock.patch.object(
+                    launcher.ctypes, "CDLL", return_value=library,
+                ):
+                    result = launcher.darwin_process_physical_footprint(123)
+                self.assertEqual(result["processFootprintAvailable"], available)
+                if available:
+                    self.assertEqual(result["processPhysicalFootprintBytes"], current)
+                    self.assertEqual(result["processLifetimePeakPhysicalFootprintBytes"], max(current, peak))
 
     def test_cross_engine_requests_do_not_inherit_the_applied_mtplx_mtp_route(self) -> None:
         model = copy.deepcopy(self.models[0])
@@ -14566,6 +17220,138 @@ for line in sys.stdin:
         self.assertEqual(mtplx_job["options"]["fan"], "max")
         self.assertEqual(mtplx_job["evidence"]["engineSettings"]["fan"], "max")
 
+    def test_tuned_ane_calibration_excludes_dflash_before_planning(self) -> None:
+        model = self.dflash_calibration_model()
+        request = self.payload("omlx", "chat", model)
+        request.update({
+            "suite": "quick", "enginePreference": "throughput",
+            "reasoning": "auto",
+        })
+        request["options"].update({
+            "acceleration": "auto", "anePrefill": "tuned",
+        })
+
+        direct_job = launcher.validated_benchmark_request(request, [model])
+        self.assertEqual(direct_job["modes"], ["ar", "mtp"])
+        self.assertEqual(direct_job["options"]["anePrefill"], "tuned")
+        self.assertEqual(
+            direct_job["evidence"]["engineSettings"]["anePrefill"], "tuned",
+        )
+        launcher.prepare_calibration_tuning_plan(direct_job)
+        self.assertNotIn("calibrationTuningPlan", direct_job)
+        self.assertEqual(launcher.benchmark_job_maximum_route_count(direct_job), 2)
+        with self.assertRaisesRegex(ValueError, "tuned ANE prefill is locked"):
+            launcher.validated_dflash2_tuning_request(request, [model])
+
+        shootout = launcher.validated_engine_shootout_request(request, [model])
+        omlx_job = next(
+            job for job in shootout["jobs"] if job["backend"] == "omlx"
+        )
+        self.assertEqual(omlx_job["modes"], ["ar", "mtp"])
+        self.assertNotIn("calibrationTuningPlan", omlx_job)
+        self.assertEqual(launcher.benchmark_job_maximum_route_count(omlx_job), 8)
+
+        plan = launcher.calibration_plan(request, [model])
+        self.assertTrue(plan["ready"])
+        omlx = next(
+            engine for engine in plan["engines"] if engine["backend"] == "omlx"
+        )
+        self.assertEqual([mode["id"] for mode in omlx["modes"]], ["ar", "mtp"])
+        self.assertEqual(omlx["measurementRouteCount"], 8)
+        self.assertIn(
+            launcher.OMLX_DFLASH_TUNED_ANE_EXCLUSION_DETAIL,
+            omlx["modeDetail"],
+        )
+        self.assertIn("tested route wins", omlx["modeDetail"])
+
+        def sample(speed: float, prompt: int) -> dict:
+            return {
+                "promptTokens": prompt, "completionTokens": 128,
+                "ttftSeconds": 0.2, "totalSeconds": 1.0,
+                "decodeTokensPerSecond": speed,
+                "endToEndTokensPerSecond": speed,
+            }
+
+        results = {
+            "ar": {
+                "label": "AR", "qualityHash": "same",
+                "qualityCompletionTokens": 64,
+                "medianTTFT": 0.2, "medianDecodeTokensPerSecond": 10,
+                "medianEndToEndTokensPerSecond": 10,
+                "samples": [sample(10, 512), sample(10, 2_048)],
+            },
+            "mtp": {
+                "label": "MTP", "qualityHash": "same",
+                "qualityCompletionTokens": 64,
+                "medianTTFT": 0.2, "medianDecodeTokensPerSecond": 12,
+                "medianEndToEndTokensPerSecond": 12,
+                "samples": [sample(12, 512), sample(12, 2_048)],
+            },
+        }
+        manager = launcher.BenchmarkManager(launcher.RunManager())
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="ane-dflash-test-mac",
+        ):
+            record = manager._build_record(direct_job, results)
+            self.assertTrue(launcher._local_benchmark_record_verified(
+                direct_job["model"]["backends"]["omlx"],
+                record,
+                direct_job["evidence"],
+            ))
+            mismatched = copy.deepcopy(record)
+            mismatched["engineSettings"]["anePrefill"] = "off"
+            self.assertFalse(launcher._local_benchmark_record_verified(
+                direct_job["model"]["backends"]["omlx"],
+                mismatched,
+                direct_job["evidence"],
+            ))
+            legacy = copy.deepcopy(record)
+            legacy["comparisonContractVersion"] = 2
+            self.assertFalse(launcher._local_benchmark_record_verified(
+                direct_job["model"]["backends"]["omlx"],
+                legacy,
+                direct_job["evidence"],
+            ))
+
+    def test_ane_off_calibration_still_searches_dflash(self) -> None:
+        model = self.dflash_calibration_model()
+        request = self.payload("omlx", "chat", model)
+        request.update({
+            "suite": "quick", "enginePreference": "throughput",
+            "reasoning": "auto",
+        })
+        request["options"].update({
+            "acceleration": "auto", "anePrefill": "off",
+        })
+
+        direct_job = launcher.validated_benchmark_request(request, [model])
+        self.assertEqual(direct_job["modes"], ["ar", "mtp", "dflash2"])
+        launcher.prepare_calibration_tuning_plan(direct_job)
+        self.assertIn("calibrationTuningPlan", direct_job)
+        self.assertEqual(
+            launcher.benchmark_job_maximum_route_count(direct_job), 12,
+        )
+
+        plan = launcher.calibration_plan(request, [model])
+        omlx = next(
+            engine for engine in plan["engines"] if engine["backend"] == "omlx"
+        )
+        self.assertEqual(
+            [mode["id"] for mode in omlx["modes"]],
+            ["ar", "mtp", "dflash2"],
+        )
+        self.assertEqual(omlx["measurementRouteCount"], 21)
+        self.assertEqual(omlx["settingsSearch"]["kind"], "runtime-and-route")
+        self.assertEqual(omlx["settingsSearch"]["maximumSetupCount"], 21)
+        self.assertEqual(omlx["settingsSearch"]["maximumCandidateCount"], 17)
+        self.assertIn("Burst preset", omlx["settingsSearch"]["axes"])
+        self.assertNotIn("candidates", omlx["settingsSearch"])
+        self.assertIn("searches up to 10 bounded DFlash", omlx["modeDetail"])
+        self.assertNotIn(
+            launcher.OMLX_DFLASH_TUNED_ANE_EXCLUSION_DETAIL,
+            omlx["modeDetail"],
+        )
+
     def test_cross_engine_calibration_uses_bounded_tuners_and_exact_candidate_settings(self) -> None:
         model = copy.deepcopy(self.models[0])
         for backend, capability in model["backends"].items():
@@ -14580,9 +17366,27 @@ for line in sys.stdin:
             [model],
         )
         lm_job["shootoutId"] = "adaptive-calibration"
+        lm_job["enginePreference"] = "throughput"
         launcher.prepare_calibration_tuning_plan(lm_job)
         self.assertEqual(
             lm_job["calibrationTuningPlan"]["maximumModelLoads"], 11,
+        )
+        self.assertEqual(
+            launcher.public_benchmark_settings_search_plan(lm_job),
+            {
+                "version": 1, "kind": "lmstudio-mtp",
+                "label": "MTP settings", "strategy": "bounded",
+                "maximumSetupCount": 11, "maximumCandidateCount": 10,
+                "referenceSetupCount": 1,
+                "axes": [
+                    "MTP draft depth", "minimum draft tokens",
+                    "continuation cutoff",
+                ],
+            },
+        )
+        self.assertEqual(
+            lm_job["calibrationTuningPlan"]["selectionMetric"],
+            "generation-tokens-per-second",
         )
         exact_mtp = {
             "depth": 2, "mtpMinTokens": 1,
@@ -14614,9 +17418,22 @@ for line in sys.stdin:
             [model],
         )
         omlx_job["shootoutId"] = "adaptive-calibration"
+        omlx_job["enginePreference"] = "throughput"
         launcher.prepare_calibration_tuning_plan(omlx_job)
         self.assertLessEqual(
             omlx_job["calibrationTuningPlan"]["maximumModelLoads"], 12,
+        )
+        omlx_search = launcher.public_benchmark_settings_search_plan(omlx_job)
+        self.assertEqual(omlx_search["kind"], "omlx-dflash2")
+        self.assertEqual(omlx_search["maximumSetupCount"], 12)
+        self.assertEqual(omlx_search["maximumCandidateCount"], 10)
+        self.assertEqual(omlx_search["referenceSetupCount"], 2)
+        self.assertEqual(omlx_search["axes"], [
+            "DFlash block size", "verification mode", "draft precision",
+        ])
+        self.assertEqual(
+            omlx_job["calibrationTuningPlan"]["selectionMetric"],
+            "generation-tokens-per-second",
         )
         exact_dflash = {
             "blockSize": 6, "verifyMode": "dflash", "draftQuant": "q4",
@@ -14627,6 +17444,210 @@ for line in sys.stdin:
         self.assertEqual(omlx_payload["options"]["depth"], 6)
         self.assertEqual(omlx_payload["options"]["dflashVerify"], "dflash")
         self.assertEqual(omlx_payload["options"]["dflashDraftQuant"], "q4")
+
+        for source in (lm_job, omlx_job):
+            with self.subTest(outer_search=source["backend"]):
+                search_manager = launcher.BenchmarkManager(mock.Mock())
+                job = copy.deepcopy(source)
+                calls = []
+
+                def measured(value, _models, mode, completed, _total, gate, **_kwargs):
+                    options = search_manager._mode_payload(value, mode)["options"]
+                    settings = search_manager._mode_settings(value, mode, options)
+                    calls.append((copy.deepcopy(value["evidence"]["engineSettings"]), mode, settings))
+                    alternative = options.get("gpu") == "off" if value["backend"] == "lmstudio" else options.get("burst") == "aggressive"
+                    speed = 10.0 if mode == "ar" else 15.0 if mode == "mtp" else 20.0
+                    if alternative:
+                        speed *= 0.8 if mode == "ar" else 2.0
+                    samples = [
+                        {"targetPromptTokens": target, "repetition": repetition + 1,
+                         "promptTokens": target, "completionTokens": 64,
+                         "ttftSeconds": 0.2, "totalSeconds": 64 / speed,
+                         "decodeTokensPerSecond": speed, "endToEndTokensPerSecond": speed,
+                         "outputHash": "a" * 64}
+                        for target in value["suite"]["promptTokens"]
+                        for repetition in range(value["suite"]["repetitions"])
+                    ]
+                    return {
+                        "label": mode, "settings": settings,
+                        "qualityHash": "b" * 64, "qualityCompletionTokens": 64,
+                        "medianTTFT": 0.2, "medianDecodeTokensPerSecond": speed,
+                        "medianEndToEndTokensPerSecond": speed, "samples": samples,
+                        "resourceCooldown": copy.deepcopy(gate),
+                    }, completed + 2 + len(samples)
+
+                with mock.patch.object(launcher, "hardware_fingerprint", return_value="adaptive-mac"), mock.patch.object(
+                    search_manager, "_measure_mode", side_effect=measured,
+                ), mock.patch.object(search_manager, "_wait_for_resource_baseline", return_value={"status": "ready", "reference": {}}):
+                    launcher.prepare_engine_settings_sweep(job)
+                    result, count, _ = search_manager._shootout_settings_search(job, [model], 0, 100, None)
+                    capability = model["backends"][job["backend"]]
+                    self.assertTrue(launcher._local_benchmark_record_verified(capability, result, job["evidence"]))
+                    self.assertEqual(count, 4 * len(calls))
+                    public = launcher.public_benchmark_settings_search_result(result)
+                    self.assertEqual(public["testedSetupCount"], len(calls))
+                    self.assertLessEqual(len(calls), public["maximumSetupCount"])
+                    self.assertNotIn("records", public)
+                    sweep = result["engineSettingsSweep"]
+                    self.assertNotEqual(sweep["selectedCandidateKey"], sweep["tuningReferenceKey"])
+                    self.assertEqual(result["engineSettings"].get("gpu", result["engineSettings"].get("burst")),
+                                     "off" if job["backend"] == "lmstudio" else "aggressive")
+                    tuned = sweep["records"][sweep["tuningReferenceKey"]]
+                    for nested in sweep["records"].values():
+                        self.assertEqual(nested["modeSettings"], tuned["modeSettings"])
+                    self.assertEqual(result["winner"], "mtp" if job["backend"] == "lmstudio" else "dflash2")
+
+                    bad_job = copy.deepcopy(job)
+                    bad_job["engineSettingsSweep"]["candidates"][0]["settings"]["fan"] = "max"
+                    before = len(calls)
+                    with self.assertRaisesRegex(RuntimeError, "plan changed"):
+                        search_manager._shootout_settings_search(bad_job, [model], 0, 100, None)
+                    self.assertEqual(len(calls), before, "invalid plan must fail before any model load")
+
+                    cancelled = launcher.BenchmarkManager(mock.Mock())
+                    cancel_after = len(calls) + len(job["engineSettingsSweep"]["candidates"]) + 1
+
+                    def cancel_during_acceleration(*args, **kwargs):
+                        output = measured(*args, **kwargs)
+                        if len(calls) == cancel_after:
+                            cancelled.cancel_event.set()
+                        return output
+
+                    with mock.patch.object(cancelled, "_measure_mode", side_effect=cancel_during_acceleration), mock.patch.object(
+                        cancelled, "_wait_for_resource_baseline", return_value={"status": "ready", "reference": {}},
+                    ), mock.patch.object(launcher, "save_benchmark_records") as partial_save:
+                        cancelled._shootout_worker({"jobs": [job]}, [model])
+                    self.assertEqual(cancelled.snapshot()["phase"], "cancelled")
+                    self.assertEqual(len(calls), cancel_after)
+                    partial_save.assert_not_called()
+
+    def test_public_tuning_search_result_is_small_and_normalized(self) -> None:
+        cases = [
+            ({
+                "backend": "lmstudio", "winner": "mtp",
+                "settings": {
+                    "depth": 3, "mtpMinTokens": 1,
+                    "mtpMinContinueProbability": 0.25,
+                },
+                "tuningSweep": {
+                    "candidateCount": 6, "maximumCandidates": "legacy-unknown",
+                    "candidates": [{"private": "not public"}] * 6,
+                },
+            }, "lmstudio-mtp", "MTP D3 · min 1 · cutoff 0.25", 7, 11),
+            ({
+                "backend": "omlx", "winner": "dflash2",
+                "settings": {
+                    "blockSize": 8, "verifyMode": "dflash",
+                    "draftQuant": "q4",
+                },
+                "tuningSweep": {
+                    "candidateCount": 5, "maximumCandidates": 10,
+                    "baselineModes": ["ar", "mtp"],
+                    "candidates": [{"private": "not public"}] * 5,
+                },
+            }, "omlx-dflash2", "DFlash block 8 · dflash · q4", 7, 12),
+            ({
+                "backend": "mtplx", "winner": "mtp",
+                "settings": {"depth": 2},
+                "mtpDepthSweep": {
+                    "candidateCount": 3, "depthCandidates": [3, 1, 2],
+                    "candidates": [{"private": "not public"}] * 3,
+                },
+            }, "mtplx-depth", "MTP depth D2", 4, 4),
+            ({
+                "backend": "mtplx", "winner": "mtp",
+                "settings": {
+                    "depth": 3,
+                    "mtplxOperatorRoute": launcher.MTPLX_LONG_CONTEXT_2111_ROUTE,
+                },
+                "mtplxOperatorSweep": {
+                    "candidates": [{"route": "default"}, {"route": "2.11"}],
+                },
+                "mtpDepthSweep": {
+                    "candidateCount": 7, "depthCandidates": list(range(1, 8)),
+                },
+            }, "mtplx-operator", "MTP D3 · 2.11 long-context", 3, 3),
+        ]
+        for record, kind, selected, tested, maximum in cases:
+            with self.subTest(kind=kind):
+                public = launcher.public_benchmark_settings_search_result(record)
+                self.assertEqual(public["kind"], kind)
+                self.assertEqual(public["selectedSetupLabel"], selected)
+                self.assertEqual(public["testedSetupCount"], tested)
+                self.assertEqual(public["maximumSetupCount"], maximum)
+                self.assertNotIn("candidates", public)
+                self.assertNotIn("selectedSettings", public)
+
+    def test_calibration_route_tuning_uses_generation_tps_for_throughput_goal(self) -> None:
+        manager = launcher.BenchmarkManager(mock.Mock())
+
+        def measured(settings: dict, decode: float, end_to_end: float) -> dict:
+            samples = [
+                {
+                    "promptTokens": target, "completionTokens": 64,
+                    "ttftSeconds": 0.2, "totalSeconds": 64 / end_to_end,
+                    "decodeTokensPerSecond": decode,
+                    "endToEndTokensPerSecond": end_to_end,
+                }
+                for target in (512, 2_048)
+            ]
+            return {
+                "settings": settings,
+                "qualityHash": "metric-contract",
+                "qualityCompletionTokens": 64,
+                "medianDecodeTokensPerSecond": decode,
+                "medianEndToEndTokensPerSecond": end_to_end,
+                "samples": samples,
+            }
+
+        baseline = measured({}, 10.0, 10.0)
+        decode_winner = measured({
+            "depth": 2, "mtpMinTokens": 1,
+            "mtpMinContinueProbability": 0.25,
+        }, 15.0, 11.0)
+        total_winner = measured({
+            "depth": 3, "mtpMinTokens": 1,
+            "mtpMinContinueProbability": 0.25,
+        }, 12.0, 16.0)
+
+        generation_candidates = [
+            manager._mtp_tuning_candidate_summary(
+                baseline, result, "depth", "ready",
+                "generation-tokens-per-second",
+            )
+            for result in (decode_winner, total_winner)
+        ]
+        total_candidates = [
+            manager._mtp_tuning_candidate_summary(
+                baseline, result, "depth", "ready",
+                "end-to-end-tokens-per-second",
+            )
+            for result in (decode_winner, total_winner)
+        ]
+
+        self.assertEqual(
+            manager._best_tuning_candidate(generation_candidates)["settings"]["depth"],
+            2,
+        )
+        self.assertEqual(
+            manager._best_tuning_candidate(total_candidates)["settings"]["depth"],
+            3,
+        )
+        self.assertTrue(all(
+            candidate["selectionMetric"] == "generation-tokens-per-second"
+            and candidate["medianDecodeTokensPerSecond"] > 0
+            and candidate["medianEndToEndTokensPerSecond"] > 0
+            for candidate in generation_candidates
+        ))
+        self.assertTrue(launcher.benchmark_record_matches_selection_preference(
+            {"selectionPreference": "throughput"}, "throughput",
+        ))
+        self.assertFalse(launcher.benchmark_record_matches_selection_preference(
+            {"selectionPreference": "throughput"}, "fastest",
+        ))
+        self.assertTrue(launcher.benchmark_record_matches_selection_preference(
+            {}, "throughput",
+        ))
 
     def test_lmstudio_calibration_keeps_required_depths_after_optional_cooldown_timeout(self) -> None:
         model = copy.deepcopy(self.models[0])
@@ -15295,10 +18316,20 @@ for line in sys.stdin:
             request.get_header("Authorization"),
             f"Bearer {attachment.plan.secrets['clientApiKey']}",
         )
-        attached_settings = manager.update_chat_settings({
-            "runId": owner.run_id, "attachmentId": public["id"],
-            "chat": {"systemPrompt": "Updated attached Chat.", "sampling": "model"},
-        })
+        with mock.patch.object(manager, "_session_proxy_api") as relay_api:
+            attached_settings = manager.update_chat_settings({
+                "runId": owner.run_id, "attachmentId": public["id"],
+                "chat": {"systemPrompt": "Updated attached Chat.", "sampling": "model"},
+            })
+        relay_api.assert_called_once()
+        relay_surface = relay_api.call_args.args[2]["surface"]
+        self.assertEqual(relay_surface["id"], public["id"])
+        self.assertEqual(
+            relay_surface["samplingContract"], attachment.plan.sampling_contract,
+        )
+        self.assertEqual(
+            relay_surface["samplingEnforcement"], attachment.plan.sampling_enforcement,
+        )
         self.assertEqual(attached_settings["attachmentId"], public["id"])
         self.assertEqual(attachment.plan.chat["systemPrompt"], "Updated attached Chat.")
         self.assertEqual(owner.chat, {})
@@ -15311,7 +18342,14 @@ for line in sys.stdin:
             next_body["messages"][0],
             {"role": "system", "content": "Updated attached Chat."},
         )
-        self.assertNotIn("temperature", next_body)
+        self.assertEqual(
+            {key: next_body[key] for key in ("temperature", "top_p", "top_k")},
+            {
+                "temperature": owner.model["defaultSampling"]["temperature"],
+                "top_p": owner.model["defaultSampling"]["top_p"],
+                "top_k": owner.model["defaultSampling"]["top_k"],
+            },
+        )
         self.assertEqual(manager.hub_snapshot()["activeSurfaceCount"], 2)
         with mock.patch.object(manager, "unregister_session_surface") as unregister:
             detached = manager.detach_surface({
@@ -15804,6 +18842,37 @@ for line in sys.stdin:
                 "ownerRunId": "stale", "requestId": request_id,
             })
 
+        chat_cancel_calls: list[tuple[str, str, dict | None]] = []
+
+        def chat_cancel_api(method: str, path: str, payload=None, **_kwargs):
+            chat_cancel_calls.append((method, path, payload))
+            return {
+                "ok": True,
+                "surfaceId": owner.run_id,
+                "cancelled": 1 if len(chat_cancel_calls) == 2 else 0,
+            }
+
+        with mock.patch.object(
+            manager, "_session_proxy_api", side_effect=chat_cancel_api,
+        ), mock.patch.object(launcher.time, "sleep") as settle_wait:
+            stopped = manager.cancel_chat_generation({
+                "runId": owner.run_id, "attachmentId": owner.run_id,
+            })
+        self.assertEqual(stopped, {"surfaceId": owner.run_id, "cancelled": 1})
+        self.assertEqual(chat_cancel_calls, [
+            ("POST", "/__launcher/surfaces", {
+                "action": "cancel", "surfaceId": owner.run_id,
+            }),
+            ("POST", "/__launcher/surfaces", {
+                "action": "cancel", "surfaceId": owner.run_id,
+            }),
+        ])
+        settle_wait.assert_called_once_with(0.02)
+        with self.assertRaisesRegex(ValueError, "older run"):
+            manager.cancel_chat_generation({
+                "runId": "stale", "attachmentId": owner.run_id,
+            })
+
         with mock.patch.object(manager, "_session_proxy_api", return_value=relay_status):
             updated = manager.set_idle_policy({
                 "ownerRunId": owner.run_id, "timeoutMinutes": 15,
@@ -16088,6 +19157,68 @@ for line in sys.stdin:
         )
         self.assertNotIn("omlxAdminSessionCookie", json.dumps(plan.public()))
 
+    def test_health_monitor_only_collects_activity_for_enabled_idle_policy(self) -> None:
+        owner = launcher.normalized_request(
+            self.payload("mtplx", "pi", self.models[0]), self.models,
+        )
+
+        class MonitorTicks:
+            def __init__(self) -> None:
+                self.ticks = 0
+
+            def wait(self, timeout: float) -> bool:
+                self.ticks += 1
+                self.last_interval = timeout
+                return self.ticks > 20
+
+            def is_set(self) -> bool:
+                return False
+
+        for minutes in (0, 5):
+            with self.subTest(idle_timeout_minutes=minutes):
+                manager = launcher.RunManager()
+                manager.plan = owner
+                manager.state = {"phase": "running", "events": []}
+                manager.process = mock.Mock()
+                manager.process.poll.return_value = None
+                manager.idle_timeout_minutes = minutes
+
+                def relay_status(*_args, **_kwargs):
+                    return {
+                        "lanes": 1, "activeCount": 0, "queuedCount": 0,
+                        "active": [], "queued": [], "recent": [], "idleSeconds": 10,
+                        "coverage": {"allLauncherSurfaces": True},
+                    }
+
+                def health_response(*_args, **_kwargs):
+                    return io.BytesIO(json.dumps({
+                        "data": [{"id": owner.model["servedId"]}],
+                    }).encode())
+
+                monitor = MonitorTicks()
+                with (
+                    mock.patch.object(manager, "_session_proxy_api", side_effect=relay_status) as relay,
+                    mock.patch.object(launcher.urllib.request, "urlopen", side_effect=health_response) as health,
+                    mock.patch.object(launcher, "mtplx_flight_activity", side_effect=lambda _plan, activity: activity) as flight,
+                    mock.patch.object(launcher, "mtplx_prompt_activity", side_effect=lambda _plan, activity, _observations: activity) as prefill,
+                    mock.patch.object(manager, "_stop_owned") as stop_owned,
+                ):
+                    manager._monitor_run(owner, monitor)  # type: ignore[arg-type]
+                    self.assertEqual(monitor.last_interval, 3.0)
+                    self.assertEqual(relay.call_count, 20 if minutes else 0)
+                    self.assertEqual(health.call_count, 20)
+                    self.assertTrue(all(
+                        call.args[0].full_url.endswith("/v1/models")
+                        for call in health.call_args_list
+                    ))
+                    flight.assert_not_called()
+                    prefill.assert_not_called()
+                    stop_owned.assert_not_called()
+                    # User-facing status still asks for fresh native token counters.
+                    manager.snapshot()
+                    flight.assert_called_once()
+                    prefill.assert_called_once()
+
     def test_expired_idle_policy_uses_normal_owned_route_stop(self) -> None:
         owner = launcher.normalized_request(
             self.payload("mtplx", "pi", self.models[0]), self.models,
@@ -16101,6 +19232,7 @@ for line in sys.stdin:
         manager.process = mock.Mock()
         manager.process.poll.return_value = None
         self.arm_session_relay(manager, owner)
+        manager.idle_timeout_minutes = 5
 
         class OneTick:
             def wait(self, _timeout: float) -> bool:
@@ -16116,13 +19248,14 @@ for line in sys.stdin:
             },
         }
         with (
-            mock.patch.object(manager, "request_activity", return_value=expired),
+            mock.patch.object(manager, "request_activity", return_value=expired) as activity,
             mock.patch.object(manager, "stop") as stop,
             mock.patch.object(launcher.threading, "Thread") as thread_class,
         ):
             manager._monitor_run(owner, OneTick())  # type: ignore[arg-type]
         thread_class.assert_called_once_with(target=stop, daemon=True)
         thread_class.return_value.start.assert_called_once()
+        activity.assert_called_once_with(include_engine_telemetry=False)
         self.assertIn("Idle timeout reached", manager.state["message"])
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for the browser-side policy test")
@@ -16161,6 +19294,74 @@ for line in sys.stdin:
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Streaming Chat scroll-follow and restoration core passed", result.stdout)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Chat navigation guard test")
+    def test_chat_navigation_javascript_preserves_unsaved_transcripts(self) -> None:
+        result = subprocess.run(
+            [str(shutil.which("node")), str(ROOT / "tests" / "test_chat_navigation_guard.js")],
+            cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "Chat navigation preserves unsaved transcripts and serializes first-save IDs",
+            result.stdout,
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_chat_portable_recovery_javascript_survives_surface_ids(self) -> None:
+        result = subprocess.run(
+            [str(shutil.which("node")), str(ROOT / "tests" / "test_chat_portable_recovery.js")],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn(
+            "Chat drafts and paused queues survive Stop, detach, and replacement surface IDs",
+            result.stdout,
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Chat history ordering test")
+    def test_chat_history_javascript_serializes_saves_reads_and_deletes(self) -> None:
+        result = subprocess.run(
+            [str(shutil.which("node")), str(ROOT / "tests" / "test_chat_history_serialization.js")],
+            cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "Chat history saves and destructive operations are ordered without resurrection races",
+            result.stdout,
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Chat surface exit guard test")
+    def test_chat_surface_exit_javascript_waits_for_recovery_and_save(self) -> None:
+        result = subprocess.run(
+            [str(shutil.which("node")), str(ROOT / "tests" / "test_chat_surface_exit_guard.js")],
+            cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Chat surface exit waits for active-turn recovery", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the surface postmortem test")
+    def test_chat_and_hub_console_javascript_retain_postmortem_output(self) -> None:
+        result = subprocess.run(
+            [str(shutil.which("node")), str(ROOT / "tests" / "test_surface_postmortem.js")],
+            cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("retain bounded postmortem output until explicit replacement", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Calibration apply lifecycle test")
+    def test_calibration_apply_javascript_reuses_the_completed_result(self) -> None:
+        result = subprocess.run(
+            [str(shutil.which("node")), str(ROOT / "tests" / "test_calibration_apply_lifecycle.js")],
+            cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "Completed Calibration bindings remain reusable through Apply and saved measured profiles.",
+            result.stdout,
+        )
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for the transcript navigation test")
     def test_chat_transcript_javascript_search_landmarks_and_bounds(self) -> None:
         result = subprocess.run(
@@ -16178,6 +19379,15 @@ for line in sys.stdin:
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Authoritative Chat response-limit detection passed", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Chat stop test")
+    def test_chat_stop_javascript_private_relay_cancellation(self) -> None:
+        result = subprocess.run(
+            [str(shutil.which("node")), str(ROOT / "tests" / "test_chat_stop.js")],
+            cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Chat Stop private-relay cancellation contract passed", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for the compact Chat status test")
     def test_chat_status_javascript_authoritative_summaries(self) -> None:
@@ -16225,6 +19435,12 @@ for line in sys.stdin:
             ".ane-contract span,.calibration-plan-facts>span,.calibration-engine-modes span{background:var(--surface-raised)}",
             ".calibration-progress{border:1px solid var(--line-soft);background:var(--surface-card)}",
             ".session-estimate-bar{background:var(--surface-strong)}",
+            ".skeleton{display:inline-block;width:72px;height:9px;border-radius:4px;background:linear-gradient(90deg,var(--surface-raised),var(--surface-strong),var(--surface-raised))",
+            ".chat-sidebar-search button:hover:not(:disabled){background:var(--surface-hover);color:var(--text)}",
+            "color:var(--secondary);font-size:7px;letter-spacing:.06em;vertical-align:1px}",
+            ".chat-history-branch{display:inline-flex!important;margin-top:4px!important;color:var(--secondary)!important",
+            "background:rgba(var(--secondary-rgb),.055);color:var(--text);font-style:normal}",
+            '.range-field input[type="range"]::-moz-range-track{height:4px;border-radius:999px;background:var(--surface-strong)}',
         ):
             self.assertIn(marker, styles)
         self.assertIn(".field>span,.field-label{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 6px;color:var(--toolbar-text)", styles)
@@ -16233,6 +19449,10 @@ for line in sys.stdin:
         self.assertNotRegex(styles, r"\.range-field output\{[^}]*background:#")
         self.assertNotRegex(styles, r"\.binary\{[^}]*background:#")
         self.assertNotRegex(styles, r"\.dflash-readiness\{[^}]*background:rgba\(16,17,19")
+        self.assertNotRegex(styles, r"\.chat-sidebar-search button:hover:not\(:disabled\)\{background:#")
+        self.assertNotRegex(styles, r"\.chat-branch-badge\{[^}]*color:#")
+        self.assertNotRegex(styles, r"\.chat-history-branch\{[^}]*color:#[^}]*!important")
+        self.assertNotRegex(styles, r"\.chat-message\.interrupted \.chat-message-body\{[^}]*color:#")
 
     def test_focused_presentation_is_progressive_disclosure_only(self) -> None:
         index = (ROOT / "index.html").read_text(encoding="utf-8")
@@ -16371,7 +19591,7 @@ for line in sys.stdin:
         ):
             self.assertIn(f'id="{element_id}"', index)
         self.assertIn("function quickStartEntries()", script)
-        self.assertIn("state.profiles.find(item => item.ready)", script)
+        self.assertIn("state.profiles.find(profileUiReady)", script)
         self.assertIn("state.sessionSets.find(item => item.ready)", script)
         self.assertIn('api("/api/profiles")', script)
         self.assertIn('api("/api/session-sets")', script)
@@ -16388,7 +19608,8 @@ for line in sys.stdin:
         self.assertNotIn('.custom-launch-editor.quick-start-collapsed,.launch-dock.quick-start-collapsed{display:none}', styles)
         self.assertIn("/* Saved routes stay optional: they never replace the normal launch editor. */", styles)
         self.assertIn(':root[data-detail="focused"] .quick-start:not(.hidden){display:block', styles)
-        quick_start_markup = index[index.index('id="quickStart"'):index.index('id="customLaunchEditor"')]
+        quick_start_begin = index.index('id="quickStart"')
+        quick_start_markup = index[quick_start_begin:index.index("</section>", quick_start_begin)]
         self.assertIn("Saved routes", quick_start_markup)
         self.assertNotIn("Saved locally", quick_start_markup)
         self.assertNotIn("Quick start", quick_start_markup)
@@ -16472,6 +19693,9 @@ for line in sys.stdin:
         self.assertIn('background:#000;color:var(--terminal-foreground);color-scheme:dark', styles)
         self.assertIn('.agent-terminal-viewport pre{min-width:max-content;margin:0;padding:0;border:0;background:transparent;color:var(--terminal-foreground)', styles)
         self.assertNotIn(':root[data-theme="daylight"]{\n  --terminal-background:', styles)
+        self.assertIn('.agent-workspace{background:#000!important;color:#f5f7fa}', styles)
+        self.assertIn('.agent-workspace .agent-console-header,.agent-workspace .agent-console-navigation,.agent-workspace .agent-console-status-panel,.agent-workspace .agent-console-composer{border-color:#262a31;background:#090a0c!important', styles)
+        self.assertIn('.agent-workspace .agent-terminal-shell,.agent-workspace .agent-terminal-viewport,.agent-workspace .agent-pi-timeline-viewport{background:#000!important}', styles)
 
     def test_running_chat_controls_drawer_is_on_demand_and_next_request_scoped(self) -> None:
         index = (ROOT / "index.html").read_text(encoding="utf-8")
@@ -16535,6 +19759,8 @@ for line in sys.stdin:
         self.assertIn('<script src="safe_markdown.js" defer></script>', index)
         self.assertIn('<script src="terminal_core.js" defer></script>', index)
         self.assertIn('<script src="agent_console_tabs.js" defer></script>', index)
+        self.assertIn('<script src="agent_console_input.js" defer></script>', index)
+        self.assertIn('<script src="pi_timeline.js" defer></script>', index)
         self.assertIn('<script src="calibration_decision.js" defer></script>', index)
         for element_id in (
             "themeMenuButton", "themeToolbarLabel", "themeMenu",
@@ -16564,6 +19790,8 @@ for line in sys.stdin:
             "agentConsoleStatusSpeed", "agentConsoleStatusSpeedValue",
             "agentConsoleStatusLane", "agentConsoleStatusLaneValue",
             "agentConsoleStatusState", "agentConsoleStatusDisclosureLabel",
+            "agentPiTimelineViewport", "agentPiTimeline", "agentPiTimelineEmpty",
+            "agentPiTimelineJumpLatest",
             "sessionAttachAgentHost",
             "chatJumpLatest", "chatJumpLatestStatus",
             "chatRunSettingsButton", "chatRunSettingsPanel", "chatRunSettingsSave",
@@ -16574,11 +19802,25 @@ for line in sys.stdin:
             "chatStatusDisclosureLabel",
         ):
             self.assertIn(f'id="{element_id}"', index)
+        timeline_renderer = (ROOT / "pi_timeline_view.js").read_text(encoding="utf-8")
+        self.assertIn('src="pi_timeline_view.js"', index)
+        self.assertIn("document.createElement", timeline_renderer)
+        self.assertIn("textContent", timeline_renderer)
+        self.assertNotIn("innerHTML", timeline_renderer)
+        self.assertIn("if (timelineNeedsRender) renderAgentPiTimeline();", script)
+        self.assertIn("function agentConsoleShowsPiTimeline", script)
+        self.assertIn("PiTimelineCore.shouldUseTimeline", script)
         self.assertIn("developers.openai.com/codex/config-reference", manual)
         self.assertIn("github.com/jundot/omlx/releases/tag/v0.6.4", manual)
-        self.assertIn("github.com/youssofal/MTPLX/releases/tag/v2.10.1", manual)
+        self.assertIn("github.com/youssofal/MTPLX/releases/tag/v2.11.2", manual)
+        self.assertIn("Powered by", manual)
+        self.assertIn("github.com/youssofal/mtplx", manual)
         self.assertIn("lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23", manual)
         self.assertIn("github.com/SharpAI/SwiftLM/releases/tag/b709", manual)
+        self.assertIn("github.com/yanun0323/Whallm/releases/tag/v1.1.4", manual)
+        self.assertIn("peak MLX active memory", manual)
+        self.assertIn("64 GiB unified memory", manual)
+        self.assertIn("This 48 GiB Mac is experimental", index)
         self.assertIn("huggingface.co/z-lab/Qwen3.8-27B-DFlash2", manual)
         self.assertIn("github.com/FlashML-org/FreeToken/blob/main/docs/quickstart.md", index)
         self.assertNotIn("quick_start.md", index)
@@ -16675,10 +19917,10 @@ for line in sys.stdin:
         self.assertIn("Saved locally; no second test is needed.", script)
         self.assertIn("calibration-engine-settings", styles)
         self.assertIn("calibration-result-settings", styles)
-        self.assertIn("engine.mtpDepthSweep", script)
-        self.assertIn("engine.tuningSweep", script)
+        self.assertIn("engine.settingsSearch", script)
+        self.assertIn("rejectedFasterCandidateCount", script)
         self.assertIn("engine.routeSettingsLabel", script)
-        self.assertIn('Routes: ${routePreview}.', script)
+        self.assertIn('Setups: ${routePreview}.', script)
         self.assertIn("Use saved result", script)
         self.assertIn("no verified accelerator in this artifact", script)
         self.assertNotIn("Saving result…", script)
@@ -16918,7 +20160,7 @@ for line in sys.stdin:
         self.assertIn('request.scope = "engines"', script)
         self.assertIn("request.enginePreference = enginePreference", script)
         self.assertIn('["measure", "apply-existing"].includes(plan.action)', script)
-        self.assertIn('? "Retest engines"', script)
+        self.assertIn('? "Retest engines + settings"', script)
         self.assertIn('? "Replace this saved measurement"', script)
         self.assertIn('const applyScope = plan.routeQualification ? "current" : "engine"', script)
         self.assertIn('applyScope, plan.preference, false, evidenceBinding', script)

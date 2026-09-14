@@ -93,3 +93,38 @@ assert.deepEqual(routes.reconcileRuntimeLimits({
 });
 
 console.log("Safe visible-route persistence and installed-route fallback passed.");
+
+assert.deepEqual(routes.reconcileRuntimeLimits({
+  context:131072, output:16384, contextWindows:[16384], outputMaximum:4096,
+}), {
+  context:16384, output:4096, contextChanged:true, outputChanged:true, promptBudget:12288,
+});
+assert.deepEqual(routes.reconcileRuntimeLimits({
+  context:16384, output:2048, contextWindows:[16384], outputMaximum:4096,
+}), {
+  context:16384, output:2048, contextChanged:false, outputChanged:false, promptBudget:14336,
+});
+
+const savedRoute = {backend:"mtplx", modelId:"model-fast", client:"chat"};
+assert.equal(routes.writeSetup(storage, savedRoute, {
+  contextInput:"65536", outputInput:"16384", reasoningSelect:"auto",
+  fanSelect:"default", profileSelect:"turbo", mtplxKv:"off",
+  systemPrompt:"private instructions", projectPath:"/private/work", apiKey:"secret",
+  experimentalConsent:"true", temperatureInput:true,
+}), true);
+const setup = routes.readSetup(storage, savedRoute);
+assert.deepEqual(setup.controls, {
+  contextInput:"65536", outputInput:"16384", reasoningSelect:"auto",
+  profileSelect:"turbo", fanSelect:"default", mtplxKv:"off",
+});
+assert.doesNotMatch(values.get(routes.SETUP_STORAGE_KEY), /private|secret|Consent/);
+assert.equal(routes.readSetup(storage, {...savedRoute, modelId:"other"}), null);
+assert.equal(routes.readSetup(storage, {...savedRoute, backend:"omlx"}), null);
+assert.equal(routes.readSetup(storage, {...savedRoute, client:"pi"}), null);
+assert.equal(routes.writeSetup(blockedStorage, savedRoute, setup.controls), false);
+assert.equal(routes.readSetup(blockedStorage, savedRoute), null);
+values.set(routes.SETUP_STORAGE_KEY, JSON.stringify({...setup, version:2}));
+assert.equal(routes.readSetup(storage, savedRoute), null);
+values.set(routes.SETUP_STORAGE_KEY, "x".repeat(8193));
+assert.equal(routes.readSetup(storage, savedRoute), null);
+console.log("Exact-route context, sampling and runtime controls persist without prompts, credentials or approvals.");

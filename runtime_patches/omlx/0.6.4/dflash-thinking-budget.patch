@@ -1,0 +1,447 @@
+--- a/omlx/engine/dflash.py
++++ b/omlx/engine/dflash.py
+@@ -10,6 +10,7 @@
+ """
+ 
+ import asyncio
++from contextlib import aclosing
+ import copy
+ import gc
+ import json
+@@ -46,6 +47,18 @@
+ )
+ 
+ logger = logging.getLogger(__name__)
++
++
++def _generation_finish_reason(summary, max_tokens, stop_ids, parser_final=None):
++    """Use the committed native stop tokens, including EOS at the limit."""
++    if summary is None:
++        return "error"
++    stopped = any(int(token) in stop_ids for token in summary.generated_token_ids)
++    if not stopped and int(summary.generation_tokens) >= max_tokens:
++        return "length"
++    if parser_final is not None and parser_final.finish_reason:
++        return parser_final.finish_reason
++    return "stop"
+ 
+ 
+ def is_dflash_compatible(model_path: str | Path) -> tuple[bool, str]:
+@@ -1141,6 +1154,7 @@
+         min_p: float = 0.0,
+         repetition_penalty: float = 1.0,
+         repetition_context_size: int = 20,
++        logits_processor_factory=None,
+     ):
+         """Build the dflash event iterator with prefix cache plumbed in."""
+         from dflash_mlx.runtime import get_stop_token_ids, stream_dflash_generate
+@@ -1197,6 +1211,8 @@
+             publish_generation_snapshot=prefix_flow.publish_generation_snapshot,
+             prefix_hit_kind=str(getattr(prefix_flow, "hit_kind", "miss") or "miss"),
+             runtime_context=self._runtime_context,
++            logits_processor=(logits_processor_factory(prompt_tokens)
++                              if logits_processor_factory is not None else None),
+         )
+         if hasattr(prefix_flow, "snapshot"):
+             prefix_flow.snapshot = None
+@@ -1239,6 +1255,7 @@
+         queue: asyncio.Queue,
+         loop: asyncio.AbstractEventLoop,
+         stop_event: threading.Event,
++        logits_processor_factory=None,
+     ) -> None:
+         """Run dflash generation with streaming on MLX executor thread.
+ 
+@@ -1266,6 +1283,7 @@
+                 min_p=min_p,
+                 repetition_penalty=repetition_penalty,
+                 repetition_context_size=repetition_context_size,
++                logits_processor_factory=logits_processor_factory,
+             )
+             cache_manager = self._begin_runtime_cache_request()
+             self._record_prefill_guard_active_memory()
+@@ -1347,6 +1365,7 @@
+                     metrics: dict[str, Any] = {
+                         "prompt_tokens": int(event.prompt_token_count),
+                         "completion_tokens": gen_tokens,
++                        "finish_reason": _generation_finish_reason(event, max_tokens, stop_ids, parser_final),
+                         "acceptance_ratio": accept_ratio,
+                         "cycles_completed": cycles,
+                         # Prefix-snapshot hit count, surfaced on the final
+@@ -1356,8 +1375,6 @@
+                     if parser_final is not None:
+                         if parser_final.tool_calls:
+                             metrics["tool_calls"] = parser_final.tool_calls
+-                        if parser_final.finish_reason:
+-                            metrics["finish_reason"] = parser_final.finish_reason
+                     asyncio.run_coroutine_threadsafe(
+                         queue.put(("", [], True, metrics)), loop
+                     )
+@@ -1414,6 +1431,13 @@
+             await self.start()
+ 
+         prompt_tokens = self._tokenize_prompt(prompt)
++        logits_processor_factory = kwargs.pop("logits_processor_factory", None)
++        if logits_processor_factory is not None and (
++            self._in_fallback_mode or self._should_fallback(prompt_tokens)
++        ):
++            raise ValueError(
++                "DFlash thinking budgets are not supported across oMLX model-eviction fallback."
++            )
+ 
+         # Fallback: evict dflash models, start LLM/VLM engine
+         if self._should_fallback(prompt_tokens):
+@@ -1491,6 +1515,7 @@
+                     min_p=min_p,
+                     repetition_penalty=repetition_penalty,
+                     repetition_context_size=int(repetition_context_size),
++                    logits_processor_factory=logits_processor_factory,
+                 )
+                 cache_manager = self._begin_runtime_cache_request()
+                 self._record_prefill_guard_active_memory()
+@@ -1530,6 +1555,7 @@
+                     parsed_visible_parts,
+                     prefix_flow,
+                     first_token_at,
++                    stop_ids,
+                 )
+             finally:
+                 self._record_prefill_guard_active_memory()
+@@ -1555,6 +1581,7 @@
+                     parsed_visible_parts,
+                     prefix_flow,
+                     first_token_at,
++                    stop_ids,
+                 ) = await asyncio.shield(asyncio.wrap_future(future))
+             except asyncio.CancelledError:
+                 stop_event.set()
+@@ -1607,11 +1634,7 @@
+             prompt_tokens=prompt_token_count,
+             completion_tokens=completion_token_count,
+             cached_tokens=self._cached_tokens_from_flow(prefix_flow),
+-            finish_reason=(
+-                parser_final.finish_reason
+-                if parser_final is not None and parser_final.finish_reason
+-                else "stop"
+-            ),
++            finish_reason=_generation_finish_reason(summary, max_tokens, stop_ids, parser_final),
+             tool_calls=(
+                 parser_final.tool_calls
+                 if parser_final is not None and parser_final.tool_calls
+@@ -1637,6 +1660,13 @@
+             await self.start()
+ 
+         prompt_tokens = self._tokenize_prompt(prompt)
++        logits_processor_factory = kwargs.pop("logits_processor_factory", None)
++        if logits_processor_factory is not None and (
++            self._in_fallback_mode or self._should_fallback(prompt_tokens)
++        ):
++            raise ValueError(
++                "DFlash thinking budgets are not supported across oMLX model-eviction fallback."
++            )
+ 
+         # Fallback: evict dflash models, start LLM/VLM engine
+         if self._should_fallback(prompt_tokens):
+@@ -1726,6 +1756,7 @@
+             queue,
+             loop,
+             stop_event,
++            logits_processor_factory,
+         )
+ 
+         total_text = ""
+@@ -1808,6 +1839,11 @@
+         if not self._loaded:
+             await self.start()
+ 
++        if kwargs.get("thinking_budget") is not None and (
++            self._in_fallback_mode or (self._fallback_engine_type == "vlm"
++                                      and self._has_multimodal_content(messages))
++        ):
++            raise ValueError("DFlash thinking budgets do not support oMLX chat fallback.")
+         if self._in_fallback_mode:
+             return await self._fallback_engine.chat(
+                 messages,
+@@ -1884,6 +1920,11 @@
+         if not self._loaded:
+             await self.start()
+ 
++        if kwargs.get("thinking_budget") is not None and (
++            self._in_fallback_mode or (self._fallback_engine_type == "vlm"
++                                      and self._has_multimodal_content(messages))
++        ):
++            raise ValueError("DFlash thinking budgets do not support oMLX chat fallback.")
+         if self._in_fallback_mode:
+             async for output in self._fallback_engine.stream_chat(
+                 messages,
+@@ -1935,7 +1976,7 @@
+             is_partial=is_partial,
+         )
+ 
+-        async for output in self.stream_generate(
++        async with aclosing(self.stream_generate(
+             prompt=prompt,
+             max_tokens=max_tokens,
+             temperature=temperature,
+@@ -1946,8 +1987,9 @@
+             presence_penalty=presence_penalty,
+             tools=tools,
+             **kwargs,
+-        ):
+-            yield output
++        )) as stream:
++            async for output in stream:
++                yield output
+ 
+     @property
+     def scheduler(self) -> Any | None:
+--- a/dflash_mlx/runtime/__init__.py
++++ b/dflash_mlx/runtime/__init__.py
+@@ -69,6 +69,7 @@
+     publish_generation_snapshot: bool = True,
+     prefix_hit_kind: str = "miss",
+     runtime_context: Any = None,
++    logits_processor: Any = None,
+ ) -> Iterator[EngineEvent]:
+     if runtime_context is None:
+         raise ValueError("runtime_context is required")
+@@ -102,6 +103,7 @@
+             min_p=min_p,
+             repetition_penalty=repetition_penalty,
+             repetition_context_size=repetition_context_size,
++            logits_processor=logits_processor,
+             prompt_tokens_override=prompt_tokens_override,
+             prompt_token_positions=prompt_token_positions,
+             quantize_kv_cache=quantize_kv_cache,
+--- a/dflash_mlx/engine/spec_epoch.py
++++ b/dflash_mlx/engine/spec_epoch.py
+@@ -138,6 +138,7 @@
+     min_p: float = 0.0
+     repetition_penalty: float = 0.0
+     repetition_context_size: int = 20
++    logits_processor: Any = None
+     prefix_snapshot: Optional[DFlashPrefixSnapshot] = None
+     snapshot_service: Optional[SnapshotService] = None
+     stable_prefix_len: Optional[int] = None
+@@ -175,6 +176,7 @@
+         min_p: float = 0.0,
+         repetition_penalty: float = 0.0,
+         repetition_context_size: int = 20,
++        logits_processor: Any = None,
+     ) -> "_SessionRequest":
+         return cls(
+             prompt_tokens=tuple(int(token) for token in prompt_tokens),
+@@ -192,6 +194,7 @@
+             min_p=float(min_p),
+             repetition_penalty=float(repetition_penalty),
+             repetition_context_size=int(repetition_context_size),
++            logits_processor=logits_processor,
+             prefix_snapshot=prefix_snapshot,
+             snapshot_service=snapshot_service,
+             stable_prefix_len=stable_prefix_len,
+@@ -1123,6 +1126,10 @@
+             penalty=request.repetition_penalty,
+             context_size=request.repetition_context_size,
+         )
++        if request.logits_processor is not None:
++            prefill_sampling_logits = request.logits_processor.process_first_logits(
++                prefill_sampling_logits
++            )
+         state.staged_first = sample_logits(
+             prefill_sampling_logits,
+             request.temperature,
+@@ -1982,6 +1989,8 @@
+             and not getattr(self.draft_model, "is_dflash2", False)
+             and request.temperature <= 0
+         ):
++            if request.logits_processor is not None:
++                raise ValueError("DFlash thinking budgets do not support DDTree verification.")
+             return (
+                 yield from self._run_ddtree_decode_events(
+                     request=request,
+@@ -2359,6 +2368,12 @@
+                     penalty=request.repetition_penalty,
+                     context_size=request.repetition_context_size,
+                 )
++            if request.logits_processor is not None:
++                if verify_token_ids_host is None:
++                    verify_token_ids_host = [int(token) for token in verify_token_ids.tolist()]
++                verify_sampling_logits = request.logits_processor.process_block(
++                    verify_sampling_logits, state.generated_token_ids, verify_token_ids_host
++                )
+             acceptance_start_ns = time.perf_counter_ns() if profile_cycles else 0
+             posterior = None
+             if request.temperature <= 0:
+@@ -2417,6 +2432,8 @@
+                     verify_ids_host[1:], posterior_host[:-1]
+                 )
+                 staged_first_next_id = posterior_host[acceptance_len]
++            if request.logits_processor is not None:
++                request.logits_processor.commit(acceptance_len)
+             state.acceptance_history.append(acceptance_len)
+             if profile_cycles:
+                 acceptance_cycle_ns = time.perf_counter_ns() - acceptance_start_ns
+@@ -2993,6 +3010,7 @@
+     publish_generation_snapshot: bool = True,
+     prefix_hit_kind: str = "miss",
+     runtime_context: Any,
++    logits_processor: Any = None,
+ ) -> Iterator[EngineEvent]:
+     target_capabilities = target_ops.capabilities_for(target_model)
+     supports_prefix_snapshot = bool(
+@@ -3041,6 +3059,7 @@
+             min_p=min_p,
+             repetition_penalty=repetition_penalty,
+             repetition_context_size=repetition_context_size,
++            logits_processor=logits_processor,
+             prompt_tokens_override=prompt_tokens,
+             quantize_kv_cache=quantize_kv_cache,
+             fallback_reason=fallback_reason,
+@@ -3058,6 +3077,7 @@
+         min_p=min_p,
+         repetition_penalty=repetition_penalty,
+         repetition_context_size=repetition_context_size,
++        logits_processor=logits_processor,
+         prefix_snapshot=prefix_snapshot,
+         snapshot_service=snapshot_service,
+         stable_prefix_len=stable_prefix_len,
+--- a/dflash_mlx/engine/fallback.py
++++ b/dflash_mlx/engine/fallback.py
+@@ -55,6 +55,7 @@
+     prompt_tokens_override: Optional[list[int]] = None,
+     quantize_kv_cache: bool = False,
+     fallback_reason: Optional[str] = None,
++    logits_processor: Any = None,
+ ) -> Iterator[EngineEvent]:
+     prompt_tokens = (
+         list(prompt_tokens_override)
+@@ -83,6 +84,8 @@
+         penalty=repetition_penalty,
+         context_size=repetition_context_size,
+     )
++    if logits_processor is not None:
++        sampling_logits = logits_processor.process_first_logits(sampling_logits)
+     next_token = int(
+         sample_logits(
+             sampling_logits,
+@@ -130,6 +133,8 @@
+             penalty=repetition_penalty,
+             context_size=repetition_context_size,
+         )
++        if logits_processor is not None:
++            sampling_logits = logits_processor.process_next_logits(sampling_logits, generated_tokens)
+         next_token = int(
+             sample_logits(
+                 sampling_logits,
+--- a/omlx/api/thinking.py
++++ b/omlx/api/thinking.py
+@@ -234,7 +234,8 @@
+         t, c = parser.finish()
+     """
+ 
+-    def __init__(self, start_in_thinking: bool = False):
++    def __init__(self, start_in_thinking: bool = False, recover_unclosed: bool = True):
++        self._recover_unclosed = recover_unclosed
+         self._in_thinking: bool = start_in_thinking
+         self._buffer: str = ""  # Buffer for potential partial tags
+         # Recovery state for malformed thinking: when the prompt prepends
+@@ -246,6 +247,10 @@
+         self._close_seen: bool = False
+         self._thinking_accumulated: List[str] = []
+         self._content_emitted: bool = False
++
++    @property
++    def in_thinking(self) -> bool:
++        return self._in_thinking
+ 
+     def feed(self, text: str) -> Tuple[str, str]:
+         """Feed a text chunk, return (thinking_delta, content_delta).
+@@ -348,7 +353,8 @@
+         # the same text twice — once in the thinking panel, once as the
+         # answer. UX trade-off documented in the chat template plan.
+         if (
+-            self._in_thinking
++            self._recover_unclosed
++            and self._in_thinking
+             and not self._close_seen
+             and not self._content_emitted
+             and self._thinking_accumulated
+--- a/omlx/server.py
++++ b/omlx/server.py
+@@ -3977,13 +3977,25 @@
+ 
+             # Separate thinking from content
+             raw_text = clean_special_tokens(output.text) if output.text else ""
+-            thinking_content, regular_content = extract_thinking(raw_text)
++            incomplete_native = False
++            if getattr(engine, "preserve_native_thinking", False):
++                native_parser = ThinkingParser(recover_unclosed=False)
++                thinking_content, regular_content = native_parser.feed(raw_text)
++                tail_thinking, tail_content = native_parser.finish()
++                thinking_content = (thinking_content + tail_thinking).strip()
++                regular_content = (regular_content + tail_content).strip()
++                incomplete_native = native_parser.in_thinking or output.finish_reason == "length"
++            else:
++                thinking_content, regular_content = extract_thinking(raw_text)
+             cleaned_thinking = sanitize_tool_call_markup(
+                 thinking_content, engine.tokenizer
+             )
+ 
+             # Protocol parsers can return structured tool_calls directly.
+-            if output.tool_calls:
++            if incomplete_native:
++                tool_calls = None
++                cleaned_text = regular_content
++            elif output.tool_calls:
+                 tool_calls = _convert_parser_tool_calls(output.tool_calls)
+                 cleaned_text = regular_content
+             else:
+@@ -3998,7 +4010,7 @@
+                 cleaned_thinking = extraction.cleaned_thinking
+ 
+             # Process response_format if specified
+-            if response_format and not tool_calls:
++            if response_format and not tool_calls and not incomplete_native:
+                 cleaned_text, parsed_json, is_valid, error = parse_json_output(
+                     cleaned_text or regular_content, response_format
+                 )
+@@ -4757,7 +4769,11 @@
+             )
+     except Exception as exc:
+         logger.debug("Could not detect chat stream thinking state: %s", exc)
+-    thinking_parser = ThinkingParser(start_in_thinking=start_in_thinking)
++    preserve_native_thinking = bool(getattr(engine, "preserve_native_thinking", False))
++    thinking_parser = ThinkingParser(
++        start_in_thinking=start_in_thinking,
++        recover_unclosed=not preserve_native_thinking,
++    )
+ 
+     # Reuse the id pre-minted by the caller (so the keepalive frame can share
+     # it); otherwise mint one for direct/non-streaming callers.
+@@ -4849,6 +4865,12 @@
+         yield "data: [DONE]\n\n"
+         return
+ 
++    # An unfinished native thinking block is reasoning, never a recovered answer
++    # or an executable tool call. Other engine recovery policies are unchanged.
++    incomplete_native = preserve_native_thinking and (
++        thinking_parser.in_thinking
++        or (last_output is not None and last_output.finish_reason == "length")
++    )
+     # Flush remaining buffered content from thinking/tool-call parsers
+     if stream_content:
+         thinking_delta, content_delta = thinking_parser.finish()
+@@ -4919,11 +4941,11 @@
+     # Parse tool calls from accumulated text
+     tool_calls = None
+     cleaned_text = accumulated_text
+-    if last_output and last_output.tool_calls:
++    if last_output and last_output.tool_calls and not incomplete_native:
+         # Protocol parser already extracted structured tool calls.
+         tool_calls = _convert_parser_tool_calls(last_output.tool_calls)
+         cleaned_text = ""
+-    elif has_tools and accumulated_text:
++    elif has_tools and accumulated_text and not incomplete_native:
+         # Separate thinking from content, then parse tool calls from content
+         # (falls back to thinking content for small models)
+         thinking_content, regular_content = extract_thinking(accumulated_text)

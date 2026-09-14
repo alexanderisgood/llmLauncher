@@ -68,11 +68,28 @@ assert.equal(staleGeneration.stale, true);
 assert.equal(staleGeneration.meta.startedAt, "2026-08-25T10:01:00Z");
 assert.equal(staleGeneration.meta.bufferEnd, 20);
 
+const switchedConversation = {...liveConsole,conversationId:"new-session",conversationRevision:2};
+const lateConversation = tabs.reconcileConsoleMeta(switchedConversation, {
+  ...liveConsole,conversationId:"old-session",conversationRevision:1,
+});
+assert.equal(lateConversation.meta.conversationId,"new-session",
+  "A delayed status with the same terminal byte count cannot rewind the conversation");
+assert.equal(lateConversation.meta.conversationRevision,2);
+const freshProcess = tabs.reconcileConsoleMeta(switchedConversation, {
+  ...restarted.meta,conversationId:"third-session",conversationRevision:1,
+});
+assert.equal(freshProcess.meta.conversationId,"third-session",
+  "A restarted Pi process owns a fresh conversation revision counter");
+
 const noPayloadRetention = tabs.reconcileConsoleMeta(liveConsole, {
   bufferEnd:520, nextOffset:510, data:"large private terminal chunk", reset:true,
+  timelineEvents:[{revision:1, kind:"answer", text:"private transcript"}],
+  timelineReset:true,
 });
 assert.equal(Object.prototype.hasOwnProperty.call(noPayloadRetention.meta, "data"), false);
 assert.equal(Object.prototype.hasOwnProperty.call(noPayloadRetention.meta, "reset"), false);
+assert.equal(Object.prototype.hasOwnProperty.call(noPayloadRetention.meta, "timelineEvents"), false);
+assert.equal(Object.prototype.hasOwnProperty.call(noPayloadRetention.meta, "timelineReset"), false);
 
 const matches = tabs.findMatches("Alpha beta ALPHA alpha", "alpha");
 assert.deepEqual(matches.ranges, [{start:0, end:5}, {start:11, end:16}, {start:17, end:22}]);
@@ -103,4 +120,39 @@ assert.equal(tabs.tabPresentation({
 }).label, "Ready");
 assert.equal(tabs.tabPresentation({consoleRecord:{state:"failed"}}).tone, "failed");
 
+assert.deepEqual(tabs.nextReadPlan({
+  backlog:true, state:"running", drainRemaining:0,
+}), {delay:0, drainRemaining:2, reason:"backlog"});
+assert.deepEqual(tabs.nextReadPlan({
+  state:"exited", streaming:true, drainRemaining:0,
+}), {delay:120, drainRemaining:2, reason:"active"});
+assert.deepEqual(tabs.nextReadPlan({
+  state:"running", localPending:2, drainRemaining:0,
+}), {delay:120, drainRemaining:2, reason:"active"});
+assert.deepEqual(tabs.nextReadPlan({
+  state:"exited", drainRemaining:2,
+}), {delay:120, drainRemaining:1, reason:"final-drain"});
+assert.deepEqual(tabs.nextReadPlan({
+  state:"exited", drainRemaining:0,
+}), {delay:null, drainRemaining:0, reason:"settled"});
+
 console.log("Agent Console tab recovery, unread state, and bounded search core passed.");
+
+let idleReads = 0, elapsed = 0, reads = 0;
+while (elapsed < 60000) {
+  const plan = tabs.nextReadPlan({state:"running",idleConfirmed:true,idleReads});
+  idleReads = plan.idleReads;
+  elapsed += plan.delay;
+  reads++;
+}
+assert.equal(reads,83,"A settled Pi console needs 83 reads in the first minute, down from 500");
+for (const busy of [
+  {streaming:true},{compacting:true},{abortBusy:true},{serverPending:1},
+  {localPending:1},{inputSending:true},{outputChanged:true},{state:"starting"},
+  {state:"stopping"},{idleConfirmed:false},
+]) {
+  const plan = tabs.nextReadPlan({state:"running",idleConfirmed:true,idleReads:4,...busy});
+  assert.equal(plan.delay,120,JSON.stringify(busy));
+  assert.equal(plan.idleReads,undefined,"Active work resets the idle streak");
+}
+assert.equal(tabs.nextReadPlan({state:"running",idleConfirmed:true,idleReads:4,backlog:true}).delay,0);

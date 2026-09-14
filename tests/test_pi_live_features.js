@@ -1,0 +1,15 @@
+const assert = require('node:assert/strict');
+const core = require('../pi_timeline.js');
+const item = {kind:'toolCall', title:'Writing · write', text:JSON.stringify({path:'app.py', content:'print(1)\nprint(2)'})};
+assert.equal(core.toolIsOpen(item), true);
+assert.equal(core.toolIsOpen(item, {active:true, open:false}), false);
+assert.equal(core.toolIsOpen({...item,title:'Completed · write'}, {active:true,open:true}), false);
+assert.equal(core.toolIsOpen({...item,title:'Completed · write'}, {active:false,open:true}), true);
+assert.equal(core.toolDisplayText(item), 'app.py\n\nprint(1)\nprint(2)');
+const now = Date.now();
+const meta = {streaming:true, extensionStatuses:{tokenSpeed:{text:'⚡ TPS: 62.4 tok/s', updatedAt:new Date(now).toISOString()}}};
+assert.equal(core.piTokenSpeed(meta, now).value, '62.4 tok/s · Pi live');
+assert.equal(core.piTokenSpeed(meta, now+6000).value, '62.4 tok/s · Pi last');
+assert.equal(core.piTokenSpeed({...meta,streaming:false}, now).state, 'idle');
+assert.equal(core.piTokenSpeed({}), null);
+console.log('Pi live code visibility, completion collapse and installed-extension TPS passed');

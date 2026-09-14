@@ -1,0 +1,12 @@
+{
+  "runtime": "2.11.2",
+  "functions": {
+    "_prefill_admission_shed": "c0eee6815f7f821459c019a9318cf548c21c552256386dae089b67ac6102cb53",
+    "SessionBank._enqueue_cold_entry": "d3d97038170dfa478242f54e7678a4edbae02e03cca527cf23e52ed994debc37",
+    "SessionBank._cold_enqueue_job": "52708ce00e18ea46e26b347f386bbe98fb3f752d835c8d57717d053cb0d04376",
+    "SessionBank._schedule_snapshot_settle": "f5eaa23ca38055ad07b434c55c37717f9e24a9a80bece167988376cbdebf5699",
+    "SessionBankColdTier._archive_legacy_store_if_needed": "555b35c3eb0de1b7310a2b1d1efbff1258813eedfaec37e9643720a197fcf418",
+    "SessionBankColdTier._connect": "bf111258deff23ce0489859367ca0c3119e98c1b8e026d3cf0fc689f16a98f45",
+    "cmd_serve_public": "b01775da916050fea17b3717cd74b67b4b5c9a757fbd485c6a255775fef45cb1"
+  }
+}

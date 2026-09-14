@@ -9,6 +9,23 @@ const root = path.resolve(__dirname, "..");
 const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
 const index = fs.readFileSync(path.join(root, "index.html"), "utf8");
 const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+const controllerSource = fs.readFileSync(path.join(root, "launcher.py"), "utf8");
+assert.equal(
+  vm.runInNewContext(app.match(/^const UZU_QUALIFICATION_MEMORY_LIMIT_BYTES = (.+);$/m)[1]),
+  vm.runInNewContext(controllerSource.match(/^UZU_PROCESS_MEMORY_CEILING_BYTES = (.+)$/m)[1]),
+  "Uzu's displayed and enforced memory ceilings must agree",
+);
+for (const name of [
+  "UZU_QUALIFICATION_CONTRACT_VERSION",
+  "UZU_QUALIFICATION_SAMPLE_MAX_TOKENS",
+  "UZU_QUALIFICATION_SAMPLE_MIN_TOKENS",
+  "UZU_QUALIFICATION_NEAR_TIER_POLICY_ID",
+]) {
+  const front = app.match(new RegExp(`^const ${name} = (.+);$`, "m"));
+  const back = controllerSource.match(new RegExp(`^${name} = (.+)$`, "m"));
+  assert.ok(front && back, `both contracts declare ${name}`);
+  assert.equal(vm.runInNewContext(front[1]), vm.runInNewContext(back[1]), `${name} must agree end to end`);
+}
 
 const primaryStart = index.indexOf('id="backendChoices"');
 const ssdStart = index.indexOf('id="ssdRuntimeDisclosure"');
@@ -25,7 +42,7 @@ assert.match(controlsMarkup, /id="uzuAccelerationLabel">DFlash \+ Weaver<\/stron
 assert.match(controlsMarkup, /managed by Uzu/);
 assert.match(controlsMarkup, /id="uzuRouteSummary"[^>]*role="note"[^>]*aria-label="Uzu route limits"/);
 assert.match(controlsMarkup, /<strong>BF16 KV<\/strong><small>Runtime fixed · no Q8\/Q4<\/small>/);
-assert.match(controlsMarkup, /<strong>Chat only<\/strong><small>Initial qualification<\/small>/);
+assert.match(controlsMarkup, /<strong>Chat capacity test<\/strong><small>Pi on verified builds<\/small>/);
 assert.doesNotMatch(controlsMarkup, /<(?:select|input)\b/);
 
 assert.match(index, /id="modelLibraryEngineFilter"[^]*<option value="uzu">Uzu · Mirai<\/option>/);
@@ -37,6 +54,15 @@ assert.match(app, /mirai:"Uzu · Mirai"/);
 assert.match(app, /route-qualification-uzu-16k/);
 assert.match(app, /route-qualification-uzu-32k/);
 assert.match(app, /Chat only for initial qualification/);
+const piReceiptContext = {state:{backend:"uzu", client:"pi"}};
+vm.createContext(piReceiptContext);
+vm.runInContext(app.slice(app.indexOf("function performanceReceiptView("),
+  app.indexOf("\nfunction renderEngineEvidenceChoices(")), piReceiptContext);
+const piReceipt = piReceiptContext.performanceReceiptView({state:"qualification-needed"});
+assert.equal(piReceipt.actionId, "review-capacity");
+assert.match(piReceipt.detail, /Pi speed is not measured/);
+assert.doesNotMatch(piReceipt.title, /[Qq]ualify|[Ff]astest/);
+assert.match(app, /action === "review-capacity"\) return openSessionDashboard\(\)/);
 assert.match(app, /BF16 KV · runtime fixed/);
 assert.match(app, /Slowest turn/);
 assert.match(app, /Correctness/);
@@ -86,7 +112,7 @@ const contextLabelEnd = app.indexOf("\nconst rangeOutputIds", contextLabelStart)
 assert.ok(contextLabelStart >= 0 && contextLabelEnd > contextLabelStart);
 const contextLabelContext = {
   formatNumber: value => Number(value).toLocaleString("en-US"),
-  UZU_QUALIFICATION_CONTEXTS: [16_384, 32_768],
+  UZU_QUALIFICATION_CONTEXTS: [16_384, 32_768, 65_536, 131_072],
 };
 vm.createContext(contextLabelContext);
 vm.runInContext(app.slice(contextLabelStart, contextLabelEnd), contextLabelContext);
@@ -94,14 +120,14 @@ assert.equal(
   contextLabelContext.modelContextLabel({
     modelType: "qwen3.6-uzu", nativeContext: 262_144,
   }),
-  "262K native · qualify 16K or 32K",
+  "262K native · guarded up to 128K",
 );
 assert.equal(
   contextLabelContext.modelContextLabel({
     nativeContext: 262_144,
     engines: [{id: "uzu", artifactCompatible: true}],
   }),
-  "262K native · qualify 16K or 32K",
+  "262K native · guarded up to 128K",
   "the Model Library recognizes Uzu from its engine report too",
 );
 
@@ -136,9 +162,12 @@ const receiptSuiteContext = {
   uzuQualificationSuite: value => ({
     16_384: "route-qualification-uzu-16k",
     32_768: "route-qualification-uzu-32k",
+    65_536: "route-qualification-uzu-64k",
+    131_072: "route-qualification-uzu-128k",
   })[Number(value)] || "",
   isUzuQualificationSuite: suite => [
     "route-qualification-uzu-16k", "route-qualification-uzu-32k",
+    "route-qualification-uzu-64k", "route-qualification-uzu-128k",
   ].includes(suite),
   LLAMACPP_PLE_QUALIFICATION_SUITE: "route-qualification-8k",
   CalibrationDecision: {receiptSuite: () => "standard"},
@@ -156,10 +185,14 @@ assert.equal(
   receiptSuiteContext.calibrationSuiteControlValue("route-qualification-uzu-32k"),
   "agentic",
 );
+qualificationContextTokens = 65_536;
+assert.equal(receiptSuiteContext.performanceReceiptSuite(), "route-qualification-uzu-64k");
+qualificationContextTokens = 131_072;
+assert.equal(receiptSuiteContext.performanceReceiptSuite(), "route-qualification-uzu-128k");
 qualificationContextTokens = 24_576;
 assert.throws(
   () => receiptSuiteContext.performanceReceiptSuite(),
-  /exact 16K or 32K context tier/,
+  /exact 16K, 32K, 64K, or 128K context tier/,
 );
 
 const qualificationProfileStart = app.indexOf("function calibrationQualificationProfile");
@@ -179,7 +212,7 @@ assert.match(qualificationProfile.startMessage, /fixed DFlash \+ Weaver route/);
 assert.doesNotMatch(qualificationProfile.startMessage, /oMLX|AR/);
 
 const fingerprint = "a".repeat(64);
-const runtimeSha = "b".repeat(64);
+const runtimeSha = "efe7fc98a8e063c30103a27badb4f308b8cb782708134a7805178f9e16caa0ce";
 const sandboxSha = "c".repeat(64);
 const systemReserveBytes = 5 * 1024 ** 3;
 const uzuModel = {
@@ -189,23 +222,37 @@ const uzuModel = {
   backends: {uzu: {
     runnable: true,
     runtimeManagedAcceleration: "DFlash + Weaver",
-    contextWindows: [16_384, 32_768],
-    contextMaximum: 32_768,
+    contextWindows: [16_384, 32_768, 65_536, 131_072],
+    contextMaximum: 131_072,
     benchmarkModelFingerprint: fingerprint,
     runtimeVersion: "Uzu 0.5.23",
     runtimeIdentity: {
       ready: true,
       networkSandbox: true,
+      upstreamCommit: "115609b6ef7ce5a94fc761bf395780f032b09f9b",
+      sourcePatchSha256: "680e2d72f0ba7a63fc822543022c6a1fc9b2895276fb7252a8049219de58692f",
+      binaryIdentityPinned: true,
       memorySafetyBlocked: false,
       rawListenerAuthenticated: true,
       rawListenerIsolated: false,
       listenerIsolationBlocked: false,
-      binary: {sha256: runtimeSha},
+      boundedContextReady: true,
+      nativeBoundaryContractId: "uzu-native-auth-context-output-v1",
+      nativeBearerAuthentication: true,
+      oneUseApiKeyFile: true,
+      nativeContextLimit: true,
+      nativeOutputLimit: true,
+      binary: {sha256: runtimeSha, size: 65_079_520},
     },
     qualificationSystemContract: {
       osReserveBytes: systemReserveBytes,
       sandboxProfileSha256: sandboxSha,
       rawListenerProtected: true,
+      nativeBoundaryContractId: "uzu-native-auth-context-output-v1",
+      nativeBearerAuthentication: true,
+      oneUseApiKeyFile: true,
+      nativeContextLimit: true,
+      nativeOutputLimit: true,
     },
     modelRegistryId: "alibaba:qwen3.6:27b:mirai:mirai-m:4",
     modelCommit: "d".repeat(40),
@@ -215,10 +262,14 @@ const uzuModel = {
 const uzuQualificationSuite = context => ({
   16_384: "route-qualification-uzu-16k",
   32_768: "route-qualification-uzu-32k",
+  65_536: "route-qualification-uzu-64k",
+  131_072: "route-qualification-uzu-128k",
 })[Number(context)] || "";
 const uzuQualificationContractId = context => ({
-  16_384: "qwen36-uzu-dflash-weaver-16k-v1",
-  32_768: "qwen36-uzu-dflash-weaver-32k-v1",
+  16_384: "qwen36-uzu-dflash-weaver-16k-v5",
+  32_768: "qwen36-uzu-dflash-weaver-32k-v5",
+  65_536: "qwen36-uzu-dflash-weaver-64k-v5",
+  131_072: "qwen36-uzu-dflash-weaver-128k-v5",
 })[Number(context)] || "";
 const scenarios = ["cold", "warmPrefix", "toolIngest", "steadyTurn"];
 const contractContext = {
@@ -229,20 +280,36 @@ const contractContext = {
   selectedModel: () => uzuModel,
   uzuQualificationSuite,
   uzuQualificationContractId,
-  UZU_QUALIFICATION_CONTEXTS: [16_384, 32_768],
+  UZU_QUALIFICATION_CONTEXTS: [16_384, 32_768, 65_536, 131_072],
   UZU_QUALIFICATION_SCENARIOS: scenarios,
-  UZU_QUALIFICATION_MEMORY_LIMIT_BYTES: 36 * 1024 ** 3,
+  UZU_QUALIFICATION_MEMORY_LIMIT_BYTES: 38 * 1024 ** 3,
   UZU_QUALIFICATION_OS_RESERVE_MINIMUM_BYTES: 4 * 1024 ** 3,
-  UZU_QUALIFICATION_CONTRACT_VERSION: 1,
-  UZU_QUALIFICATION_SAMPLE_MAX_TOKENS: 512,
+  UZU_QUALIFICATION_CONTRACT_VERSION: 5,
+  UZU_QUALIFICATION_NEAR_TIER_POLICY_ID: "uzu-near-tier-authoritative-prompt-v4-conversation",
+  UZU_QUALIFICATION_NEAR_TIER_MINIMUM_CONTEXT: 65_536,
+  UZU_QUALIFICATION_NEAR_TIER_SCENARIOS: ["toolIngest", "steadyTurn"],
+  UZU_QUALIFICATION_NEAR_TIER_FRACTION: 0.90,
+  UZU_QUALIFICATION_PROMPT_TOLERANCE_FRACTION: 0.05,
+  UZU_QUALIFICATION_PROMPT_TOLERANCE_MIN_TOKENS: 1_024,
+  UZU_NATIVE_BOUNDARY_CONTRACT_ID: "uzu-native-auth-context-output-v1",
+  UZU_RUNTIME_RELEASE_BINARY_SHA256: runtimeSha,
+  UZU_RUNTIME_RELEASE_BINARY_SIZE: 65_079_520,
+  UZU_RUNTIME_UPSTREAM_COMMIT: "115609b6ef7ce5a94fc761bf395780f032b09f9b",
+  UZU_RUNTIME_SOURCE_PATCH_SHA256: "680e2d72f0ba7a63fc822543022c6a1fc9b2895276fb7252a8049219de58692f",
+  UZU_QUALIFICATION_SAMPLE_MAX_TOKENS: 8_192,
+  UZU_QUALIFICATION_SAMPLE_MIN_TOKENS: 2_048,
   UZU_QUALIFICATION_ANSWER_RESERVE_TOKENS: 128,
   UZU_QUALIFICATION_MINIMUM_TPS: 15,
   UZU_QUALIFICATION_MINIMUM_COMPLETION_TOKENS: 128,
 };
+const promptPolicyStart = app.indexOf("function uzuQualificationPromptExercisePolicy");
+const promptPolicyEnd = app.indexOf("\nfunction isUzuQualificationSuite", promptPolicyStart);
+assert.ok(promptPolicyStart >= 0 && promptPolicyEnd > promptPolicyStart);
 const contractStart = app.indexOf("function uzuQualificationContractExact");
 const contractEnd = app.indexOf("\nfunction routeQualificationContractExact", contractStart);
 assert.ok(contractStart >= 0 && contractEnd > contractStart);
 vm.createContext(contractContext);
+vm.runInContext(app.slice(promptPolicyStart, promptPolicyEnd), contractContext);
 vm.runInContext(app.slice(contractStart, contractEnd), contractContext);
 
 function exactUzuPlan(context) {
@@ -256,23 +323,25 @@ function exactUzuPlan(context) {
       backend: "uzu",
       client: "chat",
       context,
-      output: 1_024,
+      output: 4_096,
       reasoning: "auto",
       options: {acceleration: "off", depth: 1, kv: "off"},
     },
     suite: {id: suite},
     qualificationContract: {
       id,
-      version: 1,
+      version: 5,
       scope: "route",
       clientAgnostic: false,
       client: "chat",
       backend: "uzu",
       exactContext: context,
-      configuredOutputLimit: 1_024,
-      measuredRequestMaxTokens: 512,
+      configuredOutputLimit: 4_096,
+      measuredRequestMaxTokens: 4_096,
       scenarioContract: [...scenarios],
-      sampleMaxTokens: 512,
+      sampleMaxTokens: 4_096,
+      outputBudgetPolicy: {id:"uzu-remaining-context-output-v1", maximumTokens:4096,
+        minimumTokens:2048, promptReserveTokens:512, followupReserveTokens:2176},
       answerReserveTokens: 128,
       thinkingBudgetTokens: null,
       minimumDecodeTokensPerSecond: 15,
@@ -280,10 +349,11 @@ function exactUzuPlan(context) {
       reasoningPolicy: "runtime-default-on",
       toolProbeRequired: false,
       memoryProofRequired: true,
-      memoryCeilingBytes: 36 * 1024 ** 3,
+      memoryCeilingBytes: 38 * 1024 ** 3,
       fixedAcceleration: "DFlash + Weaver",
       kvStateDataType: "BF16",
       prefixCache: true,
+      promptExercisePolicy: contractContext.uzuQualificationPromptExercisePolicy(context),
       osReservePolicy: "max-4gib-or-10-percent-total-v1",
       osReserveMinimumBytes: 4 * 1024 ** 3,
       osReserveBytes: systemReserveBytes,
@@ -293,13 +363,21 @@ function exactUzuPlan(context) {
       modelCommit: uzuModel.backends.uzu.modelCommit,
       modelToolchainVersion: uzuModel.backends.uzu.modelToolchainVersion,
       runtimeBinarySha256: runtimeSha,
+      runtimeBinarySize: uzuModel.backends.uzu.runtimeIdentity.binary.size,
+      runtimeUpstreamCommit: uzuModel.backends.uzu.runtimeIdentity.upstreamCommit,
+      runtimeSourcePatchSha256: uzuModel.backends.uzu.runtimeIdentity.sourcePatchSha256,
       sandboxProfileSha256: sandboxSha,
       rawListenerProtected: true,
+      nativeBoundaryContractId: "uzu-native-auth-context-output-v1",
+      nativeBearerAuthentication: true,
+      oneUseApiKeyFile: true,
+      nativeContextLimitTokens: context,
+      nativeMaxOutputTokens: 4_096,
       runtimeVersion: uzuModel.backends.uzu.runtimeVersion,
     },
     routeSpec: {
       id,
-      version: 1,
+      version: 5,
       scope: "route",
       clientAgnostic: false,
       client: "chat",
@@ -311,7 +389,7 @@ function exactUzuPlan(context) {
       reasoningPolicy: "runtime-default-on",
       toolProbeRequired: false,
       memoryProofRequired: true,
-      memoryCeilingBytes: 36 * 1024 ** 3,
+      memoryCeilingBytes: 38 * 1024 ** 3,
     },
     reasoningContract: {
       runtimeControlled: true,
@@ -323,7 +401,7 @@ function exactUzuPlan(context) {
   };
 }
 
-for (const context of [16_384, 32_768]) {
+for (const context of [16_384, 32_768, 65_536, 131_072]) {
   assert.equal(
     contractContext.uzuQualificationContractExact(exactUzuPlan(context)),
     true,
@@ -331,14 +409,32 @@ for (const context of [16_384, 32_768]) {
   );
 }
 for (const [label, mutate] of [
+  ["legacy v1 receipt", plan => {
+    plan.qualificationContract.version = 1;
+    plan.qualificationContract.id = "qwen36-uzu-dflash-weaver-16k-v1";
+  }],
   ["suite", plan => { plan.suite.id = "route-qualification-uzu-32k"; }],
   ["surface", plan => { plan.request.client = "pi"; }],
   ["reasoning", plan => { plan.request.reasoning = "off"; }],
   ["visible KV", plan => { plan.request.options.kv = "q8"; }],
   ["BF16 receipt", plan => { plan.qualificationContract.kvStateDataType = "Q8"; }],
+  ["near-tier prompt exercise", plan => {
+    plan.qualificationContract.promptExercisePolicy.minimumPromptTokens -= 1;
+  }],
   ["system reserve", plan => { plan.qualificationContract.osReserveBytes += 1; }],
   ["sandbox receipt", plan => { plan.qualificationContract.sandboxProfileSha256 = "e".repeat(64); }],
   ["raw listener receipt", plan => { plan.qualificationContract.rawListenerProtected = false; }],
+  ["native boundary", plan => { plan.qualificationContract.nativeBoundaryContractId = "other"; }],
+  ["native bearer", plan => { plan.qualificationContract.nativeBearerAuthentication = false; }],
+  ["one-use key", plan => { plan.qualificationContract.oneUseApiKeyFile = false; }],
+  ["native context", plan => { plan.qualificationContract.nativeContextLimitTokens += 1; }],
+  ["native output", plan => { plan.qualificationContract.nativeMaxOutputTokens -= 1; }],
+  ["adaptive output policy", plan => { plan.qualificationContract.outputBudgetPolicy.id = "old"; }],
+  ["adaptive output reserve", plan => { plan.qualificationContract.outputBudgetPolicy.promptReserveTokens = 0; }],
+  ["adaptive output maximum", plan => { plan.qualificationContract.outputBudgetPolicy.maximumTokens += 1; }],
+  ["runtime size", plan => { plan.qualificationContract.runtimeBinarySize += 1; }],
+  ["runtime commit", plan => { plan.qualificationContract.runtimeUpstreamCommit = "f".repeat(40); }],
+  ["runtime patch", plan => { plan.qualificationContract.runtimeSourcePatchSha256 = "f".repeat(64); }],
   ["fixed mode", plan => { plan.routeSpec.modeLabel = "DFlash + Weaver"; }],
 ]) {
   const candidate = exactUzuPlan(16_384);
@@ -383,7 +479,7 @@ assert.ok(resultMetricStart >= 0 && resultMetricEnd > resultMetricStart);
 const resultMetricContext = {
   finiteMetric: value => Number.isFinite(Number(value)) ? Number(value) : null,
   esc: value => String(value ?? ""),
-  UZU_QUALIFICATION_MEMORY_LIMIT_BYTES: 36 * 1024 ** 3,
+  UZU_QUALIFICATION_MEMORY_LIMIT_BYTES: 38 * 1024 ** 3,
   UZU_QUALIFICATION_MINIMUM_TPS: 15,
 };
 vm.createContext(resultMetricContext);
@@ -401,7 +497,7 @@ const resultMarkup = resultMetricContext.routeQualificationFactsMarkup({
 assert.match(resultMarkup, /Generation TPS · 25\.4 tok\/s/);
 assert.match(resultMarkup, /Slowest turn · 16\.1 tok\/s · target ≥15/);
 assert.match(resultMarkup, /BF16 KV · runtime fixed/);
-assert.match(resultMarkup, /Peak memory · 20\.0 GiB \/ 36 GiB/);
+assert.match(resultMarkup, /Peak memory · 20\.0 GiB \/ 38 GiB/);
 assert.match(resultMarkup, /Reasoning \+ final answer · Passed/);
 assert.match(resultMarkup, /Correctness · Passed/);
 assert.match(resultMarkup, /Clean unload · Passed/);

@@ -9,6 +9,7 @@
   const MAX_TABS = 12;
   const MAX_QUERY = 200;
   const MAX_MATCHES = 500;
+  const FINAL_DRAIN_READS = 2;
   const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,79}$/;
 
   const safeId = value => {
@@ -33,7 +34,13 @@
   function reconcileConsoleMeta(previousValue, incomingValue) {
     const previous = previousValue && typeof previousValue === "object" ? previousValue : {};
     const incoming = incomingValue && typeof incomingValue === "object" ? incomingValue : {};
-    const {data:ignoredPreviousData, reset:ignoredPreviousReset, ...safePrevious} = previous;
+    const {
+      data:ignoredPreviousData,
+      reset:ignoredPreviousReset,
+      timelineEvents:ignoredPreviousTimelineEvents,
+      timelineReset:ignoredPreviousTimelineReset,
+      ...safePrevious
+    } = previous;
     const previousStartedAt = String(previous.startedAt || "");
     const incomingStartedAt = String(incoming.startedAt || "");
     const generationsDiffer = Boolean(
@@ -46,7 +53,13 @@
         !Number.isFinite(previousTime) || incomingTime > previousTime
       );
       if (!incomingIsNewer) return {meta:{...safePrevious}, generationChanged:false, stale:true};
-      const {data:ignoredData, reset:ignoredReset, ...safeIncoming} = incoming;
+      const {
+        data:ignoredData,
+        reset:ignoredReset,
+        timelineEvents:ignoredTimelineEvents,
+        timelineReset:ignoredTimelineReset,
+        ...safeIncoming
+      } = incoming;
       return {meta:{...safePrevious, ...safeIncoming}, generationChanged:true, stale:false};
     }
 
@@ -57,8 +70,21 @@
       return {meta:{...safePrevious}, generationChanged:false, stale:true};
     }
 
-    const {data:ignoredData, reset:ignoredReset, ...safeIncoming} = incoming;
+    const {
+      data:ignoredData,
+      reset:ignoredReset,
+      timelineEvents:ignoredTimelineEvents,
+      timelineReset:ignoredTimelineReset,
+      ...safeIncoming
+    } = incoming;
     const meta = {...safePrevious, ...safeIncoming};
+    // Status and console reads can arrive out of order without new terminal
+    // bytes. A /new or /resume must not rewind the draft's conversation binding.
+    if (sameNamedGeneration
+        && safeOffset(previous.conversationRevision) > safeOffset(incoming.conversationRevision)) {
+      meta.conversationId = previous.conversationId;
+      meta.conversationRevision = previous.conversationRevision;
+    }
     const base = Math.max(consoleBaseOffset(previous), consoleBaseOffset(incoming));
     const end = Math.max(base, consoleEndOffset(previous), consoleEndOffset(incoming));
     meta.baseOffset = base;
@@ -217,11 +243,42 @@
     return {state, end, seenEnd, unreadBytes, unread:unreadBytes > 0, label, tone};
   }
 
+  function nextReadPlan(value = {}) {
+    const state = String(value.state || "");
+    const drainRemaining = Math.max(0, Math.min(
+      FINAL_DRAIN_READS,
+      Math.floor(Number(value.drainRemaining) || 0),
+    ));
+    if (value.backlog === true) {
+      return {delay:0, drainRemaining:FINAL_DRAIN_READS, reason:"backlog"};
+    }
+    const processActive = ["starting", "running", "stopping"].includes(state);
+    const localPending = Math.max(0, Math.floor(Number(value.localPending) || 0));
+    const workMayStillProduceOutput = value.streaming === true
+      || value.compacting === true || value.abortBusy === true
+      || Math.max(0, Math.floor(Number(value.serverPending) || 0)) > 0
+      || value.inputSending === true
+      || (localPending > 0 && (processActive || !state));
+    if (processActive || workMayStillProduceOutput) {
+      if (state === "running" && value.idleConfirmed === true
+          && !workMayStillProduceOutput && value.outputChanged !== true) {
+        const idleReads = Math.min(4, safeOffset(value.idleReads) + 1);
+        return {delay:idleReads >= 4 ? 750 : 120,
+          drainRemaining:FINAL_DRAIN_READS, reason:"idle", idleReads};
+      }
+      return {delay:120, drainRemaining:FINAL_DRAIN_READS, reason:"active"};
+    }
+    if (drainRemaining > 0) {
+      return {delay:120, drainRemaining:drainRemaining - 1, reason:"final-drain"};
+    }
+    return {delay:null, drainRemaining:0, reason:"settled"};
+  }
+
   return {
-    VERSION, MAX_TABS, MAX_QUERY, MAX_MATCHES,
+    VERSION, MAX_TABS, MAX_QUERY, MAX_MATCHES, FINAL_DRAIN_READS,
     safeId, safeOffset, consoleBaseOffset, consoleEndOffset,
     reconcileConsoleMeta, consoleNeedsReplay, allowedSurfaceIds,
     normalizeRecovery, buildRecovery,
-    findMatches, nextMatchIndex, tabPresentation,
+    findMatches, nextMatchIndex, tabPresentation, nextReadPlan,
   };
 });

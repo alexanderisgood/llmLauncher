@@ -16,20 +16,44 @@ from pathlib import Path
 from typing import Any
 
 from responses_bridge import BridgeRequest, ChatStreamBridge, translate_responses_request
+from sse_framing import EventScanner, pop_event
+from sampling_contract import (
+    NON_CONTRACT_SAMPLING_FIELDS,
+    SUPPORTED_SAMPLING_FIELDS,
+    SamplingContractError,
+    canonicalize_sampling,
+    load_sampling_contract,
+    rewrite_chat_completions_request,
+    rewrite_responses_request,
+)
 
 
 MAX_BODY = 128 * 1024 * 1024
 MAX_RESPONSE_GUARD_BUFFER = 16 * 1024 * 1024
+MAX_PRIVATE_CONFIG = 1024 * 1024
+OMLX_CONTEXT_MIN = 1_024
+OMLX_CONTEXT_MAX = 2_000_000
+OMLX_PROMPT_FIXED_RESERVE_TOKENS = 1_024
+OMLX_PROMPT_ITEM_RESERVE_TOKENS = 32
 SUPPORTED_BACKENDS = {
     "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
     "llamacpp", "uzu",
 }
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade",
+    "te", "trailer", "trailers", "transfer-encoding", "upgrade",
+}
+MUTATED_REPRESENTATION_HEADERS = {
+    "content-length", "content-md5", "digest", "content-digest", "repr-digest", "etag",
 }
 EFFORT_ORDER = ("auto", "off", "minimal", "low", "medium", "high", "xhigh", "max")
 THINKING_BUDGETS = {"minimal": 1_024, "low": 2_048, "medium": 4_096, "high": 8_192, "xhigh": 16_384}
+REASONING_OVERRIDE_FIELDS = (
+    "reasoning", "reasoning_effort", "reasoning_budget", "reasoning_budget_tokens",
+    "reasoning_budget_message", "thinking_budget", "thinking_budget_tokens",
+    "thinking_mode", "enable_thinking", "chat_template_kwargs",
+)
+SAMPLING_PROTOCOLS = {"chat-completions", "responses"}
 
 
 def fail(message: str) -> None:
@@ -37,20 +61,246 @@ def fail(message: str) -> None:
     raise SystemExit(2)
 
 
+class PrivateConfigError(RuntimeError):
+    """A private proxy handoff could not be consumed without a path race."""
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int]:
+    return int(info.st_dev), int(info.st_ino)
+
+
+def _stable_file_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(info.st_dev), int(info.st_ino), int(info.st_uid),
+        stat.S_IMODE(info.st_mode), int(info.st_nlink), int(info.st_size),
+        int(info.st_mtime_ns), int(info.st_ctime_ns),
+    )
+
+
+def _private_regular_file(info: os.stat_result) -> bool:
+    return bool(
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == os.geteuid()
+        and stat.S_IMODE(info.st_mode) == 0o600
+        and info.st_nlink == 1
+    )
+
+
+def _private_directory(info: os.stat_result) -> bool:
+    return bool(
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.geteuid()
+        and stat.S_IMODE(info.st_mode) == 0o700
+    )
+
+
+def consume_private_config(path: Path, state_root: Path) -> bytes:
+    """Read and unlink one identity-bound, owner-only proxy configuration.
+
+    The directory descriptor pins the parent while the final component is
+    opened with ``O_NOFOLLOW``.  The path and descriptor must describe the
+    same unchanged, single-link regular file before it is unlinked.  Keeping
+    the descriptor open through the unlink lets us verify that the consumed
+    inode has no remaining links.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise PrivateConfigError("O_NOFOLLOW is unavailable")
+    candidate = Path(os.path.abspath(os.fspath(path)))
+    parent = candidate.parent
+    parent_fd: int | None = None
+    config_fd: int | None = None
+    try:
+        root = state_root.resolve(strict=True)
+        parent_before = parent.lstat()
+        if not _private_directory(parent_before):
+            raise PrivateConfigError("unsafe parent directory")
+        resolved_parent = parent.resolve(strict=True)
+        try:
+            resolved_parent.relative_to(root)
+        except ValueError as error:
+            raise PrivateConfigError("configuration is outside state root") from error
+
+        directory_flags = (
+            os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+        )
+        parent_fd = os.open(parent, directory_flags)
+        parent_opened = os.fstat(parent_fd)
+        if (
+            not _private_directory(parent_opened)
+            or _file_identity(parent_before) != _file_identity(parent_opened)
+        ):
+            raise PrivateConfigError("parent directory changed")
+
+        file_before = os.stat(candidate.name, dir_fd=parent_fd, follow_symlinks=False)
+        if not _private_regular_file(file_before):
+            raise PrivateConfigError("unsafe configuration file")
+        file_flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+        config_fd = os.open(candidate.name, file_flags, dir_fd=parent_fd)
+        file_opened = os.fstat(config_fd)
+        if (
+            not _private_regular_file(file_opened)
+            or _stable_file_identity(file_before) != _stable_file_identity(file_opened)
+        ):
+            raise PrivateConfigError("configuration changed before open")
+
+        payload = bytearray()
+        while len(payload) <= MAX_PRIVATE_CONFIG:
+            chunk = os.read(
+                config_fd,
+                min(64 * 1024, MAX_PRIVATE_CONFIG + 1 - len(payload)),
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+
+        file_after = os.fstat(config_fd)
+        path_after = os.stat(candidate.name, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.fstat(parent_fd)
+        if (
+            _stable_file_identity(file_opened) != _stable_file_identity(file_after)
+            or _stable_file_identity(file_after) != _stable_file_identity(path_after)
+            or _file_identity(parent_opened) != _file_identity(parent_after)
+            or not _private_directory(parent_after)
+        ):
+            raise PrivateConfigError("configuration changed while reading")
+
+        os.unlink(candidate.name, dir_fd=parent_fd)
+        consumed = os.fstat(config_fd)
+        if _file_identity(consumed) != _file_identity(file_after) or consumed.st_nlink != 0:
+            raise PrivateConfigError("configuration was not fully consumed")
+        if len(payload) > MAX_PRIVATE_CONFIG:
+            raise PrivateConfigError("configuration is too large")
+        return bytes(payload)
+    except PrivateConfigError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise PrivateConfigError("private configuration access failed") from error
+    finally:
+        if config_fd is not None:
+            os.close(config_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def validated_sampling_policy(
+    contract_document: Any, enforcement: Any, expected_protocol: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate one launcher-authored contract and its exact wire representation."""
+    if expected_protocol not in SAMPLING_PROTOCOLS:
+        raise ValueError("unsupported sampling protocol")
+    try:
+        contract = load_sampling_contract(contract_document)
+    except SamplingContractError as error:
+        raise ValueError(str(error)) from error
+    if not isinstance(enforcement, dict) or set(enforcement) != {
+        "protocol", "representableFields", "implicitModelDefaults",
+    }:
+        raise ValueError("invalid sampling enforcement contract")
+    if enforcement.get("protocol") != expected_protocol:
+        raise ValueError("sampling enforcement protocol does not match this surface")
+    raw_fields = enforcement.get("representableFields")
+    if (
+        not isinstance(raw_fields, list)
+        or len(raw_fields) != len(set(raw_fields))
+        or any(
+            not isinstance(field, str) or field not in SUPPORTED_SAMPLING_FIELDS
+            for field in raw_fields
+        )
+    ):
+        raise ValueError("invalid representable sampling fields")
+    implicit = enforcement.get("implicitModelDefaults")
+    if not isinstance(implicit, bool):
+        raise ValueError("invalid implicit sampling-default policy")
+    fields = frozenset(raw_fields)
+    rewrite = (
+        rewrite_responses_request
+        if expected_protocol == "responses" else rewrite_chat_completions_request
+    )
+    try:
+        rewrite(
+            {}, contract,
+            representable_fields=fields,
+            implicit_model_defaults=implicit,
+        )
+    except SamplingContractError as error:
+        raise ValueError(str(error)) from error
+    return contract.as_dict(), {
+        "protocol": expected_protocol,
+        "representableFields": sorted(fields),
+        "implicitModelDefaults": implicit,
+    }
+
+
+def enforce_sampling_contract(
+    value: dict[str, Any], contract_document: Any, enforcement: Any,
+    protocol: str,
+) -> dict[str, Any]:
+    """Reject client sampling drift, then write the exact locked contract."""
+    contract_document, enforcement = validated_sampling_policy(
+        contract_document, enforcement, protocol,
+    )
+    contract = load_sampling_contract(contract_document)
+    supplied_fields = [
+        field for field in SUPPORTED_SAMPLING_FIELDS if field in value
+    ]
+    try:
+        supplied = canonicalize_sampling({
+            field: value[field] for field in supplied_fields
+        })
+    except SamplingContractError as error:
+        raise ValueError(str(error)) from error
+    conflicts = [
+        field for field in supplied_fields
+        if field not in supplied or contract.values.get(field) != supplied[field]
+    ]
+    if conflicts:
+        raise ValueError(
+            "Request sampling conflicts with the launcher contract: "
+            + ", ".join(conflicts)
+            + "."
+        )
+    rewrite = (
+        rewrite_responses_request
+        if protocol == "responses" else rewrite_chat_completions_request
+    )
+    try:
+        return rewrite(
+            value, contract,
+            representable_fields=enforcement["representableFields"],
+            implicit_model_defaults=enforcement["implicitModelDefaults"],
+        )
+    except SamplingContractError as error:
+        raise ValueError(str(error)) from error
+
+
+def _sampling_policy_source(
+    config: dict[str, Any], protocol: str, surface: dict[str, Any] | None = None,
+) -> tuple[Any, Any] | None:
+    source = surface if surface is not None else config
+    contract = source.get("samplingContract")
+    enforcement = source.get("samplingEnforcement")
+    if contract is None and enforcement is None:
+        # Keep isolated transform diagnostics backward-compatible. Every
+        # configuration consumed from disk is validated as strict below.
+        return None
+    if contract is None or enforcement is None:
+        raise ValueError("sampling contract is incomplete")
+    validated_sampling_policy(contract, enforcement, protocol)
+    return contract, enforcement
+
+
 def load_config(path: Path) -> dict[str, Any]:
-    state_root = (Path.home() / "Library" / "Application Support" / "LLM Launcher" / "runs").resolve()
-    resolved = path.resolve(strict=True)
+    state_root = Path.home() / "Library" / "Application Support" / "LLM Launcher" / "runs"
     try:
-        resolved.relative_to(state_root)
-    except ValueError:
-        fail("configuration is outside the launcher state folder")
-    info = resolved.stat()
-    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
-        fail("configuration permissions are not private")
+        payload = consume_private_config(path, state_root)
+    except PrivateConfigError:
+        fail("private configuration could not be safely consumed")
     try:
-        value = json.loads(resolved.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeError) as error:
-        fail(f"cannot read configuration: {error}")
+        value = json.loads(payload)
+    except (ValueError, UnicodeError):
+        fail("configuration data is invalid")
     if not isinstance(value, dict):
         fail("configuration is not an object")
     for key in ("listenPort", "upstreamPort", "outputLimit"):
@@ -62,20 +312,175 @@ def load_config(path: Path) -> dict[str, Any]:
         fail("invalid response limit")
     if value.get("backend") not in SUPPORTED_BACKENDS:
         fail("unsupported Responses backend")
+    context_limit = value.get("contextLimit")
+    if value.get("backend") == "omlx":
+        if (
+            isinstance(context_limit, bool) or not isinstance(context_limit, int)
+            or not OMLX_CONTEXT_MIN <= context_limit <= OMLX_CONTEXT_MAX
+        ):
+            fail("invalid oMLX context limit")
+    elif context_limit not in {None, 0}:
+        fail("unexpected context limit")
     if value.get("reasoning") not in EFFORT_ORDER:
         fail("invalid reasoning effort")
     if not all(isinstance(value.get(key), str) and value[key] for key in ("clientKey", "upstreamKey", "servedModel")):
         fail("invalid API key")
+    try:
+        value["samplingContract"], value["samplingEnforcement"] = validated_sampling_policy(
+            value.get("samplingContract"), value.get("samplingEnforcement"),
+            "responses",
+        )
+    except ValueError as error:
+        fail(str(error))
     return value
 
 
-def transform_response_request(body: bytes, config: dict[str, Any]) -> bytes:
+def bound_omlx_request_to_context(
+    value: dict[str, Any], config: dict[str, Any], output_field: str, *,
+    prompt_items: int = 0,
+) -> bytes:
+    """Keep the request plus its possible generation inside oMLX context.
+
+    The relay deliberately does not import model code. UTF-8 request bytes are
+    therefore a safe upper bound on byte-fallback tokenizer tokens, with
+    additional room for chat-template and per-item control tokens. A missing
+    context remains a no-op only for isolated legacy transform diagnostics;
+    every launcher-created proxy configuration validates this field strictly.
+    """
+    encoded = json.dumps(
+        value, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    if config.get("backend") != "omlx":
+        return encoded
+    context_limit = config.get("contextLimit")
+    if context_limit is None or context_limit == 0:
+        return encoded
+    if (
+        isinstance(context_limit, bool) or not isinstance(context_limit, int)
+        or not OMLX_CONTEXT_MIN <= context_limit <= OMLX_CONTEXT_MAX
+    ):
+        raise ValueError("invalid oMLX context limit")
+    output_tokens = value.get(output_field)
+    if (
+        isinstance(output_tokens, bool) or not isinstance(output_tokens, int)
+        or output_tokens <= 0
+    ):
+        raise ValueError(f"invalid {output_field}")
+    item_count = max(0, min(100_000, int(prompt_items)))
+    if (config.get("omlxNativeContextGuard") is True and output_field == "max_tokens"
+            and value.get("stream") is True):
+        # The launcher-owned DFlash adapter checks the rendered prompt using
+        # the engine's tokenizer before admitting any generation.
+        return encoded
+    while True:
+        encoded = json.dumps(
+            value, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+        prompt_upper_bound = (
+            len(encoded)
+            + OMLX_PROMPT_FIXED_RESERVE_TOKENS
+            + OMLX_PROMPT_ITEM_RESERVE_TOKENS * item_count
+        )
+        available_output = context_limit - prompt_upper_bound
+        if available_output <= 0:
+            raise ValueError(
+                "context_length_exceeded: This request already fills the selected oMLX context window. "
+                "Shorten the prompt or chat history before retrying."
+            )
+        bounded_output = min(int(value[output_field]), available_output)
+        if bounded_output == value[output_field]:
+            return encoded
+        value[output_field] = bounded_output
+
+
+def validate_omlx_context_is_self_contained(value: dict[str, Any]) -> None:
+    """Reject request content whose expanded token cost cannot be proven."""
+    for key in ("previous_response_id", "conversation", "prompt"):
+        if value.get(key) is not None:
+            raise ValueError(
+                f"oMLX context safety cannot bound {key}; send the complete conversation "
+                "as inline input instead."
+            )
+
+    if value.get("audio") is not None or value.get("tool_resources") is not None:
+        raise ValueError(
+            "oMLX context safety cannot bound external audio or tool resources; use "
+            "inline text/tool content only on this bounded route."
+        )
+    modalities = value.get("modalities")
+    if modalities is not None and (
+        not isinstance(modalities, list)
+        or any(str(modality).casefold() != "text" for modality in modalities)
+    ):
+        raise ValueError(
+            "oMLX context safety cannot prove non-text modality expansion; request text only "
+            "on this bounded route."
+        )
+    unbounded_tool_types = {
+        "file_search", "web_search", "web_search_preview", "computer",
+        "computer_use_preview", "code_interpreter", "mcp", "image_generation",
+    }
+    tools = value.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            tool_type = (
+                str(tool.get("type") or "").casefold()
+                if isinstance(tool, dict) else ""
+            )
+            if tool_type and any(
+                tool_type == family or tool_type.startswith(family + "_")
+                for family in unbounded_tool_types
+            ):
+                raise ValueError(
+                    "oMLX context safety cannot bound server-side retrieval or generated tool "
+                    "content; use inline text and ordinary function tools only on this bounded "
+                    "route."
+                )
+
+    stack: list[Any] = [value.get("input"), value.get("messages")]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        item_type = str(node.get("type") or "")
+        if item_type.casefold() == "item_reference":
+            raise ValueError(
+                "oMLX context safety cannot bound an item_reference; send the referenced "
+                "content inline instead."
+            )
+        media_type = item_type.casefold()
+        if any(part in media_type for part in (
+            "image", "audio", "video", "file", "document", "screenshot",
+        )) or any(key in node for key in (
+            "image_url", "video_url", "file_id", "file_url", "file_data", "audio",
+            "input_audio", "attachments",
+        )):
+            raise ValueError(
+                "oMLX context safety cannot prove media or file token expansion; use text/tool "
+                "content only on this bounded route."
+            )
+        stack.extend(node.values())
+
+
+def transform_response_request(
+    body: bytes, config: dict[str, Any], surface: dict[str, Any] | None = None,
+) -> bytes:
     """Set the exact output cap and translate the launcher's effort vocabulary."""
     value = json.loads(body)
     if not isinstance(value, dict):
         raise ValueError("Responses request must be a JSON object")
     if value.get("model") != config.get("servedModel"):
         raise ValueError("Responses request targets a different model")
+    if config.get("backend") == "omlx":
+        validate_omlx_context_is_self_contained(value)
+    sampling_policy = _sampling_policy_source(config, "responses", surface)
+    if sampling_policy is not None:
+        value = enforce_sampling_contract(
+            value, sampling_policy[0], sampling_policy[1], "responses",
+        )
     output_limit = int(config["outputLimit"])
     requested_limit = value.get("max_output_tokens")
     if requested_limit is None:
@@ -86,28 +491,27 @@ def transform_response_request(body: bytes, config: dict[str, Any]) -> bytes:
         value["max_output_tokens"] = min(requested_limit, output_limit)
     effective_output_limit = int(value["max_output_tokens"])
     effort = str(config["reasoning"])
+    requested_reasoning = value.get("reasoning")
+    reasoning_summary = (
+        requested_reasoning.get("summary")
+        if isinstance(requested_reasoning, dict) and "summary" in requested_reasoning
+        else None
+    )
+    for key in REASONING_OVERRIDE_FIELDS:
+        value.pop(key, None)
     if effort == "auto":
         # A user's global Codex setting (for example `ultra`) is otherwise
         # inherited into this one-off local route. "Model default" means the
         # local model/runtime chooses. Remove only the inherited effort while
         # retaining unrelated Responses controls such as summary style.
-        reasoning = value.get("reasoning")
-        if isinstance(reasoning, dict):
-            reasoning.pop("effort", None)
-            if reasoning:
-                value["reasoning"] = reasoning
-            else:
-                value.pop("reasoning", None)
-        else:
-            value.pop("reasoning", None)
-        value.pop("thinking_budget", None)
+        if reasoning_summary is not None:
+            value["reasoning"] = {"summary": reasoning_summary}
     else:
-        reasoning = value.get("reasoning")
-        if not isinstance(reasoning, dict):
-            reasoning = {}
         # The launcher calls the no-reasoning choice ``off``. Responses APIs,
         # including Whallm's route, call the same wire value ``none``.
-        reasoning["effort"] = "none" if effort == "off" else effort
+        reasoning = {"effort": "none" if effort == "off" else effort}
+        if reasoning_summary is not None:
+            reasoning["summary"] = reasoning_summary
         value["reasoning"] = reasoning
         if effort == "off":
             value.pop("thinking_budget", None)
@@ -121,13 +525,26 @@ def transform_response_request(body: bytes, config: dict[str, Any]) -> bytes:
         # at least half for the answer/tool call; at normal ceilings retain
         # the selected effort budget without ever exceeding the total cap.
         value["thinking_budget"] = min(THINKING_BUDGETS[effort], effective_output_limit // 2)
-        kwargs = value.get("chat_template_kwargs")
-        if not isinstance(kwargs, dict):
-            kwargs = {}
-        kwargs["enable_thinking"] = True
-        kwargs["reasoning_effort"] = effort
-        value["chat_template_kwargs"] = kwargs
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        value["chat_template_kwargs"] = {
+            "enable_thinking": True,
+            "reasoning_effort": effort,
+        }
+    input_value = value.get("input")
+    prompt_items = len(input_value) if isinstance(input_value, list) else int(input_value is not None)
+    encoded = bound_omlx_request_to_context(
+        value, config, "max_output_tokens", prompt_items=prompt_items,
+    )
+    if config["backend"] == "omlx" and effort != "auto":
+        effective_output_limit = int(value["max_output_tokens"])
+        if effective_output_limit < 2:
+            raise ValueError("max_output_tokens is too small for explicit reasoning")
+        value["thinking_budget"] = min(
+            THINKING_BUDGETS[effort], effective_output_limit // 2,
+        )
+        encoded = bound_omlx_request_to_context(
+            value, config, "max_output_tokens", prompt_items=prompt_items,
+        )
+    return encoded
 
 
 def _response_record(value: Any) -> dict[str, Any] | None:
@@ -263,25 +680,16 @@ class ResponsesLimitGuard:
         self.output_limit = max(1, int(output_limit))
         self.streaming = bool(streaming)
         self.pending = bytearray()
+        self._event_scanner = EventScanner()
+        self.passthrough_event = False
+        self.output_inspection_incomplete = False
         self.terminal = bytearray()
         self.terminal_started = False
         self.disabled = False
         self.saw_reasoning = False
         self.saw_final_output = False
 
-    @staticmethod
-    def _split_event(buffer: bytearray) -> bytes | None:
-        endings = []
-        for separator in (b"\n\n", b"\r\n\r\n"):
-            index = buffer.find(separator)
-            if index >= 0:
-                endings.append((index + len(separator), index))
-        if not endings:
-            return None
-        end, _index = min(endings, key=lambda item: item[1])
-        event = bytes(buffer[:end])
-        del buffer[:end]
-        return event
+    _split_event = staticmethod(pop_event)
 
     @staticmethod
     def _event_value(event: bytes) -> dict[str, Any] | None:
@@ -311,6 +719,8 @@ class ResponsesLimitGuard:
 
     def _observe_event(self, event: bytes) -> None:
         value = self._event_value(event)
+        if value is None and len(event) > MAX_RESPONSE_GUARD_BUFFER:
+            self.output_inspection_incomplete = True
         reasoning, final_output = response_output_signals(value)
         self.saw_reasoning = self.saw_reasoning or reasoning
         self.saw_final_output = self.saw_final_output or final_output
@@ -320,7 +730,7 @@ class ResponsesLimitGuard:
         if value is None:
             return event
         corrected = correct_completed_response_at_limit(value, self.output_limit)
-        if not corrected:
+        if not corrected and not self.output_inspection_incomplete:
             corrected = fail_completed_reasoning_only_response(
                 value,
                 saw_reasoning=self.saw_reasoning,
@@ -379,9 +789,13 @@ class ResponsesLimitGuard:
         self.pending.extend(chunk)
         released = bytearray()
         while True:
-            event = self._split_event(self.pending)
+            event = self._event_scanner.pop(self.pending)
             if event is None:
                 break
+            if self.passthrough_event:
+                released.extend(event)
+                self.passthrough_event = False
+                continue
             self._observe_event(event)
             if self._is_completed_event(event):
                 self.terminal_started = True
@@ -390,13 +804,16 @@ class ResponsesLimitGuard:
                 self.pending.clear()
                 break
             released.extend(event)
-        if not self.terminal_started and len(self.pending) > MAX_RESPONSE_GUARD_BUFFER:
-            released.extend(self.pending)
-            self.pending.clear()
-            self.disabled = True
+        if not self.terminal_started and (self.passthrough_event or len(self.pending) > MAX_RESPONSE_GUARD_BUFFER):
+            self.passthrough_event = True
+            # We cannot infer the absence of an answer from events we could
+            # not inspect. Authoritative usage-based limit correction remains.
+            self.output_inspection_incomplete = True
+            released.extend(self._event_scanner.forward_prefix(self.pending))
         return bytes(released)
 
     def finish(self) -> bytes:
+        self._event_scanner.reset()
         if self.disabled:
             return b""
         if not self.streaming:
@@ -521,7 +938,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 return
         headers = {
             key: value for key, value in self.headers.items()
-            if key.lower() not in HOP_HEADERS | {"authorization", "host", "content-length", "accept-encoding"}
+            if key.lower() not in HOP_HEADERS | MUTATED_REPRESENTATION_HEADERS
+            | {"authorization", "host", "accept-encoding"}
         }
         headers["Authorization"] = f"Bearer {config['upstreamKey']}"
         headers["Accept-Encoding"] = "identity"
@@ -581,7 +999,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_response(upstream.status, upstream.reason)
             for key, value in upstream.getheaders():
                 if key.lower() not in HOP_HEADERS and not (
-                    limit_guard is not None and key.lower() == "content-length"
+                    limit_guard is not None
+                    and key.lower() in MUTATED_REPRESENTATION_HEADERS
                 ):
                     self.send_header(key, value)
             self.send_header("Connection", "close")

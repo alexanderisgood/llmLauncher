@@ -3,6 +3,7 @@ const state = {
   freeToken: null, freeTokenBusy: false,
   selected: null, statusTimer: null, catalogNotice: "", applyingOptimal: false,
   optimizationGeneration: 0, optimalSignature: "", optimalLabel: "",
+  activeEvidenceBinding: null, activeEvidenceSignature: "",
   pendingOptimizerSnapshot: null, pendingOptimizerBackend: "",
   optimizerMenuOpen: false, themeMenuOpen: false, hubToolsMenuOpen: false, runtimeInventory: null, runtimeLoading: false,
   runtimeOpening: false,
@@ -35,6 +36,9 @@ const state = {
   calibrationProfileContractId: "",
   sessionDashboard: null, sessionLoading: false, sessionGeneration: 0,
   sessionAcknowledgementId: "", sessionAdmissionSignature: "", sessionLastLoadedAt: 0,
+  sessionAdmissionPendingSignature: "", sessionAdmissionError: "",
+  sessionAdmissionErrorSignature: "", sessionAdmissionErrorAt: 0,
+  sessionAdmissionTimer: null,
   sessionAttachmentPlan: null, sessionAttachmentLoading: false,
   sessionAttachmentBusy: false, sessionAttachmentGeneration: 0,
   sessionAttachmentOwnerRunId: "", sessionAttachmentSignature: "", sessionAttachmentTimer: null,
@@ -44,7 +48,7 @@ const state = {
   requestCancelBusyId: "", idlePolicyBusy: false,
   agentConsoleOwnerRunId: "", agentConsoleSurfaceId: "", agentConsoleMeta: null,
   agentConsoleViews: {}, agentConsoleRecoveryOwnerRunId: "",
-  agentConsoleTimer: null, agentConsoleReading: false,
+  agentConsoleTimer: null, agentConsoleReading: false, agentConsoleReadGeneration: 0,
   agentConsoleVisible: false, agentConsoleBusy: false, agentConsoleResizeTimer: null,
   agentConsoleDismissed: false, agentConsoleSearchOpen: false,
   agentConsoleSearchQuery: "", agentConsoleSearchIndex: -1,
@@ -52,14 +56,16 @@ const state = {
   routeCheckPhase: "idle", routeCheckStatus: null, routeCheckPlan: null,
   routeCheckLoading: false, routeCheckGeneration: 0, routeCheckCompletionId: "",
   routeCheckIntent: "inspect", routeCheckInputSignature: "", verifiedLaunchBusy: false,
-  runPhase: "idle", runStatus: null, chatMessages: [], chatAbort: null, chatRunId: "",
-  chatOwnerRunId: "", chatAttachment: null, chatQueue: [],
+  runPhase: "idle", runStatus: null, chatMessages: [], chatAbort: null,
+  chatStopBusy: false, chatRunId: "",
+  chatOwnerRunId: "", chatAttachment: null, chatAttachmentObserved: false,
+  chatPostmortem: null, chatQueue: [],
   chatQueuePaused: false, chatQueueRecovered: false, chatQueueStorageAvailable: null,
   chatContextFiles: [], chatContextBusy: false, chatWorkspaceContext: null,
   chatBranch: null, chatEditingMessageId: "", chatQueueEditingId: "",
   chatContextReducedAt: 0, chatRevisionBusy: false,
   chatHistoryId: "", chatHistoryThreads: [], chatHistoryLoading: false,
-  chatHistorySaving: false,
+  chatHistorySaving: false, chatHistoryMutationTail: null,
   chatHistoryDeleteConfirmId: "", chatHistoryEditingId: "",
   chatHistoryBusyId: "", chatHistoryQuery: "", chatHistoryLoaded: false,
   chatResumePlan: null, chatResumePlanLoading: false, chatResumeGeneration: 0,
@@ -77,10 +83,12 @@ const state = {
   chatTurnCheckpoint: null, chatTurnCheckpointTimer: null,
   chatTurnCheckpointPromise: null, chatTurnCheckpointDirty: false,
   chatTurnCheckpointLastAt: 0,
+  chatTurnSettlement: null,
   chatDefaultsModelId: "", chatRenderFrame: null, chatFollowOutput: true,
   chatRenderRevision: 0, chatScrollInteractionRevision: 0,
   chatTranscriptSearchOpen: false, chatTranscriptQuery: "", chatTranscriptActiveId: "",
   benchmarkPhase: "idle", benchmarkResultId: "", benchmarkStatus: null,
+  benchmarkReview: null,
   benchmarkHistory: null, benchmarkHistoryKey: "", benchmarkHistoryLoading: false,
   benchmarkHistoryGeneration: 0, benchmarkHistoryTimer: null, benchmarkHistoryError: "",
   performanceReceipt: null, performanceReceiptKey: "", performanceReceiptLoading: true,
@@ -162,6 +170,18 @@ const TerminalCore = globalThis.LLMTerminalCore;
 if (!TerminalCore) throw new Error("Hub Console terminal support did not load.");
 const AgentConsoleTabsCore = globalThis.LLMAgentConsoleTabs;
 if (!AgentConsoleTabsCore) throw new Error("Hub Console tab support did not load.");
+const AgentConsoleInputCore = globalThis.LLMAgentConsoleInputCore;
+if (!AgentConsoleInputCore) throw new Error("Reliable Hub Console input support did not load.");
+const statusPoller = globalThis.LLMPolling.createPoller();
+function statusPollInterval(active, dialogId) {
+  const interval = active || $(dialogId)?.open ? 1800 : 30000;
+  return Math.max(interval, document.hidden ? 10000 : 0);
+}
+const PiTimelineCore = globalThis.LLMPiTimelineCore;
+if (!PiTimelineCore) throw new Error("Pi semantic timeline support did not load.");
+const agentPiTimelineView = globalThis.LLMPiTimelineView.createTimelineView({
+  document, core:PiTimelineCore, formatTimestamp:formatChatTimestamp,
+});
 const formatNumber = (n) => Number(n || 0).toLocaleString();
 const formatBytes = (bytes) => {
   const value = Math.max(0, Number(bytes || 0));
@@ -191,7 +211,7 @@ function requestLiveTelemetry(request) {
 }
 function liveRequestPhaseLabel(request) {
   const live = requestLiveTelemetry(request);
-  if (!live) return "";
+  if (!live) return ChatStatusCore.requestPhase(request);
   if (live.phase === "prefill") return "Reading context";
   const reasoning = typeof live.reasoningCharacters === "number" ? live.reasoningCharacters : 0;
   const content = typeof live.contentCharacters === "number" ? live.contentCharacters : 0;
@@ -230,8 +250,305 @@ function completedRequestDetail(request) {
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const reducedMotion = () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+const MTPLX_OPERATOR_ROUTE_DEFAULT = "default";
+const MTPLX_OPERATOR_ROUTE_2111 = "dense-27b-long-context-2111";
+const MTPLX_LONG_CONTEXT_CONTRACT_VERSION = 1;
+const MTPLX_LONG_CONTEXT_SWEEP_VERSION = 5;
+const MTPLX_LONG_CONTEXT_SUITE = "mtplx-dense-27b-long-context-64k";
+const MTPLX_BENCHMARK_FRESH_MILLISECONDS = 30 * 24 * 60 * 60 * 1000;
+
+function mtplxExact2111Runtime(value) {
+  return /^(?:mtplx\s+)?2\.11\.1(?:\s+\(2\.11\.1\))?$/i.test(
+    String(value || "").trim().replace(/\s+/g, " "),
+  );
+}
+
+function mtplxExactObjectKeys(value, keys) {
+  return Boolean(
+    value && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === keys.length
+    && keys.every(key => Object.hasOwn(value, key)),
+  );
+}
+
+function mtplxCanonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(mtplxCanonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map(key => (
+      `${JSON.stringify(key)}:${mtplxCanonicalJson(value[key])}`
+    )).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function mtplxVisibleSamplingContract(model) {
+  const mode = String($("samplingMode")?.value || "");
+  const aliases = [
+    ["temperatureInput", "temperature"], ["topPInput", "top_p"],
+    ["topKInput", "top_k"], ["presencePenaltyInput", "presence_penalty"],
+    ["frequencyPenaltyInput", "frequency_penalty"],
+    ["repetitionPenaltyInput", "repetition_penalty"], ["seedInput", "seed"],
+  ];
+  let values = {};
+  if (mode === "model") {
+    const defaults = model?.defaultSampling;
+    if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) return null;
+    const allowed = new Set(aliases.map(([, key]) => key));
+    if (Object.keys(defaults).some(key => !allowed.has(key))) return null;
+    for (const [, key] of aliases) {
+      if (defaults[key] === null || defaults[key] === undefined) continue;
+      if (typeof defaults[key] !== "number" || !Number.isFinite(defaults[key])) return null;
+      values[key] = defaults[key];
+    }
+  } else if (mode === "custom") {
+    for (const [id, key] of aliases) {
+      const text = String($(id)?.value ?? "").trim();
+      if (key === "seed" && text === "") continue;
+      if (text === "") return null;
+      const value = Number(text);
+      if (!Number.isFinite(value)) return null;
+      if (["top_k", "seed"].includes(key) && !Number.isInteger(value)) return null;
+      values[key] = value;
+    }
+  } else return null;
+  return {schemaVersion:1, controlled:true, mode, values};
+}
+
+function mtplxSamplingContractMatches(record, model) {
+  const visible = mtplxVisibleSamplingContract(model);
+  const stored = record?.samplingContract;
+  return Boolean(
+    visible
+    && record?.samplingEvidenceVersion === 1
+    && record?.samplingControlled === true
+    && record?.samplingContractVersion === 1
+    && /^[0-9a-f]{64}$/.test(String(record?.samplingFingerprint || ""))
+    && /^[0-9a-f]{64}$/.test(String(record?.samplingContractFingerprint || ""))
+    && mtplxExactObjectKeys(stored, ["schemaVersion", "controlled", "mode", "values"])
+    && mtplxCanonicalJson(stored) === mtplxCanonicalJson(visible)
+  );
+}
+
+function mtplxLongContextCapabilityExact(model) {
+  const capability = model?.backends?.mtplx;
+  const route = capability?.longContext2111;
+  return Boolean(
+    model?.ready === true
+    && capability?.runnable === true
+    && capability?.mtp === true
+    && route && typeof route === "object" && !Array.isArray(route)
+    && route.contractVersion === MTPLX_LONG_CONTEXT_CONTRACT_VERSION
+    && route.ready === true
+    && route.routeId === MTPLX_OPERATOR_ROUTE_2111
+    && typeof route.contractId === "string"
+    && route.contractId.trim().length > 0 && route.contractId.length <= 256
+    && route.minimumContext === 65_536
+    && route.requiredProfile === "turbo"
+    && route.requiredAcceleration === "mtp"
+    && mtplxExact2111Runtime(route.runtimeVersion)
+    && mtplxExact2111Runtime(capability.runtimeVersion)
+  );
+}
+
+function mtplxLongContextRouteEligible(model, values = {}) {
+  const route = model?.backends?.mtplx?.longContext2111;
+  const context = Number(values.context);
+  return Boolean(
+    values.backend === "mtplx"
+    && mtplxLongContextCapabilityExact(model)
+    && values.acceleration === route.requiredAcceleration
+    && values.profile === route.requiredProfile
+    && Number.isInteger(context) && context >= route.minimumContext
+  );
+}
+
+function mtplxLongContextRecordMatches(record, model, values = {}, now = Date.now()) {
+  const capability = model?.backends?.mtplx;
+  const route = capability?.longContext2111;
+  const sweep = record?.mtplxOperatorSweep;
+  const context = Number(values.context);
+  const output = Number(values.output);
+  const depth = Number(values.depth);
+  const createdAt = Date.parse(String(record?.createdAt || ""));
+  const expectedSettings = {
+    depth, mtplxOperatorRoute:MTPLX_OPERATOR_ROUTE_2111,
+  };
+  const engineSettings = record?.engineSettings;
+  const candidate = Array.isArray(sweep?.candidates)
+    ? sweep.candidates.find(item => item?.route === MTPLX_OPERATOR_ROUTE_2111) : null;
+  return Boolean(
+    mtplxLongContextRouteEligible(model, values)
+    && Number.isInteger(output) && output > 0
+    && Number.isInteger(depth) && depth > 0
+    && Number.isFinite(createdAt) && createdAt <= now
+    && now - createdAt <= MTPLX_BENCHMARK_FRESH_MILLISECONDS
+    && record?.scope === "local"
+    && record?.backend === "mtplx"
+    && record?.kind === "mtplx-long-context-operator-tuning"
+    && record?.suite === MTPLX_LONG_CONTEXT_SUITE
+    && record?.workloadKind === "agentic"
+    && record?.selectionMetric === "generation-tokens-per-second"
+    && record?.baselinePassed === true && record?.qualityPassed === true
+    && record?.winner === "mtp"
+    && record?.runtimeVersion === capability.runtimeVersion
+    && mtplxExact2111Runtime(record.runtimeVersion)
+    && typeof capability.benchmarkModelFingerprint === "string"
+    && /^[0-9a-f]{64}$/.test(capability.benchmarkModelFingerprint)
+    && record?.modelFingerprint === capability.benchmarkModelFingerprint
+    && Number.isInteger(record?.contextMin) && Number.isInteger(record?.contextMax)
+    && record.contextMin <= context && context <= record.contextMax
+    && Number.isInteger(record?.outputMin) && Number.isInteger(record?.outputMax)
+    && record.outputMin <= output && output <= record.outputMax
+    && record?.client === values.client
+    && record?.reasoning === values.reasoning
+    && record?.targetKV === values.kv
+    && mtplxSamplingContractMatches(record, model)
+    && mtplxExactObjectKeys(engineSettings, ["profile", "fan"])
+    && engineSettings.profile === values.profile
+    && engineSettings.fan === values.fan
+    && mtplxCanonicalJson(record?.settings) === mtplxCanonicalJson(expectedSettings)
+    && mtplxCanonicalJson(record?.modeSettings?.mtp) === mtplxCanonicalJson(expectedSettings)
+    && sweep && typeof sweep === "object" && !Array.isArray(sweep)
+    && sweep.version === MTPLX_LONG_CONTEXT_SWEEP_VERSION
+    && sweep.strategy === "isolated-long-context-operator-comparison"
+    && sweep.complete === true && sweep.resourceComparable === true
+    && sweep.suiteName === MTPLX_LONG_CONTEXT_SUITE
+    && sweep.requiredContext === route.minimumContext
+    && sweep.contractId === route.contractId
+    && sweep.baselineRoute === MTPLX_OPERATOR_ROUTE_DEFAULT
+    && sweep.candidateRoute === MTPLX_OPERATOR_ROUTE_2111
+    && sweep.candidateAccepted === true
+    && sweep.selectedRoute === MTPLX_OPERATOR_ROUTE_2111
+    && mtplxCanonicalJson(sweep.selectedSettings) === mtplxCanonicalJson(expectedSettings)
+    && candidate?.selected === true
+    && candidate?.qualityMatchesAR === true
+    && candidate?.qualityMatchesDefault === true
+    && candidate?.resourceComparable === true
+    && ["ready", "condition-improved"].includes(candidate?.resourceCooldownStatus)
+    && mtplxCanonicalJson(candidate?.settings) === mtplxCanonicalJson(expectedSettings)
+  );
+}
+
+function mtplxLongContextMeasuredRecord(model, values = {}) {
+  const capability = model?.backends?.mtplx;
+  const records = Array.isArray(capability?.localBenchmarks)
+    ? capability.localBenchmarks.filter(item => item && typeof item === "object") : [];
+  if (capability?.localBenchmark && !records.includes(capability.localBenchmark)) {
+    records.push(capability.localBenchmark);
+  }
+  return records
+    .filter(record => mtplxLongContextRecordMatches(record, model, values))
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] || null;
+}
+
+function mtplxEngineEvidenceBindingExact(result = {}) {
+  const binding = result.engineEvidenceBinding;
+  const records = binding?.recordIds;
+  return Boolean(
+    binding && typeof binding === "object" && !Array.isArray(binding)
+    && binding.scope === "engine"
+    && typeof binding.suite === "string" && binding.suite.length > 0
+    && binding.preference === result.enginePreference
+    && typeof binding.shootoutId === "string" && binding.shootoutId.length > 0
+    && records && typeof records === "object" && !Array.isArray(records)
+    && typeof records.mtplx === "string" && records.mtplx.length > 0
+  );
+}
+
+function mtplxOperatorRouteFromOptimization(result, engineSelection, model, context) {
+  const requested = result?.options?.mtplxOperatorRoute;
+  if (requested !== MTPLX_OPERATOR_ROUTE_2111) return MTPLX_OPERATOR_ROUTE_DEFAULT;
+  const values = {
+    backend:result?.backend,
+    acceleration:result?.options?.acceleration,
+    profile:result?.options?.profile,
+    context,
+    output:Number($("outputInput")?.value),
+    depth:Number(result?.options?.depth),
+    fan:result?.options?.fan,
+    client:state.client,
+    reasoning:$("reasoningSelect")?.value,
+    kv:result?.options?.kv || "off",
+  };
+  if (!mtplxLongContextMeasuredRecord(model, values)) return MTPLX_OPERATOR_ROUTE_DEFAULT;
+  if (!engineSelection) {
+    return result?.evidenceTier === "local-benchmark"
+      ? MTPLX_OPERATOR_ROUTE_2111 : MTPLX_OPERATOR_ROUTE_DEFAULT;
+  }
+  const comparisonTier = result?.engineEvidenceTier || result?.evidenceTier;
+  const comparisonTrusted = [
+    "cross-engine-local-benchmark",
+    "cross-engine-leading-band",
+    "cross-engine-noise-floor",
+  ].includes(comparisonTier);
+  return result?.settingsEvidenceTier === "local-benchmark"
+    && comparisonTrusted && mtplxEngineEvidenceBindingExact(result)
+    ? MTPLX_OPERATOR_ROUTE_2111 : MTPLX_OPERATOR_ROUTE_DEFAULT;
+}
+
+function savedMtplxOperatorRoute(options = {}) {
+  const value = options.mtplxOperatorRoute ?? MTPLX_OPERATOR_ROUTE_DEFAULT;
+  if ([MTPLX_OPERATOR_ROUTE_DEFAULT, MTPLX_OPERATOR_ROUTE_2111].includes(value)) return value;
+  throw new Error("The saved long-context execution route is no longer supported.");
+}
+
+function mtplxOperatorRouteLabel(options = {}) {
+  if (options.mtplxOperatorRoute !== MTPLX_OPERATOR_ROUTE_2111) return "";
+  const depth = Number(options.depth);
+  const depthLabel = Number.isInteger(depth) && depth > 0 ? ` D${depth}` : "";
+  return `MTP${depthLabel} · 2.11.1 long-context`;
+}
+
+function updateMtplxLongContextControl() {
+  const select = $("mtplxOperatorRouteSelect");
+  const help = $("mtplxOperatorRouteHelp");
+  if (!select || !help) return;
+  const model = selectedModel();
+  const capabilityReady = mtplxLongContextCapabilityExact(model);
+  const values = {
+    backend:state.backend,
+    acceleration:$("accelerationSelect").value,
+    profile:$("profileSelect").value,
+    context:Number($("contextInput").value),
+    output:Number($("outputInput").value),
+    depth:Number($("depthInput").value),
+    fan:$("fanSelect").value,
+    client:state.client,
+    reasoning:$("reasoningSelect").value,
+    kv:$("mtplxKv").value,
+  };
+  const shapeEligible = mtplxLongContextRouteEligible(model, values);
+  const eligible = Boolean(shapeEligible && mtplxLongContextMeasuredRecord(model, values));
+  const measured = [...select.options].find(option => option.value === MTPLX_OPERATOR_ROUTE_2111);
+  if (measured) {
+    measured.disabled = !eligible;
+    measured.hidden = !eligible;
+  }
+  const resetUnavailableRoute = !eligible && select.value !== MTPLX_OPERATOR_ROUTE_DEFAULT;
+  if (resetUnavailableRoute) {
+    select.value = MTPLX_OPERATOR_ROUTE_DEFAULT;
+    clearActiveEvidenceBinding();
+    if (!state.applyingOptimal && (state.optimalSignature || state.optimalLabel)) {
+      state.optimalSignature = "";
+      state.optimalLabel = "";
+      setOptimizationState(
+        "custom", "Custom",
+        "The measured 2.11.1 long-context route is no longer available for this setup.",
+      );
+    }
+  }
+  help.textContent = eligible
+    ? "Measured 2.11.1 route ready for this exact setup."
+    : capabilityReady && shapeEligible
+      ? "Runtime default. Run Calibration once for this exact setup to unlock the measured 2.11.1 route."
+      : capabilityReady
+        ? "Runtime default. Choose MTP, Turbo, and at least 65,536 context tokens before testing the faster route."
+      : "Runtime default. The measured 2.11.1 route is not ready for this model and runtime.";
+}
+
 const optimizerControls = {
   acceleration: "accelerationSelect", depth: "depthInput", profile: "profileSelect",
+  mtplxOperatorRoute: "mtplxOperatorRouteSelect",
   fan: "fanSelect", burst: "burstSelect", dflashVerify: "dflashVerifySelect",
   dflashDraftQuant: "dflashDraftQuantSelect", anePrefill: "anePrefillSelect",
   memoryGuard: "memoryGuardSelect",
@@ -247,7 +564,7 @@ const optimizerControls = {
   queueLimit: "mferenceQueueLimit",
 };
 const optimizerKeys = {
-  mtplx: ["acceleration", "depth", "profile", "fan"],
+  mtplx: ["acceleration", "depth", "profile", "mtplxOperatorRoute", "fan"],
   omlx: ["acceleration", "depth", "dflashVerify", "dflashDraftQuant", "burst", "anePrefill", "memoryGuard"],
   lmstudio: [
     "acceleration", "depth", "mtpMinTokens",
@@ -266,6 +583,11 @@ const enginePreferenceLabels = {
 };
 const CHAT_QUEUE_MAX_MESSAGES = 32;
 const AGENT_CONSOLE_RECOVERY_KEY = "llm-launcher-agent-console-view-v1";
+const AGENT_CONSOLE_DRAFTS_KEY = "llm-launcher-agent-console-drafts-v1";
+const AGENT_CONSOLE_DRAFT_OPTIONS = Object.freeze({
+  maximumDrafts:12, maximumDraftCharacters:200_000, maximumTotalCharacters:800_000,
+});
+let agentConsoleDraftEnvelope = null;
 const CHAT_QUEUE_MAX_CHARACTERS = 1_000_000;
 const CHAT_QUEUE_STORAGE_KEY = "llm-launcher-chat-queues-v1";
 const CHAT_TURN_TAB_STORAGE_KEY = "llm-launcher-chat-tab-id-v1";
@@ -321,16 +643,13 @@ const CHAT_WORKSPACE_STOP_WORDS = new Set([
 const CHAT_TRANSCRIPT_HIGHLIGHT_LIMIT = 1_024;
 let chatMessageSequence = 0;
 
+const launcherApi = globalThis.LLMLauncherApi.createClient({
+  fetch:(...args) => fetch(...args), getToken:() => state.token,
+  setToken:token => { state.token = token; },
+});
+
 async function api(path, options = {}) {
-  const headers = { ...(options.headers || {}) };
-  if (options.method === "POST") {
-    headers["Content-Type"] = "application/json";
-    headers["X-Launcher-Token"] = state.token;
-  }
-  const response = await fetch(path, { ...options, headers });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
-  return data;
+  return launcherApi.json(path, options);
 }
 
 function showNotice(message, error = false) {
@@ -391,7 +710,40 @@ function persistVisibleRoute() {
   const route = currentVisibleRoute();
   const available = visibleRouteCatalog();
   if (!route || !RoutePreferenceCore.isRouteAvailable(route, available)) return false;
+  RoutePreferenceCore.writeSetup(themeStorage(), route, Object.fromEntries(
+    RoutePreferenceCore.SETUP_FIELDS.map(id => [id, $(id)?.value]),
+  ));
   return RoutePreferenceCore.writeRoute(themeStorage(), route).stored;
+}
+
+function restoreVisibleSettings(route) {
+  const saved = RoutePreferenceCore.readSetup(themeStorage(), route);
+  if (!saved) return false;
+  const restore = id => {
+    const control = $(id), value = saved.controls[id];
+    if (!control || typeof value !== "string") return;
+    if (control.tagName === "SELECT") {
+      if (![...control.options].some(option => option.value === value && !option.disabled)) return;
+    } else if (control.type === "number" || control.type === "range") {
+      if (value !== "") {
+        const number = Number(value);
+        if (!Number.isFinite(number)
+            || (control.min !== "" && number < Number(control.min))
+            || (control.max !== "" && number > Number(control.max))) return;
+      } else if (id !== "seedInput") return;
+    }
+    control.value = value;
+  };
+  for (const id of RoutePreferenceCore.SETUP_FIELDS) {
+    if (id !== "mtplxOperatorRouteSelect") restore(id);
+  }
+  // Reconcile current model/runtime limits and capabilities before restoring
+  // an evidence-gated accelerator. Stored settings are never approval evidence.
+  modelChanged();
+  restore("mtplxOperatorRouteSelect");
+  updateMtplxLongContextControl();
+  refreshLaunchability();
+  return true;
 }
 
 function initialiseVisibleRoute() {
@@ -413,6 +765,7 @@ function initialiseVisibleRoute() {
   if (option) $("modelSelect").value = route.modelId;
   state.client = route.client;
   modelChanged();
+  restoreVisibleSettings(route);
   state.routePreferenceReady = true;
   persistVisibleRoute();
   return route;
@@ -485,6 +838,35 @@ function runtimeKvValue(backend = state.backend) {
   return "off";
 }
 
+function runtimeKvLabel(backend, options = {}) {
+  const selected = options.kv && options.kv !== "off" ? String(options.kv).toUpperCase() : "Full";
+  return backend === "omlx" && options.acceleration === "dflash" && selected !== "Full"
+    ? (options.dflashVerify === "ddtree" ? `${selected} · incompatible with DDTree` : `${selected} (DFlash)`)
+    : selected;
+}
+
+function updateOmlxKvControl() {
+  const label = $("omlxKvLabel");
+  const hint = $("omlxKvHint");
+  if (!label || !hint) return;
+  const control = $("omlxKv");
+  const effective = $("omlxEffectiveKv");
+  const dflash = $("accelerationSelect").value === "dflash";
+  const verifier = $("dflashVerifySelect").value;
+  label.textContent = "KV cache";
+  control.hidden = false;
+  const quantized = control.value !== "off";
+  effective.hidden = !dflash || !quantized;
+  effective.textContent = verifier === "ddtree"
+    ? "Choose Adaptive or Fixed DFlash to use quantized KV."
+    : `DFlash cache: ${String(control.value).toUpperCase()}`;
+  hint.textContent = dflash
+    ? (verifier === "ddtree"
+      ? "DDTree requires full precision. Your cache selection is preserved when switching verifier."
+      : "Q8, Q6 and Q4 reduce DFlash cache memory and retain prefix reuse. Lower precision can change output. Applies on next launch.")
+    : "Quantized KV saves memory but can change output. Never changed by optimisation.";
+}
+
 function setRuntimeKvValue(backend, value) {
   if (["lmstudio", "uzu", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"].includes(backend)) return value === "off";
   const control = backend === "omlx" ? $("omlxKv") : $("mtplxKv");
@@ -526,6 +908,9 @@ function gatherOptions() {
     acceleration: $("accelerationSelect").value,
     depth: Number($("depthInput").value),
     profile: $("profileSelect").value,
+    ...(state.backend === "mtplx" ? {
+      mtplxOperatorRoute: $("mtplxOperatorRouteSelect").value,
+    } : {}),
     kv: runtimeKvValue(),
     fan: $("fanSelect").value,
     burst: $("burstSelect").value,
@@ -540,17 +925,24 @@ function gatherOptions() {
   };
 }
 
-function gatherChatSettings() {
+function gatherGenerationSettings() {
   const seed = $("seedInput").value.trim();
   return {
-    systemPrompt: $("systemPrompt").value,
     sampling: $("samplingMode").value,
     temperature: Number($("temperatureInput").value),
     topP: Number($("topPInput").value),
     topK: Number($("topKInput").value),
     presencePenalty: Number($("presencePenaltyInput").value),
     frequencyPenalty: Number($("frequencyPenaltyInput").value),
+    repetitionPenalty: Number($("repetitionPenaltyInput").value),
     seed: seed === "" ? null : Number(seed),
+  };
+}
+
+function gatherChatSettings() {
+  return {
+    systemPrompt: $("systemPrompt").value,
+    ...gatherGenerationSettings(),
   };
 }
 
@@ -561,7 +953,7 @@ function gather(mode = "custom", includeMemoryAcknowledgement = true) {
     backend: state.backend, client: state.client, modelId: model.id,
     project: $("projectPath").value, context: Number($("contextInput").value),
     output: Number($("outputInput").value), reasoning: $("reasoningSelect").value,
-    mode, options: gatherOptions(),
+    mode, options: gatherOptions(), generation:gatherGenerationSettings(),
   };
   if (state.client === "chat") request.chat = gatherChatSettings();
   else request.agentHost = $("agentHostSelect").value;
@@ -583,6 +975,7 @@ function protectedSnapshot(includeBackend = true) {
     output: $("outputInput").value, reasoning: $("reasoningSelect").value,
     kv: runtimeKvValue(),
     agentHost: state.client === "chat" ? "launcher" : $("agentHostSelect").value,
+    generation:gatherGenerationSettings(),
     chat: state.client === "chat" ? gatherChatSettings() : null,
   });
 }
@@ -594,6 +987,67 @@ function speedSignature() {
     kv: options.kv,
     values: Object.fromEntries((optimizerKeys[state.backend] || []).map(key => [key, options[key]])),
   });
+}
+
+function optimizerEvidenceContractSignature() {
+  const model = selectedModel();
+  const capability = model?.backends?.[state.backend] || {};
+  return JSON.stringify({
+    backend:state.backend,
+    modelId:model?.id || "",
+    modelFingerprint:capability.benchmarkModelFingerprint || "",
+    runtimeVersion:capability.runtimeVersion || "",
+    client:state.client,
+    context:Number($("contextInput").value),
+    output:Number($("outputInput").value),
+    reasoning:$("reasoningSelect").value,
+    kv:runtimeKvValue(),
+    generation:gatherGenerationSettings(),
+    modelSampling:model?.defaultSampling || {},
+    speed:speedSignature(),
+  });
+}
+
+function copiedEvidenceBinding(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const scope = String(value.scope || "");
+  const suite = String(value.suite || "");
+  const preference = String(value.preference || "");
+  if (!["engine", "route"].includes(scope) || !suite || !preference) return null;
+  if (scope === "engine") {
+    const records = value.recordIds;
+    if (
+      typeof value.shootoutId !== "string" || !value.shootoutId
+      || !records || typeof records !== "object" || Array.isArray(records)
+      || Object.keys(records).length < 2
+      || Object.values(records).some(id => typeof id !== "string" || !id)
+    ) return null;
+  } else if (typeof value.recordId !== "string" || !value.recordId) return null;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function clearActiveEvidenceBinding() {
+  state.activeEvidenceBinding = null;
+  state.activeEvidenceSignature = "";
+}
+
+function activeEvidenceBindingFor(scope, preference) {
+  const binding = copiedEvidenceBinding(state.activeEvidenceBinding);
+  if (
+    !binding || binding.scope !== scope || binding.preference !== preference
+    || state.activeEvidenceSignature !== optimizerEvidenceContractSignature()
+  ) return null;
+  return binding;
+}
+
+function rememberActiveEvidenceBinding(value) {
+  const binding = copiedEvidenceBinding(value);
+  if (!binding) {
+    clearActiveEvidenceBinding();
+    return;
+  }
+  state.activeEvidenceBinding = binding;
+  state.activeEvidenceSignature = optimizerEvidenceContractSignature();
 }
 
 function optimizerValueSnapshot() {
@@ -631,6 +1085,7 @@ function setOptimizationState(kind, label = "", detail = "") {
 function markOptimizerCustom() {
   if (state.applyingOptimal) return;
   if (state.optimalSignature && speedSignature() === state.optimalSignature) return;
+  clearActiveEvidenceBinding();
   state.optimalSignature = "";
   state.optimalLabel = "";
   setOptimizationState("custom", "Custom", "Performance controls were edited.");
@@ -652,6 +1107,7 @@ function cancelOptimization(reason = "") {
   clearOptimizerAnimationClasses();
   setOptimizerInteractionLocked(false);
   $("optimizationPanel").setAttribute("aria-busy", "false");
+  clearActiveEvidenceBinding();
   state.optimalSignature = "";
   state.optimalLabel = "";
   setOptimizationState("custom", "Custom", reason);
@@ -659,13 +1115,11 @@ function cancelOptimization(reason = "") {
 
 function setOptimizerInteractionLocked(locked) {
   const advanced = $("advancedControls");
-  if (locked) {
-    advanced.setAttribute("inert", "");
-    advanced.classList.add("interaction-locked");
-  } else {
-    advanced.removeAttribute("inert");
-    advanced.classList.remove("interaction-locked");
-  }
+  // The diagnostic actions remain usable while tuning fields are locked.
+  advanced.querySelectorAll(".advanced-body > :not(#launchTools)").forEach(section => {
+    section.inert = Boolean(locked);
+    section.classList.toggle("interaction-locked", Boolean(locked));
+  });
 }
 
 function setOptimizerMenu(open, focusFirst = false) {
@@ -743,6 +1197,9 @@ function updateAgentConsoleStatusSummaryLabel() {
     $("agentConsoleStatusSurface")?.textContent,
     $("agentConsoleStatusModel")?.textContent,
     `Speed ${$("agentConsoleStatusSpeedValue")?.textContent || "not reported"}`,
+    `Prompt processing ${$("agentConsoleStatusPromptValue")?.textContent || "not reported"}`,
+    `Context ${$("agentConsoleStatusContextValue")?.textContent || "not reported"}`,
+    $("agentConsoleContextTokens")?.textContent,
     `Lane ${$("agentConsoleStatusLaneValue")?.textContent || "unknown"}`,
     processState,
     panel.open ? "Hide full Agent Console status details" : "Show full Agent Console status details",
@@ -759,7 +1216,7 @@ function renderAgentConsoleStatusDisclosure() {
 function syncAgentConsoleStatusDetailMode(detail = activeDetail()) {
   const panel = $("agentConsoleStatusPanel");
   if (!panel) return;
-  panel.open = detail === "detailed";
+  panel.open = false;
   renderAgentConsoleStatusDisclosure();
 }
 
@@ -834,7 +1291,7 @@ function selectTheme(value) {
   ThemeCore.writeTheme(themeStorage(), theme);
   renderThemeMenu();
   closeThemeMenu();
-  $("themeMenuButton").focus();
+  $("hubToolsMenuButton").focus();
 }
 
 function selectDetail(value, focusMenuButton = true) {
@@ -849,7 +1306,7 @@ function selectDetail(value, focusMenuButton = true) {
   syncRuntimeCardDetailMode(detail);
   if (state.models.length) refreshLaunchability();
   closeThemeMenu();
-  if (focusMenuButton) $("themeMenuButton").focus();
+  if (focusMenuButton) $("hubToolsMenuButton").focus();
 }
 
 function toggleInterfaceDetail() {
@@ -934,18 +1391,32 @@ const LLAMACPP_PLE_QUALIFICATION_MINIMUM_TPS = 15;
 const LLAMACPP_PLE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS = 128;
 const LLAMACPP_PLE_QUALIFICATION_REASONING_BOUNDARY_ID = "atomicchat-budget-zero-boundary-v1";
 const LLAMACPP_PLE_QUALIFICATION_REASONING_MESSAGE_SHA256 = "04dbe3b430e5be6b5f2f130343e8a0b55872538b1ca53c775e7d8afd9b4acb5a";
-const UZU_QUALIFICATION_CONTEXTS = Object.freeze([16_384, 32_768]);
+const UZU_QUALIFICATION_CONTEXTS = Object.freeze([16_384, 32_768, 65_536, 131_072]);
 const UZU_QUALIFICATION_SUITES = Object.freeze({
   16_384:"route-qualification-uzu-16k",
   32_768:"route-qualification-uzu-32k",
+  65_536:"route-qualification-uzu-64k",
+  131_072:"route-qualification-uzu-128k",
 });
-const UZU_QUALIFICATION_MEMORY_LIMIT_BYTES = 36 * 1024 ** 3;
+const UZU_QUALIFICATION_MEMORY_LIMIT_BYTES = 38 * 1024 ** 3;
 const UZU_QUALIFICATION_OS_RESERVE_MINIMUM_BYTES = 4 * 1024 ** 3;
-const UZU_QUALIFICATION_CONTRACT_VERSION = 1;
+const UZU_QUALIFICATION_CONTRACT_VERSION = 5;
+const UZU_QUALIFICATION_NEAR_TIER_POLICY_ID = "uzu-near-tier-authoritative-prompt-v4-conversation";
+const UZU_QUALIFICATION_NEAR_TIER_MINIMUM_CONTEXT = 65_536;
+const UZU_QUALIFICATION_NEAR_TIER_SCENARIOS = Object.freeze(["toolIngest", "steadyTurn"]);
+const UZU_QUALIFICATION_NEAR_TIER_FRACTION = 0.90;
+const UZU_QUALIFICATION_PROMPT_TOLERANCE_FRACTION = 0.05;
+const UZU_QUALIFICATION_PROMPT_TOLERANCE_MIN_TOKENS = 1_024;
+const UZU_NATIVE_BOUNDARY_CONTRACT_ID = "uzu-native-auth-context-output-v1";
+const UZU_RUNTIME_RELEASE_BINARY_SHA256 = "efe7fc98a8e063c30103a27badb4f308b8cb782708134a7805178f9e16caa0ce";
+const UZU_RUNTIME_RELEASE_BINARY_SIZE = 65_079_520;
+const UZU_RUNTIME_UPSTREAM_COMMIT = "115609b6ef7ce5a94fc761bf395780f032b09f9b";
+const UZU_RUNTIME_SOURCE_PATCH_SHA256 = "680e2d72f0ba7a63fc822543022c6a1fc9b2895276fb7252a8049219de58692f";
 const UZU_QUALIFICATION_SCENARIOS = Object.freeze([
   "cold", "warmPrefix", "toolIngest", "steadyTurn",
 ]);
-const UZU_QUALIFICATION_SAMPLE_MAX_TOKENS = 512;
+const UZU_QUALIFICATION_SAMPLE_MAX_TOKENS = 8_192;
+const UZU_QUALIFICATION_SAMPLE_MIN_TOKENS = 2_048;
 const UZU_QUALIFICATION_ANSWER_RESERVE_TOKENS = 128;
 const UZU_QUALIFICATION_MINIMUM_TPS = 15;
 const UZU_QUALIFICATION_MINIMUM_COMPLETION_TOKENS = 128;
@@ -957,7 +1428,36 @@ function uzuQualificationSuite(context) {
 function uzuQualificationContractId(context) {
   const exact = Number(context);
   return UZU_QUALIFICATION_CONTEXTS.includes(exact)
-    ? `qwen36-uzu-dflash-weaver-${exact / 1024}k-v1` : "";
+    ? `qwen36-uzu-dflash-weaver-${exact / 1024}k-v5` : "";
+}
+
+function uzuQualificationPromptExercisePolicy(context) {
+  const exact = Number(context);
+  return {
+    id:UZU_QUALIFICATION_NEAR_TIER_POLICY_ID,
+    appliesAtOrAboveContextTokens:UZU_QUALIFICATION_NEAR_TIER_MINIMUM_CONTEXT,
+    requiredScenarios:[...UZU_QUALIFICATION_NEAR_TIER_SCENARIOS],
+    authoritativeUsageRequired:true,
+    minimumContextFraction:UZU_QUALIFICATION_NEAR_TIER_FRACTION,
+    minimumPromptTokens:Math.ceil(exact * UZU_QUALIFICATION_NEAR_TIER_FRACTION),
+    targetPromptTokensRequired:true,
+    targetToleranceFraction:UZU_QUALIFICATION_PROMPT_TOLERANCE_FRACTION,
+    targetToleranceMinimumTokens:UZU_QUALIFICATION_PROMPT_TOLERANCE_MIN_TOKENS,
+  };
+}
+
+function uzuQualificationPromptExercisePolicyExact(value, context) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const expected = uzuQualificationPromptExercisePolicy(context);
+  const keys = Object.keys(expected);
+  return Object.keys(value).length === keys.length
+    && keys.every(key => (
+      key === "requiredScenarios"
+        ? Array.isArray(value[key])
+          && value[key].length === expected[key].length
+          && value[key].every((item, index) => item === expected[key][index])
+        : value[key] === expected[key]
+    ));
 }
 
 function isUzuQualificationSuite(suite) {
@@ -1029,8 +1529,7 @@ function clientAvailability(client = state.client) {
 }
 
 function chatSettingsError() {
-  if (state.client !== "chat") return "";
-  if ($("systemPrompt").value.length > 32000) return "System prompt must be at most 32,000 characters.";
+  if (state.client === "chat" && $("systemPrompt").value.length > 32000) return "System prompt must be at most 32,000 characters.";
   const capability = selectedModel()?.backends?.[state.backend] || {};
   if ($("samplingMode").value === "custom" && capability.customSampling === false) {
     return capability.samplingReason || "This model/runtime route does not support custom sampling.";
@@ -1041,22 +1540,26 @@ function chatSettingsError() {
   const topKText = $("topKInput").value.trim();
   const presencePenaltyText = $("presencePenaltyInput").value.trim();
   const frequencyPenaltyText = $("frequencyPenaltyInput").value.trim();
+  const repetitionPenaltyText = $("repetitionPenaltyInput").value.trim();
   if (!temperatureText) return "Temperature is required when custom sampling is selected.";
   if (!topPText) return "Top P is required when custom sampling is selected.";
   if (!topKText) return "Top K is required when custom sampling is selected.";
   if (!presencePenaltyText) return "Presence penalty is required when custom sampling is selected.";
   if (!frequencyPenaltyText) return "Frequency penalty is required when custom sampling is selected.";
+  if (!repetitionPenaltyText) return "Repetition penalty is required when custom sampling is selected.";
   const temperature = Number(temperatureText);
   const topP = Number(topPText);
   const topK = Number(topKText);
   const presencePenalty = Number(presencePenaltyText);
   const frequencyPenalty = Number(frequencyPenaltyText);
+  const repetitionPenalty = Number(repetitionPenaltyText);
   const seedText = $("seedInput").value.trim();
   if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) return "Temperature must be between 0 and 2.";
   if (!Number.isFinite(topP) || topP < 0 || topP > 1) return "Top P must be between 0 and 1.";
   if (!Number.isInteger(topK) || topK < 0 || topK > 1000000) return "Top K must be a whole number between 0 and 1,000,000.";
   if (!Number.isFinite(presencePenalty) || presencePenalty < -2 || presencePenalty > 2) return "Presence penalty must be between -2 and 2.";
   if (!Number.isFinite(frequencyPenalty) || frequencyPenalty < -2 || frequencyPenalty > 2) return "Frequency penalty must be between -2 and 2.";
+  if (!Number.isFinite(repetitionPenalty) || repetitionPenalty < 0 || repetitionPenalty > 10) return "Repetition penalty must be between 0 and 10.";
   if (seedText !== "") {
     const seed = Number(seedText);
     if (!Number.isInteger(seed) || seed < 0 || seed > 4294967295) return "Seed must be a whole number between 0 and 4,294,967,295.";
@@ -1075,6 +1578,8 @@ function limitError() {
     return `${backendName(state.backend)} supports these exact context windows: ${runtimeWindows.map(formatNumber).join(", ")}.`;
   }
   if (!Number.isInteger(output) || output < 256) return "Maximum response must be at least 256 tokens.";
+  const outputMaximum = model?.backends?.[state.backend]?.outputMaximum || model?.outputMaximum;
+  if (outputMaximum && output > outputMaximum) return `This route supports at most ${formatNumber(outputMaximum)} response tokens.`;
   if (output >= context) return "Maximum response must be smaller than context.";
   if (context - output < 1024) return "Leave at least 1,024 context tokens for instructions and history.";
   if (state.client === "codex" && output < 1024) return "Codex local sessions need at least 1,024 response tokens.";
@@ -1101,7 +1606,7 @@ function isUzuModel(model = {}, capability = {}) {
 function modelContextLabel(model, capability = {}) {
   const native = Number(model?.nativeContext || 0);
   if (isUzuModel(model, capability) && Number.isInteger(native) && native > 0) {
-    return `${compactNativeContext(native)} native · qualify ${UZU_QUALIFICATION_CONTEXTS.map(exactContextTier).join(" or ")}`;
+    return `${compactNativeContext(native)} native · guarded up to ${exactContextTier(UZU_QUALIFICATION_CONTEXTS.at(-1))}`;
   }
   const qualified = Number(capability?.contextMaximum || 0);
   if (Number.isInteger(native) && native > 0
@@ -1384,10 +1889,25 @@ function renderBenchmarkSetup() {
   const eligibleEngines = engineRoutes.filter(route => route.eligible);
   const suite = $("benchmarkSuiteSelect").value;
   const agentic = suite === "agentic";
+  const mtplxOperators = Boolean(
+    state.backend === "mtplx" && agentic && mtplxLongContextCapabilityExact(model)
+    && Number($("contextInput").value) >= 65_536
+    && $("profileSelect").value === "turbo"
+  );
+  $("benchmarkStartLabel").textContent = mtplxOperators
+    ? "3 setups · AR + MTP default + long-context"
+    : agentic ? "Four staged turns per route" : "Reloads each measured route";
   $("benchmarkRoute").textContent = model
     ? `${backendName(state.backend)} · ${model.name} · ${agentic ? "agent-shaped" : "prompt-range"} evidence bound to ${clientName(state.client)}`
     : "Choose a runnable model and acceleration route.";
   $("benchmarkModes").innerHTML = candidates.map(mode => `<span class="${mode.available ? "available" : ""}">${esc(mode.label)}</span>`).join("");
+  if (mtplxOperators) {
+    $("benchmarkModes").innerHTML = ["AR", "MTP · default", "MTP · 2.11 long-context"]
+      .map(label => `<span class="available">${esc(label)}</span>`).join("");
+    $("benchmarkSuiteHelp").textContent = "Current engine: three isolated loads, 18 generated requests, with near-64K prompts. Keeps your reasoning, sampling, KV and cooling settings.";
+  } else if (agentic) {
+    $("benchmarkSuiteHelp").textContent = "Four staged coding-agent turns: cold 8K prefix, shared-prefix reuse, 4K synthetic tool-result ingestion, and a warm follow-up.";
+  }
   $("benchmarkEngineStrip").innerHTML = engineRoutes.map(route => {
     const routeModes = route.modes.map(mode => mode.label).join(" + ");
     const detail = route.eligible ? routeModes : route.reason;
@@ -1495,6 +2015,7 @@ function updateAccelerationState() {
   $("lmstudioMtpTuning").classList.toggle("inactive", !lmstudioMtpActive);
   setRangeVisual(mtpMinimum);
   setRangeVisual($("mtpMinContinueProbabilityInput"));
+  updateMtplxLongContextControl();
 }
 
 function updateChatSamplingControls() {
@@ -1505,10 +2026,13 @@ function updateChatSamplingControls() {
   if (!customSupported && $("samplingMode").value === "custom") $("samplingMode").value = "model";
   const custom = $("samplingMode").value === "custom";
   $("chatSettings").classList.toggle("sampling-defaults", !custom);
-  document.querySelectorAll(".chat-sampler").forEach(field => field.classList.toggle("inactive", !custom));
+  document.querySelectorAll(".chat-sampler").forEach(field => {
+    field.hidden = !custom;
+    field.classList.toggle("inactive", !custom);
+  });
   for (const id of [
     "temperatureInput", "topPInput", "topKInput", "presencePenaltyInput",
-    "frequencyPenaltyInput", "seedInput",
+    "frequencyPenaltyInput", "repetitionPenaltyInput", "seedInput",
   ]) $(id).disabled = !custom;
   if (!customSupported) {
     $("samplingHelp").textContent = capability.samplingReason || "This route uses fixed runtime decoding.";
@@ -1524,9 +2048,10 @@ function updateChatSamplingControls() {
   }
   const presence = Number($("presencePenaltyInput").value || 0);
   const frequency = Number($("frequencyPenaltyInput").value || 0);
+  const repetition = Number($("repetitionPenaltyInput").value || 1);
   const seed = $("seedInput").value.trim();
-  const penaltyLabel = presence === 0 && frequency === 0
-    ? "Penalties off" : `Presence ${presence} · frequency ${frequency}`;
+  const penaltyLabel = presence === 0 && frequency === 0 && repetition === 1
+    ? "Penalties neutral" : `Presence ${presence} · frequency ${frequency} · repetition ${repetition}`;
   $("chatSamplingAdvancedSummary").textContent = custom
     ? `${penaltyLabel} · ${seed ? `seed ${seed}` : "random seed"}`
     : "Available with custom sampling";
@@ -1548,6 +2073,165 @@ function currentWarmRoutePlan() {
   if (!signature || signature !== state.warmRouteSignature) return null;
   if (state.warmRoutePlan.ownerRunId !== state.runStatus?.run?.runId) return null;
   return state.warmRoutePlan;
+}
+
+const SESSION_ADMISSION_REFRESH_MS = 5_000;
+const SESSION_ADMISSION_MAX_AGE_MS = 15_000;
+const SESSION_ADMISSION_DEBOUNCE_MS = 180;
+
+function visibleSessionAdmissionRequest() {
+  try { return gather("custom", false); }
+  catch (_) { return null; }
+}
+
+function visibleSessionAdmissionSignature(request = null) {
+  const visible = request || visibleSessionAdmissionRequest();
+  return visible ? JSON.stringify(visible) : "";
+}
+
+function sessionAdmissionDecision(admission, acknowledgementId = "") {
+  if (!admission || typeof admission !== "object") return {
+    known:false, actionReady:false, decision:"unknown",
+    label:"Capacity check unavailable",
+    detail:"Refresh the route before starting a model.",
+  };
+  const needsReview = admission.requiresAcknowledgement === true;
+  const acknowledged = Boolean(
+    needsReview && admission.contractId
+    && acknowledgementId === admission.contractId
+  );
+  return {
+    known:true,
+    actionReady:Boolean(admission.launchable === true && (!needsReview || acknowledged)),
+    launchable:admission.launchable === true,
+    needsReview,
+    acknowledged,
+    decision:String(admission.decision || "unknown"),
+    label:String(admission.label || "Capacity unavailable"),
+    detail:String(admission.detail || "This route is not ready to start."),
+    contractId:String(admission.contractId || ""),
+  };
+}
+
+function currentSessionAdmission(now = Date.now()) {
+  const warm = currentWarmRoutePlan();
+  if (warm?.canAttach) return {
+    known:true, actionReady:true, launchable:true, warm:true,
+    decision:"ready", label:"Loaded route ready",
+    detail:warm.detail || "This work surface can reuse the loaded model.",
+  };
+  const signature = visibleSessionAdmissionSignature();
+  if (!signature) return {
+    known:false, actionReady:false, decision:"invalid",
+    label:"Finish the visible settings",
+    detail:"Choose a ready model and valid settings first.",
+  };
+  const matching = Boolean(
+    state.sessionDashboard?.admission
+    && state.sessionAdmissionSignature === signature
+  );
+  const age = matching ? Math.max(0, now - Number(state.sessionLastLoadedAt || 0)) : Infinity;
+  const failed = Boolean(
+    state.sessionAdmissionError
+    && state.sessionAdmissionErrorSignature === signature
+    && Number(state.sessionAdmissionErrorAt || 0) >= Number(state.sessionLastLoadedAt || 0)
+  ) ? state.sessionAdmissionError : "";
+  if (failed || !matching || age > SESSION_ADMISSION_MAX_AGE_MS) {
+    const pending = Boolean(
+      state.sessionLoading
+      && state.sessionAdmissionPendingSignature === signature
+    );
+    return {
+      known:false, actionReady:false, pending,
+      decision:failed ? "error" : "checking",
+      label:failed ? "Capacity check unavailable" : "Checking Mac capacity",
+      detail:failed || "Checking whether this exact route fits safely before it can start.",
+      signature,
+    };
+  }
+  return {
+    ...sessionAdmissionDecision(
+      state.sessionDashboard.admission,
+      state.sessionAcknowledgementId,
+    ),
+    signature, age,
+  };
+}
+
+function sessionAdmissionBlockerCopy(admission = currentSessionAdmission()) {
+  if (admission.actionReady) return "";
+  if (admission.decision === "checking") return "Checking this route fits safely…";
+  if (admission.decision === "error") return "Capacity check unavailable. Refresh and try again.";
+  if (admission.needsReview && !admission.acknowledged) {
+    return "Review this route’s memory estimate in Sessions before starting.";
+  }
+  if (admission.decision === "pressure") {
+    return "Not enough free memory right now. Close heavy apps, then refresh.";
+  }
+  if (admission.decision === "configuration") {
+    if (/high-memory mode/i.test(admission.label)) {
+      return "Choose High memory in Runtime controls, or pick a smaller route.";
+    }
+    return /context|memory/i.test(admission.label)
+      ? "This setup is too large for this Mac. Reduce context or choose another runtime."
+      : admission.label;
+  }
+  if (admission.decision === "unknown") return "Memory safety could not be confirmed. Refresh before starting.";
+  if (admission.decision === "qualification") return "This route needs its one-time qualification before launch.";
+  return admission.label || "This route is not safe to start yet.";
+}
+
+function scheduleSessionAdmissionPlan(immediate = false) {
+  const request = visibleSessionAdmissionRequest();
+  const signature = visibleSessionAdmissionSignature(request);
+  if (!signature || currentWarmRoutePlan()?.canAttach) {
+    if (state.sessionAdmissionTimer !== null) clearTimeout(state.sessionAdmissionTimer);
+    state.sessionAdmissionTimer = null;
+    return;
+  }
+  const current = state.sessionAdmissionSignature === signature
+    && Boolean(state.sessionDashboard?.admission);
+  const age = current ? Date.now() - Number(state.sessionLastLoadedAt || 0) : Infinity;
+  const recentFailure = Boolean(
+    state.sessionAdmissionError
+    && state.sessionAdmissionErrorSignature === signature
+    && Number(state.sessionAdmissionErrorAt || 0) >= Number(state.sessionLastLoadedAt || 0)
+    && Date.now() - Number(state.sessionAdmissionErrorAt || 0) < SESSION_ADMISSION_REFRESH_MS
+  );
+  if (recentFailure) return;
+  if (current && age < SESSION_ADMISSION_REFRESH_MS) return;
+  if (
+    state.sessionLoading
+    && state.sessionAdmissionPendingSignature === signature
+  ) return;
+  if (state.sessionAdmissionTimer !== null) clearTimeout(state.sessionAdmissionTimer);
+  state.sessionAdmissionTimer = setTimeout(() => {
+    state.sessionAdmissionTimer = null;
+    void loadSessionDashboard({force:current, request});
+  }, immediate ? 0 : SESSION_ADMISSION_DEBOUNCE_MS);
+}
+
+async function requireFreshSessionAdmission() {
+  const request = visibleSessionAdmissionRequest();
+  if (!request) return false;
+  const expectedSignature = visibleSessionAdmissionSignature(request);
+  const refreshed = await loadSessionDashboard({force:true, request});
+  if (!refreshed || visibleSessionAdmissionSignature() !== expectedSignature) {
+    const pending = state.sessionLoading
+      && state.sessionAdmissionPendingSignature === expectedSignature;
+    showNotice(
+      pending ? "Checking this route fits safely…"
+        : sessionAdmissionBlockerCopy(currentSessionAdmission()),
+      true,
+    );
+    refreshLaunchability();
+    return false;
+  }
+  const admission = currentSessionAdmission();
+  if (admission.actionReady) return true;
+  showNotice(sessionAdmissionBlockerCopy(admission), true);
+  refreshLaunchability();
+  return false;
 }
 
 function clearWarmRoutePlan() {
@@ -1628,7 +2312,8 @@ function updateWorkSurface() {
   const chat = state.client === "chat";
   const freeTokenMode = state.backend === "freetoken" ? freeTokenRoute() : "unavailable";
   const warm = currentWarmRoutePlan();
-  $("chatSettings").classList.toggle("hidden", !chat);
+  $("chatSettings").classList.remove("hidden");
+  $("systemPromptField").hidden = !chat;
   $("agentHostSettings").classList.toggle("hidden", chat);
   $("projectLabel").textContent = chat ? "Working folder" : "Project folder";
   $("launchLabel").textContent = warm?.canAttach
@@ -1638,23 +2323,46 @@ function updateWorkSurface() {
     $("launchSummary").textContent = `Reuse loaded ${backendName(warm.loadedRoute?.backend || state.backend)} · no model reload`;
   } else if (state.runPhase === "running" && state.warmRouteLoading) {
     $("launchSummary").textContent = "Checking the loaded route…";
-  } else $("launchSummary").textContent = state.optimalLabel || "Current visible settings";
-  $("configSubtitle").textContent = freeTokenMode === "remote"
-      ? (chat ? "Choose a connected FreeToken model for private bridged chat." : "Choose a connected FreeToken model and work surface.")
-      : freeTokenMode === "native" || (state.backend === "freetoken" && state.freeToken?.native?.installed)
-        ? "Choose a compatible checkpoint for launcher-owned native FreeToken Chat."
-        : (chat ? "Choose a runtime and model for a private local chat." : "Choose a runtime, model and work surface.");
-  document.querySelectorAll("[data-client]").forEach(button => {
-    button.classList.toggle("selected", button.dataset.client === state.client);
-  });
-  updateChatSamplingControls();
+  } else $("launchSummary").textContent = "Checks included";
+  $("configSubtitle").textContent = "Choose a model. We’ll handle getting it ready.";
+}
+
+function updateContextChoices() {
+  const input = $("contextInput");
+  const select = $("contextSelect");
+  const capability = selectedModel()?.backends?.[state.backend];
+  const windows = [...new Set((capability?.contextWindows || [])
+    .map(Number).filter(value => Number.isInteger(value) && value > 0))].sort((a, b) => a - b);
+  const fixed = windows.length > 0;
+  input.classList.toggle("hidden", fixed);
+  select.classList.toggle("hidden", !fixed);
+  select.disabled = !fixed;
+  $("contextField").htmlFor = fixed ? "contextSelect" : "contextInput";
+  if (!fixed) return;
+  const current = Number(input.value);
+  const choices = windows.map(value => `<option value="${value}">${exactContextTier(value)} · ${formatNumber(value)} tokens</option>`).join("");
+  const markup = (windows.includes(current) ? "" : '<option value="" disabled>Choose a supported context</option>') + choices;
+  if (select.innerHTML !== markup) select.innerHTML = markup;
+  select.value = windows.includes(current) ? String(current) : "";
 }
 
 function refreshLaunchability() {
+  updateContextChoices();
+  updateOmlxKvControl();
   const selected = selectedModel();
   const allowedReasoning = reasoningChoices();
   normalizeReasoningSelection();
-  [...$("reasoningSelect").options].forEach(option => { option.disabled = !allowedReasoning.includes(option.value); });
+  [...$("reasoningSelect").options].forEach(option => {
+    option.disabled = !allowedReasoning.includes(option.value);
+    const budgets = {minimal:1024, low:2048, medium:4096, high:8192, xhigh:16384};
+    const budget = state.backend === "mtplx" && budgets[option.value];
+    option.textContent = budget
+      ? `${option.value} · up to ${formatNumber(Math.min(budget, Math.max(1, Math.floor(Number($("outputInput").value) / 2))))} thinking tokens`
+      : (option.value === "auto" ? "Model default" : option.value);
+  });
+  $("reasoningSelect").title = state.backend === "mtplx"
+    ? "These levels set a thinking-token ceiling. The model may finish thinking sooner. Native effort also applies when supported by the model template. Changes apply on launch."
+    : "Reasoning settings supported by this model and engine.";
   document.querySelectorAll("[data-backend]").forEach(button => {
     if (!uiEngineVisible(button.dataset.backend)) {
       button.hidden = true;
@@ -1714,26 +2422,37 @@ function refreshLaunchability() {
   const aneActive = aneWorkIsActive();
   const runtimeControlError = state.backend === "omlx" && $("accelerationSelect").value === "dflash" && $("anePrefillSelect").value === "tuned"
     ? "DFlash 2 and tuned ANE prefill cannot run in the same oMLX engine. Choose one."
+    : state.backend === "omlx" && $("accelerationSelect").value === "dflash"
+      && $("dflashVerifySelect").value === "ddtree" && $("omlxKv").value !== "off"
+    ? "Quantized KV requires Adaptive or Fixed DFlash. DDTree needs full precision."
     : "";
   const modelReady = Boolean(
     model?.backends?.[state.backend]?.runnable && model?.ready
     && (state.backend !== "llamacpp" || llamaCppPleQualified(model))
   );
   const warm = currentWarmRoutePlan();
+  const admission = currentSessionAdmission();
   const controlsReady = Boolean(runtimeReady && modelReady && client.available && !limits && !chatError && !freeTokenError && !runtimeControlError && !state.applyingOptimal && !state.verifiedLaunchBusy && !state.profileBusy && !state.calibrationStarting && !state.calibrationApplying && !routeCheckActive && !benchmarkActive && !setupActive && !acquisitionActive && !aneActive);
-  const coldLaunchable = Boolean(controlsReady && !runActive);
+  const coldControlsReady = Boolean(controlsReady && !runActive);
+  const coldLaunchable = Boolean(coldControlsReady && !state.launchPreparing);
   const warmLaunchable = Boolean(controlsReady && state.runPhase === "running" && warm?.canAttach);
-  const launchable = coldLaunchable || warmLaunchable;
+  const launchable = (coldLaunchable || warmLaunchable) && !state.launchPreparing;
   $("launchButton").disabled = !launchable;
   $("launchButton").dataset.warm = warmLaunchable ? "true" : "false";
-  $("routeCheckButton").disabled = !coldLaunchable;
-  $("previewButton").disabled = !coldLaunchable;
-  $("applyOptimal").disabled = !coldLaunchable;
-  $("optimizerMenuButton").disabled = !coldLaunchable;
-  $("optimizerVerifiedLaunch").disabled = !coldLaunchable;
-  $("optimizerCalibrate").disabled = !coldLaunchable;
-  document.querySelectorAll("[data-optimizer-scope]").forEach(button => { button.disabled = !coldLaunchable; });
-  if (!coldLaunchable) closeOptimizerMenu();
+  // Capacity admission gates model loads, not read-only inspection or controls
+  // that can move the user to a safer engine.  The actual Route Check and
+  // Calibration start buttons apply the same admission below.
+  $("routeCheckButton").disabled = !coldControlsReady;
+  $("previewButton").disabled = !coldControlsReady;
+  $("applyOptimal").disabled = !coldControlsReady;
+  $("optimizerMenuButton").disabled = !coldControlsReady;
+  $("optimizerVerifiedLaunch").disabled = !coldControlsReady;
+  $("optimizerCalibrate").disabled = !coldControlsReady;
+  document.querySelectorAll("[data-optimizer-scope]").forEach(button => { button.disabled = !coldControlsReady; });
+  $("homeFastestEngine").disabled = !coldControlsReady || Boolean(state.launchPreparing);
+  $("homeFastestEngine").setAttribute("aria-busy", String(Boolean(state.applyingOptimal)));
+  $("homeFastestEngine").querySelector("strong").textContent = state.applyingOptimal ? "Checking engines…" : "Choose fastest engine";
+  if (!coldControlsReady) closeOptimizerMenu();
   const supportEntries = (state.adapters?.workSurfaces || []).map(
     adapter => [adapter.id, resolvedClientSupport(state.backend, adapter.id, selected)],
   );
@@ -1741,7 +2460,7 @@ function refreshLaunchability() {
     .filter(([name, support]) => !support.supported || !clientInstalled(name))
     .map(([name, support]) => `${clientName(name)} unavailable: ${clientInstalled(name) ? support.reason : "not installed"}`);
   const selectedSupportReason = resolvedClientSupport(state.backend, state.client, selected).reason || "Compatible local route";
-  const selectedReason = state.backend === "uzu"
+  const selectedReason = state.backend === "uzu" && state.client === "chat"
     ? `Chat only for initial qualification · ${selectedSupportReason}`
     : selectedSupportReason;
   const compatibilityDetail = [selectedReason, ...unsupported].join(" · ");
@@ -1761,6 +2480,7 @@ function refreshLaunchability() {
   else if (chatError) blocker = chatError;
   else if (freeTokenError) blocker = freeTokenError;
   else if (runtimeControlError) blocker = runtimeControlError;
+  else if (coldControlsReady && !admission.actionReady && !["checking", "qualification"].includes(admission.decision)) blocker = sessionAdmissionBlockerCopy(admission);
   else if (acquisitionActive) blocker = "Model Acquisition owns the pinned download and verification until it finishes or is stopped.";
   else if (setupActive) blocker = "Setup Assistant owns the model download until it finishes or is stopped.";
   else if (routeCheckActive) blocker = "Route Check owns the temporary model until its synthetic probes finish or are stopped.";
@@ -1776,15 +2496,22 @@ function refreshLaunchability() {
   updateAccelerationState();
   scheduleWarmRoutePlan();
   updateWorkSurface();
+  const admissionBlocked = Boolean(coldControlsReady && !admission.actionReady);
+  $("launchButton").dataset.admission = admissionBlocked ? "blocked" : "ready";
+  $("launchButton").title = admissionBlocked ? admission.detail : "";
+  if (admissionBlocked) $("launchSummary").textContent = "Check & start";
+  updateLaunchHome(admission);
   renderBenchmarkSetup();
   updateSetupControls();
   updateAcquisitionControls();
   updateAneControls();
   renderPerformanceReceipt();
   renderQuickStart();
+  renderProfileEditBanner();
   if ($("profileDialog")?.open) renderProfiles();
   if ($("calibrationDialog")?.open) renderCalibration();
   if ($("routeCheckDialog")?.open) renderRouteCheck();
+  scheduleSessionAdmissionPlan();
 }
 
 function updateBackend(preserveOptimization = false) {
@@ -1815,7 +2542,7 @@ function updateBackend(preserveOptimization = false) {
   const llamaCppReady = Boolean(state.binaries?.llamacpp?.installed);
   const llamaCppModel = llamaCppPleModel();
   const llamaCppChecking = llamaCppPleCheckingModel();
-  const whallmModel = state.models.find(model => model.sharedServer === true && model.backends?.whallm?.runnable);
+  const whallmModel = state.models.find(model => model.backends?.whallm?.runnable && (model.nativeWhallm || model.sharedServer === true));
   const whallmRoute = whallmModel ? routeCapabilityPresentation(whallmModel.backends.whallm, {
     backend:"whallm", modelName:whallmModel.name, modelReady:whallmModel.ready,
   }) : null;
@@ -1828,6 +2555,8 @@ function updateBackend(preserveOptimization = false) {
       : llamaCppReady
         ? "Runtime found; no pinned verified artifact route is available yet."
         : "The verified artifact route is advertised, but its pinned runtime is not installed."
+    : whallmModel?.nativeWhallm
+    ? "Qwen3.8 Flash is installed. Launch starts its engine automatically with thinking enabled."
     : whallmRoute?.attention
     ? `${whallmRoute.label}. ${whallmRoute.detail || "Whallm can be selected explicitly, but it is not automatically preferred on this Mac."}`
     : whallmModelReady
@@ -1850,7 +2579,6 @@ function renderModelOptions() {
     backend:state.backend, modelName:model.name, modelReady:model.ready,
   });
   const compatible = visibleModels.filter(model => routePresentation(model).available);
-  const unavailable = visibleModels.filter(model => !routePresentation(model).available);
   const option = (model, disabled = false) => `<option value="${esc(model.id)}" ${disabled ? "disabled" : ""}>${esc(model.name)}${disabled ? ` — ${esc(model.backends?.[state.backend]?.reason || model.status)}` : ""}</option>`;
   if (state.backend === "freetoken") {
     const native = compatible.filter(model => freeTokenRoute(model) === "native");
@@ -1861,8 +2589,8 @@ function renderModelOptions() {
     ].join("");
     select.innerHTML = groups || `<option value="">${state.freeToken?.native?.installed ? "Native port detected — no compatible local Qwen3-MoE checkpoint" : "Install the native port or connect a FreeToken server"}</option>`;
   } else select.innerHTML = compatible.length
-    ? `<optgroup label="Available for ${backendName(state.backend)}">${compatible.map(model => option(model)).join("")}</optgroup>${unavailable.length ? `<optgroup label="Detected but unavailable">${unavailable.map(model => option(model, true)).join("")}</optgroup>` : ""}`
-    : `<option value="">No available models for this runtime</option>${unavailable.map(model => option(model, true)).join("")}`;
+    ? compatible.map(model => option(model)).join("")
+    : '<option value="">No compatible models — choose another engine or open Models</option>';
   if (compatible.some(model => model.id === previous)) select.value = previous;
   modelChanged();
 }
@@ -1879,6 +2607,7 @@ function applyModelChatDefaults(model) {
   $("topKInput").value = String(defaults.top_k ?? 0);
   $("presencePenaltyInput").value = String(defaults.presence_penalty ?? 0);
   $("frequencyPenaltyInput").value = String(defaults.frequency_penalty ?? 0);
+  $("repetitionPenaltyInput").value = String(defaults.repetition_penalty ?? 1);
   $("seedInput").value = "";
   updateChatSamplingControls();
 }
@@ -1945,7 +2674,10 @@ function modelChanged() {
     context:Number($("contextInput").value),
     output:Number($("outputInput").value),
     contextWindows:runtimeWindows,
+    outputMaximum:cap.outputMaximum || model.outputMaximum,
   });
+  if (cap.outputMaximum || model.outputMaximum) $("outputInput").max = String(cap.outputMaximum || model.outputMaximum);
+  else $("outputInput").removeAttribute("max");
   if (reconciledLimits.contextChanged) {
     $("contextInput").value = String(reconciledLimits.context);
   }
@@ -1987,8 +2719,8 @@ async function loadModels(userTriggered = false) {
   state.modelVerificationTimer = null;
   if (userTriggered) cancelOptimization("Model capabilities were rescanned; reapply the current speed preset.");
   $("refreshModels").disabled = true;
-  $("refreshModels").querySelector("strong").textContent = "Scanning models…";
-  $("refreshModels").querySelector("small").textContent = "Refreshing configured model folders.";
+  $("refreshModels").textContent = "Scanning models…";
+  $("refreshModels").title = "Refreshing configured model folders.";
   try {
     const data = await api("/api/models");
     state.models = data.models;
@@ -2001,8 +2733,8 @@ async function loadModels(userTriggered = false) {
     if (checking) {
       const completed = Number(checking.verificationProgress?.completed || 0);
       const total = Number(checking.verificationProgress?.total || 28);
-      $("refreshModels").querySelector("strong").textContent = "Verifying pinned model…";
-      $("refreshModels").querySelector("small").textContent = `${formatNumber(completed)} / ${formatNumber(total)} shards checked in this controller.`;
+      $("refreshModels").textContent = "Verifying pinned model…";
+      $("refreshModels").title = `${formatNumber(completed)} / ${formatNumber(total)} shards checked in this controller.`;
       state.modelVerificationTimer = setTimeout(() => { void loadModels(false); }, 700);
     }
   } catch (error) { showNotice(error.message, true); }
@@ -2011,8 +2743,8 @@ async function loadModels(userTriggered = false) {
     const checking = state.models.some(model => model.verificationState === "checking");
     $("refreshModels").disabled = checking;
     if (!checking) {
-      $("refreshModels").querySelector("strong").textContent = "Rescan models";
-      $("refreshModels").querySelector("small").textContent = "Refresh configured model folders.";
+      $("refreshModels").textContent = "Rescan models";
+      $("refreshModels").title = "Refresh configured model folders.";
     }
   }
 }
@@ -2343,16 +3075,22 @@ async function applyOptimal(scope = "current", enginePreference = "throughput", 
   let applied = false;
   let calibrationFallback = null;
   try {
+    const bindingScope = engineSelection ? "engine" : "route";
+    const suppliedBinding = evidenceBinding === null
+      ? activeEvidenceBindingFor(bindingScope, enginePreference)
+      : copiedEvidenceBinding(evidenceBinding);
+    if (evidenceBinding !== null && !suppliedBinding) {
+      throw new Error("That measured result reference is no longer valid. Refresh Calibration before applying it.");
+    }
     const request = {
       backend:state.backend, modelId:model.id, client:state.client,
       context:Number($("contextInput").value), output:Number($("outputInput").value),
       reasoning:$("reasoningSelect").value,
       options:gatherOptions(),
+      generation:gatherGenerationSettings(),
     };
     if (engineSelection) request.enginePreference = enginePreference;
-    if (evidenceBinding && typeof evidenceBinding === "object") {
-      request.evidenceBinding = JSON.parse(JSON.stringify(evidenceBinding));
-    }
+    if (suppliedBinding) request.evidenceBinding = suppliedBinding;
     if (state.client === "chat") request.chat = gatherChatSettings();
     const endpoint = engineSelection ? "/api/optimal-engine" : "/api/optimal";
     const data = await api(endpoint, {method:"POST", body:JSON.stringify(request)});
@@ -2362,8 +3100,34 @@ async function applyOptimal(scope = "current", enginePreference = "throughput", 
       throw new Error("The measured result points to an engine that is temporarily hidden in this launcher build.");
     }
     if (!engineSelection && state.backend !== result.backend) throw new Error("The current-engine optimiser returned a different runtime.");
+    if (result.backend === "mtplx") {
+      const requestedOperatorRoute = result.options?.mtplxOperatorRoute;
+      const operatorRoute = mtplxOperatorRouteFromOptimization(
+        result, engineSelection, model, Number($("contextInput").value),
+      );
+      result.options = {...(result.options || {}), mtplxOperatorRoute:operatorRoute};
+      const routeKey = "mtplxOperatorRoute";
+      const currentOperatorRoute = $("mtplxOperatorRouteSelect").value;
+      result.changedKeys = (Array.isArray(result.changedKeys) ? result.changedKeys : [])
+        .filter(key => key !== routeKey);
+      if (currentOperatorRoute !== operatorRoute) result.changedKeys.push(routeKey);
+      result.appliedKeys = (Array.isArray(result.appliedKeys) ? result.appliedKeys : [])
+        .filter(key => key !== routeKey);
+      result.appliedKeys.push(routeKey);
+      if (
+        requestedOperatorRoute === MTPLX_OPERATOR_ROUTE_2111
+        && operatorRoute === MTPLX_OPERATOR_ROUTE_DEFAULT
+      ) {
+        const rationaleKey = engineSelection ? "engineRationale" : "rationale";
+        result[rationaleKey] = [
+          "The 2.11.1 long-context choice stayed on Runtime default because this result did not carry matching local measurement evidence.",
+          ...(Array.isArray(result[rationaleKey]) ? result[rationaleKey] : []),
+        ];
+      }
+    }
     const nextAction = engineSelection ? result.engineNextAction : null;
     if (nextAction?.id === "calibrate") {
+      clearActiveEvidenceBinding();
       calibrationFallback = {preference:enginePreference, decision:result};
       state.optimalSignature = "";
       state.optimalLabel = "";
@@ -2380,7 +3144,9 @@ async function applyOptimal(scope = "current", enginePreference = "throughput", 
       if (!setRuntimeKvValue(result.backend, result.options.kv || "off")) {
         throw new Error("The recommended engine could not preserve the selected KV precision.");
       }
-      const changed = result.changedKeys.filter(key => optimizerControls[key]);
+      const changed = result.changedKeys
+        .filter(key => optimizerControls[key])
+        .sort((left, right) => Number(left === "mtplxOperatorRoute") - Number(right === "mtplxOperatorRoute"));
       if (changed.length) {
         $("advancedControls").open = true;
         await revealFirstChangedControl(changed);
@@ -2396,9 +3162,11 @@ async function applyOptimal(scope = "current", enginePreference = "throughput", 
         .find(key => !optimizerValueMatches(key, result.options[key]));
       if (mismatch) throw new Error(`The ${mismatch} control did not reach the verified value; optimisation was cancelled.`);
       state.optimalSignature = speedSignature();
-      const resultLabel = engineSelection
+      const operatorResultLabel = result.backend === "mtplx"
+        ? mtplxOperatorRouteLabel(result.options) : "";
+      const resultLabel = operatorResultLabel || (engineSelection
         ? (result.engineEvidenceLabel || result.evidenceLabel)
-        : result.evidenceLabel;
+        : result.evidenceLabel);
       state.optimalLabel = resultLabel;
       const visibleRationale = engineSelection && result.engineRationale?.length
         ? result.engineRationale
@@ -2407,6 +3175,15 @@ async function applyOptimal(scope = "current", enginePreference = "throughput", 
         ? `${changed.length} control${changed.length === 1 ? "" : "s"} updated · ${visibleRationale.join(" ")}`
         : `Already using this setup · ${visibleRationale.join(" ")}`;
       setOptimizationState("applied", resultLabel, detail);
+      const returnedBinding = copiedEvidenceBinding(
+        (engineSelection ? result.engineEvidenceBinding : result.evidenceBinding)
+        || result.evidenceBinding || suppliedBinding,
+      );
+      if (
+        returnedBinding?.scope === bindingScope
+        && returnedBinding.preference === enginePreference
+      ) rememberActiveEvidenceBinding(returnedBinding);
+      else clearActiveEvidenceBinding();
       applied = true;
     }
   } catch (error) {
@@ -2419,6 +3196,7 @@ async function applyOptimal(scope = "current", enginePreference = "throughput", 
     }
     state.optimalSignature = "";
     state.optimalLabel = "";
+    clearActiveEvidenceBinding();
     setOptimizationState("custom", "Custom", "Optimisation could not be applied.");
     applyError = error.message;
   } finally {
@@ -2440,7 +3218,10 @@ async function applyOptimal(scope = "current", enginePreference = "throughput", 
       decision:calibrationFallback.decision,
     });
   }
-  if (applied && generation === state.optimizationGeneration) schedulePerformanceReceipt(true);
+  if (applied && generation === state.optimizationGeneration) {
+    persistVisibleRoute();
+    schedulePerformanceReceipt(true);
+  }
   return applied;
 }
 
@@ -2552,6 +3333,7 @@ function renderRouteCheck() {
     ? `<strong>${esc(result.verdict === "pass" ? "Route passed." : result.verdict === "advisory" ? "Route passed with advisories." : "Route failed.")}</strong> ${esc(result.summary || "Review the individual checks.")}${esc(receiptDetail)}<br><small>No generated response text was stored and no work surface was opened.</small>`
     : "";
 
+  const admission = currentSessionAdmission();
   const canStart = Boolean(plan?.ready && visibleMatches && !active && !state.routeCheckLoading && !receiptReady && !acquisitionIsActive());
   $("routeCheckConsent").disabled = true;
   $("routeCheckConsent").checked = false;
@@ -2559,20 +3341,24 @@ function renderRouteCheck() {
   $("routeCheckConsentCopy").textContent = work
     ? `${work.modelLoads} temporary model load · ${work.generatedRequests} generated request${work.generatedRequests === 1 ? "" : "s"} · at most ${work.maxGeneratedTokensPerRequest} tokens each · automatic unload.`
     : "The model-load and generated-request count will appear after the read-only plan is ready.";
-  $("routeCheckStartButton").disabled = !(canStart && plan?.contractId);
+  $("routeCheckStartButton").disabled = !(canStart && plan?.contractId && admission.actionReady);
+  $("routeCheckStartButton").title = admission.actionReady ? "" : admission.detail;
   $("routeCheckStartButton").classList.toggle("hidden", receiptReady);
   $("routeCheckStopButton").disabled = !active;
-  $("routeCheckStartLabel").textContent = plan?.ready
-    ? "Synthetic prompts · automatic unload"
-    : "Waiting for a valid plan";
+  $("routeCheckStartLabel").textContent = !admission.actionReady
+    ? sessionAdmissionBlockerCopy(admission)
+    : plan?.ready ? "Synthetic prompts · automatic unload" : "Waiting for a valid plan";
   const showCheckedLaunch = guided || Boolean(receipt);
   $("routeCheckLaunchButton").classList.toggle("hidden", !showCheckedLaunch);
-  $("routeCheckLaunchButton").disabled = !receiptReady || state.verifiedLaunchBusy;
+  $("routeCheckLaunchButton").disabled = !receiptReady || state.verifiedLaunchBusy || !admission.actionReady;
+  $("routeCheckLaunchButton").title = receiptReady && !admission.actionReady ? admission.detail : "";
   $("routeCheckLaunchLabel").textContent = state.verifiedLaunchBusy
     ? "Revalidating the exact receipt…"
-    : receiptReady
-      ? `${route?.backendLabel || "Checked engine"} · ${route?.surface || "selected surface"}`
-      : visibleMatches ? "Complete Route Check first" : "Settings changed · check again";
+    : receiptReady && !admission.actionReady
+      ? sessionAdmissionBlockerCopy(admission)
+      : receiptReady
+        ? `${route?.backendLabel || "Checked engine"} · ${route?.surface || "selected surface"}`
+        : visibleMatches ? "Complete Route Check first" : "Settings changed · check again";
 }
 
 async function loadRouteCheckPlan() {
@@ -2610,7 +3396,13 @@ async function openRouteCheck(intent = "inspect") {
 }
 
 async function startRouteCheck() {
-  const plan = state.routeCheckPlan;
+  let plan = state.routeCheckPlan;
+  if (!plan?.ready || !plan.contractId || !routeCheckVisibleMatches() || routeCheckIsActive()) return;
+  if (!await requireFreshSessionAdmission()) {
+    renderRouteCheck();
+    return;
+  }
+  plan = state.routeCheckPlan;
   if (!plan?.ready || !plan.contractId || !routeCheckVisibleMatches() || routeCheckIsActive()) return;
   try {
     const request = JSON.parse(JSON.stringify(plan.request));
@@ -2632,22 +3424,25 @@ async function startRouteCheck() {
   }
 }
 
-async function pollRouteCheckStatus() {
-  try {
-    const status = await api("/api/route-check/status");
-    state.routeCheckStatus = status;
-    state.routeCheckPhase = status.phase || "idle";
-    if ($("routeCheckDialog")?.open) renderRouteCheck();
-    refreshLaunchability();
-    if (
-      status.phase === "completed" && status.job?.id
-      && state.routeCheckCompletionId !== status.job.id
-    ) {
-      state.routeCheckCompletionId = status.job.id;
-      showNotice(status.result?.summary || "Route Check completed.", status.result?.verdict === "fail");
-    }
-  } catch (_) {}
-}
+const pollRouteCheckStatus = statusPoller.add("routeCheck", {
+  interval:() => statusPollInterval(routeCheckIsActive(), "routeCheckDialog"),
+  run:async () => {
+    try {
+      const status = await api("/api/route-check/status");
+      state.routeCheckStatus = status;
+      state.routeCheckPhase = status.phase || "idle";
+      if ($("routeCheckDialog")?.open) renderRouteCheck();
+      refreshLaunchability();
+      if (
+        status.phase === "completed" && status.job?.id
+        && state.routeCheckCompletionId !== status.job.id
+      ) {
+        state.routeCheckCompletionId = status.job.id;
+        showNotice(status.result?.summary || "Route Check completed.", status.result?.verdict === "fail");
+      }
+    } catch (_) {}
+  },
+});
 
 async function stopRouteCheck() {
   try {
@@ -2660,6 +3455,10 @@ async function launchCheckedRoute() {
   const status = state.routeCheckStatus || {};
   const plan = state.routeCheckPlan;
   if (!plan?.contractId || !routeCheckReceiptReady(status) || state.verifiedLaunchBusy) return;
+  if (!await requireFreshSessionAdmission()) {
+    renderRouteCheck();
+    return;
+  }
   state.verifiedLaunchBusy = true;
   refreshLaunchability();
   renderRouteCheck();
@@ -2679,7 +3478,7 @@ async function launchCheckedRoute() {
       jobId:status.job.id,
       contractId:plan.contractId,
     };
-    const launched = await launch(request);
+    const launched = await launch(request, {admissionChecked:true});
     if (launched) {
       state.routeCheckIntent = "inspect";
       if ($("routeCheckDialog").open) $("routeCheckDialog").close();
@@ -2807,13 +3606,22 @@ function chatDraftSurfacePrefix(surfaceId = state.chatRunId) {
   return `surface:${String(surfaceId || "").slice(0, 96)}:`;
 }
 
-function chatHistoryDraftKey(historyId, surfaceId = state.chatRunId) {
-  return `${chatDraftSurfacePrefix(surfaceId)}history:${String(historyId || "").slice(0, 72)}`;
+function chatHistoryDraftKey(historyId, _surfaceId = state.chatRunId) {
+  // Saved conversations outlive the temporary run/attachment that happens to
+  // display them. Keep their draft and paused queue under the history ID so a
+  // Stop, detach, or warm attachment cannot strand unsent work under an old
+  // surface ID.
+  return `history:${String(historyId || "").slice(0, 72)}`;
 }
 
-function newChatDraftKey(surfaceId = state.chatRunId) {
-  const id = localUuid();
-  return `${chatDraftSurfacePrefix(surfaceId)}new:${id}`;
+function newChatDraftKey(_surfaceId = state.chatRunId) {
+  return `draft:${localUuid()}`;
+}
+
+function isPortableChatDraftKey(key) {
+  const raw = String(key || "");
+  return /^draft:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(raw)
+    || /^surface:[^:\u0000-\u001f\u007f]{1,96}:new:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(raw);
 }
 
 function localUuid() {
@@ -2842,12 +3650,46 @@ function chatTurnTabIdentifier() {
   return state.chatTurnTabId;
 }
 
-function chatDraftHistoryIdFromKey(key, surfaceId = state.chatRunId) {
-  const prefix = `${chatDraftSurfacePrefix(surfaceId)}history:`;
-  if (!String(key || "").startsWith(prefix)) return "";
-  const value = String(key).slice(prefix.length);
+function chatDraftHistoryIdFromKey(key, _surfaceId = state.chatRunId) {
+  const raw = String(key || "");
+  const legacy = /^surface:[^:\u0000-\u001f\u007f]{1,96}:history:(.+)$/.exec(raw);
+  const value = raw.startsWith("history:") ? raw.slice("history:".length) : legacy?.[1] || "";
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
     ? value.toLocaleLowerCase() : "";
+}
+
+function migrateLegacyChatHistoryStorage(historyId) {
+  const id = String(historyId || "").toLocaleLowerCase();
+  const targetKey = chatHistoryDraftKey(id);
+  if (!chatDraftHistoryIdFromKey(targetKey)) return targetKey;
+  const suffix = `:history:${id}`;
+
+  let drafts = readChatDraftEnvelope();
+  const legacyDrafts = Object.entries(drafts.drafts || {})
+    .filter(([key]) => key.startsWith("surface:") && key.toLocaleLowerCase().endsWith(suffix))
+    .sort((left, right) => Number(right[1]?.updatedAt || 0) - Number(left[1]?.updatedAt || 0));
+  const activeWasLegacy = chatDraftHistoryIdFromKey(drafts.activeKey) === id
+    && drafts.activeKey !== targetKey;
+  if (!drafts.drafts?.[targetKey] && legacyDrafts.length) {
+    drafts = ChatDraftsCore.moveDraft(
+      drafts, legacyDrafts[0][0], targetKey, CHAT_DRAFT_OPTIONS,
+    );
+  } else if (activeWasLegacy) {
+    drafts = ChatDraftsCore.setActive(drafts, targetKey, CHAT_DRAFT_OPTIONS);
+  }
+  writeChatDraftEnvelope(drafts);
+
+  let queues = readChatQueueEnvelope();
+  const legacyQueues = Object.entries(queues.queues || {})
+    .filter(([key]) => key.startsWith("surface:") && key.toLocaleLowerCase().endsWith(suffix))
+    .sort((left, right) => Number(right[1]?.updatedAt || 0) - Number(left[1]?.updatedAt || 0));
+  if (!queues.queues?.[targetKey] && legacyQueues.length) {
+    queues = ChatQueueCore.moveQueue(
+      queues, legacyQueues[0][0], targetKey, Date.now(), CHAT_QUEUE_OPTIONS,
+    );
+    writeChatQueueEnvelope(queues);
+  }
+  return targetKey;
 }
 
 function sizeChatInput() {
@@ -2929,15 +3771,28 @@ function activateChatDraft(surfaceId, options = {}) {
     state.chatDraftTimer = null;
   }
   let envelope = readChatDraftEnvelope();
+  const requestedHistoryId = String(options.historyId || "").toLocaleLowerCase();
+  const activeHistoryId = options.restoreActive
+    ? chatDraftHistoryIdFromKey(envelope.activeKey) : "";
+  if (requestedHistoryId || activeHistoryId) {
+    migrateLegacyChatHistoryStorage(requestedHistoryId || activeHistoryId);
+    envelope = readChatDraftEnvelope();
+  }
   const prefix = chatDraftSurfacePrefix(surfaceId);
-  const active = options.restoreActive && String(envelope.activeKey || "").startsWith(prefix)
-    ? envelope.activeKey : "";
-  const explicitKey = String(options.key || "").startsWith(prefix) ? String(options.key) : "";
+  const active = options.restoreActive && (
+    String(envelope.activeKey || "").startsWith(prefix)
+    || Boolean(chatDraftHistoryIdFromKey(envelope.activeKey))
+    || isPortableChatDraftKey(envelope.activeKey)
+  ) ? envelope.activeKey : "";
+  const explicitKey = (
+    String(options.key || "").startsWith(prefix)
+    || isPortableChatDraftKey(options.key)
+  ) ? String(options.key) : "";
   const key = explicitKey || (options.historyId
     ? chatHistoryDraftKey(options.historyId, surfaceId)
     : active || newChatDraftKey(surfaceId));
   state.chatDraftKey = key;
-  state.chatDraftPendingHistoryId = active
+  state.chatDraftPendingHistoryId = !requestedHistoryId && active
     ? chatDraftHistoryIdFromKey(active, surfaceId) : "";
   envelope = ChatDraftsCore.setActive(envelope, key, CHAT_DRAFT_OPTIONS);
   writeChatDraftEnvelope(envelope);
@@ -3009,6 +3864,134 @@ async function restorePendingChatDraftConversation() {
   renderChatSidebar();
 }
 
+let activeLaunchFlow = null;
+let launchReviewResolve = null;
+
+function renderLaunchMemoryEstimate(admission) {
+  const element = $("launchMemoryEstimate");
+  if (!element) return;
+  const estimate = admission.known && admission.signature === state.sessionAdmissionSignature
+    ? state.sessionDashboard?.admission?.estimate : null;
+  const bytes = Number(estimate?.estimatedWorkingSetBytes);
+  let label = "Checking memory…";
+  let detail = "The estimate updates automatically for your model and settings. Click for memory details.";
+  if (admission.warm) {
+    label = "Reusing engine";
+    detail = "This launch reuses the running engine. It loads model weights on demand if needed.";
+  } else if (estimate?.remoteEngine || estimate?.sharedEngine) {
+    label = "Model managed by server";
+    detail = estimate.basis || "The connected server owns model memory.";
+  } else if (estimate && estimate.geometryReady !== false && Number.isFinite(bytes) && bytes > 0) {
+    label = `Est. peak ~${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+    detail = `Full-context session estimate including model, cache and runtime reserve. Actual peaks during prompt processing can vary. Excludes macOS and other apps; ${(Number(estimate.osReserveBytes || 0) / 1024 ** 3).toFixed(1)} GiB is reserved separately for macOS. Click for details.`;
+  } else if (!admission.pending && admission.decision !== "checking") {
+    label = "Memory estimate unavailable";
+    detail = admission.detail || "Finish the model settings to estimate memory.";
+  }
+  element.textContent = label;
+  element.title = detail;
+  element.dataset.pressure = String(["pressure", "review"].includes(admission.decision));
+}
+
+function updateLaunchHome(admission = currentSessionAdmission()) {
+  renderLaunchMemoryEstimate(admission);
+  document.body.dataset.preparingLaunch = String(Boolean(state.launchPreparing));
+  const engine = $("homeEngineSelect");
+  const buttons = [...document.querySelectorAll("[data-backend]")].filter(button => !button.hidden);
+  const markup = buttons.map(button => `<option value="${esc(button.dataset.backend)}"${button.disabled ? " disabled" : ""}>${esc(backendName(button.dataset.backend))}</option>`).join("");
+  if (engine.innerHTML !== markup) engine.innerHTML = markup;
+  engine.value = state.backend;
+  $("homeFastestEngineHelp").textContent = state.applyingOptimal
+    ? "Checking saved calibration across compatible engines…"
+    : state.homeEngineFeedbackSignature === protectedSnapshot() && state.homeEngineFeedback
+      ? state.homeEngineFeedback
+      : "Uses saved calibration, or measures compatible engines.";
+  $("homeSettingsSummary").textContent = `${exactContextTier(Number($("contextInput").value))} context · ${formatNumber(Number($("outputInput").value))} max response · ${$("reasoningSelect").value === "auto" ? "Model-default reasoning" : $("reasoningSelect").value + " reasoning"}${state.backend === "omlx" && $("accelerationSelect").value === "dflash" ? ` · ${runtimeKvLabel("omlx", gatherOptions())} KV` : ""}`;
+  $("customLaunchEditor").inert = Boolean(state.launchPreparing);
+  $("launchTools").inert = Boolean(state.launchPreparing);
+  $("quickStart").inert = Boolean(state.launchPreparing);
+  $("homeLaunchHint").textContent = state.launchPreparing ? "Getting your session ready"
+    : currentWarmRoutePlan()?.canAttach ? "Your model is already loaded"
+    : admission.decision === "qualification" ? "This setup needs a capacity check"
+    : state.backend === "uzu" && admission.decision === "ready" ? "Saved capacity check reused"
+    : "Ready when you are";
+  $("homeLaunchDetail").textContent = admission.decision === "qualification"
+    ? "The required capacity test runs automatically. It may take several minutes."
+    : state.backend === "uzu" && admission.decision === "ready"
+      ? "No repeat capacity test. Current memory and connection checks still run when you launch."
+      : "Model, memory and connection checks run automatically.";
+  if (!$("configScroll").classList.contains("hidden")) {
+    $("configTitle").textContent = "Your local AI";
+    $("configSubtitle").textContent = "Choose a model. We’ll handle getting it ready.";
+  }
+  if (!state.launchPreparing) $("launchSummary").textContent = currentWarmRoutePlan()?.canAttach ? "Use loaded model" : "Checks included";
+  // Compatibility detail remains available on each disabled surface and in
+  // diagnostics, rather than repeating the full engine contract on the home.
+  $("compatibilityLine").textContent = clientAvailability().available
+    ? `${clientName(state.client)} is available with this model.`
+    : clientAvailability().reason;
+  $("compatibilityLine").removeAttribute("title");
+  $("compatibilityLine").dataset.available = String(Boolean(clientAvailability().available));
+}
+
+function renderLaunchPreparation(value) {
+  $("launchPreparation").hidden = false;
+  $("launchPreparation").dataset.phase = value.phase;
+  $("launchPreparationTitle").textContent = value.title;
+  $("launchPreparationDetail").textContent = value.detail;
+  const progress = $("launchPreparationProgress");
+  progress.hidden = ["error", "review", "done"].includes(value.phase);
+  if (Number.isFinite(value.progress)) progress.value = Math.max(0, Math.min(1, value.progress));
+  else progress.removeAttribute("value");
+  $("continueLaunchPreparation").hidden = value.phase !== "review";
+  $("cancelLaunchPreparation").textContent = value.phase === "error" ? "Dismiss" : "Cancel";
+  $("cancelLaunchPreparation").disabled = ["starting", "stopping"].includes(value.phase);
+  $("launchPreparationMark").textContent = value.phase === "error" ? "!" : value.phase === "review" ? "!" : "◌";
+}
+
+async function startSimpleLaunch() {
+  if (state.launchPreparing) return;
+  if (currentWarmRoutePlan()?.canAttach) return launch();
+  let original;
+  try { original = gather("custom", false); }
+  catch (error) { showNotice(error.message, true); return; }
+  const signature = JSON.stringify(original);
+  state.launchPreparing = true;
+  activeLaunchFlow = LaunchFlow.create({
+    api,
+    update:renderLaunchPreparation,
+    isCurrent:() => visibleSessionAdmissionSignature() === signature,
+    review:admission => new Promise(resolve => {
+      launchReviewResolve = resolve;
+      renderLaunchPreparation({phase:"review", title:"This setup needs more memory", detail:admission.detail});
+    }),
+  });
+  refreshLaunchability();
+  try {
+    const request = await activeLaunchFlow.prepare(original);
+    renderLaunchPreparation({phase:"starting", title:"Opening your session", detail:"Loading the model and checking the connection…"});
+    // /api/launch revalidates capacity and the optional exact acknowledgement
+    // again at the model-load boundary; no browser decision bypasses it.
+    const accepted = await launch(request, {admissionChecked:true});
+    if (!accepted) throw new Error($("notice").textContent || "The model could not start. Try again.");
+    $("launchPreparation").hidden = true;
+  } catch (error) {
+    renderLaunchPreparation({phase:"error", title:/cancelled/i.test(error.message) ? "Launch cancelled" : "Couldn’t start this session", detail:error.message});
+  } finally {
+    state.launchPreparing = false;
+    activeLaunchFlow = null;
+    launchReviewResolve = null;
+    refreshLaunchability();
+  }
+}
+
+function cancelSimpleLaunch() {
+  activeLaunchFlow?.cancel();
+  if (launchReviewResolve) { launchReviewResolve(false); launchReviewResolve = null; }
+  if (!state.launchPreparing) $("launchPreparation").hidden = true;
+  else renderLaunchPreparation({phase:"stopping", title:"Cancelling launch", detail:"Stopping any capacity test started by this launch…"});
+}
+
 async function launch(requestOverride = null, launchOptions = {}) {
   try {
     showNotice("Validating the visible settings…");
@@ -3018,6 +4001,13 @@ async function launch(requestOverride = null, launchOptions = {}) {
       ? (launchOptions.warmPlan?.canAttach && launchOptions.warmPlan?.confirmation
         ? launchOptions.warmPlan : null)
       : currentWarmRoutePlan();
+    if (!warm && launchOptions.admissionChecked !== true && !await requireFreshSessionAdmission()) return false;
+    const opensLauncherSurface = request.client === "chat";
+    let currentChatSavedForSurface = false;
+    if (state.chatRunId && opensLauncherSurface) {
+      if (!await saveChatBeforeSurfaceExit("open that work surface again")) return false;
+      currentChatSavedForSurface = true;
+    }
     if (warm?.canAttach && warm.confirmation) {
       request.warmRouteConfirmation = warm.confirmation;
       const data = await api("/api/session/warm-attach", {
@@ -3035,8 +4025,9 @@ async function launch(requestOverride = null, launchOptions = {}) {
       if (state.sessionDashboard) state.sessionDashboard.hub = data.hub;
       clearWarmRoutePlan();
       if (data.attachment.client === "chat") {
-        enterChatSurface(data.attachment);
-        showNotice("Warm Chat opened on the loaded model. The engine and model weights were not reloaded.");
+        if (await enterChatSurface(data.attachment, {currentChatSaved:currentChatSavedForSurface})) {
+          showNotice("Warm Chat opened on the loaded model. The engine and model weights were not reloaded.");
+        }
       } else if (data.attachment.agentHost === "console") {
         enterAgentConsole(data.attachment);
         showNotice(`${data.attachment.surface} opened in Hub Console on the loaded model. No model weights were reloaded.`);
@@ -3057,6 +4048,7 @@ async function launch(requestOverride = null, launchOptions = {}) {
       state.chatRunId = data.run.runId;
       state.chatOwnerRunId = data.run.runId;
       state.chatAttachment = null;
+      state.chatAttachmentObserved = false;
       activateChatDraft(data.run.runId, {restore:false});
       renderChatMessages();
     } else if (data.run.agentHost === "console") {
@@ -3150,6 +4142,7 @@ function resetChatConversation() {
   state.chatTranscriptSearchOpen = false;
   state.chatTranscriptQuery = "";
   state.chatTranscriptActiveId = "";
+  state.chatPostmortem = null;
 }
 
 function chatEventUsage(event) {
@@ -4154,6 +5147,14 @@ function renderChatMessages({forceBottom = false} = {}) {
       .map(details => details.closest("[data-chat-message-id]")?.dataset.chatMessageId)
       .filter(Boolean),
   );
+  const reasoningScrollCaptures = new Map(
+    [...container.querySelectorAll(".chat-reasoning[open] .chat-reasoning-body")]
+      .map(body => [
+        body.closest("[data-chat-message-id]")?.dataset.chatMessageId || "",
+        ChatScrollCore.captureScroll(chatScrollMetrics(body)),
+      ])
+      .filter(([messageId]) => Boolean(messageId)),
+  );
   const previouslyOpenMessageActions = new Set(
     [...container.querySelectorAll(".chat-message-more[open]")]
       .map(details => details.closest("[data-chat-message-id]")?.dataset.chatMessageId)
@@ -4262,6 +5263,8 @@ function renderChatMessages({forceBottom = false} = {}) {
         button.disabled = Boolean(
           mutatesConversation
           && (state.chatAbort || state.chatRevisionBusy || state.chatEditingMessageId
+            || state.chatHistorySaving || state.chatHistoryLoading
+            || state.chatHistoryBusyId || state.chatHistoryMutationTail
             || (state.chatQueue.length && !pausedQueueRecovery)),
         );
         if (target === moreMenu) button.setAttribute("role", "menuitem");
@@ -4383,6 +5386,15 @@ function renderChatMessages({forceBottom = false} = {}) {
     fragment.append(article);
   });
   container.replaceChildren(fragment);
+  for (const reasoningBody of container.querySelectorAll(".chat-reasoning[open] .chat-reasoning-body")) {
+    const article = reasoningBody.closest("[data-chat-message-id]");
+    const messageId = article?.dataset.chatMessageId || "";
+    reasoningBody.scrollTop = ChatScrollCore.restoredCapturedTop(
+      chatScrollMetrics(reasoningBody),
+      reasoningScrollCaptures.get(messageId),
+      article?.classList.contains("pending") === true,
+    );
+  }
   applyChatTranscriptSearch();
   requestAnimationFrame(() => {
     const scrollAction = ChatScrollCore.renderAction({
@@ -4435,7 +5447,9 @@ function renderChatQueue() {
       : "Saved in this tab · sends in order after the current response";
   const resumeDisabled = Boolean(
     !state.chatQueuePaused || state.chatAbort || state.chatQueueEditingId
-    || state.chatRevisionBusy || state.chatContextBusy || state.runPhase !== "running" || !state.chatRunId,
+    || state.chatRevisionBusy || state.chatContextBusy || state.chatHistorySaving
+    || state.chatHistoryLoading || state.chatHistoryBusyId
+    || state.chatPostmortem || state.runPhase !== "running" || !state.chatRunId,
   );
   const nextPreview = String(state.chatQueue[0]?.content || "")
     .replace(/\s+/g, " ").trim().slice(0, 90) || "Waiting message";
@@ -4460,27 +5474,40 @@ function queueChatRender() {
 
 function setChatBusy(busy) {
   const button = $("chatSendButton");
-  const ready = state.runPhase === "running" && Boolean(state.chatRunId);
+  const retained = Boolean(state.chatPostmortem && state.chatRunId);
+  const ready = state.runPhase === "running" && Boolean(state.chatRunId) && !retained;
   const revisionBusy = Boolean(state.chatRevisionBusy);
   const editingMessage = Boolean(state.chatEditingMessageId);
   const contextBusy = Boolean(state.chatContextBusy);
-  button.disabled = !ready || revisionBusy || editingMessage || contextBusy;
+  const historyBusy = Boolean(
+    state.chatHistorySaving || state.chatHistoryLoading || state.chatHistoryBusyId,
+  );
+  button.disabled = !ready || revisionBusy || editingMessage || contextBusy || historyBusy;
   button.classList.remove("stopping");
   const queueMode = busy || state.chatQueue.length > 0;
   button.querySelector("strong").textContent = queueMode ? "Queue" : "Send";
   button.querySelector("span").textContent = queueMode ? "+" : "↑";
-  $("chatStopButton").classList.toggle("hidden", !busy);
-  $("chatStopButton").disabled = !busy;
-  $("chatInput").disabled = !ready || revisionBusy || editingMessage || contextBusy;
-  $("newChatButton").disabled = !ready || busy || (state.chatQueue.length > 0 && !state.chatQueuePaused) || revisionBusy || editingMessage || contextBusy;
-  $("chatSidebarNew").disabled = $("newChatButton").disabled;
-  $("chatHistoryButton").disabled = !ready || revisionBusy || editingMessage;
+  $("chatStopButton").classList.toggle("hidden", !busy || retained);
+  $("chatStopButton").disabled = !busy || retained || state.chatStopBusy;
+  $("chatStopButton").textContent = state.chatStopBusy ? "Stopping…" : "Stop response";
+  $("chatInput").disabled = !ready || revisionBusy || editingMessage || contextBusy || historyBusy;
+  $("newChatButton").disabled = (!ready && !retained) || busy || (state.chatQueue.length > 0 && !state.chatQueuePaused) || revisionBusy || editingMessage || contextBusy || historyBusy;
+  $("newChatButton").textContent = retained ? "Close transcript" : "New chat";
+  const sidebarNew = $("chatSidebarNew");
+  sidebarNew.disabled = $("newChatButton").disabled;
+  sidebarNew.title = retained ? "Close the retained transcript" : "Start a new chat";
+  sidebarNew.setAttribute?.("aria-label", sidebarNew.title);
+  $("chatHistoryButton").disabled = (!ready && !retained) || revisionBusy || editingMessage || historyBusy;
   $("chatComposerHint").textContent = contextBusy
     ? "Reading and validating selected text locally…"
+    : historyBusy
+      ? "Finishing the local history change before another message can start…"
     : revisionBusy
     ? "Preserving the original and preparing the branch…"
     : editingMessage
       ? "Finish or cancel the message edit before sending another turn"
+    : retained
+      ? `${state.chatPostmortem.title} · transcript retained locally until you close or replace it`
     : busy
     ? "Generating locally · Return queues next · Stop ends only this response"
     : state.chatQueueEditingId
@@ -4492,6 +5519,7 @@ function setChatBusy(busy) {
       : "Return sends · Shift+Return adds a line";
   renderChatQueue();
   renderChatContextPack();
+  renderChatMessages();
   if ($("chatHistoryDialog")?.open) renderChatHistory();
   renderChatSidebar();
   renderChatDraftStatus();
@@ -4521,13 +5549,17 @@ function queueChatMessage(content) {
 
 async function processChatQueue(surfaceId) {
   if (
-    state.chatAbort || state.chatQueuePaused || state.chatQueueEditingId || !state.chatQueue.length || state.runPhase !== "running"
+    state.chatAbort || state.chatPostmortem || state.chatQueuePaused || state.chatQueueEditingId || !state.chatQueue.length || state.runPhase !== "running"
+    || state.chatHistorySaving || state.chatHistoryLoading || state.chatHistoryBusyId
     || !state.chatRunId || state.chatRunId !== surfaceId
   ) return;
+  const preserveReaderPosition = !ChatScrollCore.queuedTurnShouldFollow(
+    state.chatFollowOutput, chatScrollMetrics(),
+  );
   const next = state.chatQueue.shift();
   persistChatQueue();
   setChatBusy(false);
-  const started = await startChatTurn(next.content);
+  const started = await startChatTurn(next.content, {preserveReaderPosition});
   if (
     !started && state.chatRunId === surfaceId && state.runPhase === "running"
     && !state.chatQueue.some(item => item.id === next.id)
@@ -4543,8 +5575,9 @@ async function processChatQueue(surfaceId) {
 
 function resumeChatQueue() {
   if (
-    !state.chatQueuePaused || !state.chatQueue.length || state.chatAbort
+    !state.chatQueuePaused || !state.chatQueue.length || state.chatAbort || state.chatPostmortem
     || state.chatQueueEditingId || state.chatRevisionBusy || state.chatContextBusy
+    || state.chatHistorySaving || state.chatHistoryLoading || state.chatHistoryBusyId
     || state.runPhase !== "running" || !state.chatRunId
   ) return;
   state.chatQueuePaused = false;
@@ -4673,6 +5706,7 @@ async function flushChatTurnCheckpoint(checkpoint) {
   state.chatTurnCheckpointPromise = request;
   try {
     await request;
+    checkpoint.persisted = true;
     state.chatTurnRecoveryAvailable = true;
   } catch (_error) {
     state.chatTurnRecoveryAvailable = false;
@@ -4696,6 +5730,7 @@ function beginChatTurnCheckpoint(surfaceId, ownerRunId, user, assistant) {
     ownerRunId,
     userId:user?.id || "",
     assistantId:assistant.id,
+    persisted:false,
   };
   state.chatTurnCheckpoint = checkpoint;
   state.chatTurnCheckpointLastAt = 0;
@@ -4744,10 +5779,12 @@ async function startChatTurn(content = "", options = {}) {
   const recoverPausedQueue = Boolean(
     options.recoverPausedQueue && state.chatQueuePaused && state.chatQueue.length,
   );
+  const preserveReaderPosition = options.preserveReaderPosition === true;
   const value = String(content || "");
   if (
-    state.runPhase !== "running" || !state.chatRunId || state.chatAbort
-    || state.chatContextBusy
+    state.runPhase !== "running" || !state.chatRunId || state.chatAbort || state.chatPostmortem
+    || state.chatContextBusy || state.chatHistorySaving || state.chatHistoryLoading
+    || state.chatHistoryBusyId
     || (operation === "message" && !reuseLastUser && !value.trim())
   ) return false;
   state.chatTranscriptSearchOpen = false;
@@ -4809,17 +5846,24 @@ async function startChatTurn(content = "", options = {}) {
     ? [...state.chatMessages].reverse().find(message => message.role === "user" && !message.exclude)
     : null);
   state.chatMessages.push(assistant);
-  state.chatFollowOutput = true;
+  if (!preserveReaderPosition) state.chatFollowOutput = true;
   state.chatEditingMessageId = "";
   if (user) clearChatDraft();
   const controller = new AbortController();
   state.chatAbort = controller;
   const checkpoint = beginChatTurnCheckpoint(surfaceId, ownerRunId, checkpointUser, assistant);
+  let resolveTurnSettlement;
+  const turnSettlement = {
+    surfaceId,
+    exitRequested:false,
+    promise:new Promise(resolve => { resolveTurnSettlement = resolve; }),
+  };
+  state.chatTurnSettlement = turnSettlement;
   let turnOutcome = "incomplete";
-  renderChatMessages({forceBottom:true});
+  renderChatMessages({forceBottom:!preserveReaderPosition});
   setChatBusy(true);
   try {
-    const response = await fetch("/api/chat", {
+    const response = await launcherApi.response("/api/chat", {
       method:"POST",
       headers:{"Content-Type":"application/json", "X-Launcher-Token":state.token},
       body:JSON.stringify({
@@ -4873,7 +5917,7 @@ async function startChatTurn(content = "", options = {}) {
       );
     } else turnOutcome = "complete";
   } catch (error) {
-    if (error.name === "AbortError") {
+    if (error.name === "AbortError" || controller.launcherStopRequested) {
       turnOutcome = "stopped";
       if (user) user.exclude = true;
       assistant.exclude = true;
@@ -4908,26 +5952,39 @@ async function startChatTurn(content = "", options = {}) {
       );
     }
   } finally {
-    assistant.pending = false;
-    if (recoverPausedQueue && turnOutcome === "complete" && state.chatQueue.length) {
-      state.chatQueuePaused = false;
-      state.chatQueueRecovered = false;
-      persistChatQueue();
-      showNotice("The incomplete answer was recovered. Queued messages will now continue in order.");
-    }
-    if (state.chatAbort === controller) state.chatAbort = null;
-    await finishChatTurnCheckpoint(checkpoint);
-    setChatBusy(false);
-    renderChatMessages();
-    if (state.chatRunId === surfaceId) {
-      const saved = await saveCurrentChatHistory();
-      if (saved) await clearChatTurnCheckpoint(checkpoint);
-      if (state.runPhase === "running") input.focus();
-      if (ChatStreamCore.shouldDrainQueue(turnOutcome)) {
-        setTimeout(() => processChatQueue(surfaceId), 0);
+    let historySaved = false;
+    let checkpointCleared = false;
+    try {
+      assistant.pending = false;
+      if (recoverPausedQueue && turnOutcome === "complete" && state.chatQueue.length) {
+        state.chatQueuePaused = false;
+        state.chatQueueRecovered = false;
+        persistChatQueue();
+        showNotice("The incomplete answer was recovered. Queued messages will now continue in order.");
       }
+      if (state.chatAbort === controller) state.chatAbort = null;
+      await finishChatTurnCheckpoint(checkpoint);
+      setChatBusy(false);
+      renderChatMessages();
+      if (state.chatRunId === surfaceId) {
+        const saved = await saveCurrentChatHistory({silentFailure:turnSettlement.exitRequested});
+        historySaved = Boolean(saved);
+        if (saved) checkpointCleared = await clearChatTurnCheckpoint(checkpoint);
+        if (state.runPhase === "running" && !turnSettlement.exitRequested) input.focus();
+        if (!turnSettlement.exitRequested && ChatStreamCore.shouldDrainQueue(turnOutcome)) {
+          setTimeout(() => processChatQueue(surfaceId), 0);
+        }
+      }
+      void pollStatus();
+    } finally {
+      resolveTurnSettlement({
+        surfaceId,
+        historySaved,
+        checkpointPersisted:Boolean(checkpoint?.persisted && !checkpointCleared),
+        checkpoint:checkpoint ? {tabId:checkpoint.tabId, turnId:checkpoint.turnId} : null,
+      });
+      if (state.chatTurnSettlement === turnSettlement) state.chatTurnSettlement = null;
     }
-    void pollStatus();
   }
   return true;
 }
@@ -4937,7 +5994,11 @@ function chatMessageIndex(messageId) {
 }
 
 async function createChatBranch(messages, sourcePoint, kind, notice) {
-  if (state.chatAbort || !messages.some(message => message.role === "user")) return false;
+  if (
+    state.chatAbort || state.chatHistorySaving || state.chatHistoryLoading
+    || state.chatHistoryBusyId || state.chatHistoryMutationTail
+    || !messages.some(message => message.role === "user")
+  ) return false;
   const parent = await saveCurrentChatHistory();
   if (!parent) {
     showNotice("The original chat could not be saved, so no branch was created.", true);
@@ -5136,7 +6197,11 @@ async function copyChatCode(button) {
 }
 
 async function runChatRevision(task) {
-  if (state.chatAbort || state.chatRevisionBusy) return;
+  if (
+    state.chatAbort || state.chatRevisionBusy || state.chatHistorySaving
+    || state.chatHistoryLoading || state.chatHistoryBusyId
+    || state.chatHistoryMutationTail
+  ) return;
   state.chatRevisionBusy = true;
   renderChatMessages();
   setChatBusy(Boolean(state.chatAbort));
@@ -5171,7 +6236,8 @@ function sendChat() {
   const content = $("chatInput").value;
   if (
     !content.trim() || state.runPhase !== "running" || !state.chatRunId
-    || state.chatRevisionBusy || state.chatContextBusy
+    || state.chatRevisionBusy || state.chatContextBusy || state.chatHistorySaving
+    || state.chatHistoryLoading || state.chatHistoryBusyId
   ) return;
   if (state.chatAbort || state.chatQueue.length) {
     queueChatMessage(content);
@@ -5180,17 +6246,100 @@ function sendChat() {
   void startChatTurn(content);
 }
 
-async function newChat() {
-  persistChatSessionState();
-  await saveCurrentChatHistory();
+function chatHasPersistableTranscript() {
+  return state.chatMessages
+    .filter(ChatStreamCore.shouldPersistHistoryMessage)
+    .some(message => message.role === "user");
+}
+
+async function saveChatBeforeNavigation(retryAction, options = {}) {
+  if (!chatHasPersistableTranscript()) return true;
+  const focused = document.activeElement;
+  const recoveryNotice = options.recoveryAvailable
+    ? " The interrupted response also remains in local recovery and can be restored after a refresh."
+    : "";
+  const saved = await saveCurrentChatHistory({
+    failureNotice:
+      `Stayed in the current chat because its local history could not be saved. `
+      + `Fix the save problem, then ${retryAction}.${recoveryNotice}`,
+  });
+  if (saved) return true;
+  requestAnimationFrame(() => {
+    const target = focused?.isConnected ? focused : $("chatInput");
+    if (typeof target?.focus !== "function") return;
+    try { target.focus({preventScroll:true}); }
+    catch (_error) { target.focus(); }
+  });
+  return false;
+}
+
+async function saveChatBeforeSurfaceExit(retryAction) {
+  const surfaceId = state.chatRunId;
+  if (!surfaceId) return true;
+  if (state.chatHistoryBusyId || state.chatHistoryLoading) {
+    showNotice(
+      `Stayed in the current chat while its local history change finishes. Then ${retryAction}.`,
+      true,
+    );
+    requestAnimationFrame(() => $("chatInput")?.focus());
+    return false;
+  }
+  const hasUnsentWork = Boolean(String($("chatInput")?.value || "") || state.chatQueue.length);
+  const localStateStored = persistChatSessionState();
+  if (hasUnsentWork && !localStateStored) {
+    showNotice(
+      `Stayed in the current chat because its unfinished message or queue could not be saved in this browser tab. Fix the storage problem, then ${retryAction}.`,
+      true,
+    );
+    requestAnimationFrame(() => $("chatInput")?.focus());
+    return false;
+  }
+  const turn = state.chatTurnSettlement?.surfaceId === surfaceId
+    ? state.chatTurnSettlement : null;
+  if (turn) turn.exitRequested = true;
+  if (state.chatQueue.length) {
+    state.chatQueuePaused = true;
+    state.chatQueueRecovered = false;
+    persistChatQueue();
+    setChatBusy(Boolean(state.chatAbort));
+  }
   if (state.chatAbort) state.chatAbort.abort();
+  const outcome = turn ? await turn.promise : null;
+  if (outcome?.historySaved) return true;
+  const saved = await saveChatBeforeNavigation(retryAction, {
+    recoveryAvailable:Boolean(outcome?.checkpointPersisted),
+  });
+  if (saved && outcome?.checkpoint) await clearChatTurnCheckpoint(outcome.checkpoint);
+  return saved;
+}
+
+async function newChat() {
+  if (
+    state.chatAbort || state.chatRevisionBusy || state.chatEditingMessageId
+    || state.chatHistoryBusyId || state.chatHistoryLoading
+    || state.chatHistorySaving || state.chatHistoryMutationTail
+  ) return;
+  persistChatSessionState();
+  if (!await saveChatBeforeNavigation("choose New chat again")) return;
+  if (state.chatAbort) state.chatAbort.abort();
+  const closeRetained = Boolean(state.chatPostmortem);
   const surfaceId = state.chatRunId;
   resetChatConversation();
-  if (surfaceId) activateChatDraft(surfaceId, {restore:false});
+  if (closeRetained) {
+    state.chatRunId = "";
+    state.chatOwnerRunId = "";
+    state.chatAttachment = null;
+    state.chatAttachmentObserved = false;
+    $("chatInput").value = "";
+    sizeChatInput();
+    renderChatDraftStatus();
+    updateChatWorkspace(state.runStatus?.run, state.runPhase);
+    updateAgentWorkspace(state.runStatus?.run, state.runPhase);
+  } else if (surfaceId) activateChatDraft(surfaceId, {restore:false});
   renderChatMessages();
   renderChatSidebar();
-  renderChatRoute(state.runStatus?.run);
-  if (state.runPhase === "running") $("chatInput").focus();
+  if (!closeRetained) renderChatRoute(state.runStatus?.run);
+  if (!closeRetained && state.runPhase === "running") $("chatInput").focus();
 }
 
 function currentChatHistoryPayload() {
@@ -5212,7 +6361,10 @@ function currentChatHistoryPayload() {
   if (!messages.some(message => message.role === "user")) return null;
   const run = state.runStatus?.run || state.chatAttachment || {};
   return {
-    id:ensureChatHistoryId(),
+    // A failed save must not turn an unsaved transcript into a phantom
+    // history entry or migrate its draft key. Commit both only after the
+    // backend accepts the record in saveCurrentChatHistory().
+    id:state.chatHistoryId || localUuid(),
     runId:state.chatOwnerRunId || state.runStatus?.run?.runId || "",
     attachmentId:state.chatRunId || "",
     messages,
@@ -5232,35 +6384,77 @@ function currentChatHistoryPayload() {
   };
 }
 
-async function saveCurrentChatHistory() {
-  const payload = currentChatHistoryPayload();
-  if (!payload) return null;
-  while (state.chatHistorySaving) await sleep(25);
-  const surfaceId = state.chatRunId;
-  const previousId = state.chatHistoryId;
-  state.chatHistorySaving = true;
+async function runChatHistoryMutation(operation) {
+  // Claim a place synchronously, before the caller can yield. A boolean
+  // "saving" flag leaves a one-microtask gap in which two first saves can both
+  // invent different IDs, or a delete can race a late auto-save and resurrect
+  // the conversation. Every history write now observes one ordered tail.
+  const preceding = state.chatHistoryMutationTail;
+  let release;
+  const barrier = new Promise(resolve => { release = resolve; });
+  state.chatHistoryMutationTail = barrier;
+  if (preceding) await preceding;
   try {
-    const data = await api("/api/chat/history/save", {
-      method:"POST", body:JSON.stringify(payload),
-    });
-    state.chatHistoryThreads = Array.isArray(data.threads) ? data.threads : state.chatHistoryThreads;
-    if (state.chatRunId === surfaceId && state.chatHistoryId === previousId) {
-      state.chatHistoryId = data.thread.id;
-      state.chatActiveThread = chatThreadSummary(data.thread);
-      migrateChatDraftToHistory(data.thread.id);
-      renderChatRoute(state.runStatus?.run);
-    }
-    renderChatSidebar();
-    renderQuickStart();
-    return data.thread;
-  } catch (error) {
-    showNotice(`The chat completed, but local history could not be saved: ${error.message}`, true);
-    return null;
+    return await operation();
   } finally {
-    state.chatHistorySaving = false;
-    if ($("chatHistoryDialog")?.open) renderChatHistory();
-    renderChatSidebar();
+    release();
+    if (state.chatHistoryMutationTail === barrier) state.chatHistoryMutationTail = null;
   }
+}
+
+async function saveCurrentChatHistory(options = {}) {
+  return runChatHistoryMutation(async () => {
+    // Construct only after every earlier mutation has committed. A second
+    // first-save therefore reuses the ID assigned by the first one.
+    const payload = currentChatHistoryPayload();
+    if (!payload) return null;
+    const surfaceId = state.chatRunId;
+    const previousId = state.chatHistoryId;
+    state.chatHistorySaving = true;
+    setChatBusy(Boolean(state.chatAbort));
+    let saved = false;
+    try {
+      const data = await api("/api/chat/history/save", {
+        method:"POST", body:JSON.stringify(payload),
+      });
+      state.chatHistoryThreads = Array.isArray(data.threads) ? data.threads : state.chatHistoryThreads;
+      if (state.chatRunId === surfaceId && state.chatHistoryId === previousId) {
+        state.chatHistoryId = data.thread.id;
+        state.chatActiveThread = chatThreadSummary(data.thread);
+        migrateChatDraftToHistory(data.thread.id);
+        renderChatRoute(state.runStatus?.run);
+      }
+      renderChatSidebar();
+      renderQuickStart();
+      saved = true;
+      return data.thread;
+    } catch (error) {
+      const failureNotice = typeof options.failureNotice === "string"
+        ? options.failureNotice.trim() : "";
+      if (!options.silentFailure) {
+        showNotice(
+          failureNotice
+            ? `${failureNotice} Save error: ${error.message}`
+            : `The chat completed, but local history could not be saved: ${error.message}`,
+          true,
+        );
+      }
+      return null;
+    } finally {
+      state.chatHistorySaving = false;
+      setChatBusy(Boolean(state.chatAbort));
+      // Rebuilding the sidebar after a failed save would detach the control the
+      // user just activated and lose keyboard focus. No visible history state
+      // changed on failure, so redraw only after a committed save.
+      if (saved && $("chatHistoryDialog")?.open) renderChatHistory();
+      if (saved) renderChatSidebar();
+    }
+  });
+}
+
+async function waitForChatHistorySave() {
+  const pending = state.chatHistoryMutationTail;
+  if (pending) await pending;
 }
 
 function chatHistoryDate(value) {
@@ -5320,12 +6514,11 @@ function chatUnsavedDrafts(query = "", queueEnvelope = readChatQueueEnvelope()) 
     !state.chatRunId
     || (state.chatDraftStorageAvailable === false && state.chatQueueStorageAvailable === false)
   ) return [];
-  const prefix = `${chatDraftSurfacePrefix()}new:`;
   const draftEnvelope = readChatDraftEnvelope();
   const keys = new Set([
     ...Object.keys(draftEnvelope.drafts),
     ...Object.keys(queueEnvelope.queues || {}),
-  ].filter(key => key.startsWith(prefix)));
+  ].filter(key => isPortableChatDraftKey(key)));
   const drafts = [...keys].map(key => {
     const draft = draftEnvelope.drafts[key];
     const queue = ChatQueueCore.readQueue(queueEnvelope, key, CHAT_QUEUE_OPTIONS);
@@ -5408,15 +6601,17 @@ function renderChatSidebar() {
 async function openUnsavedChatDraft(key) {
   if (
     state.chatAbort || state.chatRevisionBusy || state.chatEditingMessageId
-    || state.chatHistoryBusyId || state.runPhase !== "running" || !state.chatRunId
-    || !String(key || "").startsWith(`${chatDraftSurfacePrefix()}new:`)
+    || state.chatHistoryBusyId || state.chatHistoryLoading
+    || state.chatHistorySaving || state.chatHistoryMutationTail
+    || state.runPhase !== "running" || !state.chatRunId
+    || !isPortableChatDraftKey(key)
   ) return;
   if (!state.chatHistoryId && key === state.chatDraftKey) {
     $("chatInput").focus();
     return;
   }
   persistChatSessionState();
-  await saveCurrentChatHistory();
+  if (!await saveChatBeforeNavigation("open that unsent draft again")) return;
   const surfaceId = state.chatRunId;
   resetChatConversation();
   activateChatDraft(surfaceId, {key, restore:true});
@@ -5629,6 +6824,79 @@ function chatRouteLabel(route) {
   return `${profileBackendLabel(route?.backend)} · ${route?.model || "Local model"}`;
 }
 
+function sessionRouteActive(run, phase) {
+  return Boolean(
+    run?.purpose === "session" && run.runId
+    && ["preflight", "starting", "running", "stopping"].includes(phase),
+  );
+}
+
+function surfacePostmortemMarker(phase, message, subject = "Surface") {
+  const normalizedPhase = String(phase || "stopped").toLowerCase();
+  const normalizedMessage = String(message || "")
+    .replace(/\0/g, "").replace(/\s+/g, " ").trim().slice(0, 180);
+  const failed = normalizedPhase === "failed"
+    || /\b(?:failed|failure|error|crash(?:ed)?|unexpectedly terminated)\b/i.test(normalizedMessage);
+  const stateLabel = failed ? "failed" : "stopped";
+  const title = failed ? `${subject} failed` : `${subject} stopped`;
+  const reason = /^(?:ready|idle|stopped)$/i.test(normalizedMessage) ? "" : normalizedMessage;
+  return {
+    state:stateLabel,
+    title,
+    detail:`${reason ? `${reason} ` : ""}Bounded output retained. Close it or open another surface to clear it.`,
+  };
+}
+
+function retainChatPostmortem(phase, message, {ended = false} = {}) {
+  if (!state.chatRunId) return null;
+  const next = surfacePostmortemMarker(phase, message, "Chat route");
+  const previous = state.chatPostmortem;
+  state.chatPostmortem = {
+    ...(previous?.state === "failed" && next.state !== "failed" ? previous : next),
+    ownerRunId:state.chatOwnerRunId,
+    surfaceId:state.chatRunId,
+    ended:Boolean(ended || previous?.ended),
+  };
+  if (!$("chatRunSettingsPanel").hidden) closeChatRunSettings(false);
+  state.chatRunSettings = null;
+  state.chatRunSettingsKey = "";
+  const turn = state.chatTurnSettlement?.surfaceId === state.chatRunId
+    ? state.chatTurnSettlement : null;
+  if (turn) turn.exitRequested = true;
+  if (state.chatQueue.length) {
+    state.chatQueuePaused = true;
+    state.chatQueueRecovered = false;
+    persistChatQueue();
+  }
+  for (const item of state.chatMessages) {
+    if (!item.pending) continue;
+    item.pending = false;
+    item.stopped = true;
+    item.interrupted = true;
+    item.exclude = true;
+    item.failure = item.failure || `${next.title}. Partial output was retained.`;
+  }
+  if (state.chatAbort && !state.chatAbort.signal?.aborted) state.chatAbort.abort();
+  persistChatSessionState();
+  return state.chatPostmortem;
+}
+
+function clearChatForReplacement() {
+  if (!$("chatRunSettingsPanel").hidden) closeChatRunSettings(false);
+  state.chatRunSettings = null;
+  state.chatRunSettingsKey = "";
+  if (state.chatAbort && !state.chatAbort.signal?.aborted) state.chatAbort.abort();
+  persistChatSessionState();
+  state.chatRunId = "";
+  state.chatOwnerRunId = "";
+  state.chatAttachment = null;
+  state.chatAttachmentObserved = false;
+  resetChatConversation();
+  $("chatInput").value = "";
+  sizeChatInput();
+  renderChatDraftStatus();
+}
+
 function renderChatRoute(run = state.runStatus?.run) {
   const route = chatSurfaceRoute(run);
   const card = $("chatRouteCard");
@@ -5643,13 +6911,17 @@ function renderChatRoute(run = state.runStatus?.run) {
     reasoning:thread.originReasoning,
   } : null;
   const originChanged = origin && !chatRoutesMatch(origin, route);
-  card.dataset.state = savedMismatch || originChanged ? "changed" : "current";
+  const postmortem = state.chatPostmortem;
+  card.dataset.state = postmortem?.state || (savedMismatch || originChanged ? "changed" : "current");
   $("chatRouteModel").textContent = route.model;
   $("chatRouteDetail").textContent = `${profileBackendLabel(route.backend)} · ${formatNumber(route.context)} context · ${formatNumber(route.output)} max response · ${route.reasoning} reasoning · ${samplingLabel}`;
   $("chatRunSettingsButton").setAttribute(
     "aria-label", `Chat controls, ${samplingLabel}. Changes apply to the next request.`,
   );
-  if (savedMismatch) {
+  if (postmortem) {
+    $("chatRouteState").textContent = postmortem.title;
+    $("chatRouteNotice").textContent = postmortem.detail;
+  } else if (savedMismatch) {
     $("chatRouteState").textContent = "Route differs";
     $("chatRouteNotice").textContent = `This transcript was last used with ${chatRouteLabel(thread)}. New replies use the loaded route shown above; no model was swapped.`;
   } else if (originChanged) {
@@ -5666,7 +6938,7 @@ function renderChatRoute(run = state.runStatus?.run) {
   $("chatStatusModel").textContent = route.model;
   $("chatStatusEngine").textContent = `${profileBackendLabel(route.backend)} · ${formatNumber(route.context)} context`;
   $("chatStatusRouteState").textContent = $("chatRouteState").textContent;
-  $("chatStatusRouteState").hidden = card.dataset.state !== "changed";
+  $("chatStatusRouteState").hidden = !postmortem && card.dataset.state !== "changed";
   $("chatStatusRouteState").title = $("chatRouteNotice").textContent;
   updateChatStatusSummaryLabel();
   $("chatTitle").textContent = thread?.title || route.model;
@@ -5675,7 +6947,9 @@ function renderChatRoute(run = state.runStatus?.run) {
     : route.routeKind === "native"
       ? "native on this Mac; launcher Stop unloads it"
       : "streamed thinking shown when the runtime exposes it";
-  $("chatMeta").textContent = `${profileBackendLabel(route.backend)} · ${route.model} · ${routeNote}`;
+  $("chatMeta").textContent = postmortem
+    ? `${profileBackendLabel(route.backend)} · ${route.model} · bounded transcript retained`
+    : `${profileBackendLabel(route.backend)} · ${route.model} · ${routeNote}`;
 }
 
 function renderChatHistory() {
@@ -5945,30 +7219,35 @@ async function recoverInterruptedChatTurn() {
 async function loadChatHistory(force = false) {
   if (state.chatHistoryLoading) return;
   if (!force && state.chatHistoryLoaded) {
+    await waitForChatHistorySave();
     renderChatHistory();
     renderChatSidebar();
     await restorePendingChatDraftConversation();
     return;
   }
   state.chatHistoryLoading = true;
+  setChatBusy(Boolean(state.chatAbort));
   renderChatHistory();
   renderChatSidebar();
   let loaded = false;
   try {
-    await recoverInterruptedChatTurn();
-    const data = await api("/api/chat/history");
-    state.chatHistoryThreads = Array.isArray(data.threads) ? data.threads : [];
-    state.chatHistoryLoaded = true;
-    loaded = true;
-    $("chatHistoryStatus").textContent = state.runPhase === "running" && state.chatRunId
-      ? "Open uses the current Chat route. Saved routes can also be reviewed later without loading a model."
-      : "Resumable conversations can re-open their exact saved route after a read-only review. Older conversations remain readable and exportable.";
-    $("chatHistoryStatus").className = "session-dashboard-status";
+    await runChatHistoryMutation(async () => {
+      await recoverInterruptedChatTurn();
+      const data = await api("/api/chat/history");
+      state.chatHistoryThreads = Array.isArray(data.threads) ? data.threads : [];
+      state.chatHistoryLoaded = true;
+      loaded = true;
+      $("chatHistoryStatus").textContent = state.runPhase === "running" && state.chatRunId
+        ? "Open uses the current Chat route. Saved routes can also be reviewed later without loading a model."
+        : "Resumable conversations can re-open their exact saved route after a read-only review. Older conversations remain readable and exportable.";
+      $("chatHistoryStatus").className = "session-dashboard-status";
+    });
   } catch (error) {
     $("chatHistoryStatus").textContent = error.message;
     $("chatHistoryStatus").className = "session-dashboard-status error";
   } finally {
     state.chatHistoryLoading = false;
+    setChatBusy(Boolean(state.chatAbort));
     renderChatHistory();
     renderChatSidebar();
     renderQuickStart();
@@ -5989,33 +7268,37 @@ async function updateChatHistoryThread(historyId, changes) {
   state.chatHistoryBusyId = historyId;
   renderChatHistory();
   renderChatSidebar();
-  try {
-    const data = await api("/api/chat/history/update", {
-      method:"POST", body:JSON.stringify({id:historyId, ...changes}),
-    });
-    state.chatHistoryThreads = Array.isArray(data.threads) ? data.threads : [];
-    renderQuickStart();
-    state.chatHistoryEditingId = "";
-    state.chatSidebarEditingId = "";
-    state.chatSidebarMenuId = "";
-    state.chatHistoryDeleteConfirmId = "";
-    if (state.chatHistoryId === historyId) {
-      state.chatActiveThread = chatThreadSummary(data.thread);
-      renderChatRoute(state.runStatus?.run);
+  setChatBusy(Boolean(state.chatAbort));
+  return runChatHistoryMutation(async () => {
+    try {
+      const data = await api("/api/chat/history/update", {
+        method:"POST", body:JSON.stringify({id:historyId, ...changes}),
+      });
+      state.chatHistoryThreads = Array.isArray(data.threads) ? data.threads : [];
+      renderQuickStart();
+      state.chatHistoryEditingId = "";
+      state.chatSidebarEditingId = "";
+      state.chatSidebarMenuId = "";
+      state.chatHistoryDeleteConfirmId = "";
+      if (state.chatHistoryId === historyId) {
+        state.chatActiveThread = chatThreadSummary(data.thread);
+        renderChatRoute(state.runStatus?.run);
+      }
+      $("chatHistoryStatus").textContent = changes.title
+        ? "Chat renamed locally. Future auto-saves will preserve this title."
+        : changes.pinned ? "Chat pinned to the top of local history." : "Chat unpinned.";
+      $("chatHistoryStatus").className = "session-dashboard-status";
+    } catch (error) {
+      $("chatHistoryStatus").textContent = error.message;
+      $("chatHistoryStatus").className = "session-dashboard-status error";
+      showNotice(`Chat history was not updated: ${error.message}`, true);
+    } finally {
+      state.chatHistoryBusyId = "";
+      setChatBusy(Boolean(state.chatAbort));
+      renderChatHistory();
+      renderChatSidebar();
     }
-    $("chatHistoryStatus").textContent = changes.title
-      ? "Chat renamed locally. Future auto-saves will preserve this title."
-      : changes.pinned ? "Chat pinned to the top of local history." : "Chat unpinned.";
-    $("chatHistoryStatus").className = "session-dashboard-status";
-  } catch (error) {
-    $("chatHistoryStatus").textContent = error.message;
-    $("chatHistoryStatus").className = "session-dashboard-status error";
-    showNotice(`Chat history was not updated: ${error.message}`, true);
-  } finally {
-    state.chatHistoryBusyId = "";
-    renderChatHistory();
-    renderChatSidebar();
-  }
+  });
 }
 
 function chatHistoryMarkdown(thread) {
@@ -6059,6 +7342,8 @@ function chatHistoryMarkdown(thread) {
 
 async function exportChatHistoryThread(historyId) {
   if (state.chatHistoryBusyId) return;
+  await waitForChatHistorySave();
+  if (state.chatHistoryBusyId) return;
   state.chatHistoryBusyId = historyId;
   renderChatHistory();
   renderChatSidebar();
@@ -6096,63 +7381,72 @@ async function exportChatHistoryThread(historyId) {
 async function openChatHistoryThread(historyId, options = {}) {
   if (
     state.chatAbort || state.chatRevisionBusy || state.chatEditingMessageId
-    || state.chatHistoryBusyId || state.runPhase !== "running" || !state.chatRunId
+    || state.chatHistoryBusyId || state.chatHistoryLoading
+    || state.chatHistorySaving || state.chatHistoryMutationTail
+    || state.runPhase !== "running" || !state.chatRunId
   ) return;
   persistChatSessionState();
-  if (!options.skipCurrentSave) await saveCurrentChatHistory();
+  if (
+    !options.skipCurrentSave
+    && !await saveChatBeforeNavigation("open that saved chat again")
+  ) return;
   state.chatHistoryBusyId = historyId;
   renderChatHistory();
   renderChatSidebar();
+  setChatBusy(Boolean(state.chatAbort));
   try {
-    const data = await api("/api/chat/history/get", {
-      method:"POST", body:JSON.stringify({id:historyId}),
+    await runChatHistoryMutation(async () => {
+      const data = await api("/api/chat/history/get", {
+        method:"POST", body:JSON.stringify({id:historyId}),
+      });
+      const thread = data.thread;
+      state.chatHistoryId = thread.id;
+      state.chatActiveThread = chatThreadSummary(thread);
+      state.chatMessages = (thread.messages || []).map(normaliseChatMessage);
+      state.chatFollowOutput = true;
+      state.chatBranch = thread.branchParentId ? {
+        parentId:thread.branchParentId,
+        parentTitle:thread.branchParentTitle || "Local chat",
+        point:Number(thread.branchPoint || 1),
+        kind:thread.branchKind || "branch",
+      } : null;
+      state.chatQueue = [];
+      state.chatContextFiles = [];
+      state.chatWorkspaceContext = null;
+      state.chatContextBusy = false;
+      state.chatEditingMessageId = "";
+      state.chatQueueEditingId = "";
+      state.chatTranscriptSearchOpen = false;
+      state.chatTranscriptQuery = "";
+      state.chatTranscriptActiveId = "";
+      state.chatContextReducedAt = 0;
+      activateChatDraft(state.chatRunId, {historyId:thread.id, restore:true});
+      renderChatMessages({forceBottom:true});
+      renderChatSidebar();
+      renderChatRoute(state.runStatus?.run);
+      if ($("chatHistoryDialog").open) $("chatHistoryDialog").close();
+      if (matchMedia("(max-width: 820px)").matches) {
+        state.chatSidebarCollapsed = true;
+        renderChatSidebarVisibility();
+      }
+      if (options.interruptedRecovery || (thread.messages || []).some(message => message.interrupted)) {
+        state.chatTurnRecoveredHistoryId = "";
+        showNotice(`Recovered “${thread.title}” after the page closed during generation. The visible partial response is marked interrupted and will not be replayed into a new prompt.`);
+      } else {
+        showNotice(options.coldResume
+          ? `Resumed “${thread.title}” on its saved ${profileBackendLabel(thread.backend)} route.${options.systemPromptDecision === "omitted" ? " Future replies will not use its original, unsaved system prompt." : ""}`
+          : options.recovery
+            ? `Recovered “${thread.title}” and its unfinished tab-local draft. Replies use the still-loaded model.`
+            : `Opened “${thread.title}”. New replies use the currently loaded model and Chat settings.`);
+      }
+      $("chatInput").focus();
     });
-    const thread = data.thread;
-    state.chatHistoryId = thread.id;
-    state.chatActiveThread = chatThreadSummary(thread);
-    state.chatMessages = (thread.messages || []).map(normaliseChatMessage);
-    state.chatFollowOutput = true;
-    state.chatBranch = thread.branchParentId ? {
-      parentId:thread.branchParentId,
-      parentTitle:thread.branchParentTitle || "Local chat",
-      point:Number(thread.branchPoint || 1),
-      kind:thread.branchKind || "branch",
-    } : null;
-    state.chatQueue = [];
-    state.chatContextFiles = [];
-    state.chatWorkspaceContext = null;
-    state.chatContextBusy = false;
-    state.chatEditingMessageId = "";
-    state.chatQueueEditingId = "";
-    state.chatTranscriptSearchOpen = false;
-    state.chatTranscriptQuery = "";
-    state.chatTranscriptActiveId = "";
-    state.chatContextReducedAt = 0;
-    activateChatDraft(state.chatRunId, {historyId:thread.id, restore:true});
-    renderChatMessages({forceBottom:true});
-    renderChatSidebar();
-    renderChatRoute(state.runStatus?.run);
-    if ($("chatHistoryDialog").open) $("chatHistoryDialog").close();
-    if (matchMedia("(max-width: 820px)").matches) {
-      state.chatSidebarCollapsed = true;
-      renderChatSidebarVisibility();
-    }
-    if (options.interruptedRecovery || (thread.messages || []).some(message => message.interrupted)) {
-      state.chatTurnRecoveredHistoryId = "";
-      showNotice(`Recovered “${thread.title}” after the page closed during generation. The visible partial response is marked interrupted and will not be replayed into a new prompt.`);
-    } else {
-      showNotice(options.coldResume
-        ? `Resumed “${thread.title}” on its saved ${profileBackendLabel(thread.backend)} route.${options.systemPromptDecision === "omitted" ? " Future replies will not use its original, unsaved system prompt." : ""}`
-        : options.recovery
-          ? `Recovered “${thread.title}” and its unfinished tab-local draft. Replies use the still-loaded model.`
-          : `Opened “${thread.title}”. New replies use the currently loaded model and Chat settings.`);
-    }
-    $("chatInput").focus();
   } catch (error) {
     $("chatHistoryStatus").textContent = error.message;
     $("chatHistoryStatus").className = "session-dashboard-status error";
   } finally {
     state.chatHistoryBusyId = "";
+    setChatBusy(Boolean(state.chatAbort));
     renderChatHistory();
     renderChatSidebar();
   }
@@ -6177,65 +7471,71 @@ async function deleteChatHistoryThread(historyId) {
   state.chatHistoryBusyId = historyId;
   renderChatHistory();
   renderChatSidebar();
-  try {
-    const data = await api("/api/chat/history/delete", {
-      method:"POST", body:JSON.stringify({id:historyId}),
-    });
-    state.chatHistoryThreads = Array.isArray(data.threads) ? data.threads : [];
-    renderQuickStart();
-    state.chatHistoryDeleteConfirmId = "";
-    state.chatSidebarMenuId = "";
-    state.chatSidebarEditingId = "";
-    state.chatHistoryEditingId = "";
-    if (state.chatHistoryId === historyId) {
-      const oldKey = state.chatDraftKey;
-      const nextKey = newChatDraftKey();
-      const envelope = ChatDraftsCore.moveDraft(
-        readChatDraftEnvelope(), oldKey, nextKey, CHAT_DRAFT_OPTIONS,
-      );
-      migrateChatQueueKey(oldKey, nextKey);
-      state.chatHistoryId = "";
-      state.chatActiveThread = null;
-      state.chatDraftKey = nextKey;
-      writeChatDraftEnvelope(envelope);
-      renderChatRoute(state.runStatus?.run);
+  setChatBusy(Boolean(state.chatAbort));
+  return runChatHistoryMutation(async () => {
+    try {
+      const data = await api("/api/chat/history/delete", {
+        method:"POST", body:JSON.stringify({id:historyId}),
+      });
+      state.chatHistoryThreads = Array.isArray(data.threads) ? data.threads : [];
+      renderQuickStart();
+      state.chatHistoryDeleteConfirmId = "";
+      state.chatSidebarMenuId = "";
+      state.chatSidebarEditingId = "";
+      state.chatHistoryEditingId = "";
+      if (state.chatHistoryId === historyId) {
+        const oldKey = state.chatDraftKey;
+        const nextKey = newChatDraftKey();
+        const envelope = ChatDraftsCore.moveDraft(
+          readChatDraftEnvelope(), oldKey, nextKey, CHAT_DRAFT_OPTIONS,
+        );
+        migrateChatQueueKey(oldKey, nextKey);
+        state.chatHistoryId = "";
+        state.chatActiveThread = null;
+        state.chatDraftKey = nextKey;
+        writeChatDraftEnvelope(envelope);
+        renderChatRoute(state.runStatus?.run);
+      }
+      $("chatHistoryStatus").textContent = `Deleted “${deletedTitle}” from launcher-local history.`;
+      $("chatHistoryStatus").className = "session-dashboard-status";
+      showNotice(`Deleted “${deletedTitle}” from local Chat history.`);
+    } catch (error) {
+      state.chatHistoryDeleteConfirmId = "";
+      $("chatHistoryStatus").textContent = error.message;
+      $("chatHistoryStatus").className = "session-dashboard-status error";
+      showNotice(`Chat deletion failed: ${error.message}`, true);
+    } finally {
+      state.chatHistoryBusyId = "";
+      setChatBusy(Boolean(state.chatAbort));
+      renderChatHistory();
+      renderChatSidebar();
     }
-    $("chatHistoryStatus").textContent = `Deleted “${deletedTitle}” from launcher-local history.`;
-    $("chatHistoryStatus").className = "session-dashboard-status";
-    showNotice(`Deleted “${deletedTitle}” from local Chat history.`);
-  } catch (error) {
-    state.chatHistoryDeleteConfirmId = "";
-    $("chatHistoryStatus").textContent = error.message;
-    $("chatHistoryStatus").className = "session-dashboard-status error";
-    showNotice(`Chat deletion failed: ${error.message}`, true);
-  } finally {
-    state.chatHistoryBusyId = "";
-    renderChatHistory();
-    renderChatSidebar();
+  });
+}
+
+function updateWorkspaceChrome() {
+  const agentVisible = !$("agentWorkspace").classList.contains("hidden");
+  const chatVisible = !$("chatWorkspace").classList.contains("hidden");
+  const hideSettings = agentVisible || chatVisible;
+  for (const id of ["configScroll", "launchDock"]) {
+    const element = $(id);
+    if (element.classList.contains("hidden") !== hideSettings) {
+      element.classList.toggle("hidden", hideSettings);
+    }
   }
+  const title = agentVisible ? "Agent Console" : chatVisible ? "Chat" : "Your local AI";
+  if ($("configTitle").textContent !== title) $("configTitle").textContent = title;
 }
 
 function updateChatWorkspace(run, phase) {
-  const primaryChat = run?.client === "chat" && run?.purpose === "session";
-  if (!run || (state.chatOwnerRunId && state.chatOwnerRunId !== run.runId)) {
-    if (!$("chatRunSettingsPanel").hidden) closeChatRunSettings(false);
-    state.chatRunSettings = null;
-    state.chatRunSettingsKey = "";
-    if (state.chatAbort) state.chatAbort.abort();
-    persistChatSessionState();
-    state.chatRunId = "";
-    state.chatOwnerRunId = "";
-    state.chatAttachment = null;
-    resetChatConversation();
-    $("chatInput").value = "";
-    sizeChatInput();
-    renderChatDraftStatus();
-  }
-  const selectedAttachment = Boolean(
-    state.chatAttachment?.client === "chat"
-    && state.chatAttachment.ownerRunId === run?.runId
-  );
-  if (primaryChat && run.runId && !selectedAttachment && state.chatRunId !== run.runId) {
+  const routeActive = sessionRouteActive(run, phase);
+  if (
+    routeActive && state.chatOwnerRunId
+    && state.chatOwnerRunId !== run.runId
+  ) clearChatForReplacement();
+
+  const primaryChat = Boolean(routeActive && run.client === "chat");
+  if (primaryChat && run.runId && state.chatRunId !== run.runId) {
     if (state.chatAbort) state.chatAbort.abort();
     persistChatSessionState();
     state.chatRunId = run.runId;
@@ -6245,15 +7545,60 @@ function updateChatWorkspace(run, phase) {
       surface:"Chat", backend:run.backend, model:run.model,
       context:run.context, output:run.output, reasoning:run.reasoning,
     };
+    state.chatAttachmentObserved = true;
     resetChatConversation();
     state.chatRunId = run.runId;
     state.chatOwnerRunId = run.runId;
     activateChatDraft(run.runId, {restoreActive:true});
     renderChatMessages();
+  } else if (primaryChat && run.runId && !state.chatAttachment) {
+    state.chatAttachment = {
+      id:run.runId, ownerRunId:run.runId, primary:true, client:"chat",
+      surface:"Chat", backend:run.backend, model:run.model,
+      context:run.context, output:run.output, reasoning:run.reasoning,
+    };
+    state.chatAttachmentObserved = true;
   }
-  const chatRun = primaryChat || selectedAttachment;
-  const visible = chatRun && ["running", "stopping"].includes(phase) && !state.agentConsoleVisible;
-  const controlsReady = Boolean(visible && phase === "running");
+
+  const listedAttachment = Array.isArray(state.runStatus?.attachments)
+    ? state.runStatus.attachments.find(item => (
+      item?.id === state.chatRunId && item?.client === "chat"
+      && item?.ownerRunId === state.chatOwnerRunId
+    )) || null
+    : null;
+  if (listedAttachment) {
+    state.chatAttachment = {...(state.chatAttachment || {}), ...listedAttachment};
+    state.chatAttachmentObserved = true;
+  }
+  const currentPrimary = Boolean(
+    primaryChat && state.chatRunId === run.runId
+    && state.chatAttachment?.primary !== false
+  );
+  const currentAttachment = Boolean(
+    routeActive && state.chatAttachment?.client === "chat"
+    && state.chatAttachment?.primary === false
+    && state.chatAttachment.ownerRunId === run.runId
+    && (!state.chatAttachmentObserved || listedAttachment)
+  );
+  const currentSurface = currentPrimary || currentAttachment;
+  if (currentSurface && !state.chatPostmortem?.ended) {
+    state.chatPostmortem = null;
+  } else if (
+    state.chatRunId && (
+      !routeActive
+      || (["running", "stopping"].includes(phase) && !currentSurface)
+    )
+  ) {
+    retainChatPostmortem(phase, state.runStatus?.message);
+  }
+
+  const chatRun = Boolean(currentSurface && !state.chatPostmortem);
+  const retained = Boolean(state.chatPostmortem && state.chatRunId && state.chatAttachment);
+  const visible = Boolean(
+    (retained || (chatRun && ["running", "stopping"].includes(phase)))
+    && !state.agentConsoleVisible
+  );
+  const controlsReady = Boolean(visible && chatRun && phase === "running");
   $("chatRunSettingsButton").disabled = !controlsReady;
   if (!controlsReady && !$("chatRunSettingsPanel").hidden) closeChatRunSettings(false);
   if (!visible) {
@@ -6261,20 +7606,20 @@ function updateChatWorkspace(run, phase) {
     state.chatRunSettingsKey = "";
   }
   $("chatWorkspace").classList.toggle("hidden", !visible);
-  $("configScroll").classList.toggle("hidden", visible);
-  $("launchDock").classList.toggle("hidden", visible);
+  updateWorkspaceChrome();
   if (visible) {
-    $("configTitle").textContent = "Chat";
     const route = chatSurfaceRoute(run);
     $("configSubtitle").textContent = `${profileBackendLabel(route?.backend)} · ${route?.model || "Local model"}`;
     renderChatRoute(run);
     renderChatUsage();
     renderChatSidebar();
     if (!state.chatHistoryLoaded && !state.chatHistoryLoading) void loadChatHistory(false);
-    $("endChatButton").textContent = state.chatAttachment?.primary === false ? "End attached chat" : "End chat";
+    else if (state.chatDraftPendingHistoryId) void restorePendingChatDraftConversation();
+    $("endChatButton").textContent = retained
+      ? state.chatPostmortem.title
+      : state.chatAttachment?.primary === false ? "End attached chat" : "End chat";
+    $("endChatButton").disabled = retained || !chatRun;
     if (controlsReady && state.chatResumePending) void completePendingChatResume();
-  } else {
-    $("configTitle").textContent = "Launch configuration";
   }
   setChatBusy(Boolean(state.chatAbort));
 }
@@ -6302,6 +7647,20 @@ function createAgentConsoleView(meta = {}, savedSeenEnd = null) {
     unreadBytes:0,
     inputQueue:[],
     inputSending:false,
+    inputInFlightPromptCount:0,
+    inputError:"",
+    inputRetryPending:false,
+    abortBusy:false,
+    abortRequest:null,
+    readDrainRemaining:AgentConsoleTabsCore.FINAL_DRAIN_READS,
+    readIdleCount:0,
+    postmortem:null,
+    timeline:PiTimelineCore.emptyTimeline(),
+    timelineSeenRevision:0,
+    timelineLoaded:false,
+    piFollowTail:true,
+    piLastScrollTop:0,
+    piNewOutput:false,
   };
 }
 
@@ -6309,10 +7668,156 @@ function currentAgentConsoleView() {
   return state.agentConsoleViews[state.agentConsoleSurfaceId] || null;
 }
 
+function agentConsoleRunDraftKey() {
+  const owner = AgentConsoleTabsCore.safeId(state.agentConsoleOwnerRunId);
+  const surface = AgentConsoleTabsCore.safeId(state.agentConsoleSurfaceId);
+  return owner && surface ? `${owner}:${surface}` : "";
+}
+
+function agentConsoleDraftKey() {
+  const meta = currentAgentConsoleView()?.meta;
+  const conversation = meta?.protocol === "pi-rpc" ? meta.conversationId : "";
+  return typeof conversation === "string" && /^[a-f0-9]{64}$/.test(conversation)
+    ? `pi:${conversation}` : agentConsoleRunDraftKey();
+}
+
+function agentConsoleDrafts() {
+  if (!agentConsoleDraftEnvelope) {
+    let saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem(AGENT_CONSOLE_DRAFTS_KEY) || "null"); }
+    catch (_) {}
+    agentConsoleDraftEnvelope = ChatDraftsCore.normaliseEnvelope(saved, AGENT_CONSOLE_DRAFT_OPTIONS);
+  }
+  return agentConsoleDraftEnvelope;
+}
+
+function persistAgentConsoleDraft(key, text) {
+  if (!key) return;
+  // Keep an oversized draft intact in the composer; never save a truncated
+  // instruction which could later be mistaken for the complete message.
+  const value = text.length <= AGENT_CONSOLE_DRAFT_OPTIONS.maximumDraftCharacters ? text : "";
+  agentConsoleDraftEnvelope = ChatDraftsCore.writeDraft(
+    agentConsoleDrafts(), key, value, Date.now(), AGENT_CONSOLE_DRAFT_OPTIONS,
+  );
+  try { sessionStorage.setItem(AGENT_CONSOLE_DRAFTS_KEY, JSON.stringify(agentConsoleDraftEnvelope)); }
+  catch (_) {}
+}
+
+function migrateAgentConsoleDraft(key) {
+  const legacyKey = agentConsoleRunDraftKey();
+  if (!legacyKey || legacyKey === key) return;
+  const envelope = agentConsoleDrafts();
+  // Only migrate this console's pre-identity draft. Never overwrite an existing
+  // conversation draft or borrow one from another run merely by recency.
+  if (!envelope.drafts[legacyKey] || envelope.drafts[key]) return;
+  agentConsoleDraftEnvelope = ChatDraftsCore.moveDraft(
+    envelope, legacyKey, key, AGENT_CONSOLE_DRAFT_OPTIONS,
+  );
+  try { sessionStorage.setItem(AGENT_CONSOLE_DRAFTS_KEY, JSON.stringify(agentConsoleDraftEnvelope)); }
+  catch (_) {}
+}
+
+function saveAgentConsoleDraft() {
+  const input = $("agentConsoleInput");
+  const key = input.dataset.draftKey;
+  const view = currentAgentConsoleView();
+  if (!view || !key || key !== agentConsoleDraftKey()) return;
+  if (view.inputDraft === input.value) return;
+  view.inputDraft = input.value;
+  view.inputDraftTypedUnbound = key === agentConsoleRunDraftKey();
+  persistAgentConsoleDraft(key, input.value);
+}
+
+function restoreAgentConsoleDraft() {
+  const input = $("agentConsoleInput");
+  const key = agentConsoleDraftKey();
+  const view = currentAgentConsoleView();
+  if (input.dataset.draftKey === key && view?.inputDraftKey === key) return;
+  if (view?.inputDraftKey && view.inputDraftKey === input.dataset.draftKey) {
+    // A /new or /resume may change Pi's identity within the same console.
+    persistAgentConsoleDraft(view.inputDraftKey, input.value);
+  }
+  if (view && view.inputDraftKey !== key) {
+    // Only bind text typed here before this console's first reported identity.
+    // Stored legacy drafts have no trustworthy conversation binding: /new may
+    // have changed sessions since they were saved.
+    if (view.inputDraftTypedUnbound && !view.inputDraftConversationSeen
+        && view.inputDraftKey === agentConsoleRunDraftKey()) migrateAgentConsoleDraft(key);
+    view.inputDraft = ChatDraftsCore.readDraft(agentConsoleDrafts(), key, AGENT_CONSOLE_DRAFT_OPTIONS);
+    view.inputDraftKey = key;
+    view.inputDraftTypedUnbound = false;
+    if (key.startsWith("pi:")) view.inputDraftConversationSeen = true;
+  }
+  input.value = view?.inputDraft || "";
+  input.dataset.draftKey = key;
+  input.setCustomValidity("");
+}
+
+function recoverableAgentConsoleDrafts() {
+  const current = agentConsoleDraftKey();
+  return Object.entries(agentConsoleDrafts().drafts)
+    .filter(([key]) => key !== current)
+    .sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+}
+
+function openAgentConsoleDrafts() {
+  saveAgentConsoleDraft();
+  const list = $("agentConsoleDraftsList");
+  list.replaceChildren();
+  for (const [key, draft] of recoverableAgentConsoleDrafts()) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary agent-console-saved-draft";
+    const preview = document.createElement("span");
+    preview.textContent = draft.text.slice(0, 240);
+    const time = document.createElement("small");
+    time.textContent = new Date(draft.updatedAt).toLocaleString();
+    button.append(preview, time);
+    button.addEventListener("click", () => recoverAgentConsoleDraft(key));
+    list.append(button);
+  }
+  $("agentConsoleDraftsStatus").textContent = list.children.length ? "" : "No other saved drafts.";
+  $("agentConsoleDraftsDialog").showModal();
+}
+
+function recoverAgentConsoleDraft(sourceKey) {
+  const input = $("agentConsoleInput");
+  const view = currentAgentConsoleView();
+  const destination = agentConsoleDraftKey();
+  const envelope = agentConsoleDrafts();
+  const text = ChatDraftsCore.readDraft(envelope, sourceKey, AGENT_CONSOLE_DRAFT_OPTIONS);
+  if (!view || !destination || !text || sourceKey === destination) return;
+  if (input.value || ChatDraftsCore.readDraft(envelope, destination, AGENT_CONSOLE_DRAFT_OPTIONS)) {
+    $("agentConsoleDraftsStatus").textContent = "Send or clear the current draft first; it has been kept.";
+    return;
+  }
+  agentConsoleDraftEnvelope = ChatDraftsCore.moveDraft(
+    envelope, sourceKey, destination, AGENT_CONSOLE_DRAFT_OPTIONS,
+  );
+  try { sessionStorage.setItem(AGENT_CONSOLE_DRAFTS_KEY, JSON.stringify(agentConsoleDraftEnvelope)); }
+  catch (_) {}
+  // Invalidate a cached source view so revisiting it cannot resurrect the moved
+  // draft. Draft recovery never queues input or invokes the agent API.
+  for (const other of Object.values(state.agentConsoleViews)) {
+    if (other.inputDraftKey === sourceKey) other.inputDraftKey = "";
+  }
+  view.inputDraft = text;
+  view.inputDraftKey = destination;
+  input.dataset.draftKey = destination;
+  input.value = text;
+  input.setCustomValidity("");
+  $("agentConsoleDraftsDialog").close();
+  input.focus();
+}
+
 function reconcileAgentConsoleViewMeta(view, incoming = {}) {
   if (!view) return {meta:{...incoming}, generationChanged:false, stale:false};
   const result = AgentConsoleTabsCore.reconcileConsoleMeta(view.meta, incoming);
   view.meta = result.meta;
+  if (result.generationChanged) {
+    view.abortBusy = false;
+    view.abortRequest = null;
+  }
   return result;
 }
 
@@ -6331,14 +7836,39 @@ function resetAgentConsoleTerminal(
   const rows = view.terminal?.rows || Number(view.meta?.rows) || 30;
   view.terminal = new TerminalCore.TerminalBuffer(cols, rows, 2000);
   view.decoder = new TextDecoder("utf-8", {fatal:false});
+  view.terminalSuppressed = false;
   view.offset = base;
   view.renderedText = "";
   view.loaded = false;
-  if (clearInput) view.inputQueue = [];
+  if (clearInput) {
+    view.inputQueue = [];
+    view.inputInFlightPromptCount = 0;
+    view.inputError = "";
+    view.inputRetryPending = false;
+    view.abortBusy = false;
+    view.abortRequest = null;
+  }
   if (renderPlaceholder && view === currentAgentConsoleView()) {
     $("agentTerminalOutput").textContent = "Waiting for agent output…";
     $("agentTerminalOutput").dataset.consoleSurface = state.agentConsoleSurfaceId;
     $("agentConsoleJumpLatest").hidden = true;
+  }
+}
+
+function resetAgentPiTimeline(view = currentAgentConsoleView(), {renderPlaceholder = true} = {}) {
+  if (view) {
+    view.readIdleCount = 0;
+    view.timeline = PiTimelineCore.emptyTimeline();
+    view.timelineSeenRevision = 0;
+    view.timelineLoaded = false;
+    view.piFollowTail = true;
+    view.piLastScrollTop = 0;
+    view.piNewOutput = false;
+  }
+  if (renderPlaceholder && (!view || view === currentAgentConsoleView())) {
+    agentPiTimelineView.clear($("agentPiTimeline"));
+    $("agentPiTimelineEmpty").hidden = false;
+    $("agentPiTimelineJumpLatest").hidden = true;
   }
 }
 
@@ -6367,9 +7897,10 @@ function removeAgentConsoleRecovery() {
 }
 
 function clearAgentConsoleSelection(removeRecovery = true) {
-  if (state.agentConsoleTimer !== null) clearTimeout(state.agentConsoleTimer);
+  saveAgentConsoleDraft();
+  $("agentConsoleInput").dataset.draftKey = "";
+  invalidateAgentConsoleRead();
   if (state.agentConsoleResizeTimer !== null) clearTimeout(state.agentConsoleResizeTimer);
-  state.agentConsoleTimer = null;
   state.agentConsoleResizeTimer = null;
   state.agentConsoleOwnerRunId = "";
   state.agentConsoleSurfaceId = "";
@@ -6377,7 +7908,6 @@ function clearAgentConsoleSelection(removeRecovery = true) {
   state.agentConsoleViews = {};
   state.agentConsoleRecoveryOwnerRunId = "";
   state.agentConsoleVisible = false;
-  state.agentConsoleReading = false;
   state.agentConsoleSearchOpen = false;
   state.agentConsoleSearchQuery = "";
   state.agentConsoleSearchIndex = -1;
@@ -6386,6 +7916,7 @@ function clearAgentConsoleSelection(removeRecovery = true) {
   $("agentConsoleFindButton").setAttribute("aria-expanded", "false");
   $("agentConsoleSearchInput").value = "";
   resetAgentConsoleTerminal(null);
+  resetAgentPiTimeline(null);
   if (removeRecovery) removeAgentConsoleRecovery();
 }
 
@@ -6414,13 +7945,54 @@ function agentConsoleDescriptors(status = state.runStatus, ownerRunId = state.ag
   return result.slice(0, AgentConsoleTabsCore.MAX_TABS);
 }
 
-function syncAgentConsoleViews(status = state.runStatus, run = status?.run, phase = status?.phase || state.runPhase) {
-  const routeActive = Boolean(
-    run?.purpose === "session" && run.runId
-    && ["preflight","starting","running","stopping"].includes(phase),
+function retainAgentConsoleView(view, phase, message) {
+  if (!view) return null;
+  const surface = view.meta?.surface || clientName(view.meta?.client) || "Agent";
+  const next = surfacePostmortemMarker(
+    phase, message, `${surface} route`,
   );
+  const previousFailed = view.postmortem?.state === "failed"
+    || view.meta?.state === "failed" || view.meta?.status === "failed";
+  const marker = previousFailed && next.state !== "failed"
+    ? view.postmortem || surfacePostmortemMarker(
+      "failed", view.meta?.detail || message, `${surface} route`,
+    )
+    : next;
+  view.postmortem = marker;
+  view.meta = {
+    ...view.meta,
+    state:marker.state,
+    status:marker.state,
+    detail:marker.detail,
+    streaming:false,
+    canInput:false,
+    canStop:false,
+    canRestart:false,
+  };
+  view.abortBusy = false;
+  view.abortRequest = null;
+  if (view.inputQueue.length) view.inputRetryPending = true;
+  return marker;
+}
+
+function retainAgentConsoleViews(phase, message) {
+  if (state.agentConsoleTimer !== null) clearTimeout(state.agentConsoleTimer);
+  state.agentConsoleTimer = null;
+  for (const view of Object.values(state.agentConsoleViews)) {
+    retainAgentConsoleView(view, phase, message);
+  }
+  const selected = currentAgentConsoleView();
+  if (selected) state.agentConsoleMeta = selected.meta;
+  persistAgentConsoleRecovery();
+  return Object.keys(state.agentConsoleViews).length;
+}
+
+function syncAgentConsoleViews(status = state.runStatus, run = status?.run, phase = status?.phase || state.runPhase) {
+  const routeActive = sessionRouteActive(run, phase);
   if (!routeActive) {
-    if (state.agentConsoleOwnerRunId || Object.keys(state.agentConsoleViews).length) clearAgentConsoleSelection(true);
+    if (state.agentConsoleOwnerRunId || Object.keys(state.agentConsoleViews).length) {
+      retainAgentConsoleViews(phase, status?.message);
+    }
     return [];
   }
   const ownerRunId = run.runId;
@@ -6450,7 +8022,12 @@ function syncAgentConsoleViews(status = state.runStatus, run = status?.run, phas
 
   const allowed = new Set(surfaceIds);
   for (const id of Object.keys(state.agentConsoleViews)) {
-    if (!allowed.has(id)) delete state.agentConsoleViews[id];
+    if (!allowed.has(id)) {
+      retainAgentConsoleView(
+        state.agentConsoleViews[id], "stopped",
+        "This Hub Console surface is no longer attached to the active route.",
+      );
+    }
   }
   for (const descriptor of descriptors) {
     const id = descriptor.attachment.id;
@@ -6461,10 +8038,12 @@ function syncAgentConsoleViews(status = state.runStatus, run = status?.run, phas
       view = createAgentConsoleView(descriptor.meta, savedSeen);
       state.agentConsoleViews[id] = view;
     } else {
+      view.postmortem = null;
       const reconciliation = reconcileAgentConsoleViewMeta(view, descriptor.meta);
       if (reconciliation.generationChanged || AgentConsoleTabsCore.consoleNeedsReplay(view.meta, view.offset)) {
         view.recovering = true;
       }
+      if (reconciliation.generationChanged) resetAgentPiTimeline(view, {renderPlaceholder:false});
     }
   }
 
@@ -6486,6 +8065,10 @@ function syncAgentConsoleViews(status = state.runStatus, run = status?.run, phas
     state.agentConsoleMeta = selected.meta;
     if (state.agentConsoleVisible && selected.loaded) {
       selected.seenEnd = Math.max(selected.seenEnd, selected.offset);
+      selected.timelineSeenRevision = Math.max(
+        selected.timelineSeenRevision,
+        PiTimelineCore.safeRevision(selected.timeline?.revision),
+      );
     }
   } else state.agentConsoleMeta = null;
   persistAgentConsoleRecovery();
@@ -6504,6 +8087,7 @@ function enterAgentConsole(attachment) {
   if (!state.agentConsoleViews[surfaceId]) {
     state.agentConsoleViews[surfaceId] = createAgentConsoleView(attachment);
   } else {
+    state.agentConsoleViews[surfaceId].postmortem = null;
     reconcileAgentConsoleViewMeta(state.agentConsoleViews[surfaceId], attachment);
   }
   selectAgentConsole(surfaceId, {focus:true, show:true});
@@ -6513,6 +8097,7 @@ function enterAgentConsole(attachment) {
 function selectAgentConsole(surfaceId, {focus = true, show = true} = {}) {
   const view = state.agentConsoleViews[surfaceId];
   if (!view) return;
+  saveAgentConsoleDraft();
   if (state.agentConsoleTimer !== null) clearTimeout(state.agentConsoleTimer);
   state.agentConsoleTimer = null;
   state.agentConsoleSurfaceId = surfaceId;
@@ -6521,18 +8106,26 @@ function selectAgentConsole(surfaceId, {focus = true, show = true} = {}) {
   state.agentConsoleDismissed = !show;
   state.agentConsoleSearchIndex = -1;
   view.seenEnd = Math.max(view.seenEnd, view.offset);
+  view.timelineSeenRevision = Math.max(
+    view.timelineSeenRevision,
+    PiTimelineCore.safeRevision(view.timeline?.revision),
+  );
   persistAgentConsoleRecovery();
   if (state.runStatus?.run?.runId === state.agentConsoleOwnerRunId) {
     updateChatWorkspace(state.runStatus.run, state.runPhase);
     updateAgentWorkspace(state.runStatus.run, state.runPhase);
-    renderAgentTerminalOutput({preserveScroll:false});
+    if (agentConsoleShowsPiTimeline(view)) renderAgentPiTimeline({preserveScroll:false});
+    else renderAgentTerminalOutput({preserveScroll:false});
   }
   scheduleAgentConsoleRead(view.loaded ? 0 : 40);
   scheduleAgentConsoleResize();
-  if (focus) requestAnimationFrame(() => $("agentTerminalViewport").focus());
+  if (focus) requestAnimationFrame(() => (
+    agentConsoleShowsPiTimeline(view) ? $("agentPiTimelineViewport") : $("agentTerminalViewport")
+  ).focus());
 }
 
 function leaveAgentConsole() {
+  saveAgentConsoleDraft();
   state.agentConsoleVisible = false;
   state.agentConsoleDismissed = true;
   if (state.agentConsoleTimer !== null) clearTimeout(state.agentConsoleTimer);
@@ -6574,25 +8167,43 @@ function renderAgentConsoleTabs() {
   const rows = views.map(([id, view]) => {
     const activity = agentConsoleRequestActivity(id).current;
     const attachment = view.meta;
-    const consoleRecord = view.meta;
+    const structuredPi = agentConsoleShowsPiTimeline(view);
+    const localTimelineRevision = PiTimelineCore.safeRevision(view.timeline?.revision);
+    const availableTimelineRevision = PiTimelineCore.timelineAvailableRevision(
+      view.timeline, view.meta,
+    );
+    const consoleRecord = structuredPi ? {
+      ...view.meta,
+      bufferEnd:availableTimelineRevision,
+      outputRevision:availableTimelineRevision,
+    } : view.meta;
     const active = id === state.agentConsoleSurfaceId;
     const presentation = AgentConsoleTabsCore.tabPresentation({
-      attachment, consoleRecord, activity, active, seenEnd:view.seenEnd,
+      attachment, consoleRecord, activity, active,
+      seenEnd:structuredPi ? view.timelineSeenRevision : view.seenEnd,
     });
-    view.unreadBytes = active && state.agentConsoleVisible ? Math.max(0, presentation.end - view.offset) : presentation.unreadBytes;
+    view.unreadBytes = active && state.agentConsoleVisible
+      ? Math.max(0, presentation.end - (structuredPi ? localTimelineRevision : view.offset))
+      : presentation.unreadBytes;
     const surface = attachment.surface || clientName(attachment.client) || "Agent";
     const project = agentConsoleProjectName(attachment.project);
     const marker = attachment.primary ? "Primary" : project;
     const label = `${surface}, ${marker}, ${presentation.label}`;
     const badge = presentation.unreadBytes > 0 && !active
-      ? `${presentation.label} · ${formatBytes(presentation.unreadBytes)}` : presentation.label;
-    return `<button id="agent-console-tab-${esc(id)}" type="button" role="tab" data-agent-console-tab="${esc(id)}" aria-selected="${active}" aria-controls="agentTerminalViewport" aria-label="${esc(label)}" tabindex="${active ? "0" : "-1"}" class="agent-console-tab ${active ? "active" : ""} ${esc(presentation.tone)}"><i aria-hidden="true"></i><span><strong>${esc(surface)}</strong><small>${esc(marker)}</small></span><em>${esc(badge)}</em></button>`;
+      ? structuredPi ? `${presentation.label} · new events`
+        : `${presentation.label} · ${formatBytes(presentation.unreadBytes)}`
+      : presentation.label;
+    const controls = structuredPi ? "agentPiTimelineViewport" : "agentTerminalViewport";
+    return `<button id="agent-console-tab-${esc(id)}" type="button" role="tab" data-agent-console-tab="${esc(id)}" aria-selected="${active}" aria-controls="${controls}" aria-label="${esc(label)}" tabindex="${active ? "0" : "-1"}" class="agent-console-tab ${active ? "active" : ""} ${esc(presentation.tone)}"><i aria-hidden="true"></i><span><strong>${esc(surface)}</strong><small>${esc(marker)}</small></span><em>${esc(badge)}</em></button>`;
   });
   const markup = rows.join("");
   if (tabs.innerHTML !== markup) tabs.innerHTML = markup;
   const view = currentAgentConsoleView();
-  $("agentConsoleFindButton").disabled = !view;
-  $("agentConsoleCopyButton").disabled = !view?.renderedText || state.agentConsoleCopyBusy;
+  const structuredPi = agentConsoleShowsPiTimeline(view);
+  $("agentConsoleFindButton").hidden = structuredPi;
+  $("agentConsoleFindButton").disabled = !view || structuredPi;
+  $("agentConsoleCopyButton").disabled = !(structuredPi
+    ? view?.timeline?.items?.length : view?.renderedText) || state.agentConsoleCopyBusy;
   $("agentConsoleFindButton").setAttribute("aria-expanded", String(state.agentConsoleSearchOpen));
   $("agentConsoleSearch").classList.toggle("hidden", !state.agentConsoleSearchOpen);
 }
@@ -6642,12 +8253,22 @@ function applyAgentTerminalStyle(element, style = {}) {
 }
 
 function agentConsoleNearBottom(viewport = $("agentTerminalViewport")) {
-  return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 64;
+  return PiTimelineCore.isNearBottom(viewport);
+}
+
+function agentPiTimelineNearBottom(viewport = $("agentPiTimelineViewport")) {
+  return PiTimelineCore.isNearBottom(viewport);
 }
 
 function updateAgentConsoleScrollUi() {
-  const button = $("agentConsoleJumpLatest");
-  button.hidden = !currentAgentConsoleView() || agentConsoleNearBottom();
+  const view = currentAgentConsoleView();
+  const structuredPi = agentConsoleShowsPiTimeline(view);
+  $("agentConsoleJumpLatest").hidden = structuredPi || !view || agentConsoleNearBottom();
+  const timelineJump = $("agentPiTimelineJumpLatest");
+  timelineJump.hidden = !structuredPi || !view || (
+    view.piFollowTail !== false && agentPiTimelineNearBottom()
+  );
+  timelineJump.textContent = view?.piNewOutput ? "\u2193 New output" : "\u2193 Latest";
 }
 
 function scrollAgentConsoleToLatest() {
@@ -6655,6 +8276,73 @@ function scrollAgentConsoleToLatest() {
   viewport.scrollTop = viewport.scrollHeight;
   updateAgentConsoleScrollUi();
   viewport.focus({preventScroll:true});
+}
+
+function scrollAgentPiTimelineToLatest() {
+  const view = currentAgentConsoleView();
+  const viewport = $("agentPiTimelineViewport");
+  if (view) {
+    view.piFollowTail = true;
+    view.piNewOutput = false;
+    view.piScrollIntent = "";
+  }
+  viewport.scrollTop = viewport.scrollHeight;
+  if (view) view.piLastScrollTop = viewport.scrollTop;
+  updateAgentConsoleScrollUi();
+  viewport.focus({preventScroll:true});
+}
+
+let agentPiFollowFrame = 0;
+function scheduleAgentPiTimelineFollow() {
+  if (agentPiFollowFrame) return;
+  agentPiFollowFrame = requestAnimationFrame(() => {
+    agentPiFollowFrame = 0;
+    const view = currentAgentConsoleView();
+    const viewport = $("agentPiTimelineViewport");
+    if (!view || !agentConsoleShowsPiTimeline(view) || viewport.hidden) return;
+    if (view.piFollowTail !== false) {
+      viewport.scrollTop = viewport.scrollHeight;
+      view.piLastScrollTop = viewport.scrollTop;
+      view.piNewOutput = false;
+    }
+    updateAgentConsoleScrollUi();
+  });
+}
+
+function recordAgentPiScrollIntent(intent) {
+  const view = currentAgentConsoleView();
+  if (!view || !agentConsoleShowsPiTimeline(view)) return;
+  view.piScrollIntent = intent;
+  view.piScrollIntentUntil = performance.now() + 1200;
+  if (intent === "up") detachAgentPiTimelineFollow();
+}
+
+function handleAgentPiTimelineScroll() {
+  const view = currentAgentConsoleView();
+  if (!view || !agentConsoleShowsPiTimeline(view)) {
+    updateAgentConsoleScrollUi();
+    return;
+  }
+  const viewport = $("agentPiTimelineViewport");
+  const nextTop = Math.max(0, Number(viewport.scrollTop) || 0);
+  view.piFollowTail = PiTimelineCore.followTailAfterScroll(
+    view.piFollowTail,
+    view.piLastScrollTop,
+    nextTop,
+    PiTimelineCore.isNearBottom(viewport, 4),
+    performance.now() < (view.piScrollIntentUntil || 0) ? view.piScrollIntent : "",
+  );
+  view.piLastScrollTop = nextTop;
+  if (view.piFollowTail) view.piNewOutput = false;
+  updateAgentConsoleScrollUi();
+  if (view.piFollowTail !== false && !agentPiTimelineNearBottom(viewport)) scheduleAgentPiTimelineFollow();
+}
+
+function detachAgentPiTimelineFollow() {
+  const view = currentAgentConsoleView();
+  if (!view || !agentConsoleShowsPiTimeline(view)) return;
+  view.piFollowTail = false;
+  updateAgentConsoleScrollUi();
 }
 
 function renderAgentTerminalOutput({preserveScroll = true, focusMatch = false} = {}) {
@@ -6719,6 +8407,33 @@ function renderAgentTerminalOutput({preserveScroll = true, focusMatch = false} =
   requestAnimationFrame(updateAgentConsoleScrollUi);
 }
 
+function renderAgentPiTimeline({preserveScroll = true} = {}) {
+  const view = currentAgentConsoleView();
+  const viewport = $("agentPiTimelineViewport");
+  const timeline = $("agentPiTimeline");
+  if (!view || !agentConsoleShowsPiTimeline(view)) {
+    agentPiTimelineView.clear(timeline);
+    $("agentPiTimelineEmpty").hidden = false;
+    $("agentPiTimelineJumpLatest").hidden = true;
+    return;
+  }
+  const items = view.timeline?.items || [];
+  const visibleItems = view.toolPreview
+    ? [...items, {kind:"toolCall", key:"engine-tool-preview", ...view.toolPreview}]
+    : items;
+  const followTail = !preserveScroll || view.piFollowTail !== false;
+  agentPiTimelineView.render(timeline, visibleItems, {
+    viewport, surfaceId:state.agentConsoleSurfaceId, preserveScroll, followTail,
+  });
+  $("agentPiTimelineEmpty").hidden = items.length > 0;
+  if (followTail) {
+    view.piFollowTail = true;
+    view.piNewOutput = false;
+  }
+  view.piLastScrollTop = viewport.scrollTop;
+  scheduleAgentPiTimelineFollow();
+}
+
 function setAgentConsoleSearch(open) {
   state.agentConsoleSearchOpen = Boolean(open);
   state.agentConsoleSearchIndex = -1;
@@ -6742,12 +8457,16 @@ function moveAgentConsoleSearch(direction) {
 
 async function copyAgentConsoleVisible() {
   const view = currentAgentConsoleView();
-  if (!view?.renderedText || state.agentConsoleCopyBusy) return;
+  const visibleText = agentConsoleShowsPiTimeline(view)
+    ? PiTimelineCore.timelinePlainText(view?.timeline) : view?.renderedText;
+  if (!visibleText || state.agentConsoleCopyBusy) return;
   state.agentConsoleCopyBusy = true;
   renderAgentConsoleTabs();
   try {
-    await navigator.clipboard.writeText(view.renderedText);
-    showNotice("Copied the bounded visible Agent Console text.");
+    await navigator.clipboard.writeText(visibleText);
+    showNotice(agentConsoleShowsPiTimeline(view)
+      ? "Copied the visible Pi conversation timeline."
+      : "Copied the bounded visible Agent Console text.");
   } catch (error) {
     showNotice(`Could not copy the Agent Console: ${error.message}`, true);
   } finally {
@@ -6762,21 +8481,26 @@ function currentAgentConsoleInteraction(meta = currentAgentConsoleView()?.meta |
 }
 
 function renderAgentConsoleInteraction(meta, canInput) {
+  renderAgentConsoleCommands(meta);
   const panel = $("agentConsoleInteraction");
   const interactions = Array.isArray(meta?.interactions) ? meta.interactions : [];
   const interaction = currentAgentConsoleInteraction(meta);
   if (!interaction || meta.protocol !== "pi-rpc") {
     panel.hidden = true;
     panel.dataset.requestId = "";
+    panel.dataset.custom = "false";
     return;
   }
   const method = String(interaction.method || "");
+  const custom = interaction.title === "__launcher_custom_ui__";
   const changed = panel.dataset.requestId !== interaction.id;
+  const openingCustom = custom && panel.dataset.custom !== "true";
+  panel.dataset.custom = String(custom);
   panel.hidden = false;
   panel.dataset.requestId = interaction.id;
   panel.dataset.method = method;
   if (changed) {
-    $("agentConsoleInteractionTitle").textContent = interaction.title || "Pi needs input";
+    $("agentConsoleInteractionTitle").textContent = custom ? "Pi extension menu" : interaction.title || "Pi needs input";
     const detail = method === "confirm" ? String(interaction.message || "") : "";
     $("agentConsoleInteractionMessage").textContent = [
       detail,
@@ -6791,16 +8515,38 @@ function renderAgentConsoleInteraction(meta, canInput) {
       ? String(interaction.placeholder || "Enter a response…") : "Enter a response…";
   }
   const optionsVisible = method === "select";
-  const inputVisible = method === "input" || method === "editor";
+  const inputVisible = !custom && (method === "input" || method === "editor");
   const confirmVisible = method === "confirm";
   $("agentConsoleInteractionOptions").hidden = !optionsVisible;
   $("agentConsoleInteractionInputWrap").hidden = !inputVisible;
   $("agentConsoleInteractionNo").hidden = !confirmVisible;
-  $("agentConsoleInteractionSubmit").hidden = optionsVisible;
+  $("agentConsoleInteractionSubmit").hidden = optionsVisible || custom;
+  $("agentConsoleCustomUI").hidden = !custom;
+  if (custom) {
+    $("agentConsoleCustomFrame").textContent = meta.extensionStatuses?.["launcher.customUI"]?.text || "Opening menu…";
+    if (openingCustom) $("agentConsoleCustomFrame").focus({preventScroll:true});
+  }
   $("agentConsoleInteractionSubmit").querySelector("strong").textContent = confirmVisible ? "Yes" : "Continue";
   for (const button of panel.querySelectorAll("button")) button.disabled = !canInput || state.agentConsoleBusy;
   $("agentConsoleInteractionInput").disabled = !canInput || state.agentConsoleBusy;
 }
+
+function renderAgentConsoleCommands(meta = currentAgentConsoleView()?.meta || {}) {
+  const panel = $("agentConsoleCommands");
+  const input = $("agentConsoleInput");
+  const query = input.value.trim();
+  const visible = meta.protocol === "pi-rpc" && /^\/[\w:-]*$/.test(query);
+  panel.hidden = !visible;
+  if (!visible) return;
+  const commands = (Array.isArray(meta.commands) ? meta.commands : [])
+    .filter(c => c.name && c.name.toLowerCase().startsWith(query.slice(1).toLowerCase()))
+    .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 40);
+  const markup = commands.length ? commands.map(c => `<button type="button" data-pi-command="${esc(c.name)}"><strong>/${esc(c.name)}</strong><span>${esc(c.description || c.source || "")}</span></button>`).join("")
+    : "<p>No matching commands available in this session.</p>";
+  if (panel.innerHTML !== markup) panel.innerHTML = markup;
+}
+
+const piMenuKeys = {up:"\x1b[A", down:"\x1b[B", right:"\x1b[C", left:"\x1b[D", enter:"\r"};
 
 async function respondAgentConsoleInteraction(response) {
   const view = currentAgentConsoleView();
@@ -6823,35 +8569,207 @@ async function respondAgentConsoleInteraction(response) {
       reconcileAgentConsoleViewMeta(view, data.console);
       state.agentConsoleMeta = view.meta;
     }
-    scheduleAgentConsoleRead(0);
   } catch (error) {
     showNotice(error.message, true);
   } finally {
     state.agentConsoleBusy = false;
     renderAgentConsole();
+    scheduleAgentConsoleRead(0);
+  }
+}
+
+function renderAgentPrefillClock() {
+  const clock = $("agentConsolePrefillClock");
+  const value = state.agentConsoleVisible
+    ? ChatStatusCore.promptProcessingClock(agentConsoleRequestActivity().current) : null;
+  clock.hidden = value === null;
+  clock.textContent = value === null ? "" : `◷ ${value}`;
+  clock.title = "Time preparing this prompt, including cache restoration. Resets for each model request.";
+}
+
+function renderAgentConsoleQueue(meta, view, enabled, count) {
+  const panel = $("agentConsoleQueue");
+  const entries = enabled ? AgentConsoleInputCore.piQueueEntries(meta, view?.inputQueue, view?.inputInFlightItems) : [];
+  const visible = enabled && (count > 0 || entries.length > 0 || meta.queueSaveError || view?.queueEdit);
+  if (panel.hidden && visible) panel.open = true;
+  panel.hidden = !visible;
+  if (!visible) return;
+  $("agentConsoleQueueSummary").textContent = `${Math.max(count, entries.length)} ${meta.queuePaused ? "paused" : "queued"} message${Math.max(count, entries.length) === 1 ? "" : "s"}`;
+  const list = $("agentConsoleQueueMessages");
+  const signature = JSON.stringify([state.agentConsoleSurfaceId, entries]);
+  if (list.dataset.contents !== signature) {
+    list.replaceChildren(...entries.map(item => {
+      const row = document.createElement("li");
+      const label = document.createElement("small");
+      label.textContent = item.label;
+      const message = document.createElement("pre");
+      message.textContent = item.message;
+      const actions = document.createElement("div");
+      actions.className = "agent-console-queue-actions";
+      if (item.editable) {
+        for (const action of ["Edit", "Delete"]) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = action;
+          button.setAttribute("aria-label", `${action} queued message`);
+          button.addEventListener("click", () => {
+            if (action === "Delete") void changeAgentConsoleQueuedMessage(view, item, "delete");
+            else {
+              view.queueEdit = {item, text:item.message};
+              renderAgentConsole();
+              $("agentConsoleQueueEditText").focus();
+            }
+          });
+          actions.append(button);
+        }
+      } else {
+        actions.textContent = meta.queueEditingAvailable
+          ? "Already sending to Pi" : "Controls available after launcher restart";
+      }
+      row.append(label, actions, message);
+      return row;
+    }));
+    list.dataset.contents = signature;
+  }
+  list.querySelectorAll("button").forEach(button => { button.disabled = Boolean(view?.queueMutationBusy); });
+  const editor = $("agentConsoleQueueEditor");
+  editor.hidden = !view?.queueEdit;
+  if (view?.queueEdit && $("agentConsoleQueueEditText").value !== view.queueEdit.text) {
+    $("agentConsoleQueueEditText").value = view.queueEdit.text;
+  }
+  $("agentConsoleQueueSave").disabled = Boolean(view?.queueMutationBusy);
+  $("agentConsoleQueueCancel").disabled = Boolean(view?.queueMutationBusy);
+  const warning = $("agentConsoleQueueWarning");
+  warning.textContent = meta.queueSaveError || (count > entries.length
+    ? "The older controller reports more queued messages but does not expose their text. Keep it open to retain them."
+    : meta.queuePaused ? "Paused. Edit or delete messages here, or send a message to continue." : "");
+  warning.hidden = !warning.textContent;
+}
+
+async function changeAgentConsoleQueuedMessage(view, item, action, message) {
+  if (view !== currentAgentConsoleView() || view.queueMutationBusy) return;
+  if (action === "edit") {
+    const validation = AgentConsoleInputCore.validatePiPrompt(message);
+    if (!validation.ok) { showNotice(validation.error, true); return; }
+  }
+  const surfaceId = state.agentConsoleSurfaceId;
+  const ownerRunId = state.agentConsoleOwnerRunId;
+  view.queueMutationBusy = true;
+  renderAgentConsole();
+  try {
+    if (item.source === "local") {
+      const index = view.inputQueue.indexOf(item.localItem);
+      if (index < 0) throw new Error("That message is already being sent. Wait for the queue to update.");
+      if (action === "delete") view.inputQueue.splice(index, 1);
+      else item.localItem.message = message;
+      if (!view.inputQueue.length) { view.inputRetryPending = false; view.inputError = ""; }
+    } else {
+      const data = await api("/api/agent-console/input", {method:"POST", body:JSON.stringify({
+        ownerRunId, surfaceId, command:action === "edit" ? "edit_queued_message" : "delete_queued_message",
+        queueId:item.id, ...(action === "edit" ? {message} : {}),
+      })});
+      reconcileAgentConsoleViewMeta(view, data.console);
+    }
+    if (action === "edit" || view.queueEdit?.item === item) view.queueEdit = null;
+  } catch (error) {
+    showNotice(error.message, true);
+  } finally {
+    view.queueMutationBusy = false;
+    renderAgentConsole();
+    scheduleAgentConsoleRead(0);
+  }
+}
+
+let hubFanBusy = false;
+let hubFanCheckedAt = 0;
+let hubFanRunId = "";
+let hubFanMode = "unknown";
+async function updateHubFans(mode) {
+  const runId = state.agentConsoleOwnerRunId;
+  if (hubFanBusy || !runId) return;
+  hubFanBusy = true;
+  hubFanCheckedAt = Date.now();
+  const changedRun = hubFanRunId !== runId;
+  hubFanRunId = runId;
+  const select = $("hubFanMode");
+  const message = $("hubFanMessage");
+  if (changedRun) {
+    hubFanMode = "unknown";
+    select.value = hubFanMode;
+    select.querySelector('[value="smart"]').hidden = state.runStatus?.run?.backend !== "mtplx";
+  }
+  message.title = "";
+  select.disabled = true;
+  message.textContent = mode ? "Changing…" : "";
+  try {
+    const result = await api("/api/hub/fans", {method:"POST", body:JSON.stringify({runId, ...(mode ? {mode} : {})})});
+    if (runId !== state.agentConsoleOwnerRunId) return;
+    hubFanMode = result.mode || "unknown";
+    select.value = hubFanMode;
+    select.querySelector('[value="smart"]').hidden = !result.smartAvailable;
+    message.textContent = "";
+    select.title = "Changes cooling immediately. System restores macOS control.";
+  } catch (error) {
+    if (runId !== state.agentConsoleOwnerRunId) return;
+    // A failed verification can follow a partial physical change. Do not
+    // present the previous setting as a confirmed current fan mode.
+    hubFanMode = "unknown";
+    select.value = hubFanMode;
+    message.textContent = mode ? "Change not verified" : "Fan control unavailable";
+    message.title = error.message;
+    select.title = error.message;
+    if (mode) window.alert(error.message);
+  } finally {
+    hubFanBusy = false;
+    select.disabled = false;
   }
 }
 
 function renderAgentConsole() {
+  restoreAgentConsoleDraft();
+  $("agentConsoleDraftsButton").hidden = !recoverableAgentConsoleDrafts().length;
+  if (state.agentConsoleVisible && (hubFanRunId !== state.agentConsoleOwnerRunId || Date.now() - hubFanCheckedAt > 30000)) void updateHubFans();
   const view = currentAgentConsoleView();
   const attachment = currentAgentConsoleAttachment() || view?.meta || state.agentConsoleMeta || {};
   const record = currentAgentConsoleRecord();
   if (view) {
     reconcileAgentConsoleViewMeta(view, attachment);
     if (record) reconcileAgentConsoleViewMeta(view, record);
+    if (view.postmortem) {
+      view.meta = {
+        ...view.meta,
+        state:view.postmortem.state,
+        status:view.postmortem.state,
+        detail:view.postmortem.detail,
+        streaming:false,
+        canInput:false,
+        canStop:false,
+        canRestart:false,
+      };
+    }
     state.agentConsoleMeta = view.meta;
   }
   const meta = view?.meta || attachment;
+  const postmortem = view?.postmortem || null;
   const structuredPi = meta.protocol === "pi-rpc";
+  const showPiTimeline = agentConsoleShowsPiTimeline(view);
   const piInteraction = structuredPi ? currentAgentConsoleInteraction(meta) : null;
   const runtimeAdvisory = meta.runtimeAdvisory || state.runStatus?.run?.runtimeAdvisory || null;
   const surface = meta.surface || clientName(meta.client) || "Agent";
   const stateLabel = String(meta.state || meta.status || "starting");
   $("agentConsoleTitle").textContent = `${surface} · Hub Console`;
+  $("agentConsoleHeadingDetail").textContent = meta.model || "";
+  $("agentConsoleHeadingDetail").title = `${meta.model || ""} · ${stateLabel}`;
   $("agentConsoleInputLabel").textContent = `Message ${surface}`;
   $("agentConsoleInput").placeholder = `Ask ${surface}…`;
-  $("agentConsoleMeta").textContent = structuredPi
+  $("agentConsoleMeta").textContent = postmortem
+    ? `${meta.project || "Current project"} · bounded postmortem output retained in this launcher until another surface replaces it.`
+    : showPiTimeline
     ? `${meta.project || "Current project"} · stable Pi transcript with separate thinking, responses, tools, and follow-up queue; session output remains memory-only in the launcher.`
+    : structuredPi
+      ? view?.loaded
+        ? `${meta.project || "Current project"} · this running Pi session predates semantic timeline support, so its bounded terminal view remains available.`
+        : `${meta.project || "Current project"} · checking Pi timeline support; the bounded terminal view remains available meanwhile.`
     : meta.project
       ? `${meta.project} · agent-supplied terminal styling is preserved; output is bounded in memory and never saved by the launcher.`
       : "Agent-supplied terminal styling is preserved; output stays in bounded session memory and never enters Chat history.";
@@ -6866,30 +8784,56 @@ function renderAgentConsole() {
   ].join(" · ");
 
   const activity = agentConsoleRequestActivity();
-  const activelyResponding = Boolean(activity.current || meta.streaming);
-  const pendingMessages = Math.max(0, Number(meta.pendingMessages) || 0);
+  const activelyResponding = Boolean(!postmortem && (activity.current || meta.streaming));
+  const abortBusy = Boolean(structuredPi && view?.abortBusy);
+  const pendingMessages = structuredPi ? AgentConsoleInputCore.visiblePiPendingMessages(
+    meta.pendingMessages,
+    view?.inputQueue,
+    view?.inputInFlightPromptCount,
+  ) : Math.max(0, Number(meta.pendingMessages) || 0);
   const piQueuePaused = structuredPi && meta.queuePaused === true;
+  renderAgentConsoleQueue(meta, view, structuredPi, pendingMessages);
+  const inputRetryPending = Boolean(view?.inputRetryPending && view.inputQueue.length);
   const compactActivity = ChatStatusCore.activitySummary(activity.report, state.agentConsoleSurfaceId);
-  const currentMeasured = requestTps(activity.current);
-  const latestMeasured = requestTps(activity.latest);
-  const detailedMeasured = currentMeasured || (!activity.current ? latestMeasured : null);
-  $("agentConsoleTps").textContent = detailedMeasured?.compact || compactActivity.speed.value;
+  const piSpeed = structuredPi ? PiTimelineCore.piTokenSpeed(meta) : null;
+  compactActivity.speed = ChatStatusCore.agentGenerationSpeed(
+    activity.current, activity.latest, piSpeed, compactActivity.speed,
+  );
+  $("agentConsoleTps").textContent = compactActivity.speed.value;
   $("agentConsoleTps").title = compactActivity.speed.title;
-  const firstOutput = activity.current?.firstOutputSeconds ?? activity.latest?.firstOutputSeconds;
+  const firstOutput = activity.current ? activity.current.firstOutputSeconds : activity.latest?.firstOutputSeconds;
   $("agentConsoleTtft").textContent = firstOutput !== null && firstOutput !== undefined
     ? formatShortDuration(firstOutput) : activity.current ? "Waiting…" : "—";
   const livePhase = liveRequestPhaseLabel(activity.current);
+  const phaseText = !postmortem && showPiTimeline
+    ? meta.compacting ? "Compacting context…" : ChatStatusCore.requestPhase(activity.current) : "";
+  $("agentConsoleLivePhase").hidden = !phaseText;
+  $("agentConsoleLivePhaseText").textContent = phaseText;
   $("agentConsoleLane").textContent = activity.current?.state === "queued"
     ? `Queue #${formatNumber(activity.current.queuePosition || 1)}`
     : activity.current?.state === "running" ? `${livePhase || "Generating"} · ${formatShortDuration(activity.current.runSeconds || 0)}`
+      : meta.streaming ? "Working · tools / agent"
       : activity.report.engineResident ? `${formatNumber(activity.report.lanes || 1)} lane${Number(activity.report.lanes || 1) === 1 ? "" : "s"} · idle` : "Relay unavailable";
 
+  const promptSignal = ChatStatusCore.promptProcessingSummary(activity.current, activity.latest);
+  renderAgentPrefillClock();
+  const contextSignal = ChatStatusCore.agentContextSummary(meta, state.runStatus?.run?.context,
+    activity.current, activity.latest);
+  const contextTokens = $("agentConsoleContextTokens");
+  contextTokens.hidden = contextSignal.usedTokens === undefined;
+  contextTokens.textContent = contextTokens.hidden ? "" : `${formatNumber(contextSignal.usedTokens)} / ${formatNumber(contextSignal.totalTokens)} · ${formatNumber(contextSignal.remainingTokens)} left`;
+  contextTokens.title = `${contextTokens.textContent} tokens. ${contextSignal.title}`;
+  for (const [name, signal] of [["Prompt", promptSignal], ["Context", contextSignal]]) {
+    $(`agentConsoleStatus${name}Value`).textContent = signal.value;
+    $(`agentConsoleStatus${name}`).title = signal.title;
+    $(`agentConsoleStatus${name}`).dataset.state = signal.state;
+  }
   const speedSignal = $("agentConsoleStatusSpeed");
   const laneSignal = $("agentConsoleStatusLane");
   $("agentConsoleStatusSpeedValue").textContent = compactActivity.speed.value;
   speedSignal.dataset.state = compactActivity.speed.state;
   speedSignal.title = compactActivity.speed.title;
-  $("agentConsoleStatusLaneValue").textContent = livePhase || compactActivity.lane.value;
+  $("agentConsoleStatusLaneValue").textContent = meta.compacting ? "Compacting…" : livePhase || compactActivity.lane.value;
   laneSignal.dataset.state = compactActivity.lane.state;
   laneSignal.title = [$("agentConsoleLane").textContent, liveRequestDetail(activity.current)].filter(Boolean).join(". ");
   const processLabels = {
@@ -6903,79 +8847,130 @@ function renderAgentConsole() {
   $("agentConsoleStatusPanel").dataset.processState = stateLabel;
   updateAgentConsoleStatusSummaryLabel();
 
-  const canInput = Boolean(meta.canInput ?? stateLabel === "running");
+  const canInput = Boolean(!postmortem && (meta.canInput ?? stateLabel === "running"));
+  $("agentTerminalViewport").hidden = showPiTimeline;
+  $("agentPiTimelineViewport").hidden = !showPiTimeline;
+  $("agentPiTimelineViewport").setAttribute("aria-busy", String(showPiTimeline && activelyResponding));
+  if (showPiTimeline && state.agentConsoleSearchOpen) {
+    state.agentConsoleSearchOpen = false;
+    state.agentConsoleSearchIndex = -1;
+    $("agentConsoleSearch").classList.add("hidden");
+    $("agentConsoleFindButton").setAttribute("aria-expanded", "false");
+  }
   renderAgentConsoleInteraction(meta, canInput);
   $("agentConsoleInput").disabled = !canInput || state.agentConsoleBusy;
-  $("agentConsoleEnterButton").disabled = !canInput || state.agentConsoleBusy;
+  $("agentConsoleCompactButton").hidden = !structuredPi;
+  $("agentConsoleCompactButton").disabled = !canInput || activelyResponding || meta.compacting || state.agentConsoleBusy;
+  $("agentConsoleEnterButton").disabled = !canInput || state.agentConsoleBusy || meta.compacting;
+  $("agentConsoleSteerButton").hidden = !structuredPi || !activelyResponding;
+  $("agentConsoleSteerButton").disabled = !canInput || state.agentConsoleBusy || meta.compacting || view?.steerBusy || meta.supportsSteering !== true;
+  $("agentConsoleSteerButton").title = meta.supportsSteering === true
+    ? "Deliver instructions before Pi’s next model step, instead of waiting for the task to finish"
+    : "Restart the launcher after the current task to enable steering.";
+  $("agentConsoleSteerButton").textContent = view?.steerBusy ? "Steering…" : "Steer";
   $("agentConsoleEscapeButton").disabled = !canInput || state.agentConsoleBusy;
   $("agentConsoleInterruptButton").disabled = !canInput || state.agentConsoleBusy;
   $("agentConsoleStopButton").disabled = state.agentConsoleBusy || !(meta.canStop ?? ["starting","running","stopping"].includes(stateLabel));
   $("agentConsoleRestartButton").disabled = state.agentConsoleBusy || !(meta.canRestart ?? ["exited","stopped","failed"].includes(stateLabel));
-  $("agentConsoleInputLabel").textContent = structuredPi && activelyResponding
-    ? "Queue a follow-up" : `Message ${surface}`;
-  $("agentConsoleEnterButton").querySelector("strong").textContent = structuredPi && activelyResponding
-    ? "Queue" : "Send";
+  $("agentConsoleInputLabel").textContent = `Message ${surface}`;
+  $("agentConsoleInput").placeholder = structuredPi && activelyResponding
+    ? "Steer this task, or queue a follow-up…" : `Ask ${surface}…`;
+  $("agentConsoleEnterButton").querySelector("strong").textContent = inputRetryPending
+    ? "Retry send" : structuredPi && activelyResponding ? "Queue" : "Send";
   $("agentConsoleEscapeButton").textContent = structuredPi ? "Clear queue" : "Esc";
   $("agentConsoleEscapeButton").title = structuredPi
     ? "Remove queued Pi follow-up messages" : "Send the Escape key";
   $("agentConsoleEscapeButton").disabled = !canInput || state.agentConsoleBusy || (structuredPi && pendingMessages < 1);
-  $("agentConsoleInterruptButton").textContent = structuredPi ? "Stop response" : "Ctrl-C";
+  $("agentConsoleEscapeButton").hidden = structuredPi && pendingMessages < 1;
+  $("agentConsoleInterruptButton").hidden = structuredPi && !activelyResponding;
+  $("agentConsoleInterruptButton").textContent = abortBusy
+    ? "Stopping…" : structuredPi ? "Stop response" : "Ctrl-C";
   $("agentConsoleInterruptButton").title = structuredPi
-    ? "Abort Pi's current response" : "Interrupt the current agent action";
-  $("agentConsoleInterruptButton").disabled = !canInput || state.agentConsoleBusy || (structuredPi && !activelyResponding);
-  $("agentTerminalViewport").setAttribute("role", structuredPi ? "document" : "application");
-  $("agentTerminalViewport").setAttribute("aria-label", structuredPi
-    ? "Pi conversation transcript. Use the message field below to send or queue a prompt."
-    : "Interactive agent terminal. Type to send keys; use the text field below for accessible input.");
+    ? abortBusy ? "Waiting for Pi to stop the current response" : "Abort Pi's current response"
+    : "Interrupt the current agent action";
+  $("agentConsoleInterruptButton").disabled = !canInput || state.agentConsoleBusy
+    || (structuredPi && (!activelyResponding || abortBusy));
+  $("agentTerminalViewport").setAttribute("role", "application");
+  $("agentTerminalViewport").setAttribute(
+    "aria-label",
+    "Interactive agent terminal. Type to send keys; use the text field below for accessible input.",
+  );
   const dropped = Number(meta.droppedBytes || 0);
   const interactionDetail = structuredPi
-    ? piInteraction
-      ? `Pi is waiting for your answer to “${piInteraction.title || "an extension request"}”.`
+    ? abortBusy
+      ? "Stopping Pi's current response…"
+      : piInteraction
+      ? piInteraction.title === "__launcher_custom_ui__"
+        ? "Pi menu open. Use the arrow keys, Enter, or Cancel."
+        : `Pi is waiting for your answer to “${piInteraction.title || "an extension request"}”.`
       : piQueuePaused
-      ? `${pendingMessages} follow-up message${pendingMessages === 1 ? " is" : "s are"} paused because Pi returned thinking without a final answer. Send continue to finish the response, or clear the queue.`
+      ? `${pendingMessages} message${pendingMessages === 1 ? " is" : "s are"} paused. Send to continue, or clear the queue in •••.`
       : pendingMessages
-      ? `${pendingMessages} follow-up message${pendingMessages === 1 ? " is" : "s are"} queued.`
-      : activelyResponding ? "Pi is responding; Send adds a follow-up without interrupting it."
-        : "Pi is ready; session history and new output stay visible in this transcript."
+      ? `${pendingMessages} message${pendingMessages === 1 ? " is" : "s are"} queued.`
+      : ""
     : "";
-  $("agentConsoleStatus").textContent = `${view?.recovering ? "Restoring the latest console screen… " : ""}${interactionDetail || meta.detail || `Hub Console is ${stateLabel}.`}${runtimeAdvisory?.detail ? ` ${runtimeAdvisory.detail}` : ""}${dropped ? ` Earlier output was discarded after the 2 MB memory cap (${formatBytes(dropped)} dropped).` : ""}`;
-  $("agentConsoleStatus").className = stateLabel === "failed" ? "error" : runtimeAdvisory || piInteraction || piQueuePaused ? "warning" : "";
+  $("agentConsoleStatus").textContent = postmortem?.detail || view?.inputError
+    || `${view?.recovering ? "Restoring the latest console screen… " : ""}${interactionDetail || meta.detail || `Hub Console is ${stateLabel}.`}${runtimeAdvisory?.detail ? ` ${runtimeAdvisory.detail}` : ""}${dropped ? ` Earlier output was discarded after the 2 MB memory cap (${formatBytes(dropped)} dropped).` : ""}`;
+  $("agentConsoleStatus").className = postmortem?.state === "failed" || view?.inputError || stateLabel === "failed"
+    ? "error" : runtimeAdvisory || piInteraction || piQueuePaused ? "warning" : "";
+  $("agentConsoleStatus").hidden = Boolean(structuredPi && canInput && !interactionDetail
+    && !postmortem && !view?.inputError && !view?.recovering && !runtimeAdvisory && !dropped);
   renderAgentConsoleTabs();
 }
 
 function updateAgentWorkspace(run, phase) {
-  const routeActive = Boolean(run && ["preflight","starting","running","stopping"].includes(phase));
+  const routeActive = sessionRouteActive(run, phase);
   if (routeActive) syncAgentConsoleViews(state.runStatus, run, phase);
-  else if (state.agentConsoleOwnerRunId) clearAgentConsoleSelection(true);
+  else if (state.agentConsoleOwnerRunId) {
+    retainAgentConsoleViews(phase, state.runStatus?.message);
+  }
   const view = currentAgentConsoleView();
   const selected = view?.meta || state.agentConsoleMeta;
-  const visible = Boolean(state.agentConsoleVisible && routeActive && selected);
+  const retained = Boolean(view?.postmortem && selected);
+  const visible = Boolean(state.agentConsoleVisible && selected && (routeActive || retained));
+  agentPiTimelineView.setVisible($("agentPiTimeline"), visible && agentConsoleShowsPiTimeline(view));
   $("agentWorkspace").classList.toggle("hidden", !visible);
   if (visible) $("chatWorkspace").classList.add("hidden");
   const chatVisible = !$("chatWorkspace").classList.contains("hidden");
-  $("configScroll").classList.toggle("hidden", visible || chatVisible);
-  $("launchDock").classList.toggle("hidden", visible || chatVisible);
+  updateWorkspaceChrome();
   if (visible) {
-    $("configTitle").textContent = "Agent Console";
     $("configSubtitle").textContent = `${selected.surface || clientName(selected.client)} · ${selected.model || run?.model || "Local model"}`;
     renderAgentConsole();
-    if ($("agentTerminalOutput").dataset.consoleSurface !== state.agentConsoleSurfaceId) {
+    if (agentConsoleShowsPiTimeline(view)) {
+      if ($("agentPiTimeline").dataset.consoleSurface !== state.agentConsoleSurfaceId) {
+        renderAgentPiTimeline({preserveScroll:false});
+      }
+    } else if ($("agentTerminalOutput").dataset.consoleSurface !== state.agentConsoleSurfaceId) {
       renderAgentTerminalOutput({preserveScroll:false});
     }
-    scheduleAgentConsoleRead(0);
+    if (!retained) scheduleAgentConsoleRead(0, {wake:false});
   } else if (!chatVisible) {
-    $("configTitle").textContent = "Launch configuration";
     updateWorkSurface();
   }
 }
 
-function scheduleAgentConsoleRead(delay = 120) {
-  if (!state.agentConsoleVisible || !state.agentConsoleOwnerRunId || !currentAgentConsoleView()) return;
+function scheduleAgentConsoleRead(delay = 120, {wake = delay === 0} = {}) {
+  if (
+    state.agentConsoleBusy || !state.agentConsoleVisible || !state.agentConsoleOwnerRunId
+    || !currentAgentConsoleView() || currentAgentConsoleView().postmortem
+  ) return;
+  if (wake) {
+    currentAgentConsoleView().readIdleCount = 0;
+    if (state.agentConsoleTimer !== null) clearTimeout(state.agentConsoleTimer);
+    state.agentConsoleTimer = null;
+  }
   if (state.agentConsoleTimer !== null || state.agentConsoleReading) return;
   state.agentConsoleTimer = setTimeout(() => {
     state.agentConsoleTimer = null;
     void readAgentConsole();
-  }, Math.max(0, Number(delay) || 0));
+  }, Math.max(document.hidden ? 1500 : 0, Number(delay) || 0));
+}
+
+function invalidateAgentConsoleRead() {
+  if (state.agentConsoleTimer !== null) clearTimeout(state.agentConsoleTimer);
+  state.agentConsoleTimer = null;
+  state.agentConsoleReadGeneration += 1;
+  state.agentConsoleReading = false;
 }
 
 function decodeAgentConsoleChunk(view, value) {
@@ -6991,38 +8986,121 @@ async function readAgentConsole() {
   const ownerRunId = state.agentConsoleOwnerRunId;
   const surfaceId = state.agentConsoleSurfaceId;
   const requestedView = state.agentConsoleViews[surfaceId];
-  if (!requestedView) return;
+  if (!requestedView || requestedView.postmortem) return;
+  const readGeneration = state.agentConsoleReadGeneration;
   state.agentConsoleReading = true;
   let nextDelay = null;
   try {
+    const readRequest = {ownerRunId, surfaceId, offset:requestedView.offset};
+    if (agentConsoleUsesStructuredPi(requestedView)) {
+      readRequest.timelineRevision = PiTimelineCore.safeRevision(requestedView.timeline?.revision);
+      readRequest.timelineVersion = PiTimelineCore.VERSION;
+    }
     const data = await api("/api/agent-console/read", {
-      method:"POST", body:JSON.stringify({ownerRunId, surfaceId, offset:requestedView.offset}),
+      method:"POST", body:JSON.stringify(readRequest),
     });
+    if (readGeneration !== state.agentConsoleReadGeneration) return;
     const view = state.agentConsoleViews[surfaceId];
     if (!view || ownerRunId !== state.agentConsoleOwnerRunId) return;
     const output = data.console;
-    if (output.reset) {
-      resetAgentConsoleTerminal(view, output.baseOffset, {
-        renderPlaceholder:false, clearInput:false,
-      });
+    const reconciliation = reconcileAgentConsoleViewMeta(view, output);
+    if (reconciliation.stale) {
+      nextDelay = 0;
+      return;
     }
-    const decoded = decodeAgentConsoleChunk(view, output.data);
-    if (decoded) view.terminal.write(decoded);
-    view.offset = AgentConsoleTabsCore.safeOffset(output.nextOffset ?? view.offset);
-    view.loaded = true;
+    if (reconciliation.generationChanged) {
+      resetAgentPiTimeline(view, {renderPlaceholder:false});
+    }
+    const timelineWasLoaded = view.timelineLoaded === true;
+    const timelineResult = agentConsoleUsesStructuredPi(view)
+      ? PiTimelineCore.applyTimelineEnvelope(view.timeline, output) : null;
+    const preview = output.streaming && !output.compacting ? output.toolPreview || null : null;
+    const previewChanged = JSON.stringify(view.toolPreview || null) !== JSON.stringify(preview);
+    view.toolPreview = preview;
+    const timelineNeedsRender = previewChanged || PiTimelineCore.shouldRenderTimeline(
+      timelineWasLoaded, timelineResult,
+    );
+    if (timelineResult?.supported) {
+      view.timeline = timelineResult.state;
+      view.timelineLoaded = true;
+      if (timelineNeedsRender && view.piFollowTail === false) view.piNewOutput = true;
+    }
+    const suppressTerminal = timelineResult?.supported === true;
+    const replayTerminal = !suppressTerminal && view.terminalSuppressed === true;
+    if (suppressTerminal) {
+      if (!view.terminalSuppressed) {
+        // Discard the hidden emulator's scrollback once the semantic view is
+        // confirmed. Its independent revision cursor owns Pi history now.
+        resetAgentConsoleTerminal(view, output.baseOffset, {renderPlaceholder:false, clearInput:false});
+        if (surfaceId === state.agentConsoleSurfaceId) $("agentTerminalOutput").textContent = "";
+      }
+      view.terminalSuppressed = true;
+      view.offset = agentConsoleBufferEnd(output);
+    } else {
+      if (replayTerminal || reconciliation.generationChanged || output.reset) {
+        resetAgentConsoleTerminal(view, output.baseOffset, {renderPlaceholder:false, clearInput:false});
+      }
+      if (replayTerminal) {
+        // The server no longer supports our timeline version. Request the
+        // retained raw buffer from its base rather than render a partial tail.
+        resetAgentPiTimeline(view, {renderPlaceholder:false});
+      } else {
+        const decoded = decodeAgentConsoleChunk(view, output.data);
+        if (decoded) view.terminal.write(decoded);
+        view.offset = AgentConsoleTabsCore.safeOffset(output.nextOffset ?? view.offset);
+      }
+    }
+    view.loaded = !replayTerminal;
     view.recovering = false;
-    reconcileAgentConsoleViewMeta(view, output);
+    if (view.postmortem) {
+      view.meta = {
+        ...view.meta,
+        state:view.postmortem.state,
+        status:view.postmortem.state,
+        detail:view.postmortem.detail,
+        streaming:false,
+        canInput:false,
+        canStop:false,
+        canRestart:false,
+      };
+    }
     const stillActive = surfaceId === state.agentConsoleSurfaceId && state.agentConsoleVisible;
     if (stillActive) {
       view.seenEnd = Math.max(view.seenEnd, view.offset);
+      view.timelineSeenRevision = Math.max(
+        view.timelineSeenRevision,
+        PiTimelineCore.safeRevision(view.timeline?.revision),
+      );
       state.agentConsoleMeta = view.meta;
-      renderAgentTerminalOutput();
+      if (agentConsoleShowsPiTimeline(view)) {
+        if (timelineNeedsRender) renderAgentPiTimeline();
+      } else renderAgentTerminalOutput();
       renderAgentConsole();
-      const backlog = agentConsoleBufferEnd(output) > view.offset;
-      nextDelay = backlog ? 0 : output.state === "running" ? 120 : null;
+      const readPlan = AgentConsoleTabsCore.nextReadPlan({
+        backlog:replayTerminal || agentConsoleBufferEnd(output) > view.offset
+          || (timelineResult?.supported && !timelineResult.stale
+            && PiTimelineCore.safeRevision(view.timeline.availableRevision)
+              > PiTimelineCore.safeRevision(view.timeline.revision)),
+        state:output.state || view.meta?.state || view.meta?.status,
+        streaming:output.streaming === true || view.meta?.streaming === true,
+        compacting:output.compacting === true || view.meta?.compacting === true,
+        abortBusy:view.abortBusy,
+        idleConfirmed:timelineResult?.supported === true && output.streaming === false
+          && output.compacting === false,
+        idleReads:view.readIdleCount,
+        outputChanged:timelineNeedsRender || Boolean(output.data) || reconciliation.generationChanged,
+        serverPending:output.pendingMessages ?? view.meta?.pendingMessages,
+        localPending:view.inputQueue.length,
+        inputSending:view.inputSending,
+        drainRemaining:view.readDrainRemaining,
+      });
+      view.readDrainRemaining = readPlan.drainRemaining;
+      view.readIdleCount = readPlan.idleReads || 0;
+      nextDelay = readPlan.delay;
     }
     persistAgentConsoleRecovery();
   } catch (error) {
+    if (readGeneration !== state.agentConsoleReadGeneration) return;
     const stillActive = ownerRunId === state.agentConsoleOwnerRunId && surfaceId === state.agentConsoleSurfaceId;
     if (stillActive && ["preflight","starting"].includes(state.runPhase)) nextDelay = 500;
     else if (stillActive) {
@@ -7031,9 +9109,11 @@ async function readAgentConsole() {
       nextDelay = 1000;
     }
   } finally {
-    state.agentConsoleReading = false;
-    if (state.agentConsoleVisible && nextDelay !== null) scheduleAgentConsoleRead(nextDelay);
-    else if (state.agentConsoleVisible && surfaceId !== state.agentConsoleSurfaceId) scheduleAgentConsoleRead(0);
+    if (readGeneration === state.agentConsoleReadGeneration) {
+      state.agentConsoleReading = false;
+      if (state.agentConsoleVisible && nextDelay !== null && !currentAgentConsoleView()?.postmortem) scheduleAgentConsoleRead(nextDelay);
+      else if (state.agentConsoleVisible && surfaceId !== state.agentConsoleSurfaceId && !currentAgentConsoleView()?.postmortem) scheduleAgentConsoleRead(0);
+    }
   }
 }
 
@@ -7041,11 +9121,106 @@ function queueAgentConsoleInput(value) {
   const view = currentAgentConsoleView();
   if (!value || !view || !state.agentConsoleOwnerRunId || !state.agentConsoleSurfaceId) return;
   view.inputQueue.push(typeof value === "object" ? {...value} : String(value));
+  view.readDrainRemaining = AgentConsoleTabsCore.FINAL_DRAIN_READS;
+  renderAgentConsole();
   void flushAgentConsoleInput(view, state.agentConsoleOwnerRunId, state.agentConsoleSurfaceId);
+}
+
+function clearAgentConsolePendingMessages() {
+  const view = currentAgentConsoleView();
+  if (!view) return;
+  if (!agentConsoleUsesStructuredPi(view)) {
+    queueAgentConsoleInput("\u001b");
+    return;
+  }
+  AgentConsoleInputCore.discardQueuedPiPrompts(view.inputQueue);
+  queueAgentConsoleInput({command:"clear_queue"});
 }
 
 function agentConsoleUsesStructuredPi(view = currentAgentConsoleView()) {
   return view?.meta?.protocol === "pi-rpc";
+}
+
+function agentConsoleShowsPiTimeline(view = currentAgentConsoleView()) {
+  return PiTimelineCore.shouldUseTimeline(view?.meta?.protocol, view?.timelineLoaded);
+}
+
+function submitAgentConsoleInput() {
+  const view = currentAgentConsoleView();
+  const input = $("agentConsoleInput");
+  const value = input.value;
+  if (!view || input.disabled) return false;
+  if (!value) {
+    if (!view.inputRetryPending || !view.inputQueue.length) return false;
+    view.inputRetryPending = false;
+    view.inputError = "";
+    void flushAgentConsoleInput(view, state.agentConsoleOwnerRunId, state.agentConsoleSurfaceId);
+    renderAgentConsole();
+    (agentConsoleShowsPiTimeline(view) ? $("agentPiTimelineViewport") : $("agentTerminalViewport")).focus();
+    return true;
+  }
+  if (agentConsoleUsesStructuredPi(view)) {
+    const validation = AgentConsoleInputCore.validatePiPrompt(value);
+    if (!validation.ok) {
+      view.inputError = validation.error;
+      input.setCustomValidity(validation.error);
+      input.reportValidity();
+      renderAgentConsole();
+      input.focus();
+      return false;
+    }
+  }
+  input.setCustomValidity("");
+  view.inputError = "";
+  queueAgentConsoleInput(agentConsoleUsesStructuredPi(view)
+    ? {command:"prompt", message:value} : `${value}\r`);
+  input.value = "";
+  saveAgentConsoleDraft();
+  (agentConsoleShowsPiTimeline(view) ? $("agentPiTimelineViewport") : $("agentTerminalViewport")).focus();
+  return true;
+}
+
+async function steerAgentConsoleInput() {
+  const view = currentAgentConsoleView();
+  const input = $("agentConsoleInput");
+  if (!view || view.steerBusy || $("agentConsoleSteerButton").disabled) return;
+  const message = input.value;
+  saveAgentConsoleDraft();
+  const draftKey = input.dataset.draftKey;
+  const validation = AgentConsoleInputCore.validatePiPrompt(message);
+  if (!validation.ok || message.trimStart().startsWith("/")) {
+    input.setCustomValidity(validation.error || "Use Send for slash commands. Steer accepts instructions for this task.");
+    input.reportValidity();
+    return;
+  }
+  input.setCustomValidity("");
+  const ownerRunId = state.agentConsoleOwnerRunId;
+  const surfaceId = state.agentConsoleSurfaceId;
+  const startedAt = String(view.meta?.startedAt || "");
+  const conversationId = String(view.meta?.conversationId || "");
+  view.steerBusy = true;
+  renderAgentConsole();
+  try {
+    const data = await api("/api/agent-console/input", {method:"POST",
+      body:JSON.stringify({ownerRunId, surfaceId, command:"steer", message})});
+    if (agentConsoleResponseTargetIsCurrent(view, ownerRunId, surfaceId, startedAt)
+        && String(view.meta?.conversationId || "") === conversationId) {
+      reconcileAgentConsoleViewMeta(view, data.console);
+      if (view.inputDraftKey === draftKey && view.inputDraft === message) {
+        // An acknowledgement belongs to its source console, even after a tab
+        // switch. Preserve anything typed while the request was in flight.
+        if (input.dataset.draftKey === draftKey && input.value === message) input.value = "";
+        view.inputDraft = "";
+        persistAgentConsoleDraft(draftKey, "");
+      }
+    }
+  } catch (error) {
+    showNotice(`Could not send steering. Your text has been kept. ${error.message}`, true);
+  } finally {
+    view.steerBusy = false;
+    renderAgentConsole();
+    scheduleAgentConsoleRead(0);
+  }
 }
 
 function agentConsoleKeyData(event) {
@@ -7069,17 +9244,88 @@ function agentConsoleKeyData(event) {
   return null;
 }
 
+function agentConsoleResponseTargetIsCurrent(view, ownerRunId, surfaceId, startedAt) {
+  return Boolean(
+    view && state.agentConsoleViews[surfaceId] === view
+    && state.agentConsoleOwnerRunId === ownerRunId
+    && String(view.meta?.startedAt || "") === startedAt
+  );
+}
+
+async function stopAgentConsoleResponse() {
+  const view = currentAgentConsoleView();
+  const ownerRunId = state.agentConsoleOwnerRunId;
+  const surfaceId = state.agentConsoleSurfaceId;
+  if (!view || !ownerRunId || !surfaceId || view.abortBusy) return;
+  if (!agentConsoleUsesStructuredPi(view)) {
+    queueAgentConsoleInput("\u0003");
+    return;
+  }
+  const startedAt = String(view.meta?.startedAt || "");
+  const abortRequest = {};
+  view.abortBusy = true;
+  view.abortRequest = abortRequest;
+  view.readDrainRemaining = AgentConsoleTabsCore.FINAL_DRAIN_READS;
+  try {
+    renderAgentConsole();
+    if (
+      view.abortRequest !== abortRequest
+      || !agentConsoleResponseTargetIsCurrent(view, ownerRunId, surfaceId, startedAt)
+    ) return;
+    const data = await api("/api/agent-console/input", {
+      method:"POST", body:JSON.stringify({ownerRunId, surfaceId, command:"abort"}),
+    });
+    const responseStartedAt = String(data.console?.startedAt || "");
+    if (
+      view.abortRequest === abortRequest
+      && agentConsoleResponseTargetIsCurrent(view, ownerRunId, surfaceId, startedAt)
+      && responseStartedAt === startedAt
+    ) {
+      reconcileAgentConsoleViewMeta(view, data.console);
+      if (surfaceId === state.agentConsoleSurfaceId) {
+        state.agentConsoleMeta = view.meta;
+        renderAgentConsole();
+      }
+    }
+  } catch (error) {
+    if (
+      view.abortRequest === abortRequest
+      && agentConsoleResponseTargetIsCurrent(view, ownerRunId, surfaceId, startedAt)
+    ) {
+      showNotice(`Could not stop Pi's current response. ${error.message}`, true);
+    }
+  } finally {
+    if (view.abortRequest === abortRequest) {
+      view.abortBusy = false;
+      view.abortRequest = null;
+      if (state.agentConsoleViews[surfaceId] === view && surfaceId === state.agentConsoleSurfaceId) {
+        renderAgentConsole();
+      }
+    }
+    scheduleAgentConsoleRead(0);
+  }
+}
+
 async function flushAgentConsoleInput(view, ownerRunId, surfaceId) {
   if (!view || view.inputSending) return;
   view.inputSending = true;
+  view.inputRetryPending = false;
+  view.inputError = "";
+  let activeBatch = null;
   try {
     while (view.inputQueue.length) {
-      const first = view.inputQueue[0];
-      if (first && typeof first === "object") {
-        view.inputQueue.shift();
+      activeBatch = AgentConsoleInputCore.takeNextBatch(view.inputQueue);
+      if (!activeBatch) break;
+      view.inputInFlightPromptCount = AgentConsoleInputCore.queuedPiPromptCount(activeBatch.items);
+      view.inputInFlightItems = activeBatch.items;
+      renderAgentConsole();
+      if (activeBatch.structured) {
         const data = await api("/api/agent-console/input", {
-          method:"POST", body:JSON.stringify({ownerRunId, surfaceId, ...first}),
+          method:"POST", body:JSON.stringify({ownerRunId, surfaceId, ...activeBatch.payload}),
         });
+        activeBatch = null;
+        view.inputInFlightPromptCount = 0;
+        view.inputInFlightItems = [];
         if (state.agentConsoleViews[surfaceId] === view && ownerRunId === state.agentConsoleOwnerRunId) {
           reconcileAgentConsoleViewMeta(view, data.console);
         }
@@ -7087,15 +9333,15 @@ async function flushAgentConsoleInput(view, ownerRunId, surfaceId) {
           state.agentConsoleMeta = view.meta;
           renderAgentConsole();
         }
+        scheduleAgentConsoleRead(0);
         continue;
       }
-      let value = "";
-      while (view.inputQueue.length && typeof view.inputQueue[0] !== "object" && value.length < 60000) {
-        value += view.inputQueue.shift();
-      }
       const data = await api("/api/agent-console/input", {
-        method:"POST", body:JSON.stringify({ownerRunId, surfaceId, data:value}),
+        method:"POST", body:JSON.stringify({ownerRunId, surfaceId, data:activeBatch.payload}),
       });
+      activeBatch = null;
+      view.inputInFlightPromptCount = 0;
+      view.inputInFlightItems = [];
       if (state.agentConsoleViews[surfaceId] === view && ownerRunId === state.agentConsoleOwnerRunId) {
         reconcileAgentConsoleViewMeta(view, data.console);
       }
@@ -7103,15 +9349,26 @@ async function flushAgentConsoleInput(view, ownerRunId, surfaceId) {
         state.agentConsoleMeta = view.meta;
         renderAgentConsole();
       }
+      scheduleAgentConsoleRead(0);
     }
   } catch (error) {
-    view.inputQueue = [];
+    AgentConsoleInputCore.restoreFailedBatch(view.inputQueue, activeBatch);
+    activeBatch = null;
+    view.inputInFlightPromptCount = 0;
+    view.inputInFlightItems = [];
+    view.inputRetryPending = Boolean(view.inputQueue.length);
+    view.inputError = view.inputRetryPending
+      ? `Could not send the next Hub message. It is still first in the local queue; choose Retry send. ${error.message}`
+      : error.message;
     if (surfaceId === state.agentConsoleSurfaceId) {
-      $("agentConsoleStatus").textContent = error.message;
-      $("agentConsoleStatus").className = "error";
+      renderAgentConsole();
     }
   } finally {
     view.inputSending = false;
+    view.inputInFlightPromptCount = 0;
+    view.inputInFlightItems = [];
+    if (!view.inputRetryPending && !view.inputQueue.length) view.inputError = "";
+    if (surfaceId === state.agentConsoleSurfaceId) renderAgentConsole();
   }
 }
 
@@ -7136,6 +9393,7 @@ async function resizeAgentConsole() {
   const view = currentAgentConsoleView();
   const meta = currentAgentConsoleRecord() || view?.meta || state.agentConsoleMeta;
   if (!state.agentConsoleVisible || !meta || !["running","starting"].includes(meta.state || meta.status)) return;
+  if (agentConsoleUsesStructuredPi(view)) return;
   const size = agentConsoleDimensions();
   if (Number(meta.cols) === size.cols && Number(meta.rows) === size.rows) return;
   try {
@@ -7158,21 +9416,26 @@ async function resizeAgentConsole() {
 async function stopAgentConsoleSurface(attachment = null) {
   const target = attachment || currentAgentConsoleAttachment() || state.agentConsoleMeta;
   if (!target || state.agentConsoleBusy) return;
+  const targetId = target.id || target.surfaceId;
   state.agentConsoleBusy = true;
+  invalidateAgentConsoleRead();
   renderAgentConsole();
   try {
     const data = await api("/api/agent-console/stop", {
-      method:"POST", body:JSON.stringify({ownerRunId:target.ownerRunId, surfaceId:target.id || target.surfaceId}),
+      method:"POST", body:JSON.stringify({ownerRunId:target.ownerRunId, surfaceId:targetId}),
     });
     if (state.runStatus) {
       state.runStatus = {...state.runStatus, attachments:data.hub?.attachments || state.runStatus.attachments, agentConsoles:data.hub?.agentConsoles || []};
     }
     if (state.sessionDashboard) state.sessionDashboard.hub = data.hub;
     syncAgentConsoleViews(state.runStatus, state.runStatus?.run, state.runPhase);
-    const targetId = target.id || target.surfaceId;
     const view = state.agentConsoleViews[targetId];
-    if (view) reconcileAgentConsoleViewMeta(view, data.console);
+    if (view) {
+      reconcileAgentConsoleViewMeta(view, data.console);
+      view.readDrainRemaining = AgentConsoleTabsCore.FINAL_DRAIN_READS;
+    }
     if (targetId === state.agentConsoleSurfaceId && view) state.agentConsoleMeta = view.meta;
+    if (state.agentConsoleVisible && targetId === state.agentConsoleSurfaceId) leaveAgentConsole();
     renderAgentConsole();
     if ($("sessionDialog")?.open) await loadSessionDashboard();
   } catch (error) {
@@ -7180,35 +9443,39 @@ async function stopAgentConsoleSurface(attachment = null) {
   } finally {
     state.agentConsoleBusy = false;
     renderAgentConsole();
+    scheduleAgentConsoleRead(0);
   }
 }
 
 async function restartAgentConsoleSurface(attachment = null) {
   const target = attachment || currentAgentConsoleAttachment() || state.agentConsoleMeta;
   if (!target || state.agentConsoleBusy) return;
+  const targetId = target.id || target.surfaceId;
   state.agentConsoleBusy = true;
+  invalidateAgentConsoleRead();
   renderAgentConsole();
   try {
     const data = await api("/api/agent-console/restart", {
-      method:"POST", body:JSON.stringify({ownerRunId:target.ownerRunId, surfaceId:target.id || target.surfaceId}),
+      method:"POST", body:JSON.stringify({ownerRunId:target.ownerRunId, surfaceId:targetId}),
     });
     if (state.runStatus) {
       state.runStatus = {...state.runStatus, attachments:data.hub?.attachments || state.runStatus.attachments, agentConsoles:data.hub?.agentConsoles || []};
     }
     if (state.sessionDashboard) state.sessionDashboard.hub = data.hub;
     syncAgentConsoleViews(state.runStatus, state.runStatus?.run, state.runPhase);
-    const targetId = target.id || target.surfaceId;
     const view = state.agentConsoleViews[targetId];
     if (view) {
       reconcileAgentConsoleViewMeta(view, data.console);
       view.seenEnd = 0;
       resetAgentConsoleTerminal(view, 0);
+      resetAgentPiTimeline(view);
+      view.readDrainRemaining = AgentConsoleTabsCore.FINAL_DRAIN_READS;
     }
     if (targetId === state.agentConsoleSurfaceId && view) {
       state.agentConsoleMeta = view.meta;
       state.agentConsoleVisible = true;
-      renderAgentTerminalOutput({preserveScroll:false});
-      scheduleAgentConsoleRead(0);
+      if (agentConsoleShowsPiTimeline(view)) renderAgentPiTimeline({preserveScroll:false});
+      else renderAgentTerminalOutput({preserveScroll:false});
       scheduleAgentConsoleResize();
     }
     if ($("sessionDialog")?.open) await loadSessionDashboard();
@@ -7217,6 +9484,7 @@ async function restartAgentConsoleSurface(attachment = null) {
   } finally {
     state.agentConsoleBusy = false;
     renderAgentConsole();
+    scheduleAgentConsoleRead(0);
   }
 }
 
@@ -7224,14 +9492,21 @@ function renderFocusedRunStatus({phase, message, active, stopLabel, logAvailable
   const panel = $("focusedRunStatus");
   if (!panel) return;
   const safePhase = String(phase || "idle");
-  const safeStopLabel = String(stopLabel || "Stop process");
+  const safeStopLabel = state.runStatus?.run?.purpose === "session"
+    ? "End session" : String(stopLabel || "Stop process");
   panel.dataset.phase = safePhase;
   $("focusedRunPhase").textContent = safePhase;
   $("focusedRunMessage").textContent = message || "Ready";
+  const consoleAvailable = active && Boolean(currentAgentConsoleView());
+  $("focusedConsoleButton").hidden = !consoleAvailable;
+  $("focusedConsoleButton").textContent = `Return to ${currentAgentConsoleView()?.meta?.surface || "Hub"}`;
+  $("focusedStopButton").hidden = !active;
+  $("focusedLogButton").hidden = consoleAvailable;
   $("focusedStopButton").disabled = !active;
   $("focusedStopButton").setAttribute("aria-label", safeStopLabel);
   $("focusedStopButton").title = safeStopLabel;
   $("focusedLogButton").disabled = !logAvailable;
+  $("agentConsoleLogButton").disabled = !logAvailable;
 }
 
 function renderRun(status) {
@@ -7301,12 +9576,15 @@ function renderRun(status) {
   if ($("sessionSetDialog")?.open) renderSessionSets();
 }
 
-async function pollStatus() {
-  try {
-    renderRun(await api("/api/status"));
-    if ($("sessionDialog")?.open && Date.now() - state.sessionLastLoadedAt >= 4500) loadSessionDashboard();
-  } catch (_) {}
-}
+const pollStatus = statusPoller.add("run", {
+  interval:() => document.hidden ? 10000 : 1800,
+  run:async () => {
+    try {
+      renderRun(await api("/api/status"));
+      if ($("sessionDialog")?.open && Date.now() - state.sessionLastLoadedAt >= 4500) loadSessionDashboard();
+    } catch (_) {}
+  },
+});
 
 function benchmarkHistoryRequest() {
   const request = gather("custom");
@@ -7319,7 +9597,7 @@ function benchmarkHistoryRequestKey(request) {
   return JSON.stringify({
     modelId:request.modelId, backend:request.backend, client:request.client,
     context:request.context, output:request.output, reasoning:request.reasoning,
-    kv:request.options?.kv || "off", chat:request.chat || null,
+    options:request.options || {}, chat:request.chat || null, generation:request.generation || null,
     suite:request.suite, enginePreference:request.enginePreference,
   });
 }
@@ -7389,7 +9667,7 @@ function renderBenchmarkHistory() {
       .map(engine => `${engine.label} · ${engine.valueDisplay}`).join("  |  ");
     return `<article class="benchmark-history-run ${esc(run.status)}"><div class="benchmark-history-run-head"><strong>${esc(benchmarkHistoryDate(run.createdAt))}</strong><em>${esc(statusLabel)}</em></div><p>${run.trustedWinner ? `<b>${esc(run.winnerLabel)} won.</b> ` : ""}${esc(run.summary)}</p><small>${esc(engines)}</small></article>`;
   });
-  const routeRows = (history.currentRouteRuns || []).map(run => `<article class="benchmark-history-run"><div class="benchmark-history-run-head"><strong>${esc(benchmarkHistoryDate(run.createdAt))}</strong><em>Current engine</em></div><p><b>${esc(run.winnerLabel)} route.</b> ${esc(run.recommendation || "Measured locally.")}</p><small>${esc(run.display)}</small></article>`);
+  const routeRows = (history.currentRouteRuns || []).map(run => `<article class="benchmark-history-run"><div class="benchmark-history-run-head"><strong>${esc(benchmarkHistoryDate(run.createdAt))}</strong><button type="button" class="text-button" data-review-benchmark="${esc(run.id)}" data-review-suite="${esc(run.suite || history.contract.suite)}" ${active ? "disabled" : ""}>View results</button></div><p><b>${esc(run.winnerLabel)} route.</b> ${esc(run.recommendation || "Measured locally.")}</p><small>${esc(run.display)}</small></article>`);
   $("benchmarkHistoryRuns").innerHTML = [...runRows, ...routeRows].join("") || `<p class="benchmark-history-empty">No saved run matches this exact visible contract yet.</p>`;
   const other = history.otherEvidence || {};
   $("benchmarkHistoryOther").innerHTML = other.count
@@ -7423,6 +9701,22 @@ async function loadBenchmarkHistory(force = false) {
   try {
     const data = await api("/api/benchmark/history", {method:"POST",body:JSON.stringify(request)});
     if (generation !== state.benchmarkHistoryGeneration) return;
+    // The current-engine 64K sweep has a different input schedule from the
+    // cross-engine Agentic suite. Keep both histories without conflating them.
+    if (request.backend === "mtplx" && request.suite === "agentic"
+        && Number(request.context) >= 65536 && request.options?.profile === "turbo"
+        && mtplxLongContextCapabilityExact(selectedModel())) {
+      const extra = await api("/api/benchmark/history", {method:"POST", body:JSON.stringify({
+        ...request, suite:MTPLX_LONG_CONTEXT_SUITE,
+      })});
+      if (generation !== state.benchmarkHistoryGeneration) return;
+      data.history.currentRouteRuns = [
+        ...(extra.history.currentRouteRuns || []), ...(data.history.currentRouteRuns || []),
+      ];
+      if (extra.history.currentRouteRuns?.length && !data.history.exactRecordCount) {
+        data.history.freshnessMessage = "Saved current-engine settings tests are available below. No matching cross-engine comparison for this workload yet.";
+      }
+    }
     state.benchmarkHistoryKey = key;
     state.benchmarkHistory = data.history;
   } catch (error) {
@@ -7443,6 +9737,38 @@ function scheduleBenchmarkHistory(force = false) {
   state.benchmarkHistoryTimer = setTimeout(() => loadBenchmarkHistory(force), 120);
 }
 
+function benchmarkDisplayedStatus(status = state.benchmarkStatus || {}) {
+  const review = state.benchmarkReview;
+  if (!review) return status;
+  let key;
+  try { key = benchmarkHistoryRequestKey(benchmarkHistoryRequest()); } catch (_) {}
+  if (["queued", "cooldown", "starting", "running", "stopping"].includes(status.phase)
+      || key !== review.requestKey || (status.job?.id || null) !== review.jobId) {
+    state.benchmarkReview = null;
+    return status;
+  }
+  return {phase:"completed", progress:1, result:review.result, savedReview:true};
+}
+
+async function reviewBenchmarkResult(recordId, suite) {
+  try {
+    if (calibrationBenchmarkActive()) return;
+    const request = benchmarkHistoryRequest();
+    const requestKey = benchmarkHistoryRequestKey(request);
+    const jobId = state.benchmarkStatus?.job?.id || null;
+    const data = await api("/api/benchmark/history", {method:"POST", body:JSON.stringify({
+      ...request, suite, reviewRecordId:recordId,
+    })});
+    if (calibrationBenchmarkActive() || requestKey !== benchmarkHistoryRequestKey(benchmarkHistoryRequest())
+        || jobId !== (state.benchmarkStatus?.job?.id || null)) return;
+    if (data.history?.reviewResult?.id !== recordId) throw new Error("That saved result is unavailable.");
+    state.benchmarkReview = {result:data.history.reviewResult, requestKey, jobId};
+    renderBenchmarkStatus(state.benchmarkStatus || {phase:"idle"});
+    $("benchmarkHistoryPanel").open = false;
+    $("benchmarkResults").scrollIntoView({block:"nearest"});
+  } catch (error) { showNotice(error.message, true); }
+}
+
 function performanceReceiptSuite() {
   const qualificationBackend = selectedRouteQualificationBackend();
   if (qualificationBackend === "llamacpp") {
@@ -7451,7 +9777,7 @@ function performanceReceiptSuite() {
   if (qualificationBackend === "uzu") {
     const suite = uzuQualificationSuite(Number($("contextInput").value));
     if (!suite) {
-      throw new Error("Uzu qualification is available only at the exact 16K or 32K context tier.");
+      throw new Error("Uzu qualification is available only at an exact 16K, 32K, 64K, or 128K context tier.");
     }
     return suite;
   }
@@ -7473,7 +9799,10 @@ function performanceReceiptSuiteOrder(request = {}, routeQualification = false) 
   const clientOrder = request.client === "chat"
     ? ["standard", "agentic", "thorough", "quick"]
     : ["agentic", "standard", "thorough", "quick"];
-  return [preferred, ...clientOrder].filter((suite, index, suites) => (
+  const operatorSuite = request.backend === "mtplx" && Number(request.context) >= 65536
+    && request.options?.profile === "turbo" && mtplxLongContextCapabilityExact(selectedModel())
+    ? [MTPLX_LONG_CONTEXT_SUITE] : [];
+  return [preferred, ...operatorSuite, ...clientOrder].filter((suite, index, suites) => (
     suite && suites.indexOf(suite) === index
   ));
 }
@@ -7490,6 +9819,8 @@ function performanceReceiptSuiteLabel(receipt = {}) {
     [LLAMACPP_PLE_QUALIFICATION_SUITE]:"SSD PLE Route Qualification",
     "route-qualification-uzu-16k":"Uzu Route Qualification · 16K",
     "route-qualification-uzu-32k":"Uzu Route Qualification · 32K",
+    "route-qualification-uzu-64k":"Uzu Route Qualification · 64K",
+    "route-qualification-uzu-128k":"Uzu Route Qualification · 128K",
     standard:"Standard",
     thorough:"Thorough",
     quick:"Quick",
@@ -7533,6 +9864,14 @@ function performanceReceiptAge(receipt) {
 }
 
 function performanceReceiptView(receipt) {
+  if (state.backend === "uzu" && state.client === "pi") {
+    return {
+      state:"missing", icon:"○", title:"Uzu Pi · fixed DFlash + Weaver",
+      detail:"Launch uses the matching Chat capacity test. Pi speed is not measured yet.",
+      action:"Capacity", actionId:"review-capacity",
+      titleText:"Pi uses the qualified context and live memory guard. Chat TPS is not an agent-speed result.",
+    };
+  }
   const focused = activeDetail() === "focused";
   const qualificationBackend = performanceReceiptQualificationBackend(receipt);
   const routeQualification = Boolean(qualificationBackend);
@@ -7555,13 +9894,22 @@ function performanceReceiptView(receipt) {
     : "";
   const age = performanceReceiptAge(receipt);
   const firstOutput = finiteMetric(receipt?.firstTokenSeconds);
+  const selectedSetup = receipt?.settingsSearch?.selectedSetupLabel
+    || receipt?.routeSettingsLabel || receipt?.modeLabel || "";
+  const testedSetups = Number(receipt?.settingsSearch?.testedSetupCount || 0);
+  const maximumSetups = Number(receipt?.settingsSearch?.maximumSetupCount || 0);
+  const setupCoverage = testedSetups > 0 && maximumSetups >= testedSetups
+    ? `${testedSetups}/${maximumSetups} setups tested`
+    : "";
   const measured = [
     suite,
+    selectedSetup,
+    setupCoverage,
     receipt?.workloadDisplay,
     firstOutput === null ? "" : `${firstOutput.toFixed(2)}s first output`,
     age,
   ].filter(Boolean).join(" · ");
-  const measuredTitle = [receipt?.backendLabel, receipt?.modeLabel].filter(Boolean).join(" · ");
+  const measuredTitle = [receipt?.backendLabel, selectedSetup].filter(Boolean).join(" · ");
   const fullSummary = [receipt?.summary, measured].filter(Boolean).join(" ");
   if (["trusted-engine", "trusted-route"].includes(receipt?.state)) {
     const engineReceipt = receipt.state === "trusted-engine" && !routeQualification;
@@ -7574,7 +9922,7 @@ function performanceReceiptView(receipt) {
       state:"trusted", icon:"◆",
       title:focused ? focusedTitle : `Measured · ${measuredTitle || "verified route"}`,
       detail:focused
-        ? [engineReceipt ? receipt.modeLabel : receipt.backendLabel, suite, receipt.workloadDisplay, reasoningLabel, contextLabel, age].filter(Boolean).join(" · ")
+        ? [engineReceipt ? selectedSetup : receipt.backendLabel, setupCoverage, suite, receipt.workloadDisplay, reasoningLabel, contextLabel, age].filter(Boolean).join(" · ")
         : [measured, reasoningLabel, contextLabel, "review before applying"].filter(Boolean).join(" · "),
       action:"Review", actionId:"review-normalized", titleText:fullSummary,
     };
@@ -7585,7 +9933,7 @@ function performanceReceiptView(receipt) {
           ? `Qualified · ${measuredTitle || "verified route"}`
           : `Measured · ${measuredTitle || "verified route"}`,
       detail:focused
-        ? [engineReceipt ? receipt.modeLabel : receipt.backendLabel, suite, receipt.workloadDisplay, age].filter(Boolean).join(" · ")
+        ? [engineReceipt ? selectedSetup : receipt.backendLabel, setupCoverage, suite, receipt.workloadDisplay, age].filter(Boolean).join(" · ")
         : measured || `${suite} exact-contract evidence`,
       action:"Apply", actionId:engineReceipt ? "apply-engine" : "apply-route",
       titleText:fullSummary,
@@ -7839,6 +10187,7 @@ async function activatePerformanceReceipt() {
   const button = $("performanceReceipt");
   if (button.disabled) return;
   const action = button.dataset.action;
+  if (action === "review-capacity") return openSessionDashboard();
   if (action === "retry") return loadPerformanceReceipt(true);
   if (["apply-engine", "apply-route"].includes(action) && !state.performanceReceipt?.evidenceBinding) {
     showNotice("That saved result has no exact apply reference. Refresh performance evidence before applying it.", true);
@@ -7883,9 +10232,25 @@ function benchmarkPreferenceChanged() {
     thermal:"Requires every engine to start at the same public macOS thermal state, then ranks worst state and speed.",
   };
   $("benchmarkPreferenceHelp").textContent = help[preference] || help.fastest;
-  if (state.benchmarkStatus) renderBenchmarkResults(state.benchmarkStatus);
+  if (state.benchmarkStatus) renderBenchmarkResults(benchmarkDisplayedStatus());
   renderBenchmarkSetup();
   scheduleBenchmarkHistory();
+}
+
+function engineShootoutApplyBinding(result, profile, preference) {
+  const candidate = profile?.evidenceBinding
+    || (result?.selectedPreference === preference ? result?.evidenceBinding : null);
+  const recordIds = candidate?.recordIds;
+  if (
+    !candidate || typeof candidate !== "object" || Array.isArray(candidate)
+    || candidate.scope !== "engine"
+    || candidate.suite !== result?.suite
+    || candidate.preference !== preference
+    || candidate.shootoutId !== result?.id
+    || !recordIds || typeof recordIds !== "object" || Array.isArray(recordIds)
+    || !Object.keys(recordIds).length
+  ) return null;
+  return JSON.parse(JSON.stringify(candidate));
 }
 
 function renderEngineShootoutResults(status) {
@@ -7901,9 +10266,16 @@ function renderEngineShootoutResults(status) {
   }))).filter(engine => uiEngineVisible(engine.backend));
   const recommended = profile?.backend || result?.recommendedBackend;
   const trustedWinner = Boolean(profile?.trustedWinner ?? result?.trustedWinner);
+  const applyReadyTier = [
+    "cross-engine-local-benchmark",
+    "cross-engine-leading-band",
+    "cross-engine-noise-floor",
+  ].includes(profile?.evidenceTier);
+  const applyBinding = result?.matrixWorkloadComparable !== false && applyReadyTier
+    ? engineShootoutApplyBinding(result, profile, preference) : null;
   const profileComparisons = new Map((profile?.comparedEngines || []).map(item => [item.backend, item]));
   const cards = engines.map(engine => {
-    const winner = Boolean(trustedWinner && engine.backend === recommended);
+    const winner = Boolean(applyBinding && engine.backend === recommended);
     const profileComparison = profileComparisons.get(engine.backend);
     const modeLabel = engine.routeSettingsLabel
       || engine.modeLabel || (engine.mode ? benchmarkWinnerLabel(engine.mode) : "Measuring…");
@@ -7925,8 +10297,13 @@ function renderEngineShootoutResults(status) {
     return `<article class="benchmark-result engine-result ${winner ? "winner" : ""}"><div class="benchmark-result-head"><strong>${esc(engine.label || backendName(engine.backend))}</strong><em>${esc(badge)}</em></div><div class="benchmark-metrics"><span>Fastest safe route<b>${esc(modeLabel)}</b></span><span>Workload result<b>${esc(engine.display || "Measuring…")}</b></span><span>Generation speed<b>${decodeTps === null ? "Not measured" : `${decodeTps.toFixed(1)} tok/s`}</b></span><span>First output<b>${esc(ttftText)}</b></span><span>Memory pressure<b>${esc(memoryText)}</b></span><span>Thermal state<b>${esc(thermalText)}</b></span><span>Start gate<b>${esc(cooldownText)}</b></span></div>${engine.runtimeVersion ? `<p class="benchmark-runtime">${esc(engine.runtimeVersion)}</p>` : ""}<p class="benchmark-quality ${result && !engine.qualityMatchesMatrix ? "bad" : ""}">${qualityText}</p></article>`;
   }).join("");
   const recommendationText = profile?.recommendation || result?.recommendation;
+  const recommendationHeading = trustedWinner
+    ? `${profile?.label || result?.decision?.label || backendName(recommended)} wins for ${enginePreferenceLabels[preference] || "this goal"}.`
+    : profile?.engineChanged
+      ? `${profile?.label || backendName(recommended)} leads the measured group.`
+      : `${profile?.label || backendName(recommended)} stays selected.`;
   const recommendation = recommendationText
-    ? `<div class="benchmark-recommendation"><span><strong>${trustedWinner ? `${esc(profile?.label || result?.decision?.label || backendName(recommended))} wins for ${esc(enginePreferenceLabels[preference] || "this goal")}.` : "Current engine kept."}</strong> ${esc(recommendationText)}</span>${trustedWinner ? `<button type="button" class="text-button" data-apply-shootout>Apply ${esc(enginePreferenceLabels[preference] || "measured winner")}</button>` : ""}</div>`
+    ? `<div class="benchmark-recommendation"><span><strong>${esc(recommendationHeading)}</strong> ${esc(recommendationText)}</span>${applyBinding ? `<button type="button" class="text-button" data-apply-shootout>Apply ${esc(enginePreferenceLabels[preference] || "measured result")}</button>` : ""}</div>`
     : "";
   $("benchmarkResults").innerHTML = cards + recommendation;
 }
@@ -7939,8 +10316,12 @@ function renderMtpTuningResults(status) {
   const baseline = result?.modes?.ar || status.modes?.ar;
   const selectedSettings = sweep.selectedSettings || candidates.find(item => item.key === selectedKey)?.settings;
   const winner = result?.winner;
-  const baselineSpeed = Number(baseline?.medianEndToEndTokensPerSecond);
-  const facts = `<div class="benchmark-tuning-facts"><span><small>AR reference</small><b>${Number.isFinite(baselineSpeed) ? `${baselineSpeed.toFixed(1)} tok/s` : "Preparing…"}</b></span><span><small>Search progress</small><b>${candidates.length} / ${Number(sweep.maximumCandidates || status.job?.tuningPlan?.maximumMtpCandidates || 10)} candidates</b></span><span><small>Current choice</small><b>${selectedSettings ? `max ${selectedSettings.depth} · min ${selectedSettings.mtpMinTokens} · ${Number(selectedSettings.mtpMinContinueProbability).toFixed(2)}` : "Waiting…"}</b></span><span><small>Final route</small><b>${winner ? benchmarkWinnerLabel(winner) : "Not committed"}</b></span></div>`;
+  const selectionMetric = sweep.selectionMetric || status.job?.tuningPlan?.selectionMetric || result?.selectionMetric || "end-to-end-tokens-per-second";
+  const generationMetric = selectionMetric === "generation-tokens-per-second";
+  const selectedSpeedField = generationMetric ? "medianDecodeTokensPerSecond" : "medianEndToEndTokensPerSecond";
+  const selectedSpeedLabel = generationMetric ? "Generation TPS" : "End-to-end TPS";
+  const baselineSpeed = Number(baseline?.[selectedSpeedField]);
+  const facts = `<div class="benchmark-tuning-facts"><span><small>AR ${esc(selectedSpeedLabel)}</small><b>${Number.isFinite(baselineSpeed) ? `${baselineSpeed.toFixed(1)} tok/s` : "Preparing…"}</b></span><span><small>Search progress</small><b>${candidates.length} / ${Number(sweep.maximumCandidates || status.job?.tuningPlan?.maximumMtpCandidates || 10)} candidates</b></span><span><small>Current choice</small><b>${selectedSettings ? `max ${selectedSettings.depth} · min ${selectedSettings.mtpMinTokens} · ${Number(selectedSettings.mtpMinContinueProbability).toFixed(2)}` : "Waiting…"}</b></span><span><small>Final route</small><b>${winner ? benchmarkWinnerLabel(winner) : "Not committed"}</b></span></div>`;
   const stageLabels = {depth:"Draft maximum",cutoff:"Probability cutoff",minimum:"Draft minimum"};
   const cards = candidates.length
     ? `<div class="benchmark-tuning-candidates">${candidates.map(candidate => {
@@ -7948,7 +10329,7 @@ function renderMtpTuningResults(status) {
       const selected = candidate.key === selectedKey || candidate.selected === true;
       const badge = selected ? (result ? "Selected" : "Leading") : (stageLabels[candidate.stage] || "Measured");
       const quality = candidate.qualityMatchesAR === true;
-      return `<article class="benchmark-tuning-candidate ${selected ? "selected" : ""} ${quality ? "" : "mismatch"}"><header><strong>max ${esc(settings.depth)} · min ${esc(settings.mtpMinTokens)} · cutoff ${Number(settings.mtpMinContinueProbability || 0).toFixed(2)}</strong><em>${esc(badge)}</em></header><div><span>Median <b>${Number(candidate.medianSpeedupVsAR || 0).toFixed(2)}× AR</b></span><span>Worst <b>${Number(candidate.worstCaseSpeedupVsAR || 0).toFixed(2)}× AR</b></span><span>Output <b>${Number(candidate.medianEndToEndTokensPerSecond || 0).toFixed(1)} tok/s</b></span></div><p class="benchmark-quality ${quality ? "" : "bad"}">${quality ? "✓ Exact greedy output matches AR" : "! Greedy output mismatch"}</p></article>`;
+      return `<article class="benchmark-tuning-candidate ${selected ? "selected" : ""} ${quality ? "" : "mismatch"}"><header><strong>max ${esc(settings.depth)} · min ${esc(settings.mtpMinTokens)} · cutoff ${Number(settings.mtpMinContinueProbability || 0).toFixed(2)}</strong><em>${esc(badge)}</em></header><div><span>Median <b>${Number(candidate.medianSpeedupVsAR || 0).toFixed(2)}× AR</b></span><span>Worst <b>${Number(candidate.worstCaseSpeedupVsAR || 0).toFixed(2)}× AR</b></span><span>${esc(selectedSpeedLabel)} <b>${Number(candidate[selectedSpeedField] || 0).toFixed(1)} tok/s</b></span></div><p class="benchmark-quality ${quality ? "" : "bad"}">${quality ? "✓ Exact greedy output matches AR" : "! Greedy output mismatch"}</p></article>`;
     }).join("")}</div>`
     : `<p class="benchmark-tuning-empty">The AR reference is measured first. Candidate results appear here as complete, cache-isolated loads finish.</p>`;
   const recommendation = result?.recommendation
@@ -7965,11 +10346,15 @@ function renderDflashTuningResults(status) {
   const baseline = result?.modes?.ar || status.modes?.ar;
   const selectedSettings = sweep.selectedSettings || candidates.find(item => item.key === selectedKey)?.settings;
   const winner = result?.winner;
-  const baselineSpeed = Number(baseline?.medianEndToEndTokensPerSecond);
+  const selectionMetric = sweep.selectionMetric || status.job?.tuningPlan?.selectionMetric || result?.selectionMetric || "end-to-end-tokens-per-second";
+  const generationMetric = selectionMetric === "generation-tokens-per-second";
+  const selectedSpeedField = generationMetric ? "medianDecodeTokensPerSecond" : "medianEndToEndTokensPerSecond";
+  const selectedSpeedLabel = generationMetric ? "Generation TPS" : "End-to-end TPS";
+  const baselineSpeed = Number(baseline?.[selectedSpeedField]);
   const selectedLabel = selectedSettings
     ? `block ${selectedSettings.blockSize} · ${selectedSettings.verifyMode} · ${selectedSettings.draftQuant}`
     : "Waiting…";
-  const facts = `<div class="benchmark-tuning-facts"><span><small>AR reference</small><b>${Number.isFinite(baselineSpeed) ? `${baselineSpeed.toFixed(1)} tok/s` : "Preparing…"}</b></span><span><small>Search progress</small><b>${candidates.length} / ${Number(sweep.maximumCandidates || status.job?.tuningPlan?.maximumDflashCandidates || 10)} candidates</b></span><span><small>Best tested DFlash</small><b>${esc(selectedLabel)}</b></span><span><small>Final route</small><b>${winner ? benchmarkWinnerLabel(winner) : "Not committed"}</b></span></div>`;
+  const facts = `<div class="benchmark-tuning-facts"><span><small>AR ${esc(selectedSpeedLabel)}</small><b>${Number.isFinite(baselineSpeed) ? `${baselineSpeed.toFixed(1)} tok/s` : "Preparing…"}</b></span><span><small>Search progress</small><b>${candidates.length} / ${Number(sweep.maximumCandidates || status.job?.tuningPlan?.maximumDflashCandidates || 10)} candidates</b></span><span><small>Best tested DFlash</small><b>${esc(selectedLabel)}</b></span><span><small>Final route</small><b>${winner ? benchmarkWinnerLabel(winner) : "Not committed"}</b></span></div>`;
   const stageLabels = {block:"Block size",verifier:"Verifier",quantization:"Draft precision"};
   const cards = candidates.length
     ? `<div class="benchmark-tuning-candidates">${candidates.map(candidate => {
@@ -7977,13 +10362,61 @@ function renderDflashTuningResults(status) {
       const selected = candidate.key === selectedKey || candidate.selected === true;
       const badge = selected ? (result ? "Selected" : "Leading") : (stageLabels[candidate.stage] || "Measured");
       const quality = candidate.qualityMatchesAR === true;
-      return `<article class="benchmark-tuning-candidate ${selected ? "selected" : ""} ${quality ? "" : "mismatch"}"><header><strong>block ${esc(settings.blockSize)} · ${esc(settings.verifyMode)} · ${esc(settings.draftQuant)}</strong><em>${esc(badge)}</em></header><div><span>Median <b>${Number(candidate.medianSpeedupVsAR || 0).toFixed(2)}× AR</b></span><span>Worst <b>${Number(candidate.worstCaseSpeedupVsAR || 0).toFixed(2)}× AR</b></span><span>Output <b>${Number(candidate.medianEndToEndTokensPerSecond || 0).toFixed(1)} tok/s</b></span></div><p class="benchmark-quality ${quality ? "" : "bad"}">${quality ? "✓ Exact greedy output matches AR" : "! Greedy output mismatch"}</p></article>`;
+      return `<article class="benchmark-tuning-candidate ${selected ? "selected" : ""} ${quality ? "" : "mismatch"}"><header><strong>block ${esc(settings.blockSize)} · ${esc(settings.verifyMode)} · ${esc(settings.draftQuant)}</strong><em>${esc(badge)}</em></header><div><span>Median <b>${Number(candidate.medianSpeedupVsAR || 0).toFixed(2)}× AR</b></span><span>Worst <b>${Number(candidate.worstCaseSpeedupVsAR || 0).toFixed(2)}× AR</b></span><span>${esc(selectedSpeedLabel)} <b>${Number(candidate[selectedSpeedField] || 0).toFixed(1)} tok/s</b></span></div><p class="benchmark-quality ${quality ? "" : "bad"}">${quality ? "✓ Exact greedy output matches AR" : "! Greedy output mismatch"}</p></article>`;
     }).join("")}</div>`
     : `<p class="benchmark-tuning-empty">AR and native MTP references are measured first when available. Complete, cache-isolated DFlash candidates appear here as they finish.</p>`;
   const recommendation = result?.recommendation
     ? `<div class="benchmark-recommendation"><strong>${esc(benchmarkWinnerLabel(result.winner))} recommendation.</strong> ${esc(result.recommendation)}</div>`
     : "";
   $("benchmarkResults").innerHTML = `<section class="benchmark-tuning-result"><div class="benchmark-tuning-result-head"><div><span>Bounded oMLX DFlash search</span><strong>${result ? "Complete evidence contract" : "Provisional measurements"}</strong></div><em>${candidates.length} tested</em></div>${facts}${cards}</section>${recommendation}`;
+}
+
+function benchmarkRouteApplyBinding(status = {}) {
+  const result = status.result;
+  if (
+    status.phase !== "completed" || !result || result.scope !== "local"
+    || (result.kind && result.kind !== "mtplx-long-context-operator-tuning")
+    || result.qualityPassed !== true
+    || result.backend !== state.backend || result.modelId !== selectedModel()?.id
+    || result.client !== state.client || result.reasoning !== $("reasoningSelect").value
+    || Number($("contextInput").value) !== result.contextMin
+    || Number($("contextInput").value) !== result.contextMax
+    || Number($("outputInput").value) !== result.outputMax
+  ) return null;
+  return copiedEvidenceBinding({
+    scope:"route", suite:result.suite, preference:"throughput", recordId:result.id,
+  });
+}
+
+async function applyBenchmarkRouteResult() {
+  const binding = benchmarkRouteApplyBinding(benchmarkDisplayedStatus());
+  if (!binding) {
+    showNotice("This result no longer matches the visible model and settings. Restore them before applying.", true);
+    return false;
+  }
+  const applied = await applyOptimal("current", "throughput", false, binding);
+  if (applied && $("benchmarkDialog").open) $("benchmarkDialog").close();
+  return applied;
+}
+
+function benchmarkResultRecommendation(result) {
+  if (result?.kind === "mtplx-long-context-operator-tuning" && result.winner === "mtp"
+      && result.mtplxOperatorSweep?.selectedRoute === "default") {
+    const candidate = result.mtplxOperatorSweep.candidates?.find(item => item.route === "dense-27b-long-context-2111");
+    const gain = finiteMetric(candidate?.medianSpeedupVsDefault);
+    if (candidate?.qualityMatchesAR === true && candidate?.resourceComparable === true
+        && gain !== null && gain >= 1 && gain < 1.03) {
+      return `Keep default MTP: long-context MTP was only ${((gain - 1) * 100).toFixed(1)}% faster on median generation TPS, below the 3% switching threshold. Both passed the correctness check; this is a practical tie.`;
+    }
+  }
+  if (result?.kind === "mtplx-long-context-operator-tuning" && result.winner === "ar") {
+    const sweep = result.mtplxOperatorSweep;
+    const selected = (sweep?.candidates || []).find(candidate => candidate.route === sweep.selectedRoute);
+    if (selected?.qualityMatchesAR === false) {
+      return "Keep AR: the tested MTP output did not exactly match the greedy reference. Its measured speed is shown, but it is not eligible for automatic selection.";
+    }
+  }
+  return result?.recommendation || "";
 }
 
 function renderBenchmarkResults(status) {
@@ -7997,6 +10430,28 @@ function renderBenchmarkResults(status) {
   }
   if (status.result?.kind === "omlx-dflash2-tuning" || status.job?.kind === "omlx-dflash2-tuning") {
     renderDflashTuningResults(status);
+    return;
+  }
+  if (status.result?.kind === "mtplx-long-context-operator-tuning") {
+    const result = status.result, sweep = result.mtplxOperatorSweep;
+    const recommendation = benchmarkResultRecommendation(result);
+    const arSpeeds = (sweep.arMeasurement?.samples || [])
+      .map(sample => finiteMetric(sample.decodeTokensPerSecond))
+      .filter(speed => speed !== null && speed > 0);
+    const rows = [
+      {label:"AR", winner:result.winner === "ar", quality:true,
+        speed:sweep.arMeasurement?.medianDecodeTokensPerSecond,
+        worst:arSpeeds.length ? Math.min(...arSpeeds) : null},
+      ...(sweep.candidates || []).map(candidate => ({
+        label:candidate.route === "default" ? "Default MTP" : "Long-context MTP",
+        winner:result.winner === "mtp" && candidate.route === sweep.selectedRoute,
+        quality:candidate.qualityMatchesAR === true,
+        speed:candidate.medianGenerationTokensPerSecond,
+        worst:candidate.worstGenerationTokensPerSecond,
+      })),
+    ];
+    const cards = rows.map(row => `<article class="benchmark-result ${row.winner ? "winner" : ""}"><div class="benchmark-result-head"><strong>${esc(row.label)}</strong><em>${row.winner ? "Winner" : "Measured"}</em></div><div class="benchmark-metrics"><span>Generation<b>${finiteMetric(row.speed) === null ? "Not reported" : `${Number(row.speed).toFixed(1)} tok/s`}</b></span><span>Slowest turn<b>${finiteMetric(row.worst) === null ? "Not reported" : `${Number(row.worst).toFixed(1)} tok/s`}</b></span></div><p class="benchmark-quality ${row.quality ? "" : "bad"}">${row.quality ? "✓ Correctness check passed" : "! Correctness check failed"}</p></article>`).join("");
+    $("benchmarkResults").innerHTML = cards + `<div class="benchmark-recommendation"><span>${esc(recommendation)}</span>${benchmarkRouteApplyBinding(status) ? '<button type="button" class="text-button" data-apply-benchmark-route>Use measured settings</button>' : ""}</div>`;
     return;
   }
   const result = status.result;
@@ -8023,21 +10478,38 @@ function renderBenchmarkResults(status) {
       : "";
     return `<article class="benchmark-result ${winner === mode ? "winner" : ""}"><div class="benchmark-result-head"><strong>${esc(values.label || benchmarkWinnerLabel(mode))}</strong><em>${winner === mode ? "Winner" : (speedup ? `${Number(speedup).toFixed(2)}× AR` : "Measured")}</em></div><div class="benchmark-metrics">${metrics}</div>${reuse}<p class="benchmark-quality ${qualityKnown && !values.qualityMatchesAR ? "bad" : ""}">${qualityText}</p></article>`;
   }).join("");
-  const recommendation = result?.recommendation ? `<div class="benchmark-recommendation"><strong>${esc(benchmarkWinnerLabel(result.winner))} recommendation.</strong> ${esc(result.recommendation)}</div>` : "";
+  const applyBinding = benchmarkRouteApplyBinding(status);
+  const recommendation = result?.recommendation ? `<div class="benchmark-recommendation"><span><strong>${esc(benchmarkWinnerLabel(result.winner))} recommendation.</strong> ${esc(result.recommendation)}</span>${applyBinding ? '<button type="button" class="text-button" data-apply-benchmark-route>Use measured settings</button>' : ""}</div>` : "";
   $("benchmarkResults").innerHTML = cards + recommendation;
+}
+
+function renderBenchmarkLiveTps(status = {}) {
+  const active = ["queued", "cooldown", "starting", "running", "stopping"].includes(status.phase);
+  const speed = finiteMetric(status.liveMetric?.decodeTokensPerSecond);
+  const field = $("benchmarkLiveTps");
+  field.classList.toggle("hidden", !active);
+  field.textContent = !active ? ""
+    : speed === null ? "Measuring…" : `Last completed turn · ${speed.toFixed(1)} tok/s`;
+  field.title = active
+    ? [status.liveMetric?.backendLabel, status.liveMetric?.modeLabel, status.liveMetric?.stageLabel]
+      .filter(Boolean).join(" · ") : "";
 }
 
 function renderBenchmarkStatus(status = {}) {
   state.benchmarkStatus = status;
   state.benchmarkPhase = status.phase || "idle";
-  const progress = Math.max(0, Math.min(1, Number(status.progress || 0)));
+  const displayed = benchmarkDisplayedStatus(status);
+  const progress = Math.max(0, Math.min(1, Number(displayed.progress || 0)));
   const percent = Math.round(progress * 100);
   $("benchmarkPhase").textContent = ({idle:"Ready",queued:"Queued",cooldown:"Stabilising Mac",starting:"Loading route",running:"Measuring",stopping:"Stopping",completed:"Completed",cancelled:"Cancelled",failed:"Failed"})[state.benchmarkPhase] || state.benchmarkPhase;
+  if (displayed.savedReview) $("benchmarkPhase").textContent = "Saved result";
   $("benchmarkPercent").textContent = `${percent}%`;
   $("benchmarkProgressBar").style.width = `${percent}%`;
   const track = $("benchmarkProgressBar").parentElement;
   track.setAttribute("aria-valuenow", String(percent));
-  $("benchmarkStatus").textContent = status.message || "Nothing will start until you press Run benchmark.";
+  $("benchmarkStatus").textContent = (displayed.phase === "completed" && benchmarkResultRecommendation(displayed.result))
+    || status.message || "Nothing will start until you press Run benchmark.";
+  renderBenchmarkLiveTps(status);
   const order = status.result?.executionOrder || status.job?.executionOrder || [];
   const cooldown = status.result?.resourceCooldown || status.job?.resourceCooldown;
   const mtpTuning = status.result?.kind === "lmstudio-mtp-tuning" || status.job?.kind === "lmstudio-mtp-tuning";
@@ -8052,7 +10524,7 @@ function renderBenchmarkStatus(status = {}) {
     : order.length
       ? `Rotated run order: ${order.map(backendName).join(" → ")}. Before every route, Launcher waits up to ${Number(cooldown?.maxWaitSeconds || 60).toFixed(0)} seconds for comparable Mac conditions.`
       : "Every measured route receives a fresh model load.";
-  renderBenchmarkResults(status);
+  renderBenchmarkResults(displayed);
   renderBenchmarkHistory();
   renderBenchmarkSetup();
   if ($("calibrationDialog")?.open) renderCalibrationBenchmark(status);
@@ -8067,9 +10539,12 @@ function renderBenchmarkStatus(status = {}) {
   }
 }
 
-async function pollBenchmarkStatus() {
-  try { renderBenchmarkStatus(await api("/api/benchmark/status")); } catch (_) {}
-}
+const pollBenchmarkStatus = statusPoller.add("benchmark", {
+  interval:() => statusPollInterval(["queued", "cooldown", "starting", "running", "stopping"].includes(state.benchmarkPhase), "benchmarkDialog"),
+  run:async () => {
+    try { renderBenchmarkStatus(await api("/api/benchmark/status")); } catch (_) {}
+  },
+});
 
 async function openBenchmarkLab() {
   renderBenchmarkSetup();
@@ -8135,6 +10610,15 @@ function calibrationOperationBlocked() {
     || state.calibrationStarting
     || state.calibrationApplying
     || state.profileBusy;
+}
+
+function calibrationMeasurementAdmission(plan = state.calibrationPlan || {}) {
+  // Route qualification has its own stricter, freshly sampled admission
+  // contract.  Ordinary engine comparisons begin with the visible route and
+  // therefore use the launcher's signature-bound session admission.
+  return plan.routeQualification === true
+    ? sessionAdmissionDecision(plan.memoryAdmission)
+    : currentSessionAdmission();
 }
 
 function calibrationQualificationProfile(plan = state.calibrationPlan || {}) {
@@ -8243,6 +10727,9 @@ function uzuQualificationContractExact(plan = state.calibrationPlan || {}) {
   const receiptFingerprint = String(capability.benchmarkModelFingerprint || "");
   const runtimeVersion = String(capability.runtimeVersion || "");
   const runtimeSha = String(capability.runtimeIdentity?.binary?.sha256 || "");
+  const runtimeSize = Number(capability.runtimeIdentity?.binary?.size);
+  const runtimeCommit = String(capability.runtimeIdentity?.upstreamCommit || "");
+  const runtimePatchSha = String(capability.runtimeIdentity?.sourcePatchSha256 || "");
   const systemContract = capability.qualificationSystemContract || {};
   const expectedOsReserveBytes = Number(systemContract.osReserveBytes);
   const expectedSandboxProfileSha256 = String(systemContract.sandboxProfileSha256 || "");
@@ -8261,6 +10748,17 @@ function uzuQualificationContractExact(plan = state.calibrationPlan || {}) {
     && contextWindows.length === UZU_QUALIFICATION_CONTEXTS.length
     && UZU_QUALIFICATION_CONTEXTS.every((value, index) => contextWindows[index] === value)
     && capability.contextMaximum === UZU_QUALIFICATION_CONTEXTS.at(-1)
+    && capability.runtimeIdentity?.binaryIdentityPinned === true
+    && capability.runtimeIdentity?.nativeBoundaryContractId === UZU_NATIVE_BOUNDARY_CONTRACT_ID
+    && capability.runtimeIdentity?.nativeBearerAuthentication === true
+    && capability.runtimeIdentity?.oneUseApiKeyFile === true
+    && capability.runtimeIdentity?.nativeContextLimit === true
+    && capability.runtimeIdentity?.nativeOutputLimit === true
+    && systemContract.nativeBoundaryContractId === UZU_NATIVE_BOUNDARY_CONTRACT_ID
+    && systemContract.nativeBearerAuthentication === true
+    && systemContract.oneUseApiKeyFile === true
+    && systemContract.nativeContextLimit === true
+    && systemContract.nativeOutputLimit === true
     && plan.routeQualification === true
     && String(plan.model?.id || "") === String(model?.id || "")
     && String(plan.request?.modelId || "") === String(model?.id || "")
@@ -8271,12 +10769,12 @@ function uzuQualificationContractExact(plan = state.calibrationPlan || {}) {
     && plan.request?.options?.depth === 1
     && plan.request?.options?.kv === "off"
     && Number.isInteger(plan.request?.output)
-    && plan.request.output >= UZU_QUALIFICATION_SAMPLE_MAX_TOKENS
+    && plan.request.output >= UZU_QUALIFICATION_SAMPLE_MIN_TOKENS
     && Boolean(expectedSuite) && Boolean(expectedId)
     && plan.suite?.id === expectedSuite
     && /^[0-9a-f]{64}$/.test(receiptFingerprint)
     && runtimeVersion.length > 0
-    && /^[0-9a-f]{64}$/.test(runtimeSha)
+    && runtimeSha === UZU_RUNTIME_RELEASE_BINARY_SHA256
     && contract?.id === expectedId
     && contract.version === UZU_QUALIFICATION_CONTRACT_VERSION
     && contract.scope === "route"
@@ -8285,9 +10783,14 @@ function uzuQualificationContractExact(plan = state.calibrationPlan || {}) {
     && contract.backend === "uzu"
     && contract.exactContext === context
     && contract.configuredOutputLimit === plan.request?.output
-    && contract.measuredRequestMaxTokens === UZU_QUALIFICATION_SAMPLE_MAX_TOKENS
+    && contract.measuredRequestMaxTokens === Math.min(UZU_QUALIFICATION_SAMPLE_MAX_TOKENS, plan.request.output)
     && scenariosExact
-    && contract.sampleMaxTokens === UZU_QUALIFICATION_SAMPLE_MAX_TOKENS
+    && contract.sampleMaxTokens === Math.min(UZU_QUALIFICATION_SAMPLE_MAX_TOKENS, plan.request.output)
+    && contract.outputBudgetPolicy?.id === "uzu-remaining-context-output-v1"
+    && contract.outputBudgetPolicy.maximumTokens === contract.sampleMaxTokens
+    && contract.outputBudgetPolicy.minimumTokens === UZU_QUALIFICATION_SAMPLE_MIN_TOKENS
+    && contract.outputBudgetPolicy.promptReserveTokens === 512
+    && contract.outputBudgetPolicy.followupReserveTokens === UZU_QUALIFICATION_SAMPLE_MIN_TOKENS + 128
     && contract.answerReserveTokens === UZU_QUALIFICATION_ANSWER_RESERVE_TOKENS
     && contract.thinkingBudgetTokens == null
     && contract.minimumDecodeTokensPerSecond === UZU_QUALIFICATION_MINIMUM_TPS
@@ -8295,10 +10798,15 @@ function uzuQualificationContractExact(plan = state.calibrationPlan || {}) {
     && contract.reasoningPolicy === "runtime-default-on"
     && contract.toolProbeRequired === false
     && contract.memoryProofRequired === true
-    && contract.memoryCeilingBytes === UZU_QUALIFICATION_MEMORY_LIMIT_BYTES
+    && Number.isSafeInteger(contract.memoryCeilingBytes)
+    && [36 * 1024 ** 3, UZU_QUALIFICATION_MEMORY_LIMIT_BYTES].includes(contract.memoryCeilingBytes)
+    && contract.memoryCeilingBytes <= UZU_QUALIFICATION_MEMORY_LIMIT_BYTES
     && contract.fixedAcceleration === "DFlash + Weaver"
     && contract.kvStateDataType === "BF16"
     && contract.prefixCache === true
+    && uzuQualificationPromptExercisePolicyExact(
+      contract.promptExercisePolicy, context,
+    )
     && contract.osReservePolicy === "max-4gib-or-10-percent-total-v1"
     && contract.osReserveMinimumBytes === UZU_QUALIFICATION_OS_RESERVE_MINIMUM_BYTES
     && Number.isSafeInteger(expectedOsReserveBytes)
@@ -8310,10 +10818,21 @@ function uzuQualificationContractExact(plan = state.calibrationPlan || {}) {
     && contract.modelCommit === capability.modelCommit
     && contract.modelToolchainVersion === capability.modelToolchainVersion
     && contract.runtimeBinarySha256 === runtimeSha
+    && runtimeSize === UZU_RUNTIME_RELEASE_BINARY_SIZE
+    && contract.runtimeBinarySize === runtimeSize
+    && runtimeCommit === UZU_RUNTIME_UPSTREAM_COMMIT
+    && contract.runtimeUpstreamCommit === runtimeCommit
+    && runtimePatchSha === UZU_RUNTIME_SOURCE_PATCH_SHA256
+    && contract.runtimeSourcePatchSha256 === runtimePatchSha
     && /^[0-9a-f]{64}$/.test(expectedSandboxProfileSha256)
     && contract.sandboxProfileSha256 === expectedSandboxProfileSha256
     && expectedRawListenerProtected
     && contract.rawListenerProtected === true
+    && contract.nativeBoundaryContractId === UZU_NATIVE_BOUNDARY_CONTRACT_ID
+    && contract.nativeBearerAuthentication === true
+    && contract.oneUseApiKeyFile === true
+    && contract.nativeContextLimitTokens === context
+    && contract.nativeMaxOutputTokens === plan.request?.output
     && contract.runtimeVersion === runtimeVersion
     && capability.runtimeIdentity?.ready === true
     && capability.runtimeIdentity?.networkSandbox === true
@@ -8556,31 +11075,44 @@ function renderCalibrationEntry() {
 function completedCalibrationDecision(status = state.benchmarkStatus || {}) {
   if (!calibrationOwnsBenchmark(status) || status.phase !== "completed") return null;
   const result = status.result || {};
+  if (result.persistence?.saved !== true) return null;
   if (result.matrixWorkloadComparable === false) return null;
-  const decision = result.profiles?.[$("calibrationPreferenceSelect").value] || result.decision || {};
+  const preference = $("calibrationPreferenceSelect").value;
+  const decision = result.profiles?.[preference] || result.decision || {};
   if (!["cross-engine-local-benchmark", "cross-engine-leading-band", "cross-engine-noise-floor", "local-route-qualification"].includes(decision.evidenceTier)) return null;
-  return {result, decision};
+  const evidenceBinding = completedCalibrationEvidenceBinding(result, decision);
+  const expectedScope = decision.evidenceTier === "local-route-qualification"
+    || result.kind === "route-qualification" ? "route" : "engine";
+  if (
+    !evidenceBinding
+    || evidenceBinding.scope !== expectedScope
+    || evidenceBinding.preference !== preference
+    || evidenceBinding.suite !== result.suite
+    || (
+      expectedScope === "engine"
+      && String(evidenceBinding.shootoutId || "") !== String(result.id || "")
+    )
+  ) return null;
+  return {result, decision, evidenceBinding};
 }
 
 function completedCalibrationEvidenceBinding(result = {}, decision = {}) {
-  const binding = [
+  return [
     decision.evidenceBinding,
     decision.engineEvidenceBinding,
     result.evidenceBinding,
     result.evidence?.evidenceBinding,
     result.receipt?.evidenceBinding,
     result.persistence?.evidenceBinding,
-  ].find(item => item && typeof item === "object" && !Array.isArray(item));
-  return binding ? JSON.parse(JSON.stringify(binding)) : null;
+  ].map(copiedEvidenceBinding).find(Boolean) || null;
 }
 
 function promoteCompletedCalibrationResult(status = state.benchmarkStatus || {}) {
   const completed = completedCalibrationDecision(status);
   if (!completed || !state.calibrationPlan) return false;
-  const {result, decision} = completed;
+  const {result, decision, evidenceBinding} = completed;
   const backend = String(decision.backend || "");
   const backendLabel = decision.label || backendName(backend);
-  const evidenceBinding = completedCalibrationEvidenceBinding(result, decision);
   state.calibrationPlan = {
     ...state.calibrationPlan,
     action:"apply-existing",
@@ -8608,20 +11140,14 @@ function promoteCompletedCalibrationResult(status = state.benchmarkStatus || {})
 }
 
 function calibrationParityRejectionNote(engine = {}) {
-  const candidates = [
-    ...(Array.isArray(engine.tuningSweep?.candidates) ? engine.tuningSweep.candidates : []),
-    ...(Array.isArray(engine.mtpDepthSweep?.candidates) ? engine.mtpDepthSweep.candidates : []),
-  ];
-  const rejectedFaster = candidates.filter(candidate => {
-    const rawSpeedup = Number(candidate?.medianSpeedupVsAR);
-    return candidate?.qualityMatchesAR === false
-      && Number.isFinite(rawSpeedup) && rawSpeedup > 1;
-  });
-  if (!rejectedFaster.length) return "";
+  const rejectedFasterCount = Number(
+    engine.settingsSearch?.rejectedFasterCandidateCount || 0,
+  );
+  if (!Number.isInteger(rejectedFasterCount) || rejectedFasterCount <= 0) return "";
   const accelerator = engine.backend === "omlx"
     ? "DFlash 2" : ["lmstudio", "mtplx"].includes(engine.backend) ? "MTP" : "accelerator";
-  const plural = rejectedFaster.length > 1;
-  return `${plural ? `${rejectedFaster.length} faster raw ${accelerator} candidates were` : `A faster raw ${accelerator} candidate was`} excluded after failing greedy output parity with AR; ${plural ? "their" : "its"} TPS is not trusted or used here.`;
+  const plural = rejectedFasterCount > 1;
+  return `${plural ? `${rejectedFasterCount} faster raw ${accelerator} candidates were` : `A faster raw ${accelerator} candidate was`} excluded after failing greedy output parity with AR; ${plural ? "their" : "its"} TPS is not trusted or used here.`;
 }
 
 function calibrationRoutePreview(plan) {
@@ -8720,13 +11246,17 @@ function renderCalibrationPlan() {
     $("calibrationConsentPanel").classList.add("hidden");
     $("calibrationStartButton").disabled = true;
     $("calibrationStartButton").dataset.action = "measure";
-    $("calibrationStartButton").className = "secondary";
+    $("calibrationStartButton").dataset.admission = "checking";
+    $("calibrationStartButton").title = "";
+    $("calibrationStartButton").classList.remove("primary");
+    $("calibrationStartButton").classList.add("secondary");
     $("calibrationStartButton").querySelector("strong").textContent = state.calibrationLoading
       ? "Checking route" : "Test unavailable";
     $("calibrationStartLabel").textContent = state.calibrationLoading
       ? "Waiting for the current plan" : "Choose a valid route first";
     $("calibrationApplyButton").disabled = true;
-    $("calibrationApplyButton").className = "secondary";
+    $("calibrationApplyButton").classList.remove("primary");
+    $("calibrationApplyButton").classList.add("secondary");
     $("calibrationApplyButton").textContent = "Apply result";
     $("calibrationApplyButton").title = state.calibrationLoading
       ? "Wait for the current calibration plan." : "No applicable calibration result is available.";
@@ -8761,7 +11291,7 @@ function renderCalibrationPlan() {
   ] : qualification.uzu ? [
     ["Route", "DFlash + Weaver"], ["Context", `Exact ${exactContextTier(request.context)}`],
     ["Work surface", "Built-in Chat"], ["Reasoning", qualification.reasoningLabel],
-    ["KV cache", kv], ["Memory ceiling", "36 GiB"],
+    ["KV cache", kv], ["Memory ceiling", `${UZU_QUALIFICATION_MEMORY_LIMIT_BYTES / (1024 ** 3)} GiB`],
     ["Measured turns", "4 bounded"], ["Minimum speed", `≥${UZU_QUALIFICATION_MINIMUM_TPS} tok/s each`],
   ] : [
     ["Workload", plan.suite.label], ["Goal", plan.preferenceLabel],
@@ -8782,20 +11312,25 @@ function renderCalibrationPlan() {
   );
   const calibrationEngineMarkup = (plan.engines || [])
     .filter(engine => uiEngineVisible(engine.backend || engine.id))
-    .map(engine => `<article class="calibration-engine ${engine.eligible ? "eligible" : "excluded"}"><header><strong>${esc(engine.label)}</strong><em>${engine.eligible ? routeQualification ? "Exact route" : "Comparable" : "Excluded"}</em></header><p>${esc(engine.modeDetail || engine.reason)}</p>${engine.settingsLabel ? `<small class="calibration-engine-settings">Test setup · ${esc(engine.settingsLabel)}</small>` : ""}<div class="calibration-engine-modes">${(engine.modes || []).map(mode => `<span>${esc(mode.label)}</span>`).join("") || ""}</div></article>`).join("");
+    .map(engine => {
+      const setupCount = Number(engine.measurementRouteCount || 0);
+      const setupLabel = engine.eligible && !routeQualification && setupCount > 0
+        ? `Up to ${setupCount} setup${setupCount === 1 ? "" : "s"}`
+        : engine.eligible ? "Exact route" : "Excluded";
+      const search = engine.settingsSearch || {};
+      const axes = Array.isArray(search.axes) ? search.axes : [];
+      const searchDetail = search.kind
+        ? `${search.label} · up to ${search.maximumCandidateCount} candidate setup${search.maximumCandidateCount === 1 ? "" : "s"} + ${search.referenceSetupCount} reference setup${search.referenceSetupCount === 1 ? "" : "s"}${axes.length ? ` · ${axes.join(", ")}` : ""}`
+        : "";
+      return `<article class="calibration-engine ${engine.eligible ? "eligible" : "excluded"}"><header><strong>${esc(engine.label)}</strong><em>${esc(setupLabel)}</em></header><p>${esc(engine.modeDetail || engine.reason)}</p>${searchDetail ? `<small class="calibration-engine-settings calibration-detail-only">Settings search · ${esc(searchDetail)}</small>` : engine.settingsLabel ? `<small class="calibration-engine-settings calibration-detail-only">Fixed controls · ${esc(engine.settingsLabel)}</small>` : ""}<div class="calibration-engine-modes">${(engine.modes || []).map(mode => `<span>${esc(mode.label)}</span>`).join("") || ""}</div></article>`;
+    }).join("");
   $("calibrationEngineCards").innerHTML = `${calibrationEngineMarkup}${calibrationAlternativeMarkup(plan, controlsLocked)}`;
   const evidence = plan.evidence || {};
   const evidenceReady = plan.action === "apply-existing";
-  const completedResult = calibrationOwnsBenchmark()
-    && state.benchmarkStatus?.phase === "completed"
-    ? (state.benchmarkStatus.result || {}) : null;
-  const completedDecision = completedResult
-    ? (completedResult.profiles?.[$("calibrationPreferenceSelect").value] || completedResult.decision || {})
-    : null;
-  const completedDecisionReady = Boolean(
-    completedResult?.matrixWorkloadComparable !== false
-    && ["cross-engine-local-benchmark","cross-engine-leading-band","cross-engine-noise-floor","local-route-qualification"].includes(completedDecision?.evidenceTier),
-  );
+  const completed = completedCalibrationDecision();
+  const completedResult = completed?.result || null;
+  const completedDecision = completed?.decision || null;
+  const completedDecisionReady = Boolean(completed);
   const resultPending = Boolean(completedDecisionReady && !evidenceReady);
   const completedEvidenceBinding = completedResult && completedDecision
     ? completedCalibrationEvidenceBinding(completedResult, completedDecision) : null;
@@ -8872,14 +11407,14 @@ function renderCalibrationPlan() {
           : `One exact oMLX AR + PLE mmap load will run four generated reasoning turns. Authoritative usage, generation TPS, time to first output, memory pressure, and thermal state are recorded; every turn must expose separate reasoning and a final answer.${routePreview ? ` Route: ${routePreview}.` : ""}`
         : plan.ssdStreaming
         ? `${plan.eligibleEngineCount} SSD runtimes will be tested one at a time using generated prompts. First-turn and warm-prefix TPS, time to first output, memory pressure, and thermal state are recorded. The OS file cache is observed rather than forcibly purged.${routePreview ? ` Routes: ${routePreview}.` : ""}`
-        : `${plan.eligibleEngineCount} engines will be tested one at a time using generated prompts.${routePreview ? ` Routes: ${routePreview}.` : ""}`
+        : `${plan.eligibleEngineCount} engines and their supported settings will be tested one at a time using generated prompts.${routePreview ? ` Setups: ${routePreview}.` : ""}`
       : systemSettingBlocked
         ? `${metalApprovalLabel}. Unlock this Mac, run sudo /usr/sbin/sysctl -w iogpu.wired_limit_mb=45056 in Terminal, then choose Recheck limit. The launcher will only accept an exact readback and will not raise it further.`
         : runtimeConflictBlocked
           ? memoryBlocker.detail
         : blockers;
   $("calibrationEvidence").className = `calibration-evidence${!qualificationContractExact ? " blocked" : resultReady ? " trusted" : plan.ready || preparationAvailable ? "" : " blocked"}`;
-  $("calibrationEvidence").innerHTML = `<i aria-hidden="true">${!qualificationContractExact ? "×" : resultReady ? "◆" : plan.ready || preparationAvailable ? "◇" : "×"}</i><span><strong>${esc(!qualificationContractExact ? "Exact qualification contract unavailable" : resultReady ? shownEvidence.label : plan.ready ? routeQualification ? "Ready to qualify this route" : "Ready to test the engines" : preparationAvailable ? "Prepare this route safely" : systemSettingBlocked ? metalApprovalLabel : runtimeConflictBlocked ? memoryBlocker.label : "This setup cannot be tested yet")}</strong><small>${esc(evidenceDetail)}</small></span>`;
+  $("calibrationEvidence").innerHTML = `<i aria-hidden="true">${!qualificationContractExact ? "×" : resultReady ? "◆" : plan.ready || preparationAvailable ? "◇" : "×"}</i><span><strong>${esc(!qualificationContractExact ? "Exact qualification contract unavailable" : resultReady ? shownEvidence.label : plan.ready ? routeQualification ? "Ready to qualify this route" : "Ready to test engines + settings" : preparationAvailable ? "Prepare this route safely" : systemSettingBlocked ? metalApprovalLabel : runtimeConflictBlocked ? memoryBlocker.label : "This setup cannot be tested yet")}</strong><small>${esc(evidenceDetail)}</small></span>`;
   $("calibrationPhase").closest(".calibration-progress")?.classList.toggle(
     "hidden", !active && !resultReady && !plan.ready,
   );
@@ -8898,15 +11433,14 @@ function renderCalibrationPlan() {
       : engine.mode === "dflash2" ? "DFlash 2" : engine.mode === "mtp" ? "MTP" : plan.ssdStreaming ? "SSD stream" : "AR";
     const testedModes = Array.isArray(engine.testedModes) && engine.testedModes.length
       ? engine.testedModes : [engine.mode || "ar"];
-    const depthCandidates = Array.isArray(engine.mtpDepthSweep?.depthCandidates)
-      ? engine.mtpDepthSweep.depthCandidates : [];
-    const tuningCount = Number(engine.tuningSweep?.candidateCount || 0);
+    const search = engine.settingsSearch || {};
+    const tuningCount = Number(search.testedCandidateCount || 0);
     const testedRoutes = testedModes.map(item => (
-      item === "mtp" && depthCandidates.length > 1
-        ? `MTP D1–D${Math.max(...depthCandidates.map(Number))}`
-        : item === "mtp" && engine.backend === "lmstudio" && tuningCount > 0
+      item === "mtp" && search.kind === "mtplx-depth" && tuningCount > 0
+        ? `MTP depth (${tuningCount} candidates)`
+        : item === "mtp" && search.kind === "lmstudio-mtp" && tuningCount > 0
           ? `MTP tuned (${tuningCount} candidates)`
-          : item === "dflash2" && engine.backend === "omlx" && tuningCount > 0
+          : item === "dflash2" && search.kind === "omlx-dflash2" && tuningCount > 0
             ? `DFlash tuned (${tuningCount} candidates)`
         : benchmarkWinnerLabel(item)
     ));
@@ -8917,30 +11451,49 @@ function renderCalibrationPlan() {
       : testedModes.length > 1
       ? `Tested ${testedRoutes.join(" + ")}`
       : `Tested AR only · ${engine.accelerationReason || "no verified accelerator in this artifact"}`;
-    const exactRoute = engine.routeSettingsLabel
+    const exactRoute = search.selectedSetupLabel || engine.routeSettingsLabel
       || (qualification.llama ? "SSD PLE · exact 8K"
         : qualification.uzu ? `DFlash + Weaver · exact ${exactContextTier(request.context)}` : mode);
-    const modeLabel = routeQualification ? exactRoute : plan.ssdStreaming ? exactRoute : testedModes.length > 1 ? `Winner: ${exactRoute}` : "AR only";
+    const modeLabel = routeQualification ? exactRoute : plan.ssdStreaming ? exactRoute : search.kind ? `Selected: ${exactRoute}` : testedModes.length > 1 ? `Winner: ${exactRoute}` : "AR only";
+    const testedSetups = Number(search.testedSetupCount || 0);
+    const maximumSetups = Number(search.maximumSetupCount || 0);
+    const setupCoverage = search.kind && testedSetups > 0 && maximumSetups >= testedSetups
+      ? `Tested ${testedSetups}/${maximumSetups} setups`
+      : "";
+    const searchAxes = Array.isArray(search.axes) ? search.axes : [];
+    const searchDetail = search.kind
+      ? `${tuningCount}/${Number(search.maximumCandidateCount || tuningCount)} ${search.label || "tuning"} candidates · ${Number(search.referenceSetupCount || 0)} reference setup${Number(search.referenceSetupCount || 0) === 1 ? "" : "s"}${searchAxes.length ? ` · axes: ${searchAxes.join(", ")}` : ""}`
+      : "";
     const decodeTps = finiteMetric(engine.decodeTokensPerSecond);
     const parityRejectionNote = calibrationParityRejectionNote(engine);
     const badge = CalibrationDecision.resultBadge(routeQualification ? {...measuredDecision, qualified:true} : measuredDecision, engine, index);
     const qualificationFacts = routeQualification
       ? routeQualificationFactsMarkup(engine, completedResult || {}, qualification.backend)
       : decodeTps === null ? "" : `<small class="calibration-result-tps">Generation ${decodeTps.toFixed(1)} tok/s</small>`;
-    return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong><small class="calibration-result-modes">${esc(testedLabel)}</small>${engine.settingsLabel ? `<small class="calibration-result-settings">Setup · ${esc(engine.settingsLabel)}</small>` : ""}${parityRejectionNote ? `<small class="calibration-result-settings">${esc(parityRejectionNote)}</small>` : ""}${qualificationFacts}<em>${esc(badge)}</em></article>`;
+    return `<article class="${selected ? "selected" : ""}" title="${esc(engine.modeDetail || testedLabel)}"><span><b>${esc(engine.label || backendName(engine.backend))}</b><small>${esc(modeLabel)}</small></span><strong>${esc(engine.profileDisplay || engine.display || "Measured")}</strong>${setupCoverage ? `<small class="calibration-result-coverage">${esc(setupCoverage)}</small>` : ""}<small class="calibration-result-modes calibration-detail-only">${esc(testedLabel)}</small>${searchDetail ? `<small class="calibration-result-settings calibration-detail-only">Search detail · ${esc(searchDetail)}</small>` : engine.settingsLabel ? `<small class="calibration-result-settings calibration-detail-only">Fixed controls · ${esc(engine.settingsLabel)}</small>` : ""}${parityRejectionNote ? `<small class="calibration-result-settings calibration-detail-only">${esc(parityRejectionNote)}</small>` : ""}${qualificationFacts}<em>${esc(badge)}</em></article>`;
   }).join("")}</div>` : "";
   if (state.calibrationProfileContractId !== plan.contractId) {
     state.calibrationProfileContractId = plan.contractId;
     $("calibrationProfileName").value = plan.suggestedProfileName || "Quick Launch";
   }
+  const measurementAdmission = calibrationMeasurementAdmission(plan);
+  const measurementAdmissionRelevant = routeQualification
+    ? Boolean(plan.memoryAdmission)
+    : ["measure", "apply-existing"].includes(plan.action) && plan.ready;
+  const measurementAdmissionBlocked = Boolean(
+    measurementAdmissionRelevant && !measurementAdmission.actionReady,
+  );
   const canMeasure = ["measure", "apply-existing"].includes(plan.action)
     && plan.ready && qualificationContractExact
+    && measurementAdmission.actionReady
     && !resultPending && !calibrationOperationBlocked();
   const canRefreshResult = resultPending && qualificationContractExact
     && !calibrationOperationBlocked();
   const canPrepare = preparationAvailable && !calibrationOperationBlocked();
   const canRecheckSystemSetting = systemSettingBlocked && !calibrationOperationBlocked();
   const canRecheckRuntimeConflict = runtimeConflictBlocked && !calibrationOperationBlocked();
+  const measurementAdmissionBlocksAction = measurementAdmissionBlocked
+    && !resultPending && !canPrepare && !canRecheckSystemSetting && !canRecheckRuntimeConflict;
   $("calibrationConsent").disabled = true;
   $("calibrationConsent").checked = false;
   $("calibrationConsentPanel").classList.add("hidden");
@@ -8948,14 +11501,15 @@ function renderCalibrationPlan() {
     ? `${routeQualification ? "1 exact route" : `${plan.eligibleEngineCount} engines`} · ${plan.countsAreMaximum ? "up to " : ""}${plan.modelReloadCount} isolated reloads · ${plan.countsAreMaximum ? "up to " : ""}${plan.measuredRequestCount} generated local requests · ${plan.calibrationCoolingLabel || "Automatic"} cooling · up to ${Math.round(plan.resourceCooldownMaxSecondsPerRoute)} seconds of cancellable settling before each route.`
     : blockers || "Resolve the engine blockers before measurement.";
   $("calibrationStartButton").disabled = !(canMeasure || canRefreshResult || canPrepare || canRecheckSystemSetting || canRecheckRuntimeConflict);
+  $("calibrationStartButton").dataset.admission = measurementAdmissionBlocksAction ? "blocked" : "ready";
   $("calibrationStartButton").dataset.action = canPrepare
     ? "prepare" : canRecheckSystemSetting ? "recheck-limit" : canRecheckRuntimeConflict ? "recheck-conflict" : "measure";
   let measurementAction = evidenceReady
-    ? "Retest engines" : resultPending ? "Use saved result" : "Test engines";
+    ? "Retest engines + settings" : resultPending ? "Use saved result" : "Test engines + settings";
   let measurementDetail = evidenceReady
     ? "Replace this saved measurement"
     : resultPending ? "The test is complete — this will not run it again"
-    : plan.ready ? `${plan.eligibleEngineCount} engines · ${plan.countsAreMaximum ? "up to " : ""}${plan.routeCount} routes`
+    : plan.ready ? `${plan.eligibleEngineCount} engines · ${plan.countsAreMaximum ? "up to " : ""}${plan.routeCount} setups`
       : "Resolve the blockers above";
   if (routeQualification) {
     measurementAction = evidenceReady
@@ -8983,7 +11537,11 @@ function renderCalibrationPlan() {
   } else if (canRecheckRuntimeConflict) {
     measurementAction = "Recheck Whallm";
     measurementDetail = "Unload or close Whallm, then recheck · the launcher will not stop it";
+  } else if (measurementAdmissionBlocked && !resultPending) {
+    measurementDetail = sessionAdmissionBlockerCopy(measurementAdmission);
   }
+  $("calibrationStartButton").title = measurementAdmissionBlocksAction
+    ? measurementAdmission.detail : "";
   $("calibrationStartButton").querySelector("strong").textContent = measurementAction;
   $("calibrationStartLabel").textContent = measurementDetail;
   const routeEvidenceQualified = !routeQualification || shownEvidence.qualified === true;
@@ -8991,10 +11549,14 @@ function renderCalibrationPlan() {
     && routeEvidenceQualified && qualificationContractExact
     && !calibrationOperationBlocked();
   $("calibrationApplyButton").disabled = !canApply;
-  $("calibrationApplyButton").className = canApply ? "primary" : "secondary";
-  $("calibrationStartButton").className = evidenceReady ? "secondary" : "primary";
-  $("calibrationApplyButton").textContent = routeQualification
+  $("calibrationApplyButton").classList.toggle("primary", canApply);
+  $("calibrationApplyButton").classList.toggle("secondary", !canApply);
+  $("calibrationStartButton").classList.toggle("primary", !evidenceReady);
+  $("calibrationStartButton").classList.toggle("secondary", evidenceReady);
+  const applyResultLabel = routeQualification
     ? "Apply qualified route" : CalibrationDecision.applyLabel(evidence);
+  $("calibrationApplyButton").textContent = normalizedReasoning && !routeQualification
+    ? `${applyResultLabel} + model default` : applyResultLabel;
   $("calibrationApplyButton").title = routeQualification
     ? canApply
       ? `Apply the qualified ${qualification.routeLabel} without running the test again.`
@@ -9093,13 +11655,20 @@ function renderCalibrationBenchmark(status = state.benchmarkStatus || {}) {
     && plan?.qualificationPreparation?.resolvesVisibleSettings === true
     && plan?.qualificationPreparation?.doesNotChangeMacOS === true
   );
+  if (!state.calibrationLoading && plan?.action === "apply-existing") {
+    // Reopening a persisted result has no live job progress, but its completed
+    // measurement must not be presented as a fresh 0% run.
+    $("calibrationPercent").textContent = "100%";
+    $("calibrationProgressBar").style.width = "100%";
+    $("calibrationProgressBar").parentElement.setAttribute("aria-valuenow", "100");
+  }
   $("calibrationBadge").textContent = state.calibrationLoading ? "Checking" : plan?.action === "apply-existing" ? "Result ready" : plan?.ready ? "Ready" : preparationAvailable ? "Prepare" : "Blocked";
   $("calibrationBadge").className = `setup-badge${plan?.action === "apply-existing" ? " ready" : !plan?.ready && plan ? " warning" : ""}`;
   $("calibrationPhase").textContent = plan?.action === "apply-existing" ? "Ready to use" : plan?.ready ? "Ready to test" : "Needs attention";
   if (!state.calibrationLoading) {
     $("calibrationStatus").textContent = plan?.action === "apply-existing"
       ? "Your saved result matches these settings. No new test is needed."
-      : plan?.ready ? plan.routeQualification ? "Choose Qualify route when you are ready." : "Choose Test engines when you are ready."
+      : plan?.ready ? plan.routeQualification ? "Choose Qualify route when you are ready." : "Choose Test engines + settings when you are ready."
         : preparationAvailable ? "Prepare the visible safe qualification settings first; macOS stays unchanged."
           : ((plan?.blockers || ["Choose a valid comparable setup."])[0]);
   }
@@ -9278,13 +11847,20 @@ async function prepareQwenRouteQualification() {
 }
 
 async function startCalibration() {
-  const plan = state.calibrationPlan;
+  let plan = state.calibrationPlan;
   if (completedCalibrationDecision() && plan?.action !== "apply-existing") {
     promoteCompletedCalibrationResult();
     renderCalibration();
     return;
   }
   if (!plan?.ready || !["measure", "apply-existing"].includes(plan.action) || calibrationOperationBlocked()) return;
+  let expectedRequestSignature = "";
+  try { expectedRequestSignature = JSON.stringify(calibrationPlanRequest()); }
+  catch (error) {
+    $("calibrationStatus").textContent = error.message;
+    showNotice(error.message, true);
+    return;
+  }
   state.calibrationStarting = true;
   $("calibrationStatus").textContent = plan.routeQualification
     ? "Submitting this exact route qualification…"
@@ -9292,6 +11868,32 @@ async function startCalibration() {
   refreshLaunchability();
   renderCalibration();
   try {
+    if (plan.routeQualification) {
+      // Qualification capacity is stricter than ordinary launch admission and
+      // may change with memory pressure or the exact Metal limit. Refresh its
+      // own plan immediately before any model-loading request.
+      plan = await loadCalibrationPlan(false);
+      if (!plan) return;
+      const admission = calibrationMeasurementAdmission(plan || {});
+      if (!admission.actionReady) {
+        const blocker = sessionAdmissionBlockerCopy(admission);
+        $("calibrationStatus").textContent = blocker;
+        showNotice(blocker, true);
+        return;
+      }
+    } else if (!await requireFreshSessionAdmission()) {
+      renderCalibration();
+      return;
+    }
+    if (
+      !plan?.ready
+      || !["measure", "apply-existing"].includes(plan.action)
+      || !routeQualificationContractExact(plan)
+      || JSON.stringify(calibrationPlanRequest()) !== expectedRequestSignature
+    ) {
+      $("calibrationStatus").textContent = "The route changed while it was being checked. Review the current plan before testing.";
+      return;
+    }
     const request = calibrationPlanRequest();
     request.scope = "engines";
     if (plan.routeQualification) request.scope = "qualification";
@@ -9338,8 +11940,17 @@ function calibrationRouteEvidenceApplyReady(plan = state.calibrationPlan || {}) 
 async function applyCalibrationResult(saveProfile = false) {
   const plan = state.calibrationPlan;
   if (!plan || plan.action !== "apply-existing" || calibrationOperationBlocked()) return;
-  const evidenceBinding = plan.evidence?.evidenceBinding;
   const routeQualification = plan.routeQualification === true;
+  const evidenceBinding = copiedEvidenceBinding(plan.evidence?.evidenceBinding);
+  const expectedScope = routeQualification ? "route" : "engine";
+  if (
+    !evidenceBinding
+    || evidenceBinding.scope !== expectedScope
+    || evidenceBinding.preference !== plan.preference
+  ) {
+    $("calibrationStatus").textContent = "The saved result has no usable exact apply reference. Refresh Calibration before applying it.";
+    return;
+  }
   if (routeQualification && !calibrationRouteEvidenceApplyReady(plan)) {
     $("calibrationStatus").textContent = "The exact qualified route and its immutable apply reference are no longer available. Refresh Calibration before applying.";
     return;
@@ -9392,11 +12003,18 @@ async function applyCalibrationResult(saveProfile = false) {
     if (!applied) throw new Error("The measured decision no longer matches the visible contract, so nothing was saved.");
     routeApplied = true;
     if (saveProfile) {
+      const appliedBinding = activeEvidenceBindingFor(
+        applyScope === "engine" ? "engine" : "route", plan.preference,
+      );
+      if (!appliedBinding) {
+        throw new Error("The applied result no longer has a reusable reference. Refresh Calibration before saving it.");
+      }
       const data = await api("/api/profiles/save", {
         method:"POST",
         body:JSON.stringify({
           name, enginePolicy:"measured", enginePreference:plan.preference,
           request:gather("custom"),
+          evidenceBinding:appliedBinding,
         }),
       });
       useProfileInventory(data);
@@ -9436,6 +12054,29 @@ async function applyCalibrationResult(saveProfile = false) {
   }
 }
 
+function completedCalibrationMatchesOptimizerChoice(scope, preference) {
+  const plan = state.calibrationPlan;
+  const binding = copiedEvidenceBinding(plan?.evidence?.evidenceBinding);
+  const modelId = String(plan?.model?.id || plan?.request?.modelId || "");
+  return scope === "engine"
+    && plan?.action === "apply-existing"
+    && plan.routeQualification !== true
+    && plan.preference === preference
+    && binding?.scope === "engine"
+    && binding.preference === preference
+    && Boolean(modelId)
+    && modelId === String(selectedModel()?.id || "")
+    && (!plan.request?.client || plan.request.client === state.client);
+}
+
+async function applyOptimizerMenuChoice(scope = "current", preference = "throughput") {
+  closeOptimizerMenu();
+  if (completedCalibrationMatchesOptimizerChoice(scope, preference)) {
+    return applyCalibrationResult(false);
+  }
+  return applyOptimal(scope, preference);
+}
+
 function sessionDecisionClass(decision) {
   if (decision === "ready") return "ready";
   if (["review", "unknown"].includes(decision)) return "warning";
@@ -9458,18 +12099,23 @@ function sessionAttachmentRequest() {
     client,
     project:$("sessionAttachProject").value || run.project,
   };
+  const seed = $("sessionAttachSeed").value.trim();
+  const generation = {
+    sampling:$("sessionAttachSampling").value,
+    temperature:Number($("sessionAttachTemperature").value),
+    topP:Number($("sessionAttachTopP").value),
+    topK:Number($("sessionAttachTopK").value),
+    presencePenalty:Number($("sessionAttachPresencePenalty").value),
+    frequencyPenalty:Number($("sessionAttachFrequencyPenalty").value),
+    repetitionPenalty:Number($("sessionAttachRepetitionPenalty").value),
+    seed:seed === "" ? null : Number(seed),
+  };
+  request.generation = generation;
   if (client !== "chat") request.agentHost = $("sessionAttachAgentHost").value;
   if (client === "chat") {
-    const seed = $("sessionAttachSeed").value.trim();
     request.chat = {
       systemPrompt:$("sessionAttachSystemPrompt").value,
-      sampling:$("sessionAttachSampling").value,
-      temperature:Number($("sessionAttachTemperature").value),
-      topP:Number($("sessionAttachTopP").value),
-      topK:Number($("sessionAttachTopK").value),
-      presencePenalty:Number($("sessionAttachPresencePenalty").value),
-      frequencyPenalty:Number($("sessionAttachFrequencyPenalty").value),
-      seed:seed === "" ? null : Number(seed),
+      ...generation,
     };
   }
   return request;
@@ -9490,6 +12136,7 @@ function syncSessionAttachmentForm(run, phase) {
     $("sessionAttachTopK").value = "0";
     $("sessionAttachPresencePenalty").value = "0";
     $("sessionAttachFrequencyPenalty").value = "0";
+    $("sessionAttachRepetitionPenalty").value = "1";
     $("sessionAttachSeed").value = "";
   }
   const backend = run?.backend || "";
@@ -9546,14 +12193,18 @@ function renderSessionAttachmentPanel() {
   const chat = client === "chat";
   $("sessionAttachProjectField").classList.toggle("hidden", chat);
   $("sessionAttachHostField").classList.toggle("hidden", chat);
-  $("sessionAttachChatPanel").classList.toggle("hidden", !chat);
+  $("sessionAttachChatPanel").classList.remove("hidden");
+  $("sessionAttachSystemPromptField").hidden = !chat;
   const custom = $("sessionAttachSampling").value === "custom";
-  document.querySelectorAll(".session-attach-sampler").forEach(field => field.classList.toggle("inactive", !custom));
+  document.querySelectorAll(".session-attach-sampler").forEach(field => {
+    field.hidden = !custom;
+    field.classList.toggle("inactive", !custom);
+  });
   const controls = [
     "sessionAttachClient", "sessionAttachAgentHost", "sessionAttachProject", "sessionAttachSystemPrompt",
     "sessionAttachSampling", "sessionAttachTemperature", "sessionAttachTopP",
     "sessionAttachTopK", "sessionAttachPresencePenalty", "sessionAttachFrequencyPenalty",
-    "sessionAttachSeed",
+    "sessionAttachRepetitionPenalty", "sessionAttachSeed",
   ];
   for (const id of controls) {
     const control = $(id);
@@ -9592,6 +12243,32 @@ async function cancelSessionRequest(requestId, surfaceId = "") {
   } finally {
     state.requestCancelBusyId = "";
     renderRequestActivity();
+  }
+}
+
+async function stopChatResponse() {
+  const controller = state.chatAbort;
+  if (!controller || state.chatStopBusy) return;
+  controller.launcherStopRequested = true;
+  state.chatStopBusy = true;
+  setChatBusy(true);
+  try {
+    await api("/api/chat/stop", {
+      method:"POST",
+      body:JSON.stringify({
+        runId:state.chatOwnerRunId,
+        attachmentId:state.chatRunId,
+      }),
+    });
+  } catch (error) {
+    showNotice(
+      `The browser stopped reading, but the local runtime could not confirm cancellation: ${error.message}`,
+      true,
+    );
+  } finally {
+    controller.abort();
+    state.chatStopBusy = false;
+    setChatBusy(Boolean(state.chatAbort));
   }
 }
 
@@ -9674,8 +12351,13 @@ async function loadSessionAttachmentPlan(force = false) {
   }
 }
 
-function enterChatSurface(attachment) {
-  if (!attachment || attachment.client !== "chat") return;
+async function enterChatSurface(attachment, options = {}) {
+  if (!attachment || attachment.client !== "chat") return false;
+  if (
+    state.chatRunId && state.chatRunId !== attachment.id
+    && options.currentChatSaved !== true
+    && !await saveChatBeforeSurfaceExit("open that Chat surface again")
+  ) return false;
   state.agentConsoleVisible = false;
   state.agentConsoleDismissed = true;
   if (state.agentConsoleTimer !== null) clearTimeout(state.agentConsoleTimer);
@@ -9685,11 +12367,12 @@ function enterChatSurface(attachment) {
     if (!$("chatRunSettingsPanel").hidden) closeChatRunSettings(false);
     state.chatRunSettings = null;
     state.chatRunSettingsKey = "";
-    if (state.chatAbort) state.chatAbort.abort();
     persistChatSessionState();
     resetChatConversation();
   }
   state.chatAttachment = attachment;
+  state.chatAttachmentObserved = false;
+  state.chatPostmortem = null;
   state.chatRunId = attachment.id;
   state.chatOwnerRunId = attachment.ownerRunId;
   if (!state.chatDraftKey) activateChatDraft(attachment.id, {restoreActive:true});
@@ -9698,6 +12381,7 @@ function enterChatSurface(attachment) {
   updateAgentWorkspace(state.runStatus?.run, state.runPhase);
   if ($("sessionDialog").open) $("sessionDialog").close();
   requestAnimationFrame(() => $("chatInput").focus());
+  return true;
 }
 
 async function attachSessionSurface() {
@@ -9709,6 +12393,12 @@ async function attachSessionSurface() {
     $("sessionAttachStatus").className = "session-dashboard-status error";
     return;
   }
+  const opensLauncherSurface = request.client === "chat";
+  let currentChatSavedForSurface = false;
+  if (state.chatRunId && opensLauncherSurface) {
+    if (!await saveChatBeforeSurfaceExit("open that work surface again")) return;
+    currentChatSavedForSurface = true;
+  }
   state.sessionAttachmentBusy = true;
   renderSessionAttachmentPanel();
   try {
@@ -9717,8 +12407,9 @@ async function attachSessionSurface() {
     state.sessionAttachmentPlan = null;
     state.sessionAttachmentSignature = "";
     if (data.attachment.client === "chat") {
-      enterChatSurface(data.attachment);
-      showNotice("Chat attached to the loaded model. No engine or model weights were reloaded.");
+      if (await enterChatSurface(data.attachment, {currentChatSaved:currentChatSavedForSurface})) {
+        showNotice("Chat attached to the loaded model. No engine or model weights were reloaded.");
+      }
     } else if (data.attachment.agentHost === "console") {
       enterAgentConsole(data.attachment);
       showNotice(`${data.attachment.surface} attached in Hub Console. The existing model allocation is unchanged.`);
@@ -9737,8 +12428,11 @@ async function attachSessionSurface() {
 }
 
 async function detachChatSurface(attachment) {
-  if (!attachment?.canDetach) return;
-  if (state.chatRunId === attachment.id && state.chatAbort) state.chatAbort.abort();
+  if (!attachment?.canDetach) return false;
+  if (
+    state.chatRunId === attachment.id
+    && !await saveChatBeforeSurfaceExit("end this attached chat again")
+  ) return false;
   try {
     const data = await api("/api/session/detach", {
       method:"POST",
@@ -9746,30 +12440,30 @@ async function detachChatSurface(attachment) {
     });
     if (state.chatRunId === attachment.id) {
       persistChatSessionState();
-      state.chatRunId = "";
-      state.chatOwnerRunId = "";
-      state.chatAttachment = null;
-      resetChatConversation();
-      $("chatInput").value = "";
-      sizeChatInput();
-      renderChatDraftStatus();
+      state.chatAttachmentObserved = true;
+      retainChatPostmortem(
+        "stopped",
+        "Attached Chat ended.",
+        {ended:true},
+      );
       updateChatWorkspace(state.runStatus?.run, state.runPhase);
     }
     if (state.sessionDashboard) state.sessionDashboard.hub = data.hub;
     state.sessionAttachmentPlan = null;
     state.sessionAttachmentSignature = "";
     await loadSessionDashboard();
+    return true;
   } catch (error) {
     showNotice(error.message, true);
+    return false;
   }
 }
 
 async function endCurrentChatSurface() {
   if (state.chatAttachment?.primary === false) {
-    await detachChatSurface(state.chatAttachment);
-    return;
+    return detachChatSurface(state.chatAttachment);
   }
-  await stopRun();
+  return stopRun();
 }
 
 function renderSessionDashboard() {
@@ -9870,7 +12564,9 @@ function renderSessionDashboard() {
       ["Model owner", "Whallm"],
       ["Launcher adds", formatBytes(estimate.estimatedWorkingSetBytes)],
       ["Published checkpoint", "Full 512 experts"],
-      ["Observed M5 Pro peak", formatBytes(estimate.observedEnginePeakBytes)],
+      ["M5 Pro MLX active memory", formatBytes(
+        estimate.observedMlxActiveMemoryBytes ?? estimate.observedEnginePeakBytes,
+      )],
       ["Context", formatNumber(estimate.contextTokens)],
       ["Launcher stop", "Bridge only"],
     ].map(([label,value]) => `<span><small>${esc(label)}</small><b title="${esc(value)}">${esc(value)}</b></span>`).join("");
@@ -9944,25 +12640,55 @@ function renderSessionDashboard() {
   renderSessionAttachmentPanel();
 }
 
-async function loadSessionDashboard() {
-  if (state.sessionLoading) return state.sessionDashboard;
-  let request;
-  try { request = gather("custom", false); }
-  catch (error) {
+async function loadSessionDashboard(options = {}) {
+  const force = options?.force !== false;
+  let request = options?.request && typeof options.request === "object"
+    ? options.request : visibleSessionAdmissionRequest();
+  let signature = visibleSessionAdmissionSignature(request);
+  const currentSignature = visibleSessionAdmissionSignature();
+  // A debounced request may reach this point after the user has changed a
+  // control.  Never ask for, display, or authorize the older contract.
+  if (signature && currentSignature && signature !== currentSignature) {
+    request = visibleSessionAdmissionRequest();
+    signature = visibleSessionAdmissionSignature(request);
+  }
+  if (!request || !signature) {
+    state.sessionGeneration += 1;
+    state.sessionLoading = false;
+    state.sessionAdmissionPendingSignature = "";
+    state.sessionAdmissionError = "";
+    state.sessionAdmissionErrorSignature = "";
+    state.sessionAdmissionErrorAt = 0;
     state.sessionDashboard = null;
-    $("sessionDashboardStatus").textContent = error.message;
+    $("sessionDashboardStatus").textContent = "Finish the visible settings before checking capacity.";
     $("sessionDashboardStatus").className = "session-dashboard-status error";
     renderSessionDashboard();
+    refreshLaunchability();
     return null;
   }
-  const signature = JSON.stringify(request);
+  const cached = state.sessionAdmissionSignature === signature
+    && Boolean(state.sessionDashboard?.admission);
+  if (!force && cached && Date.now() - Number(state.sessionLastLoadedAt || 0) < SESSION_ADMISSION_REFRESH_MS) {
+    return state.sessionDashboard;
+  }
+  if (
+    !force && state.sessionLoading
+    && state.sessionAdmissionPendingSignature === signature
+  ) return state.sessionDashboard;
   const generation = ++state.sessionGeneration;
   state.sessionLoading = true;
+  state.sessionAdmissionPendingSignature = signature;
   renderSessionDashboard();
   try {
     const data = await api("/api/session/plan", {method:"POST", body:JSON.stringify(request)});
-    if (generation !== state.sessionGeneration) return null;
+    if (
+      generation !== state.sessionGeneration
+      || signature !== visibleSessionAdmissionSignature()
+    ) return null;
     const next = data.sessions;
+    if (!next?.admission || typeof next.admission !== "object") {
+      throw new Error("The capacity check did not return a usable result.");
+    }
     const nextContract = next?.admission?.contractId || "";
     if (state.sessionAdmissionSignature !== signature || state.sessionAcknowledgementId !== nextContract) {
       state.sessionAcknowledgementId = "";
@@ -9970,6 +12696,10 @@ async function loadSessionDashboard() {
     if (!next?.admission?.requiresAcknowledgement) state.sessionAcknowledgementId = "";
     state.sessionAdmissionSignature = signature;
     state.sessionDashboard = next;
+    state.sessionLastLoadedAt = Date.now();
+    state.sessionAdmissionError = "";
+    state.sessionAdmissionErrorSignature = "";
+    state.sessionAdmissionErrorAt = 0;
     if (
       next?.warmRoute?.ownerRunId === state.runStatus?.run?.runId
       && signature === JSON.stringify(request)
@@ -9979,8 +12709,14 @@ async function loadSessionDashboard() {
     }
     return next;
   } catch (error) {
-    if (generation === state.sessionGeneration) {
-      state.sessionDashboard = null;
+    if (
+      generation === state.sessionGeneration
+      && signature === visibleSessionAdmissionSignature()
+    ) {
+      if (state.sessionAdmissionSignature !== signature) state.sessionDashboard = null;
+      state.sessionAdmissionError = error.message;
+      state.sessionAdmissionErrorSignature = signature;
+      state.sessionAdmissionErrorAt = Date.now();
       $("sessionDashboardStatus").textContent = error.message;
       $("sessionDashboardStatus").className = "session-dashboard-status error";
     }
@@ -9988,8 +12724,9 @@ async function loadSessionDashboard() {
   } finally {
     if (generation === state.sessionGeneration) {
       state.sessionLoading = false;
-      state.sessionLastLoadedAt = Date.now();
+      state.sessionAdmissionPendingSignature = "";
       renderSessionDashboard();
+      refreshLaunchability();
       if (state.sessionDashboard?.hub?.session && state.sessionDashboard?.hub?.phase === "running") {
         void loadSessionAttachmentPlan();
       }
@@ -10117,9 +12854,12 @@ function renderSetupStatus(status = {}) {
   }
 }
 
-async function pollSetupStatus() {
-  try { renderSetupStatus(await api("/api/setup/status")); } catch (_) {}
-}
+const pollSetupStatus = statusPoller.add("setup", {
+  interval:() => statusPollInterval(setupIsActive(), "setupDialog"),
+  run:async () => {
+    try { renderSetupStatus(await api("/api/setup/status")); } catch (_) {}
+  },
+});
 
 async function loadSetupPlan() {
   const model = selectedModel();
@@ -10314,9 +13054,12 @@ function renderAneStatus(status = {}) {
   }
 }
 
-async function pollAneStatus() {
-  try { renderAneStatus(await api("/api/ane/status")); } catch (_) {}
-}
+const pollAneStatus = statusPoller.add("ane", {
+  interval:() => statusPollInterval(aneIsActive(), "aneDialog"),
+  run:async () => {
+    try { renderAneStatus(await api("/api/ane/status")); } catch (_) {}
+  },
+});
 
 async function openAneTuner() {
   if (!aneIsActive()) $("aneCpuAssist").checked = false;
@@ -10466,9 +13209,12 @@ function renderAneCloneStatus(status = {}) {
   }
 }
 
-async function pollAneCloneStatus() {
-  try { renderAneCloneStatus(await api("/api/ane/clone/status")); } catch (_) {}
-}
+const pollAneCloneStatus = statusPoller.add("aneClone", {
+  interval:() => statusPollInterval(aneCloneIsActive(), "aneCloneDialog"),
+  run:async () => {
+    try { renderAneCloneStatus(await api("/api/ane/clone/status")); } catch (_) {}
+  },
+});
 
 async function openAneClonePlan() {
   const model = selectedModel();
@@ -10542,25 +13288,85 @@ async function showLog() {
 }
 async function stopRun() {
   try {
-    if (state.chatAbort) state.chatAbort.abort();
+    if (state.chatRunId) {
+      const ready = await saveChatBeforeSurfaceExit("stop this model session again");
+      if (!ready) return false;
+    } else if (state.chatAbort) state.chatAbort.abort();
     await api("/api/stop", {method:"POST", body:"{}"});
+    if (state.agentConsoleVisible) leaveAgentConsole();
     await Promise.all([pollStatus(), pollRouteCheckStatus(), pollBenchmarkStatus(), pollSetupStatus(), pollAcquisitionStatus(), pollAneStatus(), pollAneCloneStatus(), pollRuntimeUpdateStatus()]);
+    return true;
   }
-  catch (error) { showNotice(error.message, true); }
+  catch (error) { showNotice(error.message, true); return false; }
 }
 
 function profileRunBlocked() {
-  return ["preflight","starting","running","stopping"].includes(state.runPhase)
-    || ["queued","starting","running","stopping"].includes(state.routeCheckPhase)
-    || ["queued","cooldown","starting","running","stopping"].includes(state.benchmarkPhase)
-    || ["queued","downloading","stopping","verifying"].includes(state.setupPhase)
-    || acquisitionIsActive()
-    || aneWorkIsActive()
-    || state.applyingOptimal;
+  return Boolean(profileLaunchBlockReason());
+}
+
+function profileSettingsBlockReason() {
+  if (state.profileBusy) return "Wait for the current profile change to finish.";
+  if (state.profileLoading) return "Saved profiles are still loading.";
+  if (state.applyingOptimal || state.calibrationApplying) return "Wait for the settings update to finish.";
+  if (state.launchPreparing || state.verifiedLaunchBusy || state.calibrationStarting) return "Wait for launch preparation to finish.";
+  return "";
+}
+
+function profileLaunchBlockReason() {
+  if (["preflight","starting","running","stopping"].includes(state.runPhase)) {
+    return "A model session is already open. You can apply or edit settings for your next launch. End the current session in Sessions before launching a profile.";
+  }
+  if (["queued","starting","running","stopping"].includes(state.routeCheckPhase)) return "A route check is running. Launch is available when it finishes.";
+  if (["queued","cooldown","starting","running","stopping"].includes(state.benchmarkPhase)) return "A benchmark is running. Launch is available when it finishes.";
+  if (["queued","downloading","stopping","verifying"].includes(state.setupPhase) || acquisitionIsActive()) return "Model setup is in progress. Launch is available when it finishes.";
+  if (aneWorkIsActive()) return "Engine tuning is in progress. Launch is available when it finishes.";
+  return profileSettingsBlockReason();
+}
+
+function renderProfileRunNotice() {
+  const reason = profileLaunchBlockReason();
+  $("profileRunNotice").hidden = !reason;
+  $("profileRunMessage").textContent = reason;
+  $("profileRunAction").hidden = !["preflight","starting","running","stopping"].includes(state.runPhase);
+}
+
+function renderProfileEditBanner() {
+  $("profileEditBanner").hidden = !state.profileEditingId;
+  $("profileEditName").textContent = `Editing “${$("profileName").value.trim()}”`;
+  $("profileEditSave").disabled = Boolean(profileSettingsBlockReason()) || !$("profileName").value.trim();
+  $("profileEditCancel").disabled = Boolean(profileSettingsBlockReason());
 }
 
 function profileBackendLabel(backend) {
   return backend ? backendName(backend) : "Unknown engine";
+}
+
+function measuredProfileEvidenceBinding(profile = {}) {
+  if (profile.enginePolicy !== "measured") return null;
+  const binding = copiedEvidenceBinding(profile.evidenceBinding);
+  const resolvedBackend = String(profile.resolution?.backend || "");
+  if (!binding || binding.preference !== profile.enginePreference) return null;
+  if (binding.scope === "route") return binding;
+  return binding.scope === "engine"
+    && (!resolvedBackend || typeof binding.recordIds?.[resolvedBackend] === "string")
+    ? binding : null;
+}
+
+function profileUiReady(profile = {}) {
+  return Boolean(
+    profile.ready === true
+    && (profile.enginePolicy !== "measured" || measuredProfileEvidenceBinding(profile)),
+  );
+}
+
+function profileUiReason(profile = {}) {
+  if (profile.ready !== true) {
+    return profile.reason || "This saved route is no longer available.";
+  }
+  if (profile.enginePolicy === "measured" && !measuredProfileEvidenceBinding(profile)) {
+    return "Run Calibration again before using this measured profile.";
+  }
+  return profile.resolution?.detail || "Ready to apply.";
 }
 
 function requestUsesExperimentalFreeToken(request = {}) {
@@ -10574,7 +13380,7 @@ function quickStartEntries() {
     .filter(item => item.resumeAvailable && uiEngineVisible(item.backend))
     .sort((left, right) => Date.parse(right.updatedAt || 0) - Date.parse(left.updatedAt || 0))[0] || null;
   return {
-    profile:state.profiles.find(item => item.ready) || null,
+    profile:state.profiles.find(profileUiReady) || null,
     sessionSet:state.sessionSets.find(item => item.ready) || null,
     chat:resumableChat,
   };
@@ -10684,17 +13490,44 @@ function setProfileStatus(message, kind = "") {
   const status = $("profileManagerStatus");
   status.textContent = message;
   status.className = `profile-manager-status${kind ? ` ${kind}` : ""}`;
+  $("profileEditStatus").textContent = message;
+  if (!$("profileDialog").open) showNotice(message, kind === "error");
+}
+
+function rememberAppliedProfile(profile = null) {
+  // Keep only a preset reference in the browser, never a private project path.
+  try {
+    const storage = themeStorage();
+    if (profile?.id) storage?.setItem("llm-launcher-applied-profile-v1", profile.id);
+    else storage?.removeItem("llm-launcher-applied-profile-v1");
+  } catch (_error) { /* Browsing with storage disabled remains usable. */ }
+}
+
+function restoreAppliedProfileProject() {
+  if (state.profileProjectRestored) return;
+  state.profileProjectRestored = true;
+  let id;
+  try { id = themeStorage()?.getItem("llm-launcher-applied-profile-v1"); }
+  catch (_error) { return; }
+  const profile = state.profiles.find(item => item.id === id);
+  const route = currentVisibleRoute();
+  if (!route || !profile?.request?.project
+      || RoutePreferenceCore.routeKey(route) !== RoutePreferenceCore.routeKey(profile.request)) return;
+  $("projectPath").value = profile.request.project;
+  refreshLaunchability();
 }
 
 function useProfileInventory(data) {
   state.profiles = Array.isArray(data?.profiles) ? data.profiles.filter(uiProfileVisible) : [];
   state.profileLimit = Number(data?.limit || 32);
+  restoreAppliedProfileProject();
   renderQuickStart();
 }
 
 function updateProfilePolicyControls() {
   const measured = $("profilePolicySelect").value === "measured";
-  const locked = state.profileBusy || state.profileLoading;
+  const lockReason = profileSettingsBlockReason();
+  const locked = Boolean(lockReason);
   $("profileGoalField").classList.toggle("inactive", !measured);
   $("profileGoalSelect").disabled = !measured || locked;
   $("profilePolicyHelp").textContent = measured
@@ -10703,17 +13536,22 @@ function updateProfilePolicyControls() {
   $("profileName").disabled = locked;
   $("profilePolicySelect").disabled = locked;
   $("profileSaveButton").disabled = locked || !$("profileName").value.trim();
+  $("profileSaveButton").title = lockReason || (!$("profileName").value.trim() ? "Enter a profile name to save these settings." : "");
+  $("profileNameHint").textContent = !$("profileName").value.trim() ? "Enter a name to enable saving." : state.profileEditingId ? "Updates this saved profile." : "Saves the settings shown in the launcher.";
   $("profileCancelEdit").disabled = locked;
   $("profileCancelEdit").classList.toggle("hidden", !state.profileEditingId);
   $("profileSaveButton").querySelector("strong").textContent = state.profileEditingId ? "Update profile" : "Save current settings";
-  $("profileSaveButton").querySelector("small").textContent = state.profileEditingId ? "Replace with visible settings" : "Nothing starts";
+  $("profileSaveButton").querySelector("small").textContent = !$("profileName").value.trim() ? "Enter a profile name" : state.profileEditingId ? "Save edited settings" : "Nothing starts";
+  renderProfileEditBanner();
 }
 
 function renderProfiles() {
   renderQuickStart();
   const count = state.profiles.length;
   $("profileCountBadge").textContent = state.profileLoading ? "Loading" : `${count}/${state.profileLimit} saved`;
-  const blocked = profileRunBlocked() || state.profileBusy;
+  const settingsBlock = profileSettingsBlockReason();
+  const launchBlock = profileLaunchBlockReason();
+  renderProfileRunNotice();
   if (!count && !state.profileLoading) {
     $("profileCards").innerHTML = `<div class="profile-empty"><strong>No launch profiles yet</strong><span>Name the current setup above to save its engine, model, work surface, limits, reasoning, sampling, KV precision, and runtime controls.</span></div>`;
     updateProfilePolicyControls();
@@ -10725,29 +13563,32 @@ function renderProfiles() {
     const experimentalFreeToken = profile.ready && requestUsesExperimentalFreeToken(request);
     const resolution = profile.resolution || {};
     const policy = profile.enginePolicy === "measured";
+    const ready = profileUiReady(profile);
     const engine = resolution.label || profileBackendLabel(request.backend);
     const policyLabel = policy
       ? `${enginePreferenceLabels[profile.enginePreference] || "Measured goal"} · ${engine}`
       : `Fixed · ${engine}`;
-    const resolutionDetail = profile.ready
+    const resolutionDetail = ready
       ? experimentalFreeToken
         ? "Settings are reusable; experimental approval is deliberately never saved. Review it before a new model run."
-        : (resolution.detail || "Ready to apply.")
-      : (profile.reason || "This saved route is no longer available.");
-    const disabled = !profile.ready || blocked;
+        : profileUiReason(profile)
+      : profileUiReason(profile);
+    const applyReason = settingsBlock || (!ready ? profileUiReason(profile) : "");
+    const launchReason = launchBlock || applyReason;
+    const editReason = settingsBlock || (!request.modelId ? "This profile has no saved model settings to edit." : "");
     const armed = state.profileDeleteConfirmId === profile.id;
     const editing = state.profileEditingId === profile.id;
     const client = clientName(request.client || "");
     const limits = request.context && request.output
       ? `${formatNumber(request.context)} / ${formatNumber(request.output)}`
       : "Unavailable";
-    const kv = options.kv && options.kv !== "off" ? String(options.kv).toUpperCase() : "Full";
-    return `<article class="profile-card ${profile.ready ? "ready" : "unavailable"}${editing ? " editing" : ""}">
-      <header><div class="profile-card-title"><span class="profile-card-icon" aria-hidden="true">${policy ? "◇" : "▣"}</span><span><strong title="${esc(profile.name)}">${esc(profile.name)}</strong><small title="${esc(profile.modelName || request.modelId || "")}">${esc(profile.modelName || request.modelId || "Unknown model")} · ${esc(profileDate(profile.updatedAt))}</small></span></div><em class="profile-card-state">${experimentalFreeToken ? "Review" : profile.ready ? "Ready" : "Unavailable"}</em></header>
+    const kv = runtimeKvLabel(request.backend, options);
+    return `<article class="profile-card ${ready ? "ready" : "unavailable"}${editing ? " editing" : ""}">
+      <header><div class="profile-card-title"><span class="profile-card-icon" aria-hidden="true">${policy ? "◇" : "▣"}</span><span><strong title="${esc(profile.name)}">${esc(profile.name)}</strong><small title="${esc(profile.modelName || request.modelId || "")}">${esc(profile.modelName || request.modelId || "Unknown model")} · ${esc(profileDate(profile.updatedAt))}</small></span></div><em class="profile-card-state">${experimentalFreeToken ? "Review" : ready ? "Ready" : policy ? "Needs test" : "Unavailable"}</em></header>
       <div class="profile-contract"><span><small>Surface</small><b>${esc(client)}</b></span><span><small>Context / output</small><b>${esc(limits)}</b></span><span><small>Reasoning</small><b>${esc(request.reasoning || "auto")}</b></span><span><small>KV precision</small><b>${esc(kv)}</b></span></div>
       <code class="profile-project" title="${esc(request.project || "")}">${esc(request.project || "Project unavailable")}</code>
-      <div class="profile-resolution"><i aria-hidden="true">${profile.ready ? (resolution.trustedWinner ? "◆" : "◇") : "×"}</i><span><strong>${esc(policyLabel)}</strong><small>${esc(resolutionDetail)}</small></span></div>
-      <div class="profile-actions"><button type="button" class="primary profile-launch" data-profile-launch="${esc(profile.id)}" ${disabled ? "disabled" : ""}>${experimentalFreeToken ? "Review" : "Launch"}</button><button type="button" class="secondary" data-profile-apply="${esc(profile.id)}" ${disabled ? "disabled" : ""}>Apply</button><button type="button" class="text-button" data-profile-edit="${esc(profile.id)}" ${state.profileBusy ? "disabled" : ""}>${editing ? "Editing" : "Edit"}</button><button type="button" class="danger profile-delete${armed ? " armed" : ""}" data-profile-delete="${esc(profile.id)}" ${state.profileBusy ? "disabled" : ""}>${armed ? "Confirm delete" : "Delete"}</button></div>
+      <div class="profile-resolution"><i aria-hidden="true">${ready ? (resolution.trustedWinner ? "◆" : "◇") : "×"}</i><span><strong>${esc(policyLabel)}</strong><small>${esc(resolutionDetail)}</small></span></div>
+      <div class="profile-actions"><button type="button" class="primary profile-launch" data-profile-launch="${esc(profile.id)}" title="${esc(launchReason)}" ${launchReason ? "disabled" : ""}>${experimentalFreeToken ? "Review" : "Launch"}</button><button type="button" class="secondary" data-profile-apply="${esc(profile.id)}" title="${esc(applyReason || "Load these settings for your next launch")}" ${applyReason ? "disabled" : ""}>Apply</button><button type="button" class="text-button" data-profile-edit="${esc(profile.id)}" title="${esc(editReason || "Load this profile's settings in the editor")}" ${editReason ? "disabled" : ""}>${editing ? "Editing" : "Edit"}</button><button type="button" class="danger profile-delete${armed ? " armed" : ""}" data-profile-delete="${esc(profile.id)}" ${state.profileBusy ? "disabled" : ""}>${armed ? "Confirm delete" : "Delete"}</button></div>
     </article>`;
   }).join("");
   updateProfilePolicyControls();
@@ -10762,7 +13603,7 @@ async function loadProfiles() {
     const data = await api("/api/profiles");
     useProfileInventory(data);
     setProfileStatus(state.profiles.length
-      ? "Profiles were rechecked locally. Unavailable routes stay saved but cannot be applied."
+      ? "Apply loads settings for your next launch. Edit opens the saved settings to change them."
       : "Save the current visible setup above. No engine will start.");
   } catch (error) {
     setProfileStatus(error.message, "error");
@@ -10781,23 +13622,15 @@ async function openProfileManager() {
 
 function resetProfileEditor(clearName = true) {
   state.profileEditingId = "";
+  state.profileEditingEvidenceBinding = null;
   if (clearName) $("profileName").value = "";
   $("profilePolicySelect").value = "fixed";
   $("profileGoalSelect").value = "throughput";
   renderProfiles();
 }
 
-function editProfile(profileId) {
-  const profile = state.profiles.find(item => item.id === profileId);
-  if (!profile || state.profileBusy) return;
-  state.profileEditingId = profile.id;
-  state.profileDeleteConfirmId = "";
-  $("profileName").value = profile.name;
-  $("profilePolicySelect").value = profile.enginePolicy;
-  $("profileGoalSelect").value = profile.enginePreference;
-  setProfileStatus(`Updating “${profile.name}”. Saving will replace it with the current visible launcher settings.`);
-  renderProfiles();
-  $("profileName").focus();
+async function editProfile(profileId) {
+  return applySavedProfile(profileId, false, true);
 }
 
 function setProfileSelect(id, value, label) {
@@ -10856,29 +13689,41 @@ function applyProfileRequest(request) {
   setRangeVisual($("parallelInput"), $("parallelValue"));
   setRangeVisual($("mtpMinTokensInput"), $("mtpMinTokensValue"));
   setRangeVisual($("mtpMinContinueProbabilityInput"), $("mtpMinContinueProbabilityValue"));
+  const generation = request.generation || request.chat || {sampling:"model"};
+  setProfileSelect("samplingMode", generation.sampling || "model", "The saved sampling mode");
+  if (generation.sampling === "custom") {
+    $("temperatureInput").value = String(generation.temperature);
+    $("topPInput").value = String(generation.topP);
+    $("topKInput").value = String(generation.topK);
+    $("presencePenaltyInput").value = String(generation.presencePenalty ?? 0);
+    $("frequencyPenaltyInput").value = String(generation.frequencyPenalty ?? 0);
+    $("repetitionPenaltyInput").value = String(generation.repetitionPenalty ?? 1);
+    $("seedInput").value = generation.seed === null || generation.seed === undefined ? "" : String(generation.seed);
+  }
   if (request.client === "chat") {
-    const chat = request.chat || {};
-    $("systemPrompt").value = chat.systemPrompt || "";
-    setProfileSelect("samplingMode", chat.sampling || "model", "The saved sampling mode");
-    if (chat.sampling === "custom") {
-      $("temperatureInput").value = String(chat.temperature);
-      $("topPInput").value = String(chat.topP);
-      $("topKInput").value = String(chat.topK);
-      $("presencePenaltyInput").value = String(chat.presencePenalty ?? 0);
-      $("frequencyPenaltyInput").value = String(chat.frequencyPenalty ?? 0);
-      $("seedInput").value = chat.seed === null || chat.seed === undefined ? "" : String(chat.seed);
-    }
+    $("systemPrompt").value = request.chat?.systemPrompt || "";
+  }
+  updateChatSamplingControls();
+  if (request.backend === "mtplx") {
+    updateMtplxLongContextControl();
+    setProfileSelect(
+      "mtplxOperatorRouteSelect", savedMtplxOperatorRoute(options),
+      "The saved long-context execution route",
+    );
+  } else {
+    $("mtplxOperatorRouteSelect").value = MTPLX_OPERATOR_ROUTE_DEFAULT;
   }
   updateAccelerationState();
-  updateChatSamplingControls();
   state.optimalSignature = "";
   state.optimalLabel = "";
   setOptimizationState("custom", "Saved profile", "The profile's exact visible settings are applied.");
   refreshLaunchability();
+  persistVisibleRoute();
 }
 
-async function applySavedProfile(profileId, launchAfter = false) {
-  if (state.profileBusy || profileRunBlocked()) return;
+async function applySavedProfile(profileId, launchAfter = false, editAfter = false) {
+  const blocker = launchAfter ? profileLaunchBlockReason() : profileSettingsBlockReason();
+  if (blocker) { setProfileStatus(blocker, "error"); return; }
   state.profileBusy = true;
   state.profileDeleteConfirmId = "";
   refreshLaunchability();
@@ -10888,13 +13733,30 @@ async function applySavedProfile(profileId, launchAfter = false) {
     useProfileInventory(inventory);
     const profile = state.profiles.find(item => item.id === profileId);
     if (!profile) throw new Error("That launch profile no longer exists.");
-    if (!profile.ready) throw new Error(profile.reason || "This launch profile is no longer available.");
+    if (!editAfter && !profileUiReady(profile)) throw new Error(profileUiReason(profile));
+    // A failed replacement must not leave Save targeting the previous preset.
+    if (state.profileEditingId) resetProfileEditor();
     applyProfileRequest(profile.request);
-    if (profile.enginePolicy === "measured") {
-      setProfileStatus(`Applying “${profile.name}” and rechecking its measured engine goal…`);
-      const optimized = await applyOptimal("engine", profile.enginePreference);
+    if (!editAfter && profile.enginePolicy === "measured") {
+      const binding = measuredProfileEvidenceBinding(profile);
+      const scope = binding?.scope === "route" ? "current" : "engine";
+      setProfileStatus(`Applying “${profile.name}” and rechecking its measured result…`);
+      const optimized = await applyOptimal(
+        scope, profile.enginePreference, false, binding,
+      );
       if (!optimized) throw new Error("The measured engine decision could not be applied. The profile was not launched.");
     }
+    rememberAppliedProfile(profile);
+    state.profileEditingId = editAfter ? profile.id : "";
+    state.profileEditingEvidenceBinding = editAfter ? copiedEvidenceBinding(profile.evidenceBinding) : null;
+    if (editAfter) {
+      $("profileName").value = profile.name;
+      $("profilePolicySelect").value = profile.enginePolicy;
+      $("profileGoalSelect").value = profile.enginePreference;
+      $("launchSettings").open = true;
+      setProfileStatus(`Change the settings below, then save “${profile.name}”. The running session keeps its current settings.`);
+    }
+    renderProfileEditBanner();
     if (launchAfter && freeTokenExperimentalConsentRequired()) {
       setQuickStartEditor(true);
       if ($("profileDialog").open) $("profileDialog").close();
@@ -10912,9 +13774,15 @@ async function applySavedProfile(profileId, launchAfter = false) {
       if (!started) throw new Error("The profile was applied, but final launch validation did not accept it.");
       if ($("profileDialog").open) $("profileDialog").close();
     } else {
+      if (state.agentConsoleVisible) leaveAgentConsole();
       setQuickStartEditor(true);
       if ($("profileDialog").open) $("profileDialog").close();
-      showNotice(`Applied “${profile.name}”${profile.enginePolicy === "measured" ? ` · ${state.optimalLabel || "measured engine decision"}` : " · fixed engine"}.`);
+      showNotice(editAfter ? `Editing “${profile.name}”. Save changes when ready.` : `Applied “${profile.name}” for your next launch. The running session keeps its current settings.`);
+      requestAnimationFrame(() => {
+        const target = $(editAfter ? "profileEditBanner" : "customLaunchEditor");
+        target.scrollIntoView({behavior:"smooth", block:"start"});
+        if (editAfter) $("reasoningSelect").focus({preventScroll:true});
+      });
     }
   } catch (error) {
     if (launchAfter) setQuickStartEditor(true);
@@ -10923,18 +13791,21 @@ async function applySavedProfile(profileId, launchAfter = false) {
   } finally {
     state.profileBusy = false;
     refreshLaunchability();
+    updateProfilePolicyControls();
     if ($("profileDialog").open) renderProfiles();
   }
 }
 
 async function saveCurrentProfile() {
-  if (state.profileBusy || state.profileLoading) return;
+  const blocker = profileSettingsBlockReason();
+  if (blocker) { setProfileStatus(blocker, "error"); return; }
   let request;
   try { request = gather("custom"); }
   catch (error) { setProfileStatus(error.message, "error"); return; }
   const name = $("profileName").value.trim();
   if (!name) { setProfileStatus("Give this launch profile a name.", "error"); return; }
   const editing = state.profileEditingId;
+  let message = "", failed = false;
   state.profileBusy = true;
   refreshLaunchability();
   setProfileStatus(editing ? "Validating and updating this local profile…" : "Validating and saving these settings locally…");
@@ -10945,20 +13816,31 @@ async function saveCurrentProfile() {
       enginePreference:$("profileGoalSelect").value,
       request,
     };
+    if (body.enginePolicy === "measured") {
+      const savedBinding = state.profileEditingEvidenceBinding;
+      const binding = activeEvidenceBindingFor("engine", body.enginePreference)
+        || activeEvidenceBindingFor("route", body.enginePreference)
+        || (savedBinding?.preference === body.enginePreference ? savedBinding : null);
+      if (binding) body.evidenceBinding = binding;
+    }
     if (editing) body.id = editing;
     const data = await api("/api/profiles/save", {method:"POST", body:JSON.stringify(body)});
     useProfileInventory(data);
+    if (editing) rememberAppliedProfile(state.profiles.find(item => item.id === editing));
     state.profileEditingId = "";
+    state.profileEditingEvidenceBinding = null;
     $("profileName").value = "";
     $("profilePolicySelect").value = "fixed";
     $("profileGoalSelect").value = "throughput";
-    setProfileStatus(editing ? "Profile updated. Nothing was started." : "Profile saved privately on this Mac. Nothing was started.", "success");
+    message = editing ? "Profile updated. The running session keeps its current settings." : "Profile saved privately on this Mac. Nothing was started.";
   } catch (error) {
-    setProfileStatus(error.message, "error");
+    message = error.message;
+    failed = true;
   } finally {
     state.profileBusy = false;
     refreshLaunchability();
     renderProfiles();
+    setProfileStatus(message, failed ? "error" : "success");
   }
 }
 
@@ -11955,9 +14837,12 @@ function renderAcquisitionStatus(envelope = {}) {
   }
 }
 
-async function pollAcquisitionStatus() {
-  try { renderAcquisitionStatus(await api("/api/acquisition/status")); } catch (_) {}
-}
+const pollAcquisitionStatus = statusPoller.add("acquisition", {
+  interval:() => statusPollInterval(acquisitionIsActive(), "acquisitionDialog"),
+  run:async () => {
+    try { renderAcquisitionStatus(await api("/api/acquisition/status")); } catch (_) {}
+  },
+});
 
 async function openAcquisitionCenter() {
   if ($("modelLibraryDialog").open) $("modelLibraryDialog").close();
@@ -12176,14 +15061,17 @@ function renderRuntimeUpdateStatus(data) {
   }
 }
 
-async function pollRuntimeUpdateStatus() {
-  try {
-    const data = await api("/api/runtime/update/status");
-    renderRuntimeUpdateStatus(data);
-  } catch (error) {
-    if ($("runtimeDialog").open) $("runtimeUpdateStatus").textContent = error.message;
-  }
-}
+const pollRuntimeUpdateStatus = statusPoller.add("update", {
+  interval:() => runtimeUpdateIsActive() || $("runtimeDialog")?.open ? statusPollInterval(true, "runtimeDialog") : Infinity,
+  run:async () => {
+    try {
+      const data = await api("/api/runtime/update/status");
+      renderRuntimeUpdateStatus(data);
+    } catch (error) {
+      if ($("runtimeDialog").open) $("runtimeUpdateStatus").textContent = error.message;
+    }
+  },
+});
 
 async function inspectRuntimeUpdate(channel) {
   if (state.runtimeUpdateLoading || runtimeUpdateIsActive()) return;
@@ -12334,6 +15222,8 @@ function updateRuntimePromotionControls() {
   $("runtimePromotionStartLabel").textContent = !plan
     ? "Waiting for an exact plan"
     : active ? "Runtime comparison in progress"
+    : !plan.canStart
+      ? (plan.memoryAdmission?.label || "Free memory before comparing runtimes")
     : `${plan.workload?.label || "Generated workload"} · two fresh loads`;
   $("runtimeCards").querySelectorAll("[data-runtime-compare]").forEach(button => {
     button.disabled = active || state.runtimePromotionLoading;
@@ -12369,13 +15259,16 @@ function renderRuntimePromotionStatus(data) {
   updateRuntimePromotionControls();
 }
 
-async function pollRuntimePromotionStatus() {
-  try {
-    renderRuntimePromotionStatus(await api("/api/runtime/promotion/status"));
-  } catch (error) {
-    if ($("runtimeDialog").open) $("runtimePromotionStatus").textContent = error.message;
-  }
-}
+const pollRuntimePromotionStatus = statusPoller.add("promotion", {
+  interval:() => statusPollInterval(runtimePromotionIsActive(), "runtimeDialog"),
+  run:async () => {
+    try {
+      renderRuntimePromotionStatus(await api("/api/runtime/promotion/status"));
+    } catch (error) {
+      if ($("runtimeDialog").open) $("runtimePromotionStatus").textContent = error.message;
+    }
+  },
+});
 
 async function inspectRuntimePromotion(candidateId) {
   if (state.runtimePromotionLoading || runtimePromotionIsActive()) return;
@@ -12616,6 +15509,19 @@ async function selectRuntime(runtime, candidateId, button) {
   }
 }
 
+statusPoller.add("sessionSets", {
+  interval:() => $("sessionSetDialog").open || sessionSetIsActive()
+    ? statusPollInterval(true, "sessionSetDialog") : Infinity,
+  run:() => loadSessionSetStatus(true),
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  void statusPoller.tick();
+  if (state.agentConsoleTimer !== null) clearTimeout(state.agentConsoleTimer);
+  state.agentConsoleTimer = null;
+  scheduleAgentConsoleRead(0);
+});
+
 async function init() {
   applyUiFeatureVisibility();
   renderThemeMenu();
@@ -12637,11 +15543,7 @@ async function init() {
     initialiseVisibleRoute();
     await Promise.all([pollStatus(), pollRouteCheckStatus(), pollBenchmarkStatus(), pollSetupStatus(), pollAcquisitionStatus(), pollAneStatus(), pollAneCloneStatus(), pollRuntimePromotionStatus(), loadSessionSetStatus(false), loadQuickStart()]);
     await loadChatHistory(false);
-    state.statusTimer = setInterval(() => {
-      pollStatus(); pollRouteCheckStatus(); pollBenchmarkStatus(); pollSetupStatus(); pollAcquisitionStatus(); pollAneStatus(); pollAneCloneStatus(); pollRuntimePromotionStatus();
-      if ($("runtimeDialog").open || runtimeUpdateIsActive()) pollRuntimeUpdateStatus();
-      if ($("sessionSetDialog").open || sessionSetIsActive()) loadSessionSetStatus(true);
-    }, 1800);
+    state.statusTimer = setInterval(() => { void statusPoller.tick(); }, 1800);
   } catch (error) { showNotice(`The local controller did not initialise: ${error.message}`, true); }
 }
 
@@ -12654,10 +15556,16 @@ document.querySelectorAll("[data-backend]").forEach(button => button.addEventLis
     && !state.freeToken?.native?.installed
   ) openFreeTokenDialog();
 }));
+for (const id of RoutePreferenceCore.SETUP_FIELDS) {
+  $(id)?.addEventListener("change", () => {
+    if (!state.applyingOptimal) persistVisibleRoute();
+  });
+}
 document.querySelectorAll("[data-client]").forEach(button => button.addEventListener("click", () => {
   if (!button.disabled && state.client !== button.dataset.client) {
     cancelOptimization("Work surface changed; reapply the speed preset for this workload.");
     state.client = button.dataset.client;
+    updateMtplxLongContextControl();
     refreshLaunchability();
     persistVisibleRoute();
     scheduleBenchmarkHistory();
@@ -12665,17 +15573,26 @@ document.querySelectorAll("[data-client]").forEach(button => button.addEventList
   }
 }));
 $("modelSelect").addEventListener("change", () => { modelChanged(); scheduleBenchmarkHistory(); });
-$("reasoningSelect").addEventListener("change", () => { cancelOptimization("Reasoning changed; reapply to refresh the evidence match."); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
-$("contextInput").addEventListener("input", () => { cancelOptimization("Context changed; reapply to refresh the context-specific recommendation."); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
-$("outputInput").addEventListener("input", () => { cancelOptimization("Response limit changed; reapply to refresh the workload recommendation."); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
-$("projectPath").addEventListener("input", refreshLaunchability);
+$("reasoningSelect").addEventListener("change", () => { cancelOptimization("Reasoning changed; reapply to refresh the evidence match."); updateMtplxLongContextControl(); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
+$("contextInput").addEventListener("input", () => { cancelOptimization("Context changed; reapply to refresh the context-specific recommendation."); updateMtplxLongContextControl(); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
+$("contextSelect").addEventListener("change", () => {
+  $("contextInput").value = $("contextSelect").value;
+  $("contextInput").dispatchEvent(new Event("input", {bubbles:true}));
+  $("contextInput").dispatchEvent(new Event("change", {bubbles:true}));
+  persistVisibleRoute();
+});
+$("outputInput").addEventListener("input", () => { cancelOptimization("Response limit changed; reapply to refresh the workload recommendation."); updateMtplxLongContextControl(); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
+$("projectPath").addEventListener("input", () => {
+  rememberAppliedProfile();
+  refreshLaunchability();
+});
 $("agentHostSelect").addEventListener("change", () => {
   clearWarmRoutePlan();
   refreshLaunchability();
   scheduleWarmRoutePlan(true);
 });
 $("omlxKv").addEventListener("change", () => { cancelOptimization("KV precision changed; reapply to refresh the benchmark match."); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
-$("mtplxKv").addEventListener("change", () => { cancelOptimization("KV precision changed; reapply to refresh the benchmark match."); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
+$("mtplxKv").addEventListener("change", () => { cancelOptimization("KV precision changed; reapply to refresh the benchmark match."); updateMtplxLongContextControl(); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
 $("memoryGuardSelect").addEventListener("change", () => {
   // The optimiser dispatches the same change event after moving this control.
   // Treat only a user edit as invalidating the in-flight recommendation.
@@ -12726,7 +15643,7 @@ $("themeMenu").addEventListener("click", event => {
 $("themeMenu").addEventListener("keydown", event => {
   const items = [...$("themeMenu").querySelectorAll('[role="menuitemradio"]')];
   if (event.key === "Escape") {
-    event.preventDefault(); closeThemeMenu(); $("themeMenuButton").focus(); return;
+    event.preventDefault(); closeThemeMenu(); $("hubToolsMenuButton").focus(); return;
   }
   if (["Enter", " "].includes(event.key)) {
     const themeChoice = event.target.closest("[data-theme-choice]");
@@ -12751,7 +15668,14 @@ $("applyOptimal").addEventListener("click", () => applyOptimal("current"));
 $("performanceReceipt").addEventListener("click", activatePerformanceReceipt);
 $("optimizerMenuButton").addEventListener("click", toggleOptimizerMenu);
 $("optimizerVerifiedLaunch").addEventListener("click", () => prepareVerifiedQuickLaunch("throughput"));
-document.querySelectorAll("[data-optimizer-scope]").forEach(button => button.addEventListener("click", () => applyOptimal(button.dataset.optimizerScope, button.dataset.enginePreference || "throughput")));
+document.querySelectorAll("[data-optimizer-scope]").forEach(button => button.addEventListener("click", async () => {
+  await applyOptimizerMenuChoice(button.dataset.optimizerScope, button.dataset.enginePreference || "throughput");
+  if (button.id === "homeFastestEngine") {
+    state.homeEngineFeedback = $("optimizationStatus").textContent;
+    state.homeEngineFeedbackSignature = protectedSnapshot();
+    updateLaunchHome();
+  }
+}));
 $("optimizerCalibrate").addEventListener("click", () => openCalibrationAssistant({source:"optimizer-menu", preference:"throughput"}));
 document.addEventListener("click", event => {
   if (state.optimizerMenuOpen && !$("optimizerAction").contains(event.target)) closeOptimizerMenu();
@@ -12771,8 +15695,19 @@ document.addEventListener("keydown", event => {
   const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : event.key === "ArrowDown" ? (current + 1 + items.length) % items.length : (current - 1 + items.length) % items.length;
   items[next].focus();
 });
-$("launchButton").addEventListener("click", () => launch());
+$("launchButton").addEventListener("click", startSimpleLaunch);
+$("launchMemoryEstimate").addEventListener("click", openSessionDashboard);
+$("cancelLaunchPreparation").addEventListener("click", cancelSimpleLaunch);
+$("continueLaunchPreparation").addEventListener("click", () => {
+  if (launchReviewResolve) { launchReviewResolve(true); launchReviewResolve = null; }
+});
+$("homeEngineSelect").addEventListener("change", event => {
+  const button = [...document.querySelectorAll("[data-backend]")].find(item => item.dataset.backend === event.target.value);
+  if (button && !button.disabled) button.click();
+});
+$("hubFanMode").addEventListener("change", event => { if (event.target.value !== "unknown") void updateHubFans(event.target.value); });
 $("agentConsoleBackButton").addEventListener("click", leaveAgentConsole);
+$("agentConsoleLogButton").addEventListener("click", showLog);
 $("agentConsoleSessionsButton").addEventListener("click", openSessionDashboard);
 $("agentConsoleStopButton").addEventListener("click", () => stopAgentConsoleSurface());
 $("agentConsoleRestartButton").addEventListener("click", () => restartAgentConsoleSurface());
@@ -12796,6 +15731,7 @@ $("agentConsoleTabs").addEventListener("keydown", event => {
 });
 $("agentConsoleFindButton").addEventListener("click", () => setAgentConsoleSearch(!state.agentConsoleSearchOpen));
 $("agentConsoleCopyButton").addEventListener("click", copyAgentConsoleVisible);
+$("agentConsoleDraftsButton").addEventListener("click", openAgentConsoleDrafts);
 $("agentConsoleSearch").addEventListener("submit", event => {
   event.preventDefault();
   moveAgentConsoleSearch(event.shiftKey ? -1 : 1);
@@ -12819,9 +15755,73 @@ $("agentConsoleSearchNext").addEventListener("click", () => moveAgentConsoleSear
 $("agentConsoleSearchClose").addEventListener("click", () => setAgentConsoleSearch(false));
 $("agentConsoleJumpLatest").addEventListener("click", scrollAgentConsoleToLatest);
 $("agentTerminalViewport").addEventListener("scroll", updateAgentConsoleScrollUi, {passive:true});
+$("agentPiTimelineJumpLatest").addEventListener("click", scrollAgentPiTimelineToLatest);
+$("agentPiTimelineViewport").addEventListener("scroll", handleAgentPiTimelineScroll, {passive:true});
+$("agentPiTimelineViewport").addEventListener("wheel", event => {
+  if (event.ctrlKey || !event.deltaY) return;
+  recordAgentPiScrollIntent(event.deltaY < 0 ? "up" : "down");
+}, {passive:true});
+let agentPiTouchY = null;
+$("agentPiTimelineViewport").addEventListener("touchstart", event => {
+  agentPiTouchY = event.touches.length === 1 ? event.touches[0].clientY : null;
+}, {passive:true});
+$("agentPiTimelineViewport").addEventListener("touchmove", event => {
+  const nextY = event.touches.length === 1 ? event.touches[0].clientY : null;
+  if (agentPiTouchY !== null && nextY !== null && Math.abs(nextY - agentPiTouchY) > 2) {
+    recordAgentPiScrollIntent(nextY > agentPiTouchY ? "up" : "down");
+  }
+  agentPiTouchY = nextY;
+}, {passive:true});
+let agentPiScrollbarPointer = null;
+$("agentPiTimelineViewport").addEventListener("pointerdown", event => {
+  if (event.pointerType === "touch" || event.button !== 0) return;
+  const bounds = event.currentTarget.getBoundingClientRect();
+  if (event.clientX >= bounds.right - 18) {
+    agentPiScrollbarPointer = event.pointerId;
+    recordAgentPiScrollIntent("scrollbar");
+  }
+}, {passive:true});
+$("agentPiTimelineViewport").addEventListener("pointermove", event => {
+  if (event.buttons === 1 && event.pointerId === agentPiScrollbarPointer) recordAgentPiScrollIntent("scrollbar");
+}, {passive:true});
+for (const type of ["pointerup", "pointercancel"]) window.addEventListener(type, event => {
+  if (event.pointerId !== agentPiScrollbarPointer) return;
+  agentPiScrollbarPointer = null;
+  const view = currentAgentConsoleView();
+  if (view?.piScrollIntent === "scrollbar") view.piScrollIntentUntil = performance.now() + 100;
+}, {passive:true});
+const agentPiTimelineResizeObserver = new ResizeObserver(scheduleAgentPiTimelineFollow);
+agentPiTimelineResizeObserver.observe($("agentPiTimeline"));
+agentPiTimelineResizeObserver.observe($("agentPiTimelineViewport"));
 $("agentConsoleInteractionOptions").addEventListener("click", event => {
   const button = event.target.closest("[data-agent-console-option]");
   if (button && !button.disabled) void respondAgentConsoleInteraction({value:button.dataset.agentConsoleOption || ""});
+});
+$("agentConsoleCustomUI").addEventListener("click", event => {
+  const button = event.target.closest("[data-pi-key]");
+  if (button && !button.disabled) void respondAgentConsoleInteraction({value:piMenuKeys[button.dataset.piKey]});
+});
+$("agentConsoleCustomFrame").addEventListener("keydown", event => {
+  if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return;
+  const key = {ArrowUp:piMenuKeys.up, ArrowDown:piMenuKeys.down, ArrowLeft:piMenuKeys.left, ArrowRight:piMenuKeys.right, Enter:"\r", Escape:"\x1b", Backspace:"\x7f", Tab:"\t"}[event.key]
+    || (event.key.length === 1 ? event.key : "");
+  if (!key) return;
+  event.preventDefault();
+  void respondAgentConsoleInteraction({value:key});
+});
+$("agentConsoleCommands").addEventListener("click", event => {
+  const button = event.target.closest("[data-pi-command]");
+  if (!button) return;
+  $("agentConsoleInput").value = `/${button.dataset.piCommand} `;
+  saveAgentConsoleDraft();
+  $("agentConsoleInput").focus();
+  renderAgentConsoleCommands();
+});
+$("agentConsoleInput").addEventListener("keydown", event => {
+  const panel = $("agentConsoleCommands");
+  if (panel.hidden || !["Tab", "ArrowDown"].includes(event.key)) return;
+  const first = panel.querySelector("button");
+  if (first) { event.preventDefault(); first.focus(); }
 });
 $("agentConsoleInteractionCancel").addEventListener("click", () => {
   void respondAgentConsoleInteraction({cancelled:true});
@@ -12845,19 +15845,37 @@ $("agentConsoleInteractionInput").addEventListener("keydown", event => {
 });
 $("agentConsoleForm").addEventListener("submit", event => {
   event.preventDefault();
-  const value = $("agentConsoleInput").value;
-  if (!value || $("agentConsoleInput").disabled) return;
-  queueAgentConsoleInput(agentConsoleUsesStructuredPi()
-    ? {command:"prompt", message:value} : `${value}\r`);
-  $("agentConsoleInput").value = "";
-  $("agentTerminalViewport").focus();
+  submitAgentConsoleInput();
 });
-$("agentConsoleEscapeButton").addEventListener("click", () => queueAgentConsoleInput(
-  agentConsoleUsesStructuredPi() ? {command:"clear_queue"} : "\u001b",
-));
-$("agentConsoleInterruptButton").addEventListener("click", () => queueAgentConsoleInput(
-  agentConsoleUsesStructuredPi() ? {command:"abort"} : "\u0003",
-));
+$("agentConsoleSteerButton").addEventListener("click", steerAgentConsoleInput);
+$("agentConsoleInput").addEventListener("input", event => {
+  saveAgentConsoleDraft();
+  renderAgentConsoleCommands();
+  event.currentTarget.setCustomValidity("");
+  const view = currentAgentConsoleView();
+  if (view?.inputError && !view.inputRetryPending) {
+    view.inputError = "";
+    renderAgentConsole();
+  }
+});
+$("agentConsoleCompactButton").addEventListener("click", () => queueAgentConsoleInput({command:"compact"}));
+$("agentConsoleQueueEditText").addEventListener("input", event => {
+  const view = currentAgentConsoleView();
+  if (view?.queueEdit) view.queueEdit.text = event.target.value;
+});
+$("agentConsoleQueueCancel").addEventListener("click", () => {
+  const view = currentAgentConsoleView();
+  if (view) view.queueEdit = null;
+  renderAgentConsole();
+});
+$("agentConsoleQueueSave").addEventListener("click", () => {
+  const view = currentAgentConsoleView();
+  if (view?.queueEdit) void changeAgentConsoleQueuedMessage(view, view.queueEdit.item, "edit", view.queueEdit.text);
+});
+$("agentConsoleEscapeButton").addEventListener("click", clearAgentConsolePendingMessages);
+$("agentConsoleInterruptButton").addEventListener("click", () => {
+  void stopAgentConsoleResponse();
+});
 $("agentTerminalViewport").addEventListener("keydown", event => {
   if (event.isComposing) return;
   if (agentConsoleUsesStructuredPi()) {
@@ -12877,17 +15895,36 @@ $("agentTerminalViewport").addEventListener("paste", event => {
   if (agentConsoleUsesStructuredPi()) {
     event.preventDefault();
     $("agentConsoleInput").value += value;
+    saveAgentConsoleDraft();
     $("agentConsoleInput").focus();
     return;
   }
   event.preventDefault();
   queueAgentConsoleInput(value.replaceAll("\n", "\r"));
 });
+$("agentPiTimelineViewport").addEventListener("keydown", event => {
+  if (["ArrowUp", "PageUp", "Home"].includes(event.key)) recordAgentPiScrollIntent("up");
+  if (["ArrowDown", "PageDown", "End"].includes(event.key)) recordAgentPiScrollIntent("down");
+  if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey || event.key?.length !== 1) return;
+  event.preventDefault();
+  $("agentConsoleInput").value += event.key;
+  saveAgentConsoleDraft();
+  $("agentConsoleInput").focus();
+});
+$("agentPiTimelineViewport").addEventListener("paste", event => {
+  const value = event.clipboardData?.getData("text");
+  if (!value) return;
+  event.preventDefault();
+  $("agentConsoleInput").value += value;
+  saveAgentConsoleDraft();
+  $("agentConsoleInput").focus();
+});
 window.addEventListener("resize", scheduleAgentConsoleResize);
 $("stopButton").addEventListener("click", stopRun);
 $("logButton").addEventListener("click", showLog);
 $("focusedStopButton").addEventListener("click", stopRun);
 $("focusedLogButton").addEventListener("click", showLog);
+$("focusedConsoleButton").addEventListener("click", () => selectAgentConsole(state.agentConsoleSurfaceId));
 $("openBenchmarkButton").addEventListener("click", openBenchmarkLab);
 $("benchmarkSuiteSelect").addEventListener("change", benchmarkSuiteChanged);
 $("benchmarkPreferenceSelect").addEventListener("change", benchmarkPreferenceChanged);
@@ -12897,8 +15934,26 @@ $("benchmarkMtpTuneButton").addEventListener("click", () => startBenchmark("mtp-
 $("benchmarkDflashTuneButton").addEventListener("click", () => startBenchmark("dflash-tune"));
 $("benchmarkStopButton").addEventListener("click", stopBenchmark);
 $("benchmarkHistoryRerun").addEventListener("click", () => startBenchmark("engines"));
+$("benchmarkHistoryRuns").addEventListener("click", event => {
+  const button = event.target.closest("[data-review-benchmark]");
+  if (button && !button.disabled) void reviewBenchmarkResult(button.dataset.reviewBenchmark, button.dataset.reviewSuite);
+});
 $("benchmarkResults").addEventListener("click", event => {
-  if (event.target.closest("[data-apply-shootout]")) applyOptimal("engine", $("benchmarkPreferenceSelect").value);
+  if (event.target.closest("[data-apply-benchmark-route]")) {
+    void applyBenchmarkRouteResult();
+    return;
+  }
+  if (!event.target.closest("[data-apply-shootout]")) return;
+  const preference = $("benchmarkPreferenceSelect").value;
+  const result = state.benchmarkStatus?.result?.kind === "engine-shootout"
+    ? state.benchmarkStatus.result : null;
+  const profile = result?.profiles?.[preference] || result?.decision || null;
+  const evidenceBinding = engineShootoutApplyBinding(result, profile, preference);
+  if (!evidenceBinding) {
+    showNotice("That measured result has no exact apply reference. Refresh it before applying.", true);
+    return;
+  }
+  void applyOptimal("engine", preference, false, evidenceBinding);
 });
 $("openCalibrationAssistant").addEventListener("click", () => openCalibrationAssistant());
 $("calibrationDetailToggle").addEventListener("click", () => {
@@ -12933,7 +15988,7 @@ $("calibrationStopButton").addEventListener("click", stopCalibration);
 $("calibrationApplyButton").addEventListener("click", () => applyCalibrationResult(false));
 $("calibrationSaveButton").addEventListener("click", () => applyCalibrationResult(true));
 $("openSessionDashboard").addEventListener("click", openSessionDashboard);
-$("sessionRefreshButton").addEventListener("click", loadSessionDashboard);
+$("sessionRefreshButton").addEventListener("click", () => loadSessionDashboard({force:true}));
 $("sessionStopButton").addEventListener("click", stopSessionFromDashboard);
 $("sessionAttachClient").addEventListener("change", () => scheduleSessionAttachmentPlan(true));
 $("sessionAttachAgentHost").addEventListener("change", () => scheduleSessionAttachmentPlan(true));
@@ -12941,7 +15996,7 @@ $("sessionAttachSampling").addEventListener("change", () => scheduleSessionAttac
 for (const id of [
   "sessionAttachProject", "sessionAttachSystemPrompt", "sessionAttachTemperature",
   "sessionAttachTopP", "sessionAttachTopK", "sessionAttachPresencePenalty",
-  "sessionAttachFrequencyPenalty", "sessionAttachSeed",
+  "sessionAttachFrequencyPenalty", "sessionAttachRepetitionPenalty", "sessionAttachSeed",
 ]) $(id).addEventListener("input", () => scheduleSessionAttachmentPlan(false));
 $("sessionAttachButton").addEventListener("click", attachSessionSurface);
 $("sessionActivityList").addEventListener("click", event => {
@@ -12959,8 +16014,8 @@ $("sessionAttachmentList").addEventListener("click", event => {
   const stopConsole = event.target.closest("[data-session-stop-console]");
   const restartConsole = event.target.closest("[data-session-restart-console]");
   const attachments = state.sessionDashboard?.hub?.attachments || [];
-  if (open) enterChatSurface(attachments.find(item => item.id === open.dataset.sessionOpenChat));
-  else if (detach) detachChatSurface(attachments.find(item => item.id === detach.dataset.sessionDetachChat));
+  if (open) void enterChatSurface(attachments.find(item => item.id === open.dataset.sessionOpenChat));
+  else if (detach) void detachChatSurface(attachments.find(item => item.id === detach.dataset.sessionDetachChat));
   else if (openConsole) enterAgentConsole(attachments.find(item => item.id === openConsole.dataset.sessionOpenConsole));
   else if (stopConsole) stopAgentConsoleSurface(attachments.find(item => item.id === stopConsole.dataset.sessionStopConsole));
   else if (restartConsole) restartAgentConsoleSurface(attachments.find(item => item.id === restartConsole.dataset.sessionRestartConsole));
@@ -12970,6 +16025,7 @@ $("sessionConsent").addEventListener("change", () => {
   state.sessionAcknowledgementId = $("sessionConsent").checked && admission?.requiresAcknowledgement
     ? admission.contractId || "" : "";
   renderSessionDashboard();
+  refreshLaunchability();
 });
 $("openSetupButton").addEventListener("click", openSetupAssistant);
 $("setupConsent").addEventListener("change", updateSetupControls);
@@ -13061,6 +16117,15 @@ $("runtimeCards").addEventListener("click", event => {
   else if (button) selectRuntime(button.dataset.runtimeSelect, button.dataset.candidateId, button);
 });
 $("openProfileManager").addEventListener("click", openProfileManager);
+$("profileRunAction").addEventListener("click", () => {
+  $("profileDialog").close();
+  openSessionDashboard();
+});
+$("profileEditSave").addEventListener("click", saveCurrentProfile);
+$("profileEditCancel").addEventListener("click", () => {
+  resetProfileEditor();
+  setProfileStatus("Editing cancelled. The saved profile was not changed.");
+});
 $("quickStartCustom").addEventListener("click", toggleQuickStartRoutes);
 $("quickStartCards").addEventListener("click", event => {
   const profile = event.target.closest("[data-quick-profile-launch]");
@@ -13116,13 +16181,26 @@ $("sessionSetCards").addEventListener("click", event => {
   else if (edit) editSessionSet(edit.dataset.sessionSetEdit);
   else if (remove) deleteSavedSessionSet(remove.dataset.sessionSetDelete);
 });
-$("samplingMode").addEventListener("change", () => { updateChatSamplingControls(); refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
+$("samplingMode").addEventListener("change", () => {
+  if (!state.applyingOptimal) cancelOptimization("Sampling changed; reapply to refresh the evidence match.");
+  updateChatSamplingControls();
+  updateMtplxLongContextControl();
+  refreshLaunchability();
+  scheduleBenchmarkHistory();
+  schedulePerformanceReceipt();
+});
 $("systemPrompt").addEventListener("input", () => { refreshLaunchability(); scheduleBenchmarkHistory(); });
 for (const id of [
   "temperatureInput", "topPInput", "topKInput", "presencePenaltyInput",
-  "frequencyPenaltyInput", "seedInput",
+  "frequencyPenaltyInput", "repetitionPenaltyInput", "seedInput",
 ]) {
-  $(id).addEventListener("input", () => { refreshLaunchability(); scheduleBenchmarkHistory(); schedulePerformanceReceipt(); });
+  $(id).addEventListener("input", () => {
+    if (!state.applyingOptimal) cancelOptimization("Sampling changed; reapply to refresh the evidence match.");
+    updateMtplxLongContextControl();
+    refreshLaunchability();
+    scheduleBenchmarkHistory();
+    schedulePerformanceReceipt();
+  });
 }
 $("chatForm").addEventListener("submit", event => { event.preventDefault(); sendChat(); });
 $("chatAttachButton").addEventListener("click", () => {
@@ -13166,7 +16244,7 @@ $("chatDraftClear").addEventListener("click", () => {
   clearChatDraft();
   $("chatInput").focus();
 });
-$("chatStopButton").addEventListener("click", () => state.chatAbort?.abort());
+$("chatStopButton").addEventListener("click", stopChatResponse);
 $("chatQueue").addEventListener("click", event => {
   const remove = event.target.closest("[data-chat-queue-remove]");
   const move = event.target.closest("[data-chat-queue-move]");
@@ -13298,6 +16376,32 @@ document.addEventListener("keydown", event => {
 $("chatTrimButton").addEventListener("click", () => runChatRevision(trimChatToRecent));
 $("chatStatusPanel").addEventListener("toggle", renderChatStatusDisclosure);
 $("agentConsoleStatusPanel").addEventListener("toggle", renderAgentConsoleStatusDisclosure);
+setInterval(renderAgentPrefillClock, 250);
+$("agentConsoleActionsMenu").addEventListener("click", event => {
+  if (!event.target.closest("button")) return;
+  const menu = $("agentConsoleActionsMenu");
+  menu.open = false;
+  requestAnimationFrame(() => {
+    // A command may focus its dialog or search field. Otherwise return focus
+    // to the visible trigger instead of leaving it inside the closed menu.
+    if (menu.contains(document.activeElement) || document.activeElement === document.body) {
+      menu.querySelector("summary").focus();
+    }
+  });
+});
+document.addEventListener("pointerdown", event => {
+  for (const id of ["agentConsoleActionsMenu", "agentConsoleStatusPanel"]) {
+    const panel = $(id);
+    if (panel.open && !panel.contains(event.target)) panel.open = false;
+  }
+});
+$("agentWorkspace").addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  for (const id of ["agentConsoleActionsMenu", "agentConsoleStatusPanel"]) {
+    const panel = $(id);
+    if (panel.open) { panel.open = false; panel.querySelector("summary").focus(); event.preventDefault(); event.stopPropagation(); }
+  }
+});
 $("chatHistoryButton").addEventListener("click", openChatHistory);
 $("chatRunSettingsButton").addEventListener("click", () => {
   if ($("chatRunSettingsPanel").hidden) openChatRunSettings();
@@ -13504,12 +16608,13 @@ $("chatHistoryList").addEventListener("submit", event => {
 $("newChatButton").addEventListener("click", newChat);
 $("endChatButton").addEventListener("click", endCurrentChatSurface);
 window.addEventListener("beforeunload", persistChatSessionState);
+window.addEventListener("pagehide", saveAgentConsoleDraft);
 
 Object.values(optimizerControls).forEach(id => {
   const control = $(id);
   control.addEventListener("input", () => {
     if (control.type === "range") setRangeVisual(control);
-    if (id === "accelerationSelect" || id === "depthInput") updateAccelerationState();
+    if (["accelerationSelect", "depthInput", "profileSelect", "mtplxOperatorRouteSelect", "fanSelect"].includes(id)) updateAccelerationState();
     if (id.startsWith("freeToken")) {
       updateFreeTokenNativeControls();
       refreshLaunchability();
@@ -13518,7 +16623,7 @@ Object.values(optimizerControls).forEach(id => {
     schedulePerformanceReceipt();
   });
   control.addEventListener("change", () => {
-    if (id === "accelerationSelect" || id === "depthInput") updateAccelerationState();
+    if (["accelerationSelect", "depthInput", "profileSelect", "mtplxOperatorRouteSelect", "fanSelect"].includes(id)) updateAccelerationState();
     if (id.startsWith("freeToken")) updateFreeTokenNativeControls();
     markOptimizerCustom();
     refreshLaunchability();

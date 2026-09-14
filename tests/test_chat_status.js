@@ -3,6 +3,15 @@
 const assert = require("assert");
 const core = require("../chat_status.js");
 
+const piEstimate = {value:"12.5 tok/s · Pi live", state:"live", title:"Pi token estimate"};
+const measuredRequest = {state:"running", liveTelemetry:{source:"mtplx-flight", phase:"decode", tokensPerSecond:26.8}};
+assert.equal(core.agentGenerationSpeed(measuredRequest, null, piEstimate, null).value, "26.8 tok/s · engine");
+assert.equal(core.agentGenerationSpeed({state:"running"}, null, piEstimate, null).value, "12.5 tok/s · Pi estimate");
+assert.equal(core.agentGenerationSpeed(null, {decodeTokensPerSecond:30}, piEstimate, null).value, "30.0 tok/s · last");
+assert.equal(core.agentGenerationSpeed({state:"running", liveTelemetry:{source:"omlx-activity", metricKind:"prefill", tokensPerSecond:400}},
+  {decodeTokensPerSecond:25}, piEstimate, null).value, "25.0 tok/s · last");
+assert.equal(core.agentGenerationSpeed({state:"running", liveTelemetry:{phase:"prefill"}}, null, piEstimate, null).value, "Waiting…");
+
 assert.equal(core.requestTps({}), null);
 assert.equal(core.requestTps({runSeconds:1.2}), null, "timing must not become TPS");
 assert.equal(core.requestTps({decodeTokensPerSecond:-1}), null, "negative TPS is invalid");
@@ -62,8 +71,8 @@ let summary = core.activitySummary({
   queued:[], recent:[],
 }, "chat-1");
 assert.deepEqual(summary.speed, {
-  value:"Measuring…", state:"measuring",
-  title:"TPS is waiting for authoritative runtime usage.",
+  value:"Awaiting token count", state:"measuring",
+  title:"This engine has not reported token usage for the current request yet. Speed appears when that count arrives.",
 });
 assert.deepEqual(summary.lane, {value:"Generating", state:"running"});
 
@@ -113,8 +122,28 @@ summary = core.activitySummary({
   queued:[{surfaceId:"chat-1", state:"queued", queuePosition:2}],
   recent:[{surfaceId:"chat-1", decodeTokensPerSecond:99}],
 }, "chat-1");
-assert.equal(summary.speed.value, "Not reported", "a queued request must not look like live TPS");
+assert.equal(summary.speed.value, "99.0 tok/s · last", "a queued request labels historical TPS explicitly");
 assert.deepEqual(summary.lane, {value:"Queue #2", state:"queued"});
+
+summary = core.activitySummary({
+  engineResident:true,
+  active:[{surfaceId:"pi", state:"running", firstOutputSeconds:1.2}],
+  recent:[{surfaceId:"other", decodeTokensPerSecond:99}, {surfaceId:"pi", decodeTokensPerSecond:40.37}],
+}, "pi");
+assert.equal(summary.speed.value, "40.4 tok/s · last");
+assert.match(summary.speed.title, /Last completed model request/);
+assert.doesNotMatch(summary.speed.title, /Chat/);
+summary = core.activitySummary({active:[{surfaceId:"pi", state:"running", liveTelemetry:{
+  source:"omlx-activity", phase:"prefill", metricKind:"prefill", tokensPerSecond:1200,
+}}]}, "pi");
+assert.equal(summary.speed.value, "1200.0 tok/s prefill", "prefill must not be labeled generation speed");
+assert.equal(core.requestPhase({state:"running"}), "Preparing prompt…");
+assert.equal(core.requestPhase({state:"running", firstOutputSeconds:0}), "Generating…");
+assert.equal(core.requestPhase({state:"running", liveTelemetry:{source:"omlx-activity", phase:"prefill"}}), "Prefilling · reading context…");
+assert.equal(core.requestPhase({state:"running", liveTelemetry:{source:"unknown", phase:"prefill"}}), "Preparing prompt…");
+assert.equal(core.requestPhase({state:"running", liveTelemetry:{source:"mtplx-flight", phase:"decode", reasoningCharacters:12}}), "Thinking…");
+assert.equal(core.requestPhase({state:"completed"}), "");
+assert.equal(core.requestPhase(null), "", "transient activity disappears when the request finishes");
 
 assert.deepEqual(core.cacheSummary({
   state:"confirmed-reuse", engineResident:true,
@@ -149,3 +178,60 @@ assert.equal(core.contextSummary({promptTokens:-1}, 1000).percent, null);
 assert.equal(core.contextSummary({promptTokens:990}, "1000").percent, null);
 
 console.log("Authoritative compact Chat status summaries passed.");
+
+const promptLast = {usageReported:true, promptTokens:2000, completionTokens:500, firstOutputSeconds:2};
+assert.equal(core.promptProcessingSummary(null, promptLast).value, 'Not reported');
+assert.match(core.promptProcessingSummary(null, promptLast).title, /cached context/);
+assert.equal(core.promptProcessingSummary(null, {...promptLast, firstOutputSeconds:0}).state, 'unknown');
+assert.equal(core.promptProcessingSummary(null, {...promptLast, usageReported:false}).state, 'unknown');
+assert.equal(core.promptProcessingSummary({state:'running',liveTelemetry:{source:'omlx-activity',metricKind:'prefill',tokensPerSecond:1234}}, promptLast).value, '1234.0 tok/s');
+assert.equal(core.promptProcessingSummary({state:'running',liveTelemetry:{source:'omlx-activity',metricKind:'decode',tokensPerSecond:60}}, promptLast).value, 'Waiting…');
+const piContext = tokens => ({extensionStatuses:{'launcher.context':{text:JSON.stringify({source:'pi-context-estimate', tokens, contextWindow:10000})}}});
+assert.equal(core.agentContextSummary(piContext(2500),10000,null,promptLast).value,'~25.0%');
+assert.equal(core.agentContextSummary(piContext(9000),10000).state,'busy');
+assert.equal(core.agentContextSummary(piContext(null),10000,null,promptLast).value,'Recalculating…', 'Do not reuse pre-compaction or summarisation usage');
+assert.equal(core.agentContextSummary({...piContext(2500),compacting:true},10000).value,'Compacting…');
+assert.equal(core.agentContextSummary({},10000,null,promptLast).value,'25.0% · last', 'Context includes output, not only prompt tokens');
+assert.equal(core.agentContextSummary({},0,null,promptLast).state,'unknown');
+console.log('Hub prompt throughput and compaction-aware context percentage passed');
+
+const nativePrompt = {...promptLast,promptProcessing:{source:'uzu-native-stats', tokensPerSecond:215.7,processedTokens:269,cachedTokens:68273}};
+assert.equal(core.promptProcessingSummary(null,nativePrompt).value,'215.7 tok/s · last');
+assert.match(core.promptProcessingSummary(null,nativePrompt).title,/cached tokens are excluded/);
+
+const processingNow = Date.parse('2026-09-05T21:00:12Z');
+const processingRequest = {state:'running', startedAt:'2026-09-05T21:00:00Z', firstOutputSeconds:null};
+assert.equal(core.promptProcessingClock(processingRequest, processingNow), '0:12');
+assert.equal(core.promptProcessingClock({...processingRequest, state:'queued'}, processingNow), null);
+assert.equal(core.promptProcessingClock({...processingRequest, firstOutputSeconds:0}, processingNow), null);
+assert.equal(core.promptProcessingClock({...processingRequest, liveTelemetry:{phase:'decode'}}, processingNow), null);
+assert.equal(core.promptProcessingClock({...processingRequest, startedAt:'invalid'}, processingNow), null);
+assert.equal(core.promptProcessingClock({...processingRequest, startedAt:'2026-09-05T21:00:10Z'}, processingNow), '0:02');
+const nativePrefill = core.promptProcessingSummary({state:'running', promptProcessing:{source:'omlx-dflash-prefill', tokensPerSecond:320.5, processedTokens:641, cachedTokens:39000}}, null);
+assert.equal(nativePrefill.value, '320.5 tok/s');
+assert.match(nativePrefill.title, /39,000 cached tokens are excluded/);
+const tokenBudget = core.agentContextSummary({extensionStatuses:{'launcher.context':{text:JSON.stringify({source:'pi-context-estimate',tokens:40000,contextWindow:131072})}}}, 131072);
+assert.equal(tokenBudget.usedTokens,40000);
+assert.equal(tokenBudget.totalTokens,131072);
+assert.equal(tokenBudget.remainingTokens,91072);
+const exceededBudget = core.agentContextSummary({},100,{liveTelemetry:{source:'omlx-activity',contextTokens:120}});
+assert.equal(exceededBudget.remainingTokens,0);
+assert.equal(core.agentContextSummary({compacting:true},100).remainingTokens,undefined);
+
+const mtplxPrefill = {source:'mtplx-prefill',tokensPerSecond:500,processedTokens:1000,cachedTokens:8000,partial:true};
+assert.equal(core.promptProcessingSummary({promptProcessing:mtplxPrefill}, null).value, '500.0 tok/s');
+assert.match(core.promptProcessingSummary({promptProcessing:mtplxPrefill}, null).title, /MTPLX.*Latest observed prefill sample/);
+assert.equal(core.promptProcessingSummary(null,{promptProcessing:{...mtplxPrefill,partial:false}}).value, '500.0 tok/s · last');
+
+const whallmPrefill = {state:'running', liveTelemetry:{source:'whallm-native-stats',phase:'prefill'}};
+const whallmComplete = {state:'completed', runtimeStatsSource:'whallm-native-stats',runtimeTokensPerSecond:10,
+  decodeTokensPerSecond:100, promptProcessing:{source:'whallm-prefill',tokensPerSecond:400,processedTokens:2000,cachedTokens:8000}};
+assert.equal(core.requestTps(whallmComplete).primary, 10, 'native end-to-end decode supersedes transport timing');
+assert.match(core.requestTps(whallmComplete).label, /Whallm.*including cache evaluation/);
+assert.equal(core.requestPhase(whallmPrefill), 'Prefilling · reading context…');
+assert.equal(core.agentGenerationSpeed(whallmPrefill,whallmComplete,{state:'live',value:'100 tok/s Pi live'},{}).value,'Waiting…');
+assert.equal(core.promptProcessingSummary(whallmPrefill,whallmComplete).value,'Waiting…', 'last request speed is hidden while the new prompt is processing');
+assert.equal(core.promptProcessingSummary(null,whallmComplete).value,'400.0 tok/s · last');
+assert.match(core.promptProcessingSummary(null,whallmComplete).title,/Whallm.*2,000 new prompt tokens; 8,000 cached tokens are excluded/);
+assert.equal(core.agentContextSummary({},16384,{liveTelemetry:{source:'whallm-native-stats',contextTokens:8192}}).usedTokens,8192);
+console.log('Whallm native prompt/decode attribution and fresh-prefill display passed');

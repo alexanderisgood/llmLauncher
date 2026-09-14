@@ -12,6 +12,37 @@ assert.equal(scroll.restoredTop({scrollHeight:1400, clientHeight:400}, 275), 275
 assert.equal(scroll.restoredTop({scrollHeight:500, clientHeight:400}, 275), 100);
 assert.equal(scroll.restoredTop({scrollHeight:500, clientHeight:400}, -20), 0);
 
+const scrolledUpReasoning = scroll.captureScroll({
+  scrollHeight:1000, clientHeight:360, scrollTop:180,
+});
+assert.deepEqual(scrolledUpReasoning, {scrollTop:180, follow:false});
+assert.equal(
+  scroll.restoredCapturedTop(
+    {scrollHeight:1400, clientHeight:360, scrollTop:0}, scrolledUpReasoning,
+  ),
+  180,
+  "a streamed reasoning redraw must preserve the reader's inner scroll position",
+);
+
+const followedReasoning = scroll.captureScroll({
+  scrollHeight:1000, clientHeight:360, scrollTop:640,
+});
+assert.deepEqual(followedReasoning, {scrollTop:640, follow:true});
+assert.equal(
+  scroll.restoredCapturedTop(
+    {scrollHeight:1400, clientHeight:360, scrollTop:0}, followedReasoning,
+  ),
+  1040,
+  "a reasoning panel already at its tail must follow newly streamed thinking",
+);
+assert.equal(
+  scroll.restoredCapturedTop(
+    {scrollHeight:900, clientHeight:360, scrollTop:0}, null, true,
+  ),
+  540,
+  "a new live reasoning panel starts at its latest output",
+);
+
 assert.equal(scroll.renderAction({
   shouldFollow:true,
   capturedRenderRevision:7,
@@ -30,6 +61,28 @@ assert.equal(scroll.renderAction({
 }), "follow");
 assert.equal(scroll.renderAction({shouldFollow:true}), "follow");
 assert.equal(scroll.renderAction({shouldFollow:false}), "restore");
+
+assert.equal(
+  scroll.queuedTurnShouldFollow(true, {
+    scrollHeight:1000, clientHeight:400, scrollTop:600,
+  }),
+  true,
+  "an auto-started queued turn may follow only when the reader is still at the tail",
+);
+assert.equal(
+  scroll.queuedTurnShouldFollow(false, {
+    scrollHeight:1000, clientHeight:400, scrollTop:600,
+  }),
+  false,
+  "an explicit scroll-up intent survives the transition to the next queued turn",
+);
+assert.equal(
+  scroll.queuedTurnShouldFollow(true, {
+    scrollHeight:1000, clientHeight:400, scrollTop:420,
+  }),
+  false,
+  "a reader above the follow threshold is not yanked to the next queued answer",
+);
 
 assert.deepEqual(
   scroll.normaliseMetrics({scrollHeight:"900", clientHeight:"300", scrollTop:"Infinity"}),

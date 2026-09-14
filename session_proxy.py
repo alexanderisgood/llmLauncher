@@ -16,7 +16,6 @@ import json
 import math
 import os
 import re
-import stat
 import sys
 import threading
 import time
@@ -27,8 +26,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from codex_proxy import ResponsesLimitGuard, transform_response_request
+from codex_proxy import (
+    OMLX_CONTEXT_MAX,
+    OMLX_CONTEXT_MIN,
+    MUTATED_REPRESENTATION_HEADERS,
+    PrivateConfigError,
+    REASONING_OVERRIDE_FIELDS,
+    ResponsesLimitGuard,
+    bound_omlx_request_to_context,
+    consume_private_config,
+    enforce_sampling_contract,
+    transform_response_request,
+    validate_omlx_context_is_self_contained,
+    validated_sampling_policy,
+)
 from responses_bridge import BridgeRequest, ChatStreamBridge, translate_responses_request
+from relay_transport import InterruptibleHTTPConnection
+from sse_framing import EventScanner, pop_event
 
 
 VERSION = 2
@@ -46,7 +60,7 @@ SUPPORTED_BACKENDS = {
     "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
     "llamacpp", "uzu",
 }
-UZU_CONTEXT_WINDOWS = frozenset({16_384, 32_768})
+UZU_CONTEXT_WINDOWS = frozenset({16_384, 32_768, 65_536, 131_072})
 CHAT_REASONING_LEVELS = frozenset({
     "auto", "off", "minimal", "low", "medium", "high", "xhigh", "max",
 })
@@ -56,8 +70,40 @@ LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE = (
 )
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade",
+    "te", "trailer", "trailers", "transfer-encoding", "upgrade",
 }
+
+
+def mtplx_launcher_request(body: bytes, headers: dict[str, str]) -> tuple[bytes, dict[str, str]]:
+    """The authenticated relay owns sampling; MTPLX owns the engine route.
+
+    A `pi` managed-client hint makes MTPLX ignore even explicit sampler values.
+    Identify the actual policy owner after the relay validates those values.
+    Keep session/cache affinity, but never allow a client to change the loaded
+    route's acceleration or draft depth when enabling request controls.
+    """
+    value = json.loads(body)
+    for field in ("generation_mode", "depth", "mtp_depth", "speculative_depth",
+                  "draft_block_size", "gemma_draft_block_size"):
+        value.pop(field, None)
+    recovery_header = "x-llm-launcher-mtplx-recovery"
+    recovered_session = next((val for key, val in headers.items()
+                              if key.lower() == recovery_header), None)
+    if recovered_session is not None and (
+        len(recovered_session) > 256
+        or not re.fullmatch(r"[A-Za-z0-9._:-]+:recovery:[0-9a-f]{24}", recovered_session)
+    ):
+        raise ValueError("Invalid repaired MTPLX session identity")
+    stripped = {"x-mtplx-client", "x-mtplx-allow-client-controls", recovery_header}
+    if recovered_session is not None:
+        stripped.add("x-mtplx-session-id")
+    result = {key: val for key, val in headers.items() if key.lower() not in stripped}
+    if recovered_session is not None:
+        # Apply after every client hook: a global Pi extension may reset the
+        # public session ID to one whose committed cache still contains a loop.
+        result["x-mtplx-session-id"] = recovered_session
+    result.update({"x-mtplx-client": "llm-launcher", "x-mtplx-allow-client-controls": "true"})
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(), result
 
 
 def utc_now() -> str:
@@ -73,7 +119,7 @@ def _valid_secret(value: Any) -> bool:
     return isinstance(value, str) and 16 <= len(value) <= 512 and "\0" not in value
 
 
-def _valid_surface(value: Any) -> dict[str, str]:
+def _valid_surface(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("surface is not an object")
     surface_id = str(value.get("id") or "")
@@ -85,25 +131,31 @@ def _valid_surface(value: Any) -> dict[str, str]:
         raise ValueError("invalid surface id") from error
     if parsed != surface_id.lower() or client not in CLIENTS or not _valid_secret(key):
         raise ValueError("invalid surface registration")
-    return {"id": parsed, "client": client, "key": str(key)}
+    protocol = "responses" if client == "codex" else "chat-completions"
+    contract, enforcement = validated_sampling_policy(
+        value.get("samplingContract"), value.get("samplingEnforcement"), protocol,
+    )
+    return {
+        "id": parsed,
+        "client": client,
+        "key": str(key),
+        "samplingContract": contract,
+        "samplingEnforcement": enforcement,
+    }
 
 
 def load_config(path: Path) -> dict[str, Any]:
     state_root = (
         Path.home() / "Library" / "Application Support" / "LLM Launcher" / "runs"
-    ).resolve()
-    resolved = path.resolve(strict=True)
+    )
     try:
-        resolved.relative_to(state_root)
-    except ValueError:
-        fail("configuration is outside the launcher state folder")
-    info = resolved.stat()
-    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
-        fail("configuration permissions are not private")
+        payload = consume_private_config(path, state_root)
+    except PrivateConfigError:
+        fail("private configuration could not be safely consumed")
     try:
-        value = json.loads(resolved.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeError) as error:
-        fail(f"cannot read configuration: {error}")
+        value = json.loads(payload)
+    except (ValueError, UnicodeError):
+        fail("configuration data is invalid")
     if not isinstance(value, dict):
         fail("configuration is not an object")
     for key in ("listenPort", "upstreamPort", "lanes", "outputLimit"):
@@ -129,12 +181,24 @@ def load_config(path: Path) -> dict[str, Any]:
             fail("Uzu Qwen3.6 reasoning must be auto or off")
         if value.get("contextLimit") not in UZU_CONTEXT_WINDOWS:
             fail("invalid Uzu context limit")
+    elif value.get("backend") == "omlx":
+        context_limit = value.get("contextLimit")
+        if (
+            isinstance(context_limit, bool) or not isinstance(context_limit, int)
+            or not OMLX_CONTEXT_MIN <= context_limit <= OMLX_CONTEXT_MAX
+        ):
+            fail("invalid oMLX context limit")
     elif value.get("contextLimit") not in {None, 0}:
         fail("unexpected context limit")
     if not all(_valid_secret(value.get(key)) for key in ("controlKey", "upstreamKey")):
         fail("invalid relay secret")
     if not isinstance(value.get("servedModel"), str) or not value["servedModel"]:
         fail("invalid served model")
+    aliases = value.get("servedModelAliases", [])
+    if (not isinstance(aliases, list) or len(aliases) > 1
+            or any(not isinstance(alias, str) or not re.fullmatch(r"local-[0-9a-f]{24}", alias)
+                   for alias in aliases)):
+        fail("invalid served model aliases")
     surfaces = value.get("surfaces")
     if not isinstance(surfaces, list) or len(surfaces) != 1:
         fail("one primary surface is required")
@@ -146,13 +210,13 @@ def load_config(path: Path) -> dict[str, Any]:
 
 
 class SurfaceRegistry:
-    def __init__(self, surfaces: list[dict[str, str]]) -> None:
+    def __init__(self, surfaces: list[dict[str, Any]]) -> None:
         self.lock = threading.RLock()
-        self.by_id: dict[str, dict[str, str]] = {}
+        self.by_id: dict[str, dict[str, Any]] = {}
         for surface in surfaces:
             self.register(surface)
 
-    def register(self, value: Any) -> dict[str, str]:
+    def register(self, value: Any) -> dict[str, Any]:
         surface = _valid_surface(value)
         with self.lock:
             for current in self.by_id.values():
@@ -161,13 +225,13 @@ class SurfaceRegistry:
             self.by_id[surface["id"]] = surface
         return dict(surface)
 
-    def unregister(self, surface_id: Any) -> dict[str, str] | None:
+    def unregister(self, surface_id: Any) -> dict[str, Any] | None:
         value = str(surface_id or "")
         with self.lock:
             surface = self.by_id.pop(value, None)
             return dict(surface) if surface else None
 
-    def authenticate(self, authorization: str) -> dict[str, str] | None:
+    def authenticate(self, authorization: str) -> dict[str, Any] | None:
         if not authorization.startswith("Bearer "):
             return None
         supplied = authorization[7:]
@@ -266,16 +330,16 @@ class RequestScheduler:
                     return True
                 self.condition.wait(0.25)
 
-    def set_connection(self, request_id: str, connection: http.client.HTTPConnection) -> None:
-        close_now = False
+    def set_connection(self, request_id: str, connection: InterruptibleHTTPConnection) -> None:
+        cancel_now = False
         with self.condition:
             record = self.records.get(request_id)
             if record is None or record["cancel"].is_set():
-                close_now = True
+                cancel_now = True
             else:
                 record["connection"] = connection
-        if close_now:
-            connection.close()
+        if cancel_now:
+            connection.cancel()
 
     def first_byte(self, request_id: str) -> None:
         with self.condition:
@@ -304,7 +368,7 @@ class RequestScheduler:
                 record["completionTokens"] = valid(completion_tokens)
 
     def set_runtime_stats(self, request_id: str, value: dict[str, Any]) -> None:
-        """Attach only allowlisted numeric engine facts to one relay request."""
+        """Attach allowlisted numeric facts and Uzu's opaque log correlation tag."""
         bounds = {
             "runtimeTokensPerSecond": 1_000_000.0,
             "runtimeTimeToFirstTokenSeconds": 86_400.0,
@@ -317,6 +381,12 @@ class RequestScheduler:
             record = self.records.get(request_id)
             if record is None:
                 return
+            tag = value.get("uzuRequestTag")
+            if isinstance(tag, str) and re.fullmatch(r"[0-9a-f]{8}", tag):
+                record["uzuRequestTag"] = tag
+            response_id = value.get("runtimeResponseId")
+            if isinstance(response_id, str) and re.fullmatch(r"chatcmpl-[0-9a-f]{8,32}", response_id):
+                record["runtimeResponseId"] = response_id
             for key, maximum in bounds.items():
                 candidate = value.get(key)
                 integer_field = key in {"totalDraftTokens", "acceptedDraftTokens"}
@@ -341,7 +411,7 @@ class RequestScheduler:
             return bool(record and record["cancel"].is_set())
 
     def cancel(self, request_id: Any) -> bool:
-        connection: http.client.HTTPConnection | None = None
+        connection: InterruptibleHTTPConnection | None = None
         with self.condition:
             record = self.records.get(str(request_id or ""))
             if record is None:
@@ -351,10 +421,7 @@ class RequestScheduler:
             connection = record.get("connection")
             self.condition.notify_all()
         if connection is not None:
-            try:
-                connection.close()
-            except OSError:
-                pass
+            connection.cancel()
         return True
 
     def cancel_surface(self, surface_id: Any) -> int:
@@ -465,6 +532,8 @@ class RequestScheduler:
             "endToEndTokensPerSecond": round(end_to_end_tps, 2) if end_to_end_tps is not None else None,
             "decodeTokensPerSecond": round(decode_tps, 2) if decode_tps is not None else None,
             "runtimeStatsSource": "lmstudio-response-stats" if runtime_stats_reported else None,
+            "uzuRequestTag": record.get("uzuRequestTag"),
+            "runtimeResponseId": record.get("runtimeResponseId"),
             **runtime_fields,
             "statusCode": record["statusCode"],
             "result": record["result"],
@@ -529,10 +598,11 @@ class ResponseMetrics:
         self.buffer = bytearray()
         self.complete = bytearray()
         self.overflowed = False
+        self.discarding_line = False
         self.output_seen = False
         self.prompt_tokens: int | None = None
         self.completion_tokens: int | None = None
-        self.runtime_stats: dict[str, int | float] = {}
+        self.runtime_stats: dict[str, int | float | str] = {}
 
     @staticmethod
     def _token(value: Any) -> int | None:
@@ -630,6 +700,14 @@ class ResponseMetrics:
     def _inspect(self, value: Any) -> bool:
         if not isinstance(value, dict):
             return False
+        if self.backend in {"omlx", "mtplx"}:
+            identifier = value.get("id")
+            if isinstance(identifier, str) and re.fullmatch(r"chatcmpl-[0-9a-f]{8,32}", identifier):
+                self.runtime_stats["runtimeResponseId"] = identifier
+        if self.backend == "uzu":
+            identifier = value.get("id")
+            if isinstance(identifier, str) and re.fullmatch(r"chatcmpl-[0-9a-f]{32}", identifier):
+                self.runtime_stats["uzuRequestTag"] = identifier[9:17]
         self._usage(value)
         self._performance(value)
         emitted = False
@@ -676,18 +754,27 @@ class ResponseMetrics:
     def feed(self, chunk: bytes) -> bool:
         emitted = False
         if self.streaming:
-            self.buffer.extend(chunk)
-            if len(self.buffer) > MAX_METRICS_BUFFER:
-                newline = self.buffer.rfind(b"\n")
-                if newline < 0:
+            start = 0
+            while start < len(chunk):
+                newline = chunk.find(b"\n", start)
+                end = len(chunk) if newline < 0 else newline
+                if self.discarding_line:
+                    # An oversized line may span many reads. Its suffix is
+                    # still part of that line, never a new metrics event.
+                    self.discarding_line = newline < 0
+                elif len(self.buffer) + end - start > MAX_METRICS_BUFFER:
+                    self.buffer.clear()
+                    self.overflowed = True
+                    self.discarding_line = newline < 0
+                elif newline < 0:
+                    self.buffer.extend(chunk[start:end])
+                elif self.buffer:
+                    self.buffer.extend(chunk[start:end])
+                    emitted = self._line(self.buffer) or emitted
                     self.buffer.clear()
                 else:
-                    del self.buffer[:newline + 1]
-                self.overflowed = True
-            while b"\n" in self.buffer:
-                line, _, remainder = self.buffer.partition(b"\n")
-                self.buffer = bytearray(remainder)
-                emitted = self._line(line) or emitted
+                    emitted = self._line(chunk[start:end]) or emitted
+                start = end + 1
         elif not self.overflowed:
             if len(self.complete) + len(chunk) <= MAX_METRICS_BUFFER:
                 self.complete.extend(chunk)
@@ -712,12 +799,12 @@ class ResponseMetrics:
     def public_usage(self) -> tuple[int | None, int | None]:
         return self.prompt_tokens, self.completion_tokens
 
-    def public_runtime_stats(self) -> dict[str, int | float]:
+    def public_runtime_stats(self) -> dict[str, int | float | str]:
         return dict(self.runtime_stats)
 
 
 class ChatCompletionLimitGuard:
-    """Correct a falsely normal terminal SSE event at the exact output ceiling.
+    """Correct a falsely normal Chat Completions result at the output ceiling.
 
     Some local servers have reported ``finish_reason=stop`` after emitting exactly
     ``max_tokens``.  Agent clients then treat a reasoning-only, budget-exhausted
@@ -726,26 +813,24 @@ class ChatCompletionLimitGuard:
     Prompt, reasoning, and response text are never retained by this guard.
     """
 
-    def __init__(self, output_limit: int) -> None:
+    def __init__(self, output_limit: int, streaming: bool = True, *, mtplx_memory_recovery: bool = False) -> None:
         self.output_limit = max(1, int(output_limit))
+        self.streaming = streaming
+        self.mtplx_memory_recovery = mtplx_memory_recovery
+        self.memory_refused = False
+        # A non-stream completion contains the generated text and terminal
+        # usage in one JSON document, so the small SSE-tail allowance is not
+        # sufficient.  The handler caps and buffers that document before
+        # sending response headers; keep the guard's bound identical.
+        self.buffer_limit = MAX_LIMIT_GUARD_BUFFER if streaming else MAX_BODY
         self.pending = bytearray()
+        self._event_scanner = EventScanner()
+        self.passthrough_event = False
         self.terminal = bytearray()
         self.terminal_started = False
         self.disabled = False
 
-    @staticmethod
-    def _split_event(buffer: bytearray) -> bytes | None:
-        endings = []
-        for separator in (b"\n\n", b"\r\n\r\n"):
-            index = buffer.find(separator)
-            if index >= 0:
-                endings.append((index + len(separator), index))
-        if not endings:
-            return None
-        end, _index = min(endings, key=lambda item: item[1])
-        event = bytes(buffer[:end])
-        del buffer[:end]
-        return event
+    _split_event = staticmethod(pop_event)
 
     @staticmethod
     def _event_value(event: bytes) -> dict[str, Any] | None:
@@ -809,8 +894,16 @@ class ChatCompletionLimitGuard:
             return b""
         if self.disabled:
             return chunk
+        if not self.streaming:
+            if len(self.pending) + len(chunk) > self.buffer_limit:
+                released = bytes(self.pending) + chunk
+                self.pending.clear()
+                self.disabled = True
+                return released
+            self.pending.extend(chunk)
+            return b""
         if self.terminal_started:
-            if len(self.terminal) + len(chunk) > MAX_LIMIT_GUARD_BUFFER:
+            if len(self.terminal) + len(chunk) > self.buffer_limit:
                 released = bytes(self.terminal) + chunk
                 self.terminal.clear()
                 self.disabled = True
@@ -821,9 +914,19 @@ class ChatCompletionLimitGuard:
         self.pending.extend(chunk)
         released = bytearray()
         while True:
-            event = self._split_event(self.pending)
+            event = self._event_scanner.pop(self.pending)
             if event is None:
                 break
+            if self.passthrough_event:
+                # Finish forwarding the oversized event before inspecting the
+                # next one. A JSON-looking suffix is not a separate event.
+                released.extend(event)
+                self.passthrough_event = False
+                continue
+            if self.mtplx_memory_recovery:
+                normalized = normalize_mtplx_compactable_event(event)
+                self.memory_refused |= normalized != event
+                event = normalized
             if self._has_terminal_stop(event):
                 self.terminal_started = True
                 self.terminal.extend(event)
@@ -831,15 +934,53 @@ class ChatCompletionLimitGuard:
                 self.pending.clear()
                 break
             released.extend(event)
-        if not self.terminal_started and len(self.pending) > MAX_LIMIT_GUARD_BUFFER:
-            released.extend(self.pending)
-            self.pending.clear()
-            self.disabled = True
+        if not self.terminal_started and (self.passthrough_event or len(self.pending) > self.buffer_limit):
+            # Forward large tool/content events without disabling correction for
+            # later usage or memory errors. Keep only enough bytes to recognize
+            # either SSE separator (LF LF or CRLF CRLF) across read boundaries.
+            self.passthrough_event = True
+            released.extend(self._event_scanner.forward_prefix(self.pending))
         return bytes(released)
 
+    def finish_completion(self, payload: bytes | bytearray) -> bytes | bytearray:
+        """Correct an already bounded complete response without copying it into pending."""
+        try:
+            value = json.loads(payload)
+        except (ValueError, UnicodeError, TypeError):
+            return payload
+        usage = value.get("usage") if isinstance(value, dict) else None
+        completion = usage.get("completion_tokens", usage.get("output_tokens")) \
+            if isinstance(usage, dict) else None
+        choices = value.get("choices") if isinstance(value, dict) else None
+        if (
+            isinstance(completion, int) and not isinstance(completion, bool)
+            and completion >= self.output_limit
+            and isinstance(choices, list) and len(choices) == 1
+        ):
+            changed = False
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                if choice.get("finish_reason") == "stop":
+                    choice["finish_reason"] = "length"
+                    changed = True
+                if choice.get("finishReason") == "stop":
+                    choice["finishReason"] = "length"
+                    changed = True
+            if changed:
+                return json.dumps(
+                    value, separators=(",", ":"), ensure_ascii=False,
+                ).encode("utf-8")
+        return payload
+
     def finish(self) -> bytes:
+        self._event_scanner.reset()
         if self.disabled:
             return b""
+        if not self.streaming:
+            payload = bytes(self.pending)
+            self.pending.clear()
+            return self.finish_completion(payload)
         if not self.terminal_started:
             released = bytes(self.pending)
             self.pending.clear()
@@ -854,21 +995,51 @@ class ChatCompletionLimitGuard:
         return tail
 
 
-def transform_chat_request(body: bytes, config: dict[str, Any]) -> bytes:
+PI_SUMMARIZATION_SYSTEM_PROMPT = (
+    "You are a context summarization assistant. Your task is to read a conversation "
+    "between a user and an AI assistant, then produce a structured summary following "
+    "the exact format specified.\n\nDo NOT continue the conversation. Do NOT respond "
+    "to any questions in the conversation. ONLY output the structured summary."
+)
+
+
+def transform_chat_request(
+    body: bytes, config: dict[str, Any], surface: dict[str, Any] | None = None,
+) -> bytes:
     value = json.loads(body)
-    if not isinstance(value, dict) or value.get("model") != config.get("servedModel"):
+    allowed_models = [config.get("servedModel"), *config.get("servedModelAliases", [])]
+    if not isinstance(value, dict) or value.get("model") not in allowed_models:
         raise ValueError("chat request targets a different model")
+    # Pi's native summarizer bypasses before_provider_request. Resolve the
+    # same-artifact stable identity at the authenticated relay as well.
+    value["model"] = config["servedModel"]
+    backend = str(config.get("backend") or "")
+    if backend == "omlx":
+        validate_omlx_context_is_self_contained(value)
+    sampling_source = surface if surface is not None else config
+    contract_document = sampling_source.get("samplingContract")
+    enforcement = sampling_source.get("samplingEnforcement")
+    if contract_document is not None or enforcement is not None:
+        if contract_document is None or enforcement is None:
+            raise ValueError("sampling contract is incomplete")
+        contract_document, enforcement = validated_sampling_policy(
+            contract_document, enforcement, "chat-completions",
+        )
+        value = enforce_sampling_contract(
+            value, contract_document, enforcement, "chat-completions",
+        )
     # Unit-level callers and older in-memory diagnostics predate the explicit
     # field; a real proxy configuration is still validated strictly at load.
     reasoning = config.get("reasoning", "auto")
     if reasoning not in CHAT_REASONING_LEVELS:
         raise ValueError("invalid reasoning effort")
-    backend = str(config.get("backend") or "")
-    if backend in {"whallm", "omlx", "uzu"}:
-        value.pop("thinking_mode", None)
-        value.pop("reasoning_effort", None)
-        value.pop("enable_thinking", None)
-        value.pop("chat_template_kwargs", None)
+    llama_client_budgets = {
+        key: value.get(key)
+        for key in ("reasoning_budget_tokens", "thinking_budget_tokens")
+        if key in value
+    } if backend == "llamacpp" else {}
+    for key in REASONING_OVERRIDE_FIELDS:
+        value.pop(key, None)
     if backend == "whallm" and reasoning != "auto":
         if reasoning == "off":
             value.update({"thinking_mode": "chat", "reasoning_effort": "none"})
@@ -889,46 +1060,33 @@ def transform_chat_request(body: bytes, config: dict[str, Any]) -> bytes:
         # normalize to Default, so send the one canonical request control.
         value["reasoning_effort"] = "disabled" if reasoning == "off" else "default"
     limit = int(config["outputLimit"])
-    requested = value.get("max_tokens")
-    if backend == "llamacpp":
-        # llama.cpp accepts both OpenAI spellings as aliases for the same
-        # generation limit.  Collapse them before forwarding so a modern agent
-        # cannot leave a larger max_completion_tokens value beside the
-        # launcher-capped max_tokens value.
-        requested_limits: list[int] = []
-        for key in ("max_tokens", "max_completion_tokens"):
-            candidate = value.get(key)
-            if candidate is None:
-                continue
-            if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate <= 0:
-                raise ValueError(f"invalid {key}")
-            requested_limits.append(candidate)
-        value["max_tokens"] = min([limit, *requested_limits])
-        value.pop("max_completion_tokens", None)
-    elif backend == "uzu":
-        requested_limits: list[int] = []
-        for key in ("max_tokens", "max_completion_tokens"):
-            candidate = value.get(key)
-            if candidate is None:
-                continue
-            if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate <= 0:
-                raise ValueError(f"invalid {key}")
-            requested_limits.append(candidate)
-        value["max_completion_tokens"] = min([limit, *requested_limits])
+    requested_limits: list[int] = []
+    for key in ("max_tokens", "max_completion_tokens"):
+        candidate = value.get(key)
+        if candidate is None:
+            continue
+        if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate <= 0:
+            raise ValueError(f"invalid {key}")
+        requested_limits.append(candidate)
+    effective_limit = min([limit, *requested_limits])
+    if backend == "uzu":
+        # Uzu implements the newer Chat Completions spelling. Keep exactly one
+        # upstream field so two client aliases can never disagree.
+        value["max_completion_tokens"] = effective_limit
         value.pop("max_tokens", None)
-    elif requested is None:
-        value["max_tokens"] = limit
-    elif isinstance(requested, bool) or not isinstance(requested, int) or requested <= 0:
-        raise ValueError("invalid max_tokens")
     else:
-        value["max_tokens"] = min(requested, limit)
+        # oMLX, LM Studio, MTPLX and the SSD/native runtimes accept max_tokens.
+        # Modern clients may send max_completion_tokens instead (or alongside
+        # it), so preserve the strictest visible ceiling and collapse aliases.
+        value["max_tokens"] = effective_limit
+        value.pop("max_completion_tokens", None)
     if backend == "llamacpp":
         effective = int(value["max_tokens"])
         reserve = 128 if effective >= 512 else max(1, effective // 4)
         maximum_thinking = min(384, max(0, effective - reserve))
         client_budgets: list[int] = []
         for key in ("reasoning_budget_tokens", "thinking_budget_tokens"):
-            client_budget = value.get(key)
+            client_budget = llama_client_budgets.get(key)
             if client_budget is None or client_budget == -1:
                 continue
             if (
@@ -949,15 +1107,23 @@ def transform_chat_request(body: bytes, config: dict[str, Any]) -> bytes:
         messages = value.get("messages")
         if not isinstance(messages, list):
             raise ValueError("invalid Uzu messages")
-        # A byte is a conservative upper bound for one byte-fallback tokenizer
-        # token. Reserve template/control tokens per message as well. This is
-        # intentionally cautious until Uzu's CLI exposes ChatConfig::Custom.
-        prompt_token_upper_bound = len(body) + 1_024 + 32 * len(messages)
-        if prompt_token_upper_bound + int(value["max_completion_tokens"]) > context_limit:
-            raise ValueError(
-                "This request plus its response limit exceeds the selected Uzu context window. "
-                "Shorten the chat, lower Maximum response, or choose 32K context."
-            )
+        # The pinned native runtime counts the rendered prompt with its real
+        # tokenizer and reserves the complete response allowance before decode.
+        # JSON bytes are NOT tokens: a byte guard rejects ordinary code/history
+        # far below the selected context and prevents Pi's own compaction.
+    # Native Pi summaries are housekeeping, not a new reasoning turn. Keep
+    # them bounded so recovery cannot consume its own remaining KV headroom.
+    if backend in {"omlx", "mtplx"} and (surface or {}).get("client") == "pi":
+        messages = value.get("messages")
+        first = messages[0] if isinstance(messages, list) and messages else {}
+        if (
+            isinstance(first, dict) and first.get("role") == "system"
+            and first.get("content") == PI_SUMMARIZATION_SYSTEM_PROMPT
+        ):
+            value["max_tokens"] = min(int(value.get("max_tokens") or 4096), 4096)
+            value["chat_template_kwargs"] = {"enable_thinking": False}
+            if backend == "mtplx":
+                value.update({"enable_thinking": False, "reasoning_effort": "none"})
     if value.get("stream") is True:
         stream_options = value.get("stream_options")
         if stream_options is None:
@@ -968,7 +1134,85 @@ def transform_chat_request(body: bytes, config: dict[str, Any]) -> bytes:
         if backend == "uzu":
             # Uzu always emits terminal usage and ignores stream_options.
             value.pop("stream_options", None)
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    messages = value.get("messages")
+    prompt_items = len(messages) if isinstance(messages, list) else 0
+    return bound_omlx_request_to_context(
+        value, config, "max_tokens", prompt_items=prompt_items,
+    )
+
+
+def normalize_uzu_context_error(payload: bytes) -> bytes:
+    """Keep native overflow recognisable when an SDK retains only error.message."""
+    try:
+        value = json.loads(payload)
+        error = value.get("error") if isinstance(value, dict) else None
+        if isinstance(error, dict) and error.get("code") == "context_length_exceeded":
+            error["message"] = "context_length_exceeded: " + str(error.get("message") or "The request exceeds the context window.")
+            return json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except (ValueError, UnicodeError):
+        pass
+    return payload
+
+
+def normalize_omlx_compactable_error(payload: bytes) -> bytes:
+    """Let Pi reduce history after the native prompt-memory admission guard.
+
+    Pi's SDK drops structured error codes, so the compaction trigger must
+    survive in error.message. Preserve the native code and memory diagnostics;
+    unrelated allocation/runtime failures must not become compaction retries.
+    """
+    try:
+        value = json.loads(payload)
+        error = value.get("error") if isinstance(value, dict) else None
+        if (isinstance(error, dict)
+                and error.get("code") == "prefill_memory_exceeded"):
+            message = str(error.get("message") or "The prompt exceeds available processing memory.")
+            if not message.startswith("context_length_exceeded:"):
+                error["message"] = (
+                    "context_length_exceeded: Compact the conversation to reduce prompt-processing memory. "
+                    + message
+                )
+            return json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except (ValueError, UnicodeError):
+        pass
+    return payload
+
+
+def normalize_mtplx_compactable_error(payload: bytes) -> bytes:
+    """Recognise admission refusal, never a failed allocation during generation."""
+    try:
+        value = json.loads(payload)
+        error = value.get("error") if isinstance(value, dict) else None
+        if not isinstance(error, dict) or error.get("code") != "insufficient_memory":
+            return payload
+        message = str(error.get("message") or "")
+        if not (message.startswith("insufficient memory: this prompt projects ")
+                and "refused before prefill" in message):
+            return payload
+        # Pi recognises the context marker after its SDK discards error codes.
+        # The second marker selects the existing bounded retention policy.
+        error["message"] = "context_length_exceeded: prefill_memory_exceeded: " + message
+        return json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except (ValueError, UnicodeError):
+        return payload
+
+
+def normalize_mtplx_compactable_event(event: bytes) -> bytes:
+    data = b"\n".join(line[5:].lstrip() for line in event.splitlines() if line.startswith(b"data:"))
+    normalized = normalize_mtplx_compactable_error(data)
+    if normalized == data:
+        return event
+    output = []
+    written = False
+    for line in event.splitlines(keepends=True):
+        if line.startswith(b"data:"):
+            if not written:
+                ending = b"\r\n" if line.endswith(b"\r\n") else b"\n" if line.endswith(b"\n") else b""
+                output.append(b"data: " + normalized + ending)
+                written = True
+        else:
+            output.append(line)
+    return b"".join(output)
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -1075,6 +1319,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 cancelled = self.scheduler.cancel_surface(surface_id) if removed else 0
                 self.send_json(HTTPStatus.OK, {"ok": True, "removed": bool(removed), "cancelled": cancelled})
                 return
+            if action == "cancel":
+                surface_id = str(payload.get("surfaceId") or "")
+                known = any(
+                    surface["id"] == surface_id
+                    for surface in self.registry.public()
+                )
+                if not known:
+                    raise ValueError("unknown surface")
+                cancelled = self.scheduler.cancel_surface(surface_id)
+                self.send_json(HTTPStatus.ACCEPTED, {
+                    "ok": True, "surfaceId": surface_id,
+                    "cancelled": cancelled,
+                })
+                return
             raise ValueError("unknown surface action")
         except (ValueError, json.JSONDecodeError) as error:
             self.send_json_error(HTTPStatus.BAD_REQUEST, str(error))
@@ -1141,7 +1399,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if generation:
             try:
                 if base_path == "/v1/responses":
-                    body = transform_response_request(body, self.config)
+                    body = transform_response_request(body, self.config, surface)
                     request_output_limit = int(json.loads(body)["max_output_tokens"])
                     protocol = "responses"
                     if self.config["backend"] == "mtplx":
@@ -1149,12 +1407,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         body = bridge_request.body
                         upstream_path = "/v1/chat/completions"
                 else:
-                    body = transform_chat_request(body, self.config)
+                    body = transform_chat_request(body, self.config, surface)
                     protocol = "chat-completions"
                     transformed = json.loads(body)
-                    request_output_limit = int(
-                        transformed.get("max_completion_tokens", transformed.get("max_tokens"))
+                    limit_field = (
+                        "max_completion_tokens"
+                        if self.config["backend"] == "uzu" else
+                        "max_tokens"
                     )
+                    request_output_limit = int(transformed[limit_field])
             except (ValueError, TypeError, json.JSONDecodeError) as error:
                 self.send_json_error(
                     HTTPStatus.BAD_REQUEST,
@@ -1177,42 +1438,94 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         headers = {
             key: value for key, value in self.headers.items()
-            if key.lower() not in HOP_HEADERS | {"authorization", "host", "content-length", "accept-encoding"}
+            if key.lower() not in HOP_HEADERS | MUTATED_REPRESENTATION_HEADERS
+            | {"authorization", "host", "accept-encoding"}
         }
         headers["Authorization"] = f"Bearer {self.config['upstreamKey']}"
         headers["Accept-Encoding"] = "identity"
+        if generation and self.config["backend"] == "mtplx":
+            body, headers = mtplx_launcher_request(body, headers)
         if body:
             headers["Content-Length"] = str(len(body))
         headers["Connection"] = "close"
-        connection = http.client.HTTPConnection(
+        connection = InterruptibleHTTPConnection(
             "127.0.0.1", self.config["upstreamPort"], timeout=900,
+            downstream=self.connection,
         )
+        # A connected client that stops consuming output must not occupy an
+        # engine lane forever. This is a write timeout, not a prefill deadline.
+        self.connection.settimeout(30)
         if request_id:
             self.scheduler.set_connection(request_id, connection)
         response_started = False
         status_code: int | None = None
         result = "completed"
         metrics: ResponseMetrics | None = None
+        runtime_identity_sent = False
         try:
             if request_id and self.scheduler.cancelled(request_id):
                 raise ConnectionAbortedError("request cancelled")
             connection.request(self.command, upstream_path, body=body or None, headers=headers)
             upstream = connection.getresponse()
             status_code = upstream.status
+            if upstream.status >= 400:
+                result = "upstream-error"
             upstream_content_type = upstream.getheader("Content-Type") or ""
             is_event_stream = upstream_content_type.lower().startswith("text/event-stream")
             limit_guard: ChatCompletionLimitGuard | ResponsesLimitGuard | None = None
             if request_output_limit is not None and 200 <= upstream.status < 300:
                 if protocol == "responses" and bridge_request is None:
                     limit_guard = ResponsesLimitGuard(request_output_limit, is_event_stream)
-                elif protocol == "chat-completions" and is_event_stream:
-                    limit_guard = ChatCompletionLimitGuard(request_output_limit)
+                elif protocol == "chat-completions":
+                    limit_guard = ChatCompletionLimitGuard(
+                        request_output_limit, is_event_stream,
+                        mtplx_memory_recovery=self.config["backend"] == "mtplx",
+                    )
             if request_id:
                 metrics = ResponseMetrics(
                     "chat-completions" if bridge_request is not None else protocol,
                     upstream_content_type,
                     self.config["backend"],
                 )
+            buffered_chat_completion: bytes | bytearray | None = None
+            normalized_error = False
+            if ((self.config["backend"] in {"uzu", "omlx"} and upstream.status == 400)
+                    or (self.config["backend"] == "mtplx" and upstream.status == 507)):
+                payload = upstream.read(MAX_BODY + 1)
+                if len(payload) > MAX_BODY:
+                    raise OSError("Local model server returned an oversized error")
+                buffered_chat_completion = (
+                    normalize_uzu_context_error(payload) if self.config["backend"] == "uzu"
+                    else normalize_mtplx_compactable_error(payload) if self.config["backend"] == "mtplx"
+                    else normalize_omlx_compactable_error(payload)
+                )
+                normalized_error = True
+            if (
+                isinstance(limit_guard, ChatCompletionLimitGuard)
+                and not is_event_stream
+            ):
+                payload = bytearray()
+                while len(payload) <= MAX_BODY:
+                    chunk = upstream.read1(16 * 1024)
+                    if not chunk:
+                        break
+                    payload.extend(chunk)
+                    if request_id:
+                        self.scheduler.first_byte(request_id)
+                        self.scheduler.add_bytes(request_id, len(chunk))
+                        if metrics is not None and metrics.feed(chunk):
+                            self.scheduler.first_output(request_id)
+                if len(payload) > MAX_BODY:
+                    result = "upstream-error"
+                    status_code = int(HTTPStatus.BAD_GATEWAY)
+                    response_started = True
+                    self.send_json_error(
+                        HTTPStatus.BAD_GATEWAY,
+                        "Local model server returned an oversized non-stream completion",
+                    )
+                    return
+                buffered_chat_completion = limit_guard.finish_completion(payload)
+                del payload
             if bridge_request is not None and 200 <= upstream.status < 300:
                 bridge = ChatStreamBridge(bridge_request)
                 content_type = (upstream.getheader("Content-Type") or "").lower()
@@ -1264,33 +1577,53 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_response(upstream.status, upstream.reason)
             for key, value in upstream.getheaders():
                 if key.lower() not in HOP_HEADERS and not (
-                    limit_guard is not None and key.lower() == "content-length"
+                    (limit_guard is not None or normalized_error)
+                    and key.lower() in MUTATED_REPRESENTATION_HEADERS
                 ):
                     self.send_header(key, value)
             self.send_header("Connection", "close")
             if request_id:
                 self.send_header("X-LLM-Launcher-Request-Id", request_id)
             self.end_headers()
-            while True:
-                chunk = upstream.read1(16 * 1024)
-                if not chunk:
-                    break
-                if request_id:
-                    self.scheduler.first_byte(request_id)
-                    self.scheduler.add_bytes(request_id, len(chunk))
-                    if metrics is not None and metrics.feed(chunk):
-                        self.scheduler.first_output(request_id)
-                relayed = limit_guard.feed(chunk) if limit_guard is not None else chunk
-                if relayed:
-                    self.wfile.write(relayed)
+            if buffered_chat_completion is not None:
+                if buffered_chat_completion:
+                    self.wfile.write(buffered_chat_completion)
                     self.wfile.flush()
-            if limit_guard is not None:
-                terminal = limit_guard.finish()
-                if terminal:
-                    self.wfile.write(terminal)
-                    self.wfile.flush()
+            else:
+                while True:
+                    chunk = upstream.read1(16 * 1024)
+                    if not chunk:
+                        break
+                    if request_id:
+                        self.scheduler.first_byte(request_id)
+                        self.scheduler.add_bytes(request_id, len(chunk))
+                        if metrics is not None and metrics.feed(chunk):
+                            self.scheduler.first_output(request_id)
+                    relayed = limit_guard.feed(chunk) if limit_guard is not None else chunk
+                    if isinstance(limit_guard, ChatCompletionLimitGuard) and limit_guard.memory_refused:
+                        result = "upstream-error"
+                        status_code = 507
+                    # Publish correlation metadata as soon as the first SSE
+                    # frame arrives. Waiting until EOF hides buffered tool
+                    # previews for the entire request.
+                    if request_id and metrics is not None and not runtime_identity_sent:
+                        response_id = metrics.runtime_stats.get("runtimeResponseId")
+                        if response_id:
+                            self.scheduler.set_runtime_stats(request_id, {"runtimeResponseId": response_id})
+                            runtime_identity_sent = True
+                    if relayed:
+                        self.wfile.write(relayed)
+                        self.wfile.flush()
+                if limit_guard is not None:
+                    terminal = limit_guard.finish()
+                    if terminal:
+                        self.wfile.write(terminal)
+                        self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
-            result = "client-disconnected"
+            result = (
+                "cancelled" if request_id and self.scheduler.cancelled(request_id)
+                else "client-disconnected"
+            )
         except (ConnectionAbortedError, OSError, http.client.HTTPException) as error:
             cancelled = bool(request_id and self.scheduler.cancelled(request_id))
             result = "cancelled" if cancelled else "upstream-error"
@@ -1305,6 +1638,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         finally:
             connection.close()
             if request_id:
+                if self.scheduler.cancelled(request_id):
+                    result = "cancelled"
                 if metrics is not None:
                     if metrics.finish():
                         self.scheduler.first_output(request_id)

@@ -1,0 +1,10 @@
+But the user says "the game sounds are not playing." This could be:
+1. The sounds are too quiet
+2. The AudioContext is in suspended state
+3. The browser blocks audio until a specific gesture (like click, not keypress)
+
+In Chrome, AudioContext requires a user gesture. Any key press should count. But the game only responds to keyboard, so if the user opens the game, they need to press a key to unlock audio. This should work.
+
+However, there's a subtlety: the game might be creating the AudioContext before the user interacts. Let me check if there's any audio initialization at load time...
+
+Actually, the `initAudio()` function I added is never called. So the AudioContext is only created on the first key press.

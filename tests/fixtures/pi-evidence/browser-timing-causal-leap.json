@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "id": "recorded-browser-timing-causal-leap",
+  "provenance": {
+    "kind": "reduced noncontiguous replay of recorded messages, not a full historical request",
+    "session": "21:31:35 UTC, 7 September 2026, Mario browser verification · Qwen medium",
+    "source_model_id": "local-e12c8114bbeab47c9928f4fd",
+    "source_thinking_level": "medium",
+    "selected_transcript_lines": [
+      22,
+      23,
+      24,
+      25,
+      38,
+      39,
+      40,
+      41
+    ],
+    "objective_transcript_line": 5,
+    "omitted_context": "Earlier discovery, audio/start checks and intermediate movement retries are omitted; selected assistant/tool messages remain complete.",
+    "sanitization": "Only the project root becomes /fixture and tool IDs become stable local IDs. Selected text, numbers, source and tool arguments otherwise remain as recorded.",
+    "source_records": [
+      {
+        "file": "2026-09-07T21-31-35-093Z_01a07dc8-9f35-71d7-ac82-2bf5e1daa184.jsonl",
+        "line": 5,
+        "sha256": "78b5d822a6710f895d3a33b14cfd59a3c9e3f54ae3bcf5ddf0c4bd10007500b1"
+      },
+      {
+        "file": "2026-09-07T21-31-35-093Z_01a07dc8-9f35-71d7-ac82-2bf5e1daa184.jsonl",
+        "line": 22,
+        "sha256": "ea3df00f9e540566baa921e07d0482d3b608f4bba0e6ea6cc2386c4ab1014c8f"
+      },
+      {
+        "file": "2026-09-07T21-31-35-093Z_01a07dc8-9f35-71d7-ac82-2bf5e1daa184.jsonl",
+        "line": 23,
+        "sha256": "0ce22c6507f7c7bfed1e743b4c62d7a0a41818e3facba87a26f7c52a26f71334"
+      },
+      {
+        "file": "2026-09-07T21-31-35-093Z_01a07dc8-9f35-71d7-ac82-2bf5e1daa184.jsonl",
+        "line": 24,
+        "sha256": "a1f4218a04b0bc19f091c4906ac8ceac5be10b37e4a46cdf20cc6cd24f8bdd29"
+      },
+      {
+        "file": "2026-09-07T21-31-35-093Z_01a07dc8-9f35-71d7-ac82-2bf5e1daa184.jsonl",
+        "line": 25,
+        "sha256": "c6b839175da45ba787987073c9c154b8d534f386c0006746c469d6610bbb7009"
+      },
+      {
+        "file": "2026-09-07T21-31-35-093Z_01a07dc8-9f35-71d7-ac82-2bf5e1daa184.jsonl",
+        "line": 38,
+        "sha256": "bce2056ab16eeda868ad1a949a719aa217cbe8785d7eeaa3b25629b9f7d00a74"
+      },
+      {
+        "file": "2026-09-07T21-31-35-093Z_01a07dc8-9f35-71d7-ac82-2bf5e1daa184.jsonl",
+        "line": 39,
+        "sha256": "05101b2bc66672e9ce222f33122e8512e69d20150f810e2b4df1daffd9fa182d"
+      },
+      {
+        "file": "2026-09-07T21-31-35-093Z_01a07dc8-9f35-71d7-ac82-2bf5e1daa184.jsonl",
+        "line": 40,
+        "sha256": "52e4ce87108c67fcbed4cf77709cfcb7cb6cb90266aa6dae3d27b6733949a58c"
+      },
+      {
+        "file": "2026-09-07T21-31-35-093Z_01a07dc8-9f35-71d7-ac82-2bf5e1daa184.jsonl",
+        "line": 41,
+        "sha256": "6b702e1d93d8621ef1234702f416c17124502f823b785500a1290f4a0df49be2"
+      },
+      {
+        "file": "2026-09-07T20-39-36-239Z_01a07d99-082f-77a8-9e7b-473c84bbf17d.jsonl",
+        "line": 19,
+        "sha256": "4bac971593764d2a5d9cdd98c4d837a0de2288e539d093e378987912d03e0208"
+      },
+      {
+        "file": "2026-09-07T20-39-36-239Z_01a07d99-082f-77a8-9e7b-473c84bbf17d.jsonl",
+        "line": 21,
+        "sha256": "2f4c5c8a32866cc47cb123eb20416b5beb3aaf19bdce211afe388b93e43f31cb"
+      }
+    ],
+    "objective_matches_saved_handover": true,
+    "compactions_in_source_session": 0,
+    "custom_injections_in_source_session": 0,
+    "wire_capture_limitation": "The saved Pi transcript is available; the entire original provider request/system prompt is not captured in this fixture.",
+    "caller_excerpt_matches_earlier_source_verbatim": true
+  },
+  "replay_messages": [
+    {
+      "role": "user",
+      "content": "Verify the current Mario game in this project using the provided browser_check tool. Begin by opening file:///fixture/index.html in that private browser and collecting an actual browser result. It maintains its own page between calls, so you do not need to write a Playwright setup script.\n\nCheck that the game starts after Enter, responds to movement input, and creates a running Web Audio context after user interaction. Measure current movement timing with a small in-page check; account for collisions or death rather than interpreting them as a speed bug. Extend the check only to resolve a concrete failure. Do not alter game state just to manufacture a pass.\n\nEarlier agents already changed game.js after a historical movement/audio complaint. That complaint is not proof of a fault in the current file. Fix only a fault you can reproduce and verify. Matching original NES physics, traversing the entire level and rewriting the game are outside this check. Finish with concise measured results and explicit limitations, including anything not verified in Safari or actual speakers. Close the private browser when done."
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "OK, now let's take a look at updatePlayer, the movement physics calculations, and the tick rate of the main loop (the rAF dt scaling). Gotta search for it.\n",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "recorded-22-1",
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "arguments": "{\"command\": \"cd /fixture && grep -n \\\"function updatePlayer\\\\|function loop\\\\|requestAnimationFrame\\\\|lastT\\\\|dt\\\\b\\\" game.js | head -20\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "recorded-22-1",
+      "content": "647:function updatePlayer() {\n994:function updateEnemies(dt) {\n1104:function updateItems(dt) {\n1262:function update(dt) {\n1263:  animT += dt;\n1264:  stateT += dt;\n1279:    timeLeft -= dt / 60;\n1283:    updateEnemies(dt);\n1284:    updateItems(dt);\n1311:    updateEnemies(dt);\n1312:    updateItems(dt);\n3197:    update(1); // dt in \"frames\"\n3201:  requestAnimationFrame(frame);\n3208:if (typeof requestAnimationFrame === \"function\") requestAnimationFrame(frame);\n"
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "Good — the loop is fixed-step: every rAF frame, `update(1)` (1 \"frame\" unit) is executed. To grasp the speed, let's take a look at the movement portion of updatePlayer (line 647 onwards).\n",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "recorded-24-1",
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "arguments": "{\"command\": \"cd /fixture && sed -n '647,720p' game.js\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "recorded-24-1",
+      "content": "function updatePlayer() {\n  const p = player;\n  if (p.dead) { p.deadT++; p.vy += 0.35; p.y += p.vy; return; }\n\n  if (p.shotCd > 0) p.shotCd--;\n  if (p.star > 0) p.star--;\n  if (p.invuln > 0) p.invuln--;\n\n  const ax = axisX();\n  const ACC = 0.04, FR = 0.32;\n  const runKey = keys[\"b\"] || keys[\"B\"] || keys[\"Shift\"];\n  const walk = { small: 1.4, big: 1.5, super: 1.6 };\n  const run  = { small: 1.9, big: 2.0, super: 2.2 };\n  const yoshiWalk = 1.7, yoshiRun = 2.5;\n  const MAX = p.yoshi ? (runKey ? yoshiRun : yoshiWalk) : (runKey ? run[p.power] : walk[p.power]);\n  if (ax) {\n    p.vx += ax * ACC;\n    p.vx = Math.max(-MAX, Math.min(MAX, p.vx));\n    p.facing = ax;\n    if (p.onGround) p.animT += 1;\n  } else {\n    p.vx -= Math.sign(p.vx) * (p.onGround ? FR : FR * 0.25);\n    if (Math.abs(p.vx) < FR) p.vx = 0;\n  }\n  if (Math.abs(p.vx) < 0.02 && !ax) p.anim = \"idle\";\n\n  // --- jumping / propeller / yoshi flutter ---\n  const jHeld = jumpHeld(), jPress = jumpPressed();\n  const wantJump = (jPress && p.onGround) || (jHeld && p.yoshi && p.onGround && p.vy > -1);\n  if (wantJump) {\n    const base = p.big ? -7.9 : -7.6;\n    p.vy = p.yoshi ? -4.9 : base;\n    p.onGround = false;\n    if (!p.yoshi) SFX.jump();\n  }\n  if (p.power === \"prop\" && !p.onGround) {\n    if (jHeld) { p.vy += -0.62 * 1; if (p.vy < -3.6) p.vy = -3.6; }\n    else { p.vy += 0.5; if (p.vy > 5.5) p.vy = 5.5; }\n  } else {\n    if (p.vy < -1.5 && !jHeld && !p.yoshi && p.power !== \"prop\") p.vy += 0.22;  // variable jump\n    p.vy += p.yoshi && !jHeld ? 0.36 : 0.38;\n    if (p.vy > 8.5) p.vy = 8.5;\n  }\n  if (p.yoshi && !p.onGround && jHeld && p.vy > 0.2) p.vy = Math.min(p.vy, 1.9);  // flutter\n\n  p.x += p.vx;\n  if (p.x < 0) { p.x = 0; p.vx = 0; }\n  if (p.x > LW * 16 - p.w) { p.x = LW * 16 - p.w; p.vx = 0; }\n\n  const prevBottom = p.y + p.h;\n  moveAndCollide(p);\n\n  // pass-through (one-way) platforms\n  if (p.vy >= 0) {\n    const bottom = p.y + p.h;\n    const r0 = Math.floor(bottom / 16);\n    const c1 = tileAt(Math.floor((p.x + 1) / 16), r0), c2 = tileAt(Math.floor((p.x + p.w - 1) / 16), r0);\n    if ((c1 === \"p\" || c2 === \"p\") && bottom >= r0 * 16 && prevBottom <= r0 * 16 + 2) {\n      p.y = r0 * 16 - p.h - 0.01; p.vy = 0; p.onGround = true;\n    }\n  }\n\n  // crystal lift riding\n  if (p.ride) {\n    const L = p.ride;\n    if (Math.abs(p.x + p.w / 2 - L.x) > L.w / 2 + 10) p.ride = null;\n  }\n  if (!p.ride && p.vy >= -0.1) {\n    for (const L of lifts) {\n      const top = L.topY;\n      if (Math.abs(p.x + p.w / 2 - L.x) <= L.w / 2 + 3 && Math.abs(prevBottom - top) <= 6) {\n        p.ride = L; break;\n      }\n    }\n"
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "Currently:\n- Restart works (lives=3, new player, state=play).\n- While holding ArrowRight: vx accelerates 0 → 0.6 → 1.2 → 1.4 px/frame, hitting exactly the upper limit of the small walk (1.4). Between t=503–1005 (502ms, about 30 frames), Δx = 143.2-71.2 = 72 → wait, this includes reaching the cap. From t=754 to t=1005 at full speed vx=1.4: 28.0px over 250.5ms = 111.8 px/s... hmm, 1.4 px/frame × 60fps = 84 px/s. But measured is 111.78 px/s? Let me verify: 754.8→1005.3 is 250.5ms → at 60fps that's 15.03 frames → 28.0px/15.03 = 1.86 px/frame. But the sample says vx=1.4 at t=754.8. So between 754 and 1005 the player is moving faster than 1.4?\n\nHmm wait, but at t=1005 the player died (dead=true, y=125). The x=143.2 at t=1005 might be the position at death... actually, death from enemy collision. If Mario stomped a goomba, vy goes negative, x keeps increasing. But the fact that dead=true means it got hit (or a pit). y=125 is in the air.\n\nWhy is the effective speed 1.86 instead of 1.4? Possibilities: (a) the rAF framerate in headless isn't exactly 60 — if the display runs at 120Hz, or if rAF runs faster, then per-second speed doubles. 111.78/84 = 1.33 — that's not 2. Hmm, actually 1.4 px/frame at 80fps = 112 px/s! Exactly: 1.4 × 80 = 112. So rAF is running at about 80Hz in this headless environment (or display refresh). Let's verify the actual rAF rate in the page.\n\nLet me measure the rAF fps: count frames for 1000ms.\n\nIf rAF is about 80Hz, then the game runs 33% faster in real time, but that's due to environmental factors (the headless display refresh rate), not a game bug — the game is frame-based (fixed 1 step per rAF) and is designed for 60Hz. On a 60Hz display it would be 84 px/s of walking. This is exactly the nuance of the \"movement timing\" measurement: px/frame matches the code constant (walk 1.4), real-time speed scales with the refresh rate.\n\nAlso the death at t≈1005ms: got hit by an enemy while running (at x≈143, y=125 in the air — maybe got hit by a high-flying enemy? There might be enemies in the level). Death is a valid collision, not a speed bug.\n\nSo next, measure: rAF fps, and a clean run: restart (need to wait for the respawn flow — if lives > 0, after deadT > 70, auto-respawns at start, or at the check point). Actually, the code auto-respawns during the \"play\" state after death (deadT>70, lives>0 → buildLevel, state play). But in the end state, dead=true, state=\"play\" — respawn happens automatically after 70 frames. And lives: does killPlayer decrement lives? In any case — I can wait for auto-respawn and then repeat the clean measurement, this time with a jump to avoid the enemy, or just run and measure until I hit the cap, without dying.\n\nActually, the main questions about movement are already answered: vx reaches exactly the cap 1.4, acceleration profile matches ACC 0.04 (0→0.6→1.2→1.4 ≈ 0.04×frames: after about 15 frames vx≈0.6 ✓, about 30 frames →1.2 ✓, 35 frames →1.4 ✓). The steady 1.4 px/frame is exactly the constant in the code. The discrepancy with px/second is a refresh-rate artifact.\n\nThings to do:\n1. Measure rAF fps.\n2. A clean running measurement until the cap is reached + verify deceleration (FR 0.32/frame → from 1.4, stops in 5 frames: 1.4→1.08→0.76→0.44→0.12→0: about 5 frames ≈ 83ms at 60Hz; here the deceleration sample D showed vx=0 by 100ms — consistent with 5–6 frames at 80Hz).\n3. Then close the browser.\n\nLet me first check the current state (auto-respawn) and fps.\n",
+      "content": "Restart works, and while pressing the right arrow key: vx accelerates 0→0.6→1.2→1.4 px/frame, reaching exactly the small-walk cap (1.4) — the acceleration profile matches the code constant (ACC 0.04/frame). The effective real-time value I measured was 111.8 px/s ≈ 1.4 px/frame × ~80fps, suggesting that the headless rAF rate here isn't 60Hz. Since the game is frame-stepped (`update(1)` per rAF), I'll measure the actual rAF fps, wait for the automatic respawn after the (valid) collision death, and then grab one clean run and deceleration measurement.\n\n",
+      "tool_calls": [
+        {
+          "id": "recorded-38-2",
+          "type": "function",
+          "function": {
+            "name": "browser_check",
+            "arguments": "{\"action\": \"evaluate\", \"script\": \"(async () => {\\n  const wait = ms => new Promise(r => setTimeout(r, ms));\\n  const fps = await new Promise(res => { let n = 0; const t0 = performance.now(); const step = () => { n++; if (performance.now() - t0 < 1000) requestAnimationFrame(step); else res(n); }; requestAnimationFrame(step); });\\n  return { rafFpsPerSecond: fps, state, dead: player.dead, lives, x: +player.x.toFixed(2), y: +player.y.toFixed(2) };\\n})()\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "recorded-38-2",
+      "content": "{\"browser\":\"Chromium\",\"url\":\"file:///fixture/index.html\",\"result\":{\"rafFpsPerSecond\":121,\"state\":\"gameover\",\"dead\":true,\"lives\":0,\"x\":34,\"y\":611.09},\"truncated\":false,\"errors\":[]}"
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "Two findings:\n1. rAF is running at about 121 fps in this headless environment (not 60). So the actual real-time speed = 1.4 px/frame × 121 ≈ 169 px/s… but the measurement was 111.8 px/s in steady state? Hmm, that doesn't match. 111.78/1.4 = 79.8. So during that run, effective fps was about 80. Now it's 121? Headless rAF can fluctuate (vsync off, variable load). In any case: on this headless Chromium, rAF isn't locked to 60Hz and runs at a variable rate (currently 80–121 fps), so the real-time speed varies with display rate. The per-frame physics is deterministic and matches the code exactly.\n\n2. State is currently gameover with lives=0 — lives hit 0? Wait, after respawn I should have lives=3, then… did killPlayer consume lives? Earlier I measured lives=3 after restart. Then I died once → lives should be 2, auto-respawn… but it's gameover with lives 0. Hmm, maybe during the ~1 second of fps measurement, the respawned player stood still and got hit again (goomba approaches at start, invuln=60 frames = 0.5s at 120fps… at 121fps invuln lasts only about 0.5s). The respawned player stood still and died again → lives→… but lives goes 3→2→… gameover means lives<=0. Maybe during the interval between calls, the player stood at the starting position and got hit repeatedly? Auto-respawn gives invuln=60 frames; at 121fps that's only 0.49s of invuln — a goomba walks in, kills again. That could have happened multiple times between calls. Also note: at high fps the invuln frames cover less real time, so deaths happen faster. This is an artifact of frame-based timing in a high-refresh-rate environment, not a product defect.\n\nOK. Next, restart (gameover → Enter, wait 120 frames = about 1 second at 121fps), and immediately run right to escape the start position. Then measure up to cap + release + deceleration. Also check jump response (optional but nice): press Space briefly → vy goes to -7.6. Quick check: after running a bit, dispatch Space keydown and sample vy — expect jumpHeld to make vy ≤ -7.6. That validates jump input too.\n\nThe script is a compact version of the previous one plus a jump sample.\n",
+      "content": "rAF is running at approximately 121 fps here (a headless environment, not locked to 60Hz). Also, due to the frame-based invincibility timer, the stationary respawned Mario got hit again, and lives were depleted. Restarting, and to avoid the goombas in the spawn area, I'll measure clean run + jump + deceleration all in one go.\n\n",
+      "tool_calls": [
+        {
+          "id": "recorded-40-2",
+          "type": "function",
+          "function": {
+            "name": "browser_check",
+            "arguments": "{\"action\": \"evaluate\", \"script\": \"(async () => {\\n  const wait = ms => new Promise(r => setTimeout(r, ms));\\n  window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }));\\n  await wait(100);\\n  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));\\n  await wait(400); // wait past gameover's 120-frame gate at ~121fps\\n  const st = { state, lives, x: +player.x.toFixed(2), dead: player.dead };\\n  window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }));\\n  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));\\n  const t0 = performance.now();\\n  const S = [{ t: 0, x: +player.x.toFixed(2), vx: +player.vx.toFixed(3) }];\\n  for (let i = 1; i <= 6; i++) { await wait(150); S.push({ t: +(performance.now() - t0).toFixed(1), x: +player.x.toFixed(2), vx: +player.vx.toFixed(3) }); }\\n  // jump while running\\n  window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }));\\n  await wait(40);\\n  const j = { vy: +player.vy.toFixed(2), onGround: player.onGround };\\n  await wait(600); // jump arc, moving forward\\n  S.push({ t: +(performance.now() - t0).toFixed(1), x: +player.x.toFixed(2), vx: +player.vx.toFixed(3), y: +player.y.toFixed(1) });\\n  // release all\\n  window.dispatchEvent(new KeyboardEvent('keyup', { key: ' ' }));\\n  window.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight' }));\\n  const d0 = performance.now(); const D = [];\\n  for (let i = 0; i < 4; i++) { await wait(80); D.push({ t: +(performance.now() - d0).toFixed(1), vx: +player.vx.toFixed(3), x: +player.x.toFixed(2) }); }\\n  // pick two samples near cap (vx ~1.4) for steady speed\\n  const capSamples = S.filter(s => s.vx >= 1.35);\\n  let steady = null;\\n  if (capSamples.length >= 2) { const a = capSamples[0], b = capSamples[capSamples.length - 1]; steady = +((b.x - a.x) / ((b.t - a.t) / 1000)).toFixed(1); }\\n  return { st, S, jump: j, D, steadyPxPerSec: steady, endState: state, end: { x: +player.x.toFixed(2), y: +player.y.toFixed(2), dead: player.dead, onGround: player.onGround }, acState: AC ? AC.state : null };\\n})()\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "recorded-40-2",
+      "content": "{\"browser\":\"Chromium\",\"url\":\"file:///fixture/index.html\",\"result\":{\"st\":{\"state\":\"play\",\"lives\":3,\"x\":34,\"dead\":false},\"S\":[{\"t\":0,\"x\":34,\"vx\":0},{\"t\":151.1,\"x\":37.6,\"vx\":0.36},{\"t\":301.9,\"x\":47.68,\"vx\":0.72},{\"t\":453,\"x\":64.24,\"vx\":1.08},{\"t\":604.1,\"x\":87.2,\"vx\":1.4},{\"t\":754.9,\"x\":112.4,\"vx\":1.4},{\"t\":905.6,\"x\":123.6,\"vx\":0},{\"t\":1546.3,\"x\":123.6,\"vx\":0,\"y\":229.6}],\"jump\":{\"vy\":-4.05,\"onGround\":true},\"D\":[{\"t\":81.2,\"vx\":0,\"x\":123.6},{\"t\":162.5,\"vx\":0,\"x\":123.6},{\"t\":243.6,\"vx\":0,\"x\":123.6},{\"t\":324.9,\"vx\":0,\"x\":123.6}],\"steadyPxPerSec\":167.1,\"endState\":\"play\",\"end\":{\"x\":123.6,\"y\":474.09,\"dead\":true,\"onGround\":true},\"acState\":\"running\"},\"truncated\":false,\"errors\":[]}"
+    }
+  ],
+  "available_source": [
+    {
+      "path": "/fixture/game.js",
+      "symbol": "frame",
+      "approximate_line": 3188,
+      "content": "let last = performance.now();\nlet acc = 0;\nconst STEP = 1000 / 60;\nfunction frame(now) {\n  let delta = now - last;\n  last = now;\n  if (delta > 100) delta = 100; // clamp after tab switch\n  acc += delta;\n  while (acc >= STEP) {\n    update(1); // dt in \"frames\"\n    acc -= STEP;\n  }\n  draw();\n  requestAnimationFrame(frame);\n}",
+      "provenance": {
+        "file": "2026-09-07T20-39-36-239Z_01a07d99-082f-77a8-9e7b-473c84bbf17d.jsonl",
+        "line": 19,
+        "note": "Earlier same-day recorded read; absent from selected newest-session tool reads."
+      }
+    },
+    {
+      "path": "/fixture/game.js",
+      "symbol": "moveAndCollide",
+      "approximate_line": 569,
+      "content": "function moveAndCollide(e) {\n  e.onGround = false;\n  const prevRightX = e.x + e.w;\n  const prevLeftX = e.x;\n  e.x += e.vx;\n  if (hitSolid(e)) {\n    const x0 = Math.floor(e.x / 16), x1 = Math.floor((e.x + e.w) / 16);\n    const y0 = Math.floor(e.y / 16), y1 = Math.floor((e.y + e.h) / 16);\n    let hitX = false;\n    if (e.vx > 0) {\n      for (let tx = x0; tx <= x1 && !hitX; tx++)\n        for (let ty = y0; ty <= y1; ty++)\n          if (isSolid(tileAt(tx, ty)) && tx * 16 >= prevRightX) {\n            e.x = tx * 16 - e.w - 0.01; hitX = true; break;\n          }\n    } else if (e.vx < 0) {\n      for (let tx = x1; tx >= x0 && !hitX; tx--)\n        for (let ty = y0; ty <= y1; ty++)\n          if (isSolid(tileAt(tx, ty)) && (tx + 1) * 16 <= prevLeftX + 4) {\n            e.x = (tx + 1) * 16 + 0.01; hitX = true; break;\n          }\n    }\n    if (hitX) {\n      e.vx = -e.vx * (e.noBounce ? 0 : 1);\n      if (e.noBounce) e.vx = 0;\n    }\n  }\n  const prevBottomV = e.y + e.h;\n  const prevTopV = e.y;\n  e.y += e.vy;\n  if (hitSolid(e)) {\n    const x0 = Math.floor(e.x / 16), x1 = Math.floor((e.x + e.w) / 16);\n    const y0 = Math.floor(e.y / 16), y1 = Math.floor((e.y + e.h) / 16);\n    let hitHead = false;\n    for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {\n      if (!isSolid(tileAt(tx, ty))) continue;\n      if (e.vy > 0 && prevBottomV <= ty * 16 + 4) {\n        e.y = ty * 16 - e.h - 0.01; e.vy = 0; e.onGround = true;\n      } else if (e.vy < 0 && prevTopV >= (ty + 1) * 16 - 4) {\n        e.y = (ty + 1) * 16 + 0.01; e.vy = 0.01; hitHead = true;\n      }\n    }\n    if (hitHead && e.onHead) e.onHead(e);\n  }\n  return e;\n}",
+      "provenance": {
+        "file": "2026-09-07T20-39-36-239Z_01a07d99-082f-77a8-9e7b-473c84bbf17d.jsonl",
+        "line": 21,
+        "note": "Earlier same-day recorded read; newest session saw the caller, not this function body."
+      }
+    }
+  ]
+}

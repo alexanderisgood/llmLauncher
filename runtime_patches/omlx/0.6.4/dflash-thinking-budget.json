@@ -1,0 +1,33 @@
+{
+  "id": "dflash-thinking-budget-v1",
+  "omlxVersion": "0.6.4",
+  "dflashVersion": "0.1.10+omlx.7",
+  "patch": "dflash-thinking-budget.patch",
+  "files": {
+    "omlx/engine/dflash.py": {
+      "beforeSha256": "b06ce0e8e2924960e1628a5b889386e98a62d226e05eea046d35c73cec8cf110",
+      "afterSha256": "ece5e310b6854c39e7cb00a0983e96b8da7aab9000eee5297721dc57f1242f07"
+    },
+    "dflash_mlx/runtime/__init__.py": {
+      "beforeSha256": "65ef2d6980f5a24d1833d60a0deb869017e6e4db191618595473386e369b6243",
+      "afterSha256": "c0c26427b8d54061213e9f88297960f45761cddf98ca72ba5185243aca675b31"
+    },
+    "dflash_mlx/engine/spec_epoch.py": {
+      "beforeSha256": "568dcbfdf31f0db59324512bd303c47c5e477e8ba47255f856b8a5a1b4f2e88b",
+      "afterSha256": "bd32b1a435ed9507d2cf3ccf97ab1fe7554f35ed71d31de5a74257822411caa4"
+    },
+    "dflash_mlx/engine/fallback.py": {
+      "beforeSha256": "2e111679f0026216803f15c98f8095b3e70d605413e6468c7277320237999304",
+      "afterSha256": "906e5f404a87005b97ad67d6ab1832ea8c42edb2a5fc2352fd82baf62d5a4e3d"
+    },
+    "omlx/api/thinking.py": {
+      "beforeSha256": "b59fa47e84323b796e2ec5dd7accdd5224201a031926757a4a86847b8be72a6d",
+      "afterSha256": "da22abfc5cd342f69276280b4c97da1a4bc6fd8db31aa1156ae22014284814a6"
+    },
+    "omlx/server.py": {
+      "beforeSha256": "fdffe13f58a66c88a7517c04e2dbbfd35085f5e3ff8de2f68352c73a4570e767",
+      "afterSha256": "c6576539c2cb877b91d90428183085cee4cbf49e86ec2c0c3d27808c29125f9a"
+    }
+  },
+  "patchSha256": "4a20aa5736ac267eac1a7d3e3d1f870527de422bfbc3696e5ac6aa0485947306"
+}

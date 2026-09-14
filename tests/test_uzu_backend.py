@@ -5,10 +5,13 @@ import hashlib
 import importlib.util
 import json
 import os
+import stat
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -30,6 +33,10 @@ class UzuBackendTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.registry_path = self.root / "registry.json"
+        self.resolved_path = self.root / "resolved-models.json"
+        catalog_patch = mock.patch.object(launcher, "UZU_RESOLVED_MODELS_PATH", self.resolved_path)
+        catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
         self.cache_root = self.root / "models" / "mirai"
         self.model_path = (
             self.cache_root
@@ -176,9 +183,9 @@ class UzuBackendTests(unittest.TestCase):
             )
 
     def runtime_fixture(self) -> tuple[Path, Path, str]:
-        runtime = self.root / "runtimes" / "uzu-0.5.22" / "mirai"
-        runtime.parent.mkdir(parents=True)
-        runtime.write_bytes(b"pinned-uZu-0.5.22-test-binary")
+        runtime = self.root / "runtimes" / f"uzu-{launcher.UZU_RUNTIME_TAG}" / "mirai"
+        runtime.parent.mkdir(parents=True, mode=launcher.UZU_RUNTIME_DIRECTORY_MODE)
+        runtime.write_bytes(b"pinned-hardened-uZu-test-binary")
         runtime.chmod(0o500)
         sandbox = self.root / "sandbox-exec"
         sandbox.write_bytes(b"test sandbox")
@@ -200,9 +207,10 @@ class UzuBackendTests(unittest.TestCase):
             "agentReasoning": ["auto"],
             "codexReasoning": ["auto"],
             "customSampling": False,
+            "implicitSamplingDefaultsVerified": True,
             "samplingReason": "Packaged model defaults are fixed.",
-            "contextWindows": [16_384, 32_768],
-            "contextMaximum": 32_768,
+            "contextWindows": list(launcher.UZU_SAFE_CONTEXT_WINDOWS),
+            "contextMaximum": max(launcher.UZU_SAFE_CONTEXT_WINDOWS),
             "modelRegistryId": launcher.UZU_MODEL_REGISTRY_ID,
             "modelRepository": launcher.UZU_MODEL_REPOSITORY,
             "modelCommit": launcher.UZU_MODEL_COMMIT,
@@ -212,12 +220,24 @@ class UzuBackendTests(unittest.TestCase):
             "runtimeVersion": "Uzu fixed-test",
             "runtimeIdentity": {
                 "ready": True,
-                "binary": {"sha256": "b" * 64},
+                "binary": {
+                    "sha256": launcher.UZU_RUNTIME_RELEASE_BINARY_SHA256,
+                    "size": launcher.UZU_RUNTIME_RELEASE_BINARY_SIZE,
+                },
+                "upstreamCommit": launcher.UZU_RUNTIME_UPSTREAM_COMMIT,
+                "sourcePatchSha256": launcher.UZU_RUNTIME_SOURCE_PATCH_SHA256,
                 "networkSandbox": True,
+                "binaryIdentityPinned": True,
                 "memorySafetyBlocked": False,
                 "rawListenerAuthenticated": True,
                 "rawListenerIsolated": False,
                 "listenerIsolationBlocked": False,
+                "boundedContextReady": True,
+                "nativeBoundaryContractId": launcher.UZU_NATIVE_BOUNDARY_CONTRACT_ID,
+                "nativeBearerAuthentication": True,
+                "oneUseApiKeyFile": True,
+                "nativeContextLimit": True,
+                "nativeOutputLimit": True,
             },
             "qualificationSystemContract": {
                 "osReserveBytes": max(
@@ -226,6 +246,11 @@ class UzuBackendTests(unittest.TestCase):
                 ),
                 "sandboxProfileSha256": launcher.UZU_SANDBOX_PROFILE_SHA256,
                 "rawListenerProtected": True,
+                "nativeBoundaryContractId": launcher.UZU_NATIVE_BOUNDARY_CONTRACT_ID,
+                "nativeBearerAuthentication": True,
+                "oneUseApiKeyFile": True,
+                "nativeContextLimit": True,
+                "nativeOutputLimit": True,
             },
             "runtimeManagedAcceleration": "DFlash + Weaver",
             "runtimeManagedAccelerationReady": True,
@@ -252,7 +277,7 @@ class UzuBackendTests(unittest.TestCase):
             "modelId": model["id"],
             "project": str(self.root),
             "context": context,
-            "output": 1_024,
+            "output": 4_096,
             "reasoning": "auto",
             "mode": "custom",
             "suite": "quick",
@@ -263,23 +288,39 @@ class UzuBackendTests(unittest.TestCase):
         return model, payload, binary
 
     def qualification_record(
-        self, spec: dict, *, context: int = 16_384,
+        self, spec: dict, *, context: int = 16_384, configured_output: int = 4096,
     ) -> dict:
         total_memory = 48 * 1024**3
         minimum_headroom = 12.0
+        suite = launcher.BENCHMARK_SUITES[spec["suite"]]
+        prefix_tokens = int(suite["prefixTokens"])
+        tool_tokens = int(suite["toolTokens"])
+        prompt_targets = [
+            prefix_tokens,
+            prefix_tokens,
+            prefix_tokens + tool_tokens,
+            prefix_tokens + tool_tokens,
+        ]
         samples = []
         for index, scenario in enumerate(launcher.ROUTE_QUALIFICATION_SCENARIOS):
+            prompt_targets[index] = launcher.uzu_conversation_target(
+                scenario, prompt_targets[index], samples[-1] if samples else None,
+                context, launcher.UZU_QUALIFICATION_SAMPLE_MAX_TOKENS,
+            )
             ttft = 0.5 + index * 0.05
             decode_tps = 30.0 + index
             samples.append({
                 "scenario": scenario,
                 "scenarioLabel": scenario,
                 "cacheExpected": index > 0,
-                "targetPromptTokens": 3_000 + index * 500,
+                "targetPromptTokens": prompt_targets[index],
                 "repetition": 1,
-                "promptTokens": 3_000 + index * 500,
+                "promptTokens": prompt_targets[index],
+                "authoritativeUsage": True,
                 "completionTokens": 256,
-                "requestedMaxTokens": launcher.ROUTE_QUALIFICATION_MAX_TOKENS,
+                "requestedMaxTokens": launcher.uzu_qualification_request_tokens(
+                    scenario, prompt_targets[index], context, min(configured_output, launcher.UZU_QUALIFICATION_SAMPLE_MAX_TOKENS),
+                ),
                 "ttftSeconds": ttft,
                 "totalSeconds": round(ttft + 255 / decode_tps, 6),
                 "decodeTokensPerSecond": decode_tps,
@@ -295,7 +336,9 @@ class UzuBackendTests(unittest.TestCase):
         expected_answer = b"RQ-UZU-742"
         return {
             "id": "uzu-qualification-record",
-            "createdAt": "2026-09-03T12:00:00Z",
+            "createdAt": (
+                datetime.now(timezone.utc) - timedelta(minutes=2)
+            ).isoformat(),
             "scope": "local",
             "kind": "route-qualification",
             "qualificationVersion": launcher.ROUTE_QUALIFICATION_VERSION,
@@ -314,10 +357,10 @@ class UzuBackendTests(unittest.TestCase):
             "samplingFingerprint": "c" * 64,
             "contextMin": context,
             "contextMax": context,
-            "outputMin": launcher.ROUTE_QUALIFICATION_MAX_TOKENS,
-            "outputMax": launcher.ROUTE_QUALIFICATION_MAX_TOKENS,
-            "configuredOutputLimit": 1_024,
-            "measuredRequestMaxTokens": launcher.ROUTE_QUALIFICATION_MAX_TOKENS,
+            "outputMin": min(s["requestedMaxTokens"] for s in samples),
+            "outputMax": max(s["requestedMaxTokens"] for s in samples),
+            "configuredOutputLimit": configured_output,
+            "measuredRequestMaxTokens": max(s["requestedMaxTokens"] for s in samples),
             "comparedModes": ["ar"],
             "winner": "ar",
             "baselinePassed": True,
@@ -330,13 +373,14 @@ class UzuBackendTests(unittest.TestCase):
                 "backend": "uzu",
                 "exactContext": context,
                 "scenarioContract": list(launcher.ROUTE_QUALIFICATION_SCENARIOS),
-                "sampleMaxTokens": launcher.ROUTE_QUALIFICATION_MAX_TOKENS,
+                "sampleMaxTokens": min(configured_output, launcher.UZU_QUALIFICATION_SAMPLE_MAX_TOKENS),
+                "outputBudgetPolicy": launcher.uzu_qualification_output_policy(configured_output),
                 "answerReserveTokens": launcher.ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS,
                 "minimumCompletionTokens": launcher.ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS,
                 "minimumDecodeTokensPerSecond": launcher.UZU_QUALIFICATION_MINIMUM_DECODE_TPS,
                 "thinkingBudgetTokens": None,
-                "configuredOutputLimit": 1_024,
-                "measuredRequestMaxTokens": launcher.ROUTE_QUALIFICATION_MAX_TOKENS,
+                "configuredOutputLimit": configured_output,
+                "measuredRequestMaxTokens": min(configured_output, launcher.UZU_QUALIFICATION_SAMPLE_MAX_TOKENS),
                 "reasoningPolicy": spec["reasoningPolicy"],
                 "toolProbeRequired": False,
                 "memoryProofRequired": True,
@@ -345,10 +389,16 @@ class UzuBackendTests(unittest.TestCase):
                 "modelRegistryId": launcher.UZU_MODEL_REGISTRY_ID,
                 "modelCommit": launcher.UZU_MODEL_COMMIT,
                 "modelToolchainVersion": launcher.UZU_MODEL_TOOLCHAIN_VERSION,
-                "runtimeBinarySha256": "b" * 64,
+                "runtimeBinarySha256": launcher.UZU_RUNTIME_RELEASE_BINARY_SHA256,
+                "runtimeBinarySize": launcher.UZU_RUNTIME_RELEASE_BINARY_SIZE,
+                "runtimeUpstreamCommit": launcher.UZU_RUNTIME_UPSTREAM_COMMIT,
+                "runtimeSourcePatchSha256": launcher.UZU_RUNTIME_SOURCE_PATCH_SHA256,
                 "fixedAcceleration": "DFlash + Weaver",
                 "kvStateDataType": "BF16",
                 "prefixCache": True,
+                "promptExercisePolicy": (
+                    launcher.uzu_qualification_prompt_exercise_policy(context)
+                ),
                 "osReservePolicy": "max-4gib-or-10-percent-total-v1",
                 "osReserveMinimumBytes": launcher.SESSION_OS_RESERVE_MIN_BYTES,
                 "osReserveBytes": max(
@@ -361,6 +411,11 @@ class UzuBackendTests(unittest.TestCase):
                     launcher.UZU_NETWORK_SANDBOX_PROFILE.encode("utf-8")
                 ).hexdigest(),
                 "rawListenerProtected": True,
+                "nativeBoundaryContractId": launcher.UZU_NATIVE_BOUNDARY_CONTRACT_ID,
+                "nativeBearerAuthentication": True,
+                "oneUseApiKeyFile": True,
+                "nativeContextLimitTokens": context,
+                "nativeMaxOutputTokens": configured_output,
             },
             "correctnessContract": {
                 "id": getattr(
@@ -414,13 +469,46 @@ class UzuBackendTests(unittest.TestCase):
             },
         }
 
-    def test_runtime_contract_accepts_pinned_signature_but_blocks_unsafe_release(self) -> None:
+    def bind_qualification_record(
+        self, model: dict, payload: dict, record: dict, spec: dict,
+    ) -> None:
+        evidence = launcher.optimizer_evidence(
+            model, int(record["contextMin"]), int(payload["output"]),
+            str(payload["client"]), str(payload["reasoning"]),
+            str(payload["options"]["kv"]), payload["chat"],
+        )
+        record["samplingFingerprint"] = evidence["samplingFingerprint"]
+        record.update(launcher.sampling_record_evidence(evidence))
+        record["modes"]["ar"]["agenticMetrics"] = {
+            "cacheTelemetryAvailable": True,
+            "coldTTFTSeconds": 1.0,
+            "warmPrefixTTFTSeconds": 0.8,
+            "prefixReuseFactor": 1.25,
+            "toolIngestTTFTSeconds": 0.9,
+            "steadyTurnTTFTSeconds": 0.7,
+            "toolReuseFactor": 1.2,
+        }
+        metrics = launcher.route_qualification_metrics(record, spec)
+        self.assertIsNotNone(metrics)
+        record["qualification"] = {
+            "reasoningEnabled": True,
+            "reasoningObserved": True,
+            "answerObserved": True,
+            "terminalCompletionObserved": True,
+            "authoritativeUsage": True,
+            "metrics": metrics,
+        }
+        model["backends"]["uzu"]["localBenchmarks"] = [record]
+        model["backends"]["uzu"]["localBenchmark"] = record
+
+    def test_runtime_contract_accepts_only_exact_hardened_build(self) -> None:
         runtime, sandbox, sha256 = self.runtime_fixture()
         with (
             mock.patch.multiple(
                 launcher,
                 UZU_RUNTIME_PATH=runtime,
                 UZU_RUNTIME_RELEASE_BINARY_SHA256=sha256,
+                UZU_RUNTIME_RELEASE_BINARY_SIZE=runtime.stat().st_size,
                 UZU_SANDBOX_EXECUTABLE=sandbox,
             ),
             mock.patch.object(launcher.sys, "platform", "darwin"),
@@ -428,26 +516,94 @@ class UzuBackendTests(unittest.TestCase):
         ):
             contract = launcher.uzu_runtime_contract(runtime)
 
-        self.assertFalse(contract["ready"])
-        self.assertEqual(contract["version"], "Uzu 0.5.22")
+        self.assertTrue(contract["ready"])
+        self.assertEqual(contract["version"], f"Uzu {launcher.UZU_RUNTIME_TAG}")
         self.assertEqual(contract["binary"]["sha256"], sha256)
-        self.assertTrue(contract["publisherSignatureValid"])
-        self.assertEqual(contract["publisherTeamIdentifier"], "C39GZ239GY")
+        self.assertTrue(contract["binaryIdentityPinned"])
+        self.assertEqual(contract["upstreamCommit"], launcher.UZU_RUNTIME_UPSTREAM_COMMIT)
+        self.assertEqual(contract["sourcePatchSha256"], launcher.UZU_RUNTIME_SOURCE_PATCH_SHA256)
+        self.assertNotIn("publisherSignatureValid", contract)
+        self.assertNotIn("notarizationVerified", contract)
         self.assertTrue(contract["networkSandbox"])
-        self.assertTrue(contract["memorySafetyBlocked"])
+        self.assertFalse(contract["memorySafetyBlocked"])
         self.assertTrue(contract["boundedContextReady"])
         self.assertTrue(contract["localOnly"])
         self.assertTrue(contract["telemetryBlocked"])
         self.assertTrue(contract["automaticDownloadsBlocked"])
-        self.assertFalse(contract["rawListenerAuthenticated"])
+        self.assertTrue(contract["rawListenerAuthenticated"])
         self.assertFalse(contract["rawListenerIsolated"])
-        self.assertTrue(contract["listenerIsolationBlocked"])
+        self.assertFalse(contract["listenerIsolationBlocked"])
+        self.assertTrue(contract["nativeBearerAuthentication"])
+        self.assertTrue(contract["oneUseApiKeyFile"])
+        self.assertTrue(contract["nativeContextLimit"])
+        self.assertTrue(contract["nativeOutputLimit"])
+        self.assertEqual(
+            contract["nativeBoundaryContractId"],
+            launcher.UZU_NATIVE_BOUNDARY_CONTRACT_ID,
+        )
         reason = contract["reason"].lower()
-        self.assertIn("memory", reason)
-        self.assertIn("hotfix", reason)
-        self.assertIn("unauthenticated raw listener", reason)
-        self.assertIn("fixed release alone", reason)
-        self.assertNotIn("signature verification", reason)
+        self.assertIn("native bearer", reason)
+        self.assertNotIn("signed", reason)
+        self.assertNotIn("notarized", reason)
+
+    def test_runtime_path_rejects_missing_or_blank_values_as_not_installed(self) -> None:
+        for path_value in (None, "", "   \t"):
+            with self.subTest(path_value=path_value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "launcher-managed Uzu executable is not installed",
+                ):
+                    launcher._uzu_runtime_path(path_value)
+
+                contract = launcher.uzu_runtime_contract(path_value)
+                self.assertFalse(contract["ready"])
+                self.assertIn("not installed", contract["reason"])
+
+    def test_runtime_candidate_uses_exact_label_only_for_pinned_bytes(self) -> None:
+        runtime, sandbox, sha256 = self.runtime_fixture()
+        candidate = {
+            "id": "managed-uzu-fixture",
+            "runtime": "mirai",
+            "path": str(runtime),
+            "resolvedPath": str(runtime.resolve()),
+            "channel": "launcher-managed",
+            "channelLabel": "Launcher-managed Uzu fixture",
+        }
+
+        def details(expected_sha256: str) -> dict:
+            with (
+                mock.patch.multiple(
+                    launcher,
+                    UZU_RUNTIME_PATH=runtime,
+                    UZU_RUNTIME_RELEASE_BINARY_SHA256=expected_sha256,
+                    UZU_RUNTIME_RELEASE_BINARY_SIZE=runtime.stat().st_size,
+                    UZU_SANDBOX_EXECUTABLE=sandbox,
+                ),
+                mock.patch.object(launcher.sys, "platform", "darwin"),
+                mock.patch.object(launcher.platform, "machine", return_value="arm64"),
+                mock.patch.dict(launcher.BINARIES, {"mirai": str(runtime)}, clear=True),
+                mock.patch.object(launcher, "runtime_candidates", return_value=[candidate]),
+                mock.patch.object(
+                    launcher,
+                    "command_version",
+                    side_effect=AssertionError("an unverified Uzu candidate was executed"),
+                ) as command,
+            ):
+                result = launcher.runtime_candidate_details("mirai")
+            command.assert_not_called()
+            self.assertEqual(len(result), 1)
+            return result[0]
+
+        unverified = details("0" * 64)
+        self.assertEqual(
+            unverified["version"],
+            "Installed (unverified managed runtime)",
+        )
+        self.assertFalse(unverified["uzuContract"]["binaryIdentityPinned"])
+
+        verified = details(sha256)
+        self.assertEqual(verified["version"], f"Uzu {launcher.UZU_RUNTIME_TAG}")
+        self.assertTrue(verified["uzuContract"]["binaryIdentityPinned"])
 
     def test_listener_protection_requires_positive_proof_and_no_open_gate(self) -> None:
         self.assertTrue(launcher.uzu_listener_protection_ready({
@@ -479,9 +635,9 @@ class UzuBackendTests(unittest.TestCase):
         symlink = self.root / "mirai-link"
         symlink.symlink_to(runtime)
         cases = (
-            (runtime, "0" * 64, "no longer matches the pinned official"),
+            (runtime, "0" * 64, "no longer matches the pinned hardened"),
             (symlink, sha256, "must not be a symbolic link"),
-            (wrong_path, sha256, "Only the launcher-managed Uzu 0.5.22"),
+            (wrong_path, sha256, "Only the launcher-managed hardened Uzu"),
         )
         for requested, expected_hash, expected_reason in cases:
             with self.subTest(reason=expected_reason):
@@ -490,6 +646,7 @@ class UzuBackendTests(unittest.TestCase):
                         launcher,
                         UZU_RUNTIME_PATH=runtime,
                         UZU_RUNTIME_RELEASE_BINARY_SHA256=expected_hash,
+                        UZU_RUNTIME_RELEASE_BINARY_SIZE=runtime.stat().st_size,
                         UZU_SANDBOX_EXECUTABLE=sandbox,
                     ),
                     mock.patch.object(launcher.sys, "platform", "darwin"),
@@ -500,6 +657,192 @@ class UzuBackendTests(unittest.TestCase):
                     contract = launcher.uzu_runtime_contract(requested)
                 self.assertFalse(contract["ready"])
                 self.assertIn(expected_reason, contract["reason"])
+
+    def test_runtime_contract_requires_exact_owner_only_install_modes(self) -> None:
+        runtime, sandbox, sha256 = self.runtime_fixture()
+        patches = (
+            mock.patch.multiple(
+                launcher,
+                UZU_RUNTIME_PATH=runtime,
+                UZU_RUNTIME_RELEASE_BINARY_SHA256=sha256,
+                UZU_RUNTIME_RELEASE_BINARY_SIZE=runtime.stat().st_size,
+                UZU_SANDBOX_EXECUTABLE=sandbox,
+            ),
+            mock.patch.object(launcher.sys, "platform", "darwin"),
+            mock.patch.object(launcher.platform, "machine", return_value="arm64"),
+        )
+        runtime.parent.chmod(0o755)
+        with patches[0], patches[1], patches[2]:
+            contract = launcher.uzu_runtime_contract(runtime)
+        self.assertFalse(contract["ready"])
+        self.assertIn("owner-only mode 0700", contract["reason"])
+
+        runtime.parent.chmod(launcher.UZU_RUNTIME_DIRECTORY_MODE)
+        runtime.chmod(0o700)
+        with (
+            mock.patch.multiple(
+                launcher,
+                UZU_RUNTIME_PATH=runtime,
+                UZU_RUNTIME_RELEASE_BINARY_SHA256=sha256,
+                UZU_RUNTIME_RELEASE_BINARY_SIZE=runtime.stat().st_size,
+                UZU_SANDBOX_EXECUTABLE=sandbox,
+            ),
+            mock.patch.object(launcher.sys, "platform", "darwin"),
+            mock.patch.object(launcher.platform, "machine", return_value="arm64"),
+        ):
+            contract = launcher.uzu_runtime_contract(runtime)
+        self.assertFalse(contract["ready"])
+        self.assertIn("owner-executable mode 0500", contract["reason"])
+
+    def test_runtime_contract_rejects_hardlinks_and_writable_ancestors(self) -> None:
+        runtime, sandbox, sha256 = self.runtime_fixture()
+
+        def contract() -> dict:
+            with (
+                mock.patch.multiple(
+                    launcher,
+                    UZU_RUNTIME_PATH=runtime,
+                    UZU_RUNTIME_RELEASE_BINARY_SHA256=sha256,
+                    UZU_RUNTIME_RELEASE_BINARY_SIZE=runtime.stat().st_size,
+                    UZU_SANDBOX_EXECUTABLE=sandbox,
+                ),
+                mock.patch.object(launcher.sys, "platform", "darwin"),
+                mock.patch.object(launcher.platform, "machine", return_value="arm64"),
+            ):
+                return launcher.uzu_runtime_contract(runtime)
+
+        second_name = runtime.with_name("mirai-hardlink")
+        os.link(runtime, second_name)
+        hardlinked = contract()
+        self.assertFalse(hardlinked["ready"])
+        self.assertIn("exactly one filesystem link", hardlinked["reason"])
+
+        second_name.unlink()
+        unsafe_ancestor = runtime.parent.parent
+        original_mode = stat.S_IMODE(unsafe_ancestor.stat().st_mode)
+        unsafe_ancestor.chmod(0o770)
+        try:
+            writable = contract()
+        finally:
+            unsafe_ancestor.chmod(original_mode)
+        self.assertFalse(writable["ready"])
+        self.assertIn("writable or untrusted directory ancestor", writable["reason"])
+
+    def test_runtime_hash_rejects_a_file_changed_during_descriptor_read(self) -> None:
+        runtime, sandbox, sha256 = self.runtime_fixture()
+        real_read = os.read
+        changed = False
+
+        def mutate_then_read(descriptor: int, size: int) -> bytes:
+            nonlocal changed
+            if not changed:
+                changed = True
+                runtime.chmod(0o700)
+            return real_read(descriptor, size)
+
+        try:
+            with (
+                mock.patch.multiple(
+                    launcher,
+                    UZU_RUNTIME_PATH=runtime,
+                    UZU_RUNTIME_RELEASE_BINARY_SHA256=sha256,
+                    UZU_RUNTIME_RELEASE_BINARY_SIZE=runtime.stat().st_size,
+                    UZU_SANDBOX_EXECUTABLE=sandbox,
+                ),
+                mock.patch.object(launcher.os, "read", side_effect=mutate_then_read),
+            ):
+                contract = launcher.uzu_runtime_contract(runtime)
+        finally:
+            runtime.chmod(launcher.UZU_RUNTIME_BINARY_MODE)
+        self.assertTrue(changed)
+        self.assertFalse(contract["ready"])
+        self.assertIn("changed while it was being identified", contract["reason"])
+
+    def test_retained_runtime_fd_detects_a_replaced_path(self) -> None:
+        runtime, _sandbox, _sha256 = self.runtime_fixture()
+        with mock.patch.object(launcher, "UZU_RUNTIME_PATH", runtime):
+            opened = launcher._open_uzu_runtime_executable(runtime)
+        try:
+            displaced = runtime.with_name("mirai-displaced")
+            runtime.rename(displaced)
+            runtime.write_bytes(displaced.read_bytes())
+            runtime.chmod(launcher.UZU_RUNTIME_BINARY_MODE)
+            with self.assertRaisesRegex(ValueError, "changed immediately before launch"):
+                launcher._confirm_open_uzu_executable(opened)
+        finally:
+            opened.close()
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS /dev/fd semantics")
+    def test_current_macos_does_not_claim_executable_dev_fd_support(self) -> None:
+        runtime, _sandbox, _sha256 = self.runtime_fixture()
+        with mock.patch.object(launcher, "UZU_RUNTIME_PATH", runtime):
+            opened = launcher._open_uzu_runtime_executable(runtime)
+        try:
+            if os.access(f"/dev/fd/{opened.fd}", os.X_OK):
+                self.skipTest("this macOS host exposes executable descriptor paths")
+            self.assertIsNone(launcher._uzu_inherited_executable_path(opened))
+        finally:
+            opened.close()
+
+    def test_checked_in_hardening_patch_matches_pinned_digest(self) -> None:
+        root = ROOT / "runtime_patches" / "uzu" / "0.5.23"
+        patches = [root / name for name in launcher.UZU_RUNTIME_SOURCE_PATCHES]
+        self.assertTrue(all(patch.is_file() for patch in patches))
+        self.assertEqual(
+            hashlib.sha256(b"".join(patch.read_bytes() for patch in patches)).hexdigest(),
+            launcher.UZU_RUNTIME_SOURCE_PATCH_SHA256,
+        )
+
+    def test_frontend_and_controller_share_exact_qualified_binary_identity(self) -> None:
+        script = (ROOT / "app.js").read_text()
+        for name in ("UZU_RUNTIME_RELEASE_BINARY_SHA256", "UZU_RUNTIME_UPSTREAM_COMMIT",
+                     "UZU_RUNTIME_SOURCE_PATCH_SHA256"):
+            self.assertIn(f'const {name} = "{getattr(launcher, name)}";', script)
+        size_literal = script.split("const UZU_RUNTIME_RELEASE_BINARY_SIZE = ", 1)[1].split(";", 1)[0]
+        self.assertEqual(int(size_literal.replace("_", "")), launcher.UZU_RUNTIME_RELEASE_BINARY_SIZE)
+
+    def test_offline_catalog_uses_only_verified_local_files(self) -> None:
+        self.write_registry()
+        self.write_cache()
+        with self.patched_cache_globals():
+            cache = launcher._uzu_model_cache_contract()
+            self.assertFalse(self.resolved_path.exists(), "Scanning must stay read-only")
+            launcher._ensure_uzu_offline_catalog(cache)
+            first = self.resolved_path.read_bytes()
+            catalog = json.loads(first)
+            self.assertEqual(catalog["version"], 2)
+            self.assertIsNone(catalog["models"][0]["files"])
+            model = catalog["models"][0]["model"]
+            self.assertEqual(model["accessibility"], {
+                "type": "on_device", "source": {
+                    "type": "filesystem", "path": str(self.model_path.resolve()),
+                },
+            })
+            self.assertEqual(model["encoding"], self.registry_entry()["encoding"])
+            self.assertEqual(model["backends"], self.registry_entry()["backends"])
+            self.assertEqual(stat.S_IMODE(self.resolved_path.stat().st_mode), 0o600)
+            launcher._ensure_uzu_offline_catalog(cache)
+            self.assertEqual(self.resolved_path.read_bytes(), first)
+            model["accessibility"]["source"]["path"] = "/wrong/model"
+            self.resolved_path.write_text(json.dumps(catalog))
+            changed = self.resolved_path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "not been overwritten"):
+                launcher._ensure_uzu_offline_catalog(cache)
+            self.assertEqual(self.resolved_path.read_bytes(), changed)
+
+    def test_offline_catalog_rejects_symlinks_and_unverified_models(self) -> None:
+        self.write_registry()
+        self.write_cache()
+        with self.patched_cache_globals():
+            cache = launcher._uzu_model_cache_contract()
+            with self.assertRaisesRegex(ValueError, "Verified"):
+                launcher._ensure_uzu_offline_catalog({**cache, "ready": False})
+            target = self.root / "untouched.json"
+            target.write_text("{}")
+            self.resolved_path.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, "not been overwritten"):
+                launcher._ensure_uzu_offline_catalog(cache)
+            self.assertEqual(target.read_text(), "{}")
 
     def test_complete_model_cache_requires_exact_files_and_receipts(self) -> None:
         self.write_registry()
@@ -744,6 +1087,357 @@ class UzuBackendTests(unittest.TestCase):
         self.assertIsNone(rejected["kvHeads"])
         self.assertEqual(rejected_context, 262_144)
 
+    def test_128k_capacity_includes_full_bf16_kv_and_long_context_reserve(self) -> None:
+        model, payload, _binary = self.qualification_fixture(131_072)
+        model["memoryGeometry"] = {
+            "ready": True,
+            "layers": 64,
+            "fullAttentionLayers": 16,
+            "attentionHeads": 32,
+            "kvHeads": 4,
+            "headDimension": 256,
+            "layerSource": "uzu-layer-configs",
+        }
+        resource = {
+            "memoryAvailable": True,
+            "totalMemoryBytes": 48 * 1024**3,
+            "headroomBytes": 38 * 1024**3,
+        }
+
+        estimate = launcher.launch_memory_estimate(payload, model, resource)
+
+        self.assertEqual(estimate["contextTokens"], 131_072)
+        self.assertEqual(estimate["targetKvCacheBytes"], 8 * 1024**3)
+        self.assertEqual(
+            estimate["draftKvCacheBytes"],
+            131_072 * launcher.UZU_DRAFT_FULL_ATTENTION_BYTES_PER_TOKEN
+            + launcher.UZU_DRAFT_SLIDING_CACHE_BYTES,
+        )
+        self.assertEqual(estimate["prefillTransientReserveBytes"], 2 * 1024**3)
+        self.assertLess(
+            estimate["estimatedWorkingSetBytes"]
+            + launcher.UZU_PROCESS_CEILING_ADMISSION_MARGIN_BYTES,
+            launcher.UZU_PROCESS_MEMORY_CEILING_BYTES,
+        )
+        self.assertTrue(launcher.uzu_estimate_within_process_ceiling(estimate))
+        self.assertLess(estimate["requiredHeadroomBytes"], resource["headroomBytes"])
+
+    def test_uzu_context_tiers_stop_at_guarded_128k_not_native_262k(self) -> None:
+        model, _payload, _binary = self.qualification_fixture(131_072)
+        self.assertEqual(
+            launcher.UZU_SAFE_CONTEXT_WINDOWS,
+            (16_384, 32_768, 65_536, 131_072),
+        )
+        self.assertIsNotNone(launcher.route_qualification_spec(model, "uzu", 131_072))
+        self.assertIsNone(launcher.route_qualification_spec(model, "uzu", 262_144))
+        with self.assertRaisesRegex(ValueError, "fixed context windows"):
+            launcher.validate_runtime_context("uzu", 262_144)
+
+    def test_uzu_ceiling_fit_is_fail_closed(self) -> None:
+        estimate = {
+            "estimatedWorkingSetBytes": 33 * 1024**3,
+            "processMemoryCeilingBytes": 36 * 1024**3,
+            "processCeilingAdmissionMarginBytes": 2 * 1024**3,
+        }
+        self.assertTrue(launcher.uzu_estimate_within_process_ceiling(estimate))
+        estimate["estimatedWorkingSetBytes"] = 34 * 1024**3
+        self.assertFalse(launcher.uzu_estimate_within_process_ceiling(estimate))
+        del estimate["processCeilingAdmissionMarginBytes"]
+        self.assertFalse(launcher.uzu_estimate_within_process_ceiling(estimate))
+
+    def test_uzu_38gib_ceiling_preserves_stricter_receipts_not_their_overflows(self) -> None:
+        self.assertEqual(launcher.UZU_PROCESS_MEMORY_CEILING_BYTES, 38 * 1024**3)
+        model, _, _ = self.qualification_fixture(65_536)
+        spec = launcher.route_qualification_spec(model, "uzu", 65_536)
+        record = self.qualification_record(spec, context=65_536)
+        record["qualificationContract"]["memoryCeilingBytes"] = 36 * 1024**3
+        self.assertIsNotNone(launcher.route_qualification_metrics(record, spec))
+        telemetry = record["modes"]["ar"]["resourceTelemetry"]
+        telemetry["peakProcessGroupPhysicalFootprintBytes"] = 36 * 1024**3
+        self.assertIsNone(launcher.route_qualification_metrics(record, spec))
+        record["qualificationContract"]["memoryCeilingBytes"] = 38 * 1024**3
+        self.assertIsNotNone(launcher.route_qualification_metrics(record, spec))
+        telemetry["peakProcessGroupPhysicalFootprintBytes"] = 38 * 1024**3
+        self.assertIsNone(launcher.route_qualification_metrics(record, spec))
+        for invalid in (None, True, 38.0 * 1024**3, 37 * 1024**3, 40 * 1024**3):
+            self.assertFalse(launcher.uzu_qualification_memory_ceiling_supported(invalid))
+
+    def test_uzu_live_guard_enforces_38gib_current_or_peak(self) -> None:
+        limit = 38 * 1024**3
+        for current, peak, should_stop in (
+            (37 * 1024**3, 37 * 1024**3, False),
+            (limit - 1, limit - 1, False),
+            (limit, limit - 1, True),
+            (limit - 1, limit, True),
+        ):
+            with self.subTest(current=current, peak=peak):
+                manager = launcher.RunManager()
+                plan = mock.Mock(backend="uzu", purpose="session")
+                process = mock.Mock(pid=4321)
+                process.poll.side_effect = [None, 0]
+                cancelled = threading.Event()
+                manager.plan, manager.process = plan, process
+                manager.state = {"phase": "running", "message": "Running", "events": []}
+                with mock.patch.object(launcher.os, "getpgid", return_value=4321), mock.patch.object(
+                    launcher, "darwin_process_group_physical_footprint", return_value={
+                        "processGroupFootprintAvailable": True,
+                        "processGroupMemberCount": 1,
+                        "processGroupPhysicalFootprintBytes": current,
+                        "processGroupLifetimePeakPhysicalFootprintBytes": peak,
+                    },
+                ), mock.patch.object(launcher, "apple_memory_pressure_state", return_value={
+                    "memoryAvailable": True, "totalBytes": 48 * 1024**3, "freePercent": 20,
+                }), mock.patch.object(manager, "_stop_owned") as stop:
+                    manager._guard_uzu_memory(plan, process, cancelled)
+                self.assertEqual(stop.called, should_stop)
+
+    def test_128k_qualification_requires_a_fresh_matching_64k_receipt(self) -> None:
+        model, payload, binary = self.qualification_fixture(131_072)
+        model["memoryGeometry"] = {
+            "ready": True,
+            "layers": 64,
+            "fullAttentionLayers": 16,
+            "attentionHeads": 32,
+            "kvHeads": 4,
+            "headDimension": 256,
+            "layerSource": "uzu-layer-configs",
+        }
+        snapshot = {
+            "memoryAvailable": True,
+            "totalBytes": 48 * 1024**3,
+            "freePercent": 80.0,
+            "thermalAvailable": True,
+            "thermalState": 0,
+            "lowPowerMode": False,
+            "metalWiredLimitBytes": 0,
+        }
+        idle_hub = {"phase": "idle", "message": "Ready"}
+        idle_operation = {"active": False}
+
+        with mock.patch.dict(
+            launcher.BINARIES, {"mirai": str(binary)}, clear=True,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="uzu-test-mac",
+        ):
+            missing = launcher.route_qualification_memory_admission(
+                payload, [model], resource_snapshot=snapshot,
+                hub=idle_hub, operation=idle_operation,
+            )
+        self.assertFalse(missing["launchable"])
+        self.assertEqual(missing["decision"], "qualification")
+        self.assertEqual(
+            missing["stagedQualification"]["reason"], "missing-64k-receipt",
+        )
+
+        spec_64k = launcher.route_qualification_spec(model, "uzu", 65_536)
+        self.assertIsNotNone(spec_64k)
+        assert spec_64k is not None
+        record = self.qualification_record(spec_64k, context=65_536)
+        self.bind_qualification_record(model, payload, record, spec_64k)
+        with mock.patch.dict(
+            launcher.BINARIES, {"mirai": str(binary)}, clear=True,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="uzu-test-mac",
+        ):
+            ready = launcher.route_qualification_memory_admission(
+                payload, [model], resource_snapshot=snapshot,
+                hub=idle_hub, operation=idle_operation,
+            )
+        self.assertTrue(ready["launchable"])
+        proof = ready["stagedQualification"]
+        self.assertTrue(proof["required"])
+        self.assertTrue(proof["ready"])
+        self.assertEqual(proof["receiptId"], record["id"])
+        self.assertEqual(
+            proof["projected128KProcessGroupPeakWithMarginBytes"],
+            proof["measured64KProcessGroupPeakBytes"]
+            + proof["estimatedWorkingSetGrowthBytes"]
+            + launcher.UZU_PROCESS_CEILING_ADMISSION_MARGIN_BYTES,
+        )
+        self.assertLess(
+            proof["projected128KProcessGroupPeakWithMarginBytes"],
+            launcher.UZU_PROCESS_MEMORY_CEILING_BYTES,
+        )
+
+        for field, value in (
+            ("createdAt", "2025-01-01T00:00:00Z"),
+            ("runtimeVersion", "different Uzu runtime"),
+            ("modelFingerprint", "b" * 64),
+            ("samplingFingerprint", "d" * 64),
+        ):
+            with self.subTest(mismatch=field):
+                broken_model = copy.deepcopy(model)
+                broken_record = broken_model["backends"]["uzu"]["localBenchmarks"][0]
+                broken_record[field] = value
+                broken_model["backends"]["uzu"]["localBenchmark"] = broken_record
+                with mock.patch.dict(
+                    launcher.BINARIES, {"mirai": str(binary)}, clear=True,
+                ), mock.patch.object(
+                    launcher, "hardware_fingerprint", return_value="uzu-test-mac",
+                ):
+                    rejected = launcher.route_qualification_memory_admission(
+                        payload, [broken_model], resource_snapshot=snapshot,
+                        hub=idle_hub, operation=idle_operation,
+                    )
+                self.assertFalse(rejected["launchable"])
+                self.assertEqual(
+                    rejected["stagedQualification"]["reason"],
+                    "missing-64k-receipt",
+                )
+
+        different_output = copy.deepcopy(payload)
+        different_output["output"] = 2_048
+        with mock.patch.dict(
+            launcher.BINARIES, {"mirai": str(binary)}, clear=True,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="uzu-test-mac",
+        ):
+            rejected_output = launcher.route_qualification_memory_admission(
+                different_output, [model], resource_snapshot=snapshot,
+                hub=idle_hub, operation=idle_operation,
+            )
+        self.assertFalse(rejected_output["launchable"])
+        self.assertEqual(
+            rejected_output["stagedQualification"]["reason"],
+            "missing-64k-receipt",
+        )
+
+    def test_128k_staged_projection_must_stay_strictly_below_live_ceiling(self) -> None:
+        model, payload, _binary = self.qualification_fixture(131_072)
+        model["memoryGeometry"] = {
+            "ready": True,
+            "layers": 64,
+            "fullAttentionLayers": 16,
+            "attentionHeads": 32,
+            "kvHeads": 4,
+            "headDimension": 256,
+            "layerSource": "uzu-layer-configs",
+        }
+        resource = {
+            "memoryAvailable": True,
+            "totalMemoryBytes": 48 * 1024**3,
+            "headroomBytes": 40 * 1024**3,
+        }
+        request_64k = copy.deepcopy(payload)
+        request_64k["context"] = 65_536
+        estimate_64k = launcher.launch_memory_estimate(request_64k, model, resource)
+        estimate_128k = launcher.launch_memory_estimate(payload, model, resource)
+        growth = (
+            estimate_128k["estimatedWorkingSetBytes"]
+            - estimate_64k["estimatedWorkingSetBytes"]
+        )
+        boundary_peak = (
+            launcher.UZU_PROCESS_MEMORY_CEILING_BYTES
+            - launcher.UZU_PROCESS_CEILING_ADMISSION_MARGIN_BYTES
+            - growth
+        )
+        spec_64k = launcher.route_qualification_spec(model, "uzu", 65_536)
+        self.assertIsNotNone(spec_64k)
+        assert spec_64k is not None
+        record = self.qualification_record(spec_64k, context=65_536)
+        telemetry = record["modes"]["ar"]["resourceTelemetry"]
+        telemetry["peakProcessGroupPhysicalFootprintBytes"] = boundary_peak
+        self.bind_qualification_record(model, payload, record, spec_64k)
+
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="uzu-test-mac",
+        ):
+            rejected = launcher.uzu_128k_staged_qualification_proof(
+                payload, model, resource, estimate_128k,
+            )
+        self.assertFalse(rejected["ready"])
+        self.assertEqual(rejected["reason"], "projected-ceiling")
+        self.assertEqual(
+            rejected["projected128KProcessGroupPeakWithMarginBytes"],
+            launcher.UZU_PROCESS_MEMORY_CEILING_BYTES,
+        )
+
+        telemetry["peakProcessGroupPhysicalFootprintBytes"] = boundary_peak - 1
+        self.bind_qualification_record(model, payload, record, spec_64k)
+        with mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="uzu-test-mac",
+        ):
+            accepted = launcher.uzu_128k_staged_qualification_proof(
+                payload, model, resource, estimate_128k,
+            )
+        self.assertTrue(accepted["ready"])
+        self.assertEqual(
+            accepted["projected128KProcessGroupPeakWithMarginBytes"],
+            launcher.UZU_PROCESS_MEMORY_CEILING_BYTES - 1,
+        )
+
+    def test_128k_benchmark_never_starts_without_matching_64k_receipt(self) -> None:
+        model, payload, binary = self.qualification_fixture(131_072)
+        model["memoryGeometry"] = {
+            "ready": True,
+            "layers": 64,
+            "fullAttentionLayers": 16,
+            "attentionHeads": 32,
+            "kvHeads": 4,
+            "headDimension": 256,
+            "layerSource": "uzu-layer-configs",
+        }
+        request = copy.deepcopy(payload)
+        request["scope"] = "qualification"
+        snapshot = {
+            "memoryAvailable": True,
+            "totalBytes": 48 * 1024**3,
+            "freePercent": 80.0,
+            "thermalAvailable": True,
+            "thermalState": 0,
+            "lowPowerMode": False,
+            "metalWiredLimitBytes": 0,
+        }
+        run_manager = launcher.RunManager()
+        manager = launcher.BenchmarkManager(run_manager)
+
+        with mock.patch.dict(
+            launcher.BINARIES, {"mirai": str(binary)}, clear=True,
+        ), mock.patch.object(
+            launcher, "physical_memory_bytes", return_value=48 * 1024**3,
+        ), mock.patch.object(
+            launcher, "apple_resource_snapshot", return_value=snapshot,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="uzu-test-mac",
+        ), mock.patch.object(
+            launcher.threading, "Thread",
+        ) as worker_thread, mock.patch.object(
+            run_manager, "start",
+        ) as model_start:
+            with self.assertRaisesRegex(ValueError, "64K"):
+                manager.start(request, [model])
+        worker_thread.assert_not_called()
+        model_start.assert_not_called()
+        self.assertEqual(manager.snapshot()["phase"], "idle")
+
+        with mock.patch.dict(
+            launcher.BINARIES, {"mirai": str(binary)}, clear=True,
+        ), mock.patch.object(
+            launcher, "physical_memory_bytes", return_value=48 * 1024**3,
+        ):
+            qualification = launcher.validated_route_qualification_request(
+                request, [model],
+            )
+        rejected_plan = mock.Mock(
+            backend="uzu", run_dir=None, secrets={},
+        )
+        with mock.patch.dict(
+            launcher.BINARIES, {"mirai": str(binary)}, clear=True,
+        ), mock.patch.object(
+            launcher, "normalized_request", return_value=rejected_plan,
+        ), mock.patch.object(
+            launcher, "apple_resource_snapshot", return_value=snapshot,
+        ), mock.patch.object(
+            launcher, "hardware_fingerprint", return_value="uzu-test-mac",
+        ), mock.patch.object(
+            run_manager, "start",
+        ) as model_start:
+            with self.assertRaisesRegex(RuntimeError, "64K"):
+                manager._measure_mode(
+                    qualification["job"], [model], "ar", 0, 6,
+                )
+        model_start.assert_not_called()
+
     def test_model_record_keeps_native_context_separate_from_safe_windows(self) -> None:
         self.write_registry()
         self.write_cache()
@@ -768,8 +1462,8 @@ class UzuBackendTests(unittest.TestCase):
         capability = model["backends"]["uzu"]
         self.assertEqual(model["nativeContext"], 262_144)
         self.assertEqual(model["architectureNativeContext"], 262_144)
-        self.assertEqual(capability["contextWindows"], [16_384, 32_768])
-        self.assertEqual(capability["contextMaximum"], 32_768)
+        self.assertEqual(capability["contextWindows"], list(launcher.UZU_SAFE_CONTEXT_WINDOWS))
+        self.assertEqual(capability["contextMaximum"], max(launcher.UZU_SAFE_CONTEXT_WINDOWS))
         self.assertFalse(capability["customSampling"])
         self.assertIn("model defaults", capability["samplingReason"])
         self.assertEqual(capability["agentReasoning"], ["auto"])
@@ -782,6 +1476,11 @@ class UzuBackendTests(unittest.TestCase):
                 ),
                 "sandboxProfileSha256": launcher.UZU_SANDBOX_PROFILE_SHA256,
                 "rawListenerProtected": False,
+                "nativeBoundaryContractId": None,
+                "nativeBearerAuthentication": False,
+                "oneUseApiKeyFile": False,
+                "nativeContextLimit": False,
+                "nativeOutputLimit": False,
             },
         )
         self.assertFalse(capability["runnable"])
@@ -793,7 +1492,18 @@ class UzuBackendTests(unittest.TestCase):
         runtime_contract = {
             "ready": True,
             "reason": "verified fixed release",
-            "binary": {"sha256": "runtime-sha256"},
+            "binary": {"sha256": "runtime-sha256", "size": runtime.stat().st_size},
+            "upstreamCommit": launcher.UZU_RUNTIME_UPSTREAM_COMMIT,
+            "sourcePatchSha256": launcher.UZU_RUNTIME_SOURCE_PATCH_SHA256,
+            "binaryIdentityPinned": True,
+            "networkSandbox": True,
+            "memorySafetyBlocked": False,
+            "nativeBoundaryContractId": launcher.UZU_NATIVE_BOUNDARY_CONTRACT_ID,
+            "nativeBearerAuthentication": True,
+            "oneUseApiKeyFile": True,
+            "nativeContextLimit": True,
+            "nativeOutputLimit": True,
+            "boundedContextReady": True,
             "rawListenerAuthenticated": True,
             "rawListenerIsolated": False,
             "listenerIsolationBlocked": False,
@@ -803,6 +1513,7 @@ class UzuBackendTests(unittest.TestCase):
             "reason": "complete",
             "path": str(self.model_path),
             "fingerprint": fingerprint,
+            "registryEntry": self.registry_entry(),
         }
         capability = {
             "runnable": True,
@@ -811,6 +1522,15 @@ class UzuBackendTests(unittest.TestCase):
             "modelCommit": launcher.UZU_MODEL_COMMIT,
             "modelToolchainVersion": launcher.UZU_MODEL_TOOLCHAIN_VERSION,
             "agentReasoning": ["auto"],
+            "runtimeIdentity": copy.deepcopy(runtime_contract),
+            "qualificationSystemContract": {
+                "rawListenerProtected": True,
+                "nativeBoundaryContractId": launcher.UZU_NATIVE_BOUNDARY_CONTRACT_ID,
+                "nativeBearerAuthentication": True,
+                "oneUseApiKeyFile": True,
+                "nativeContextLimit": True,
+                "nativeOutputLimit": True,
+            },
         }
         model = {
             "id": "uzu-test",
@@ -822,11 +1542,14 @@ class UzuBackendTests(unittest.TestCase):
 
         for reasoning, request_effort in (("auto", "default"), ("off", "disabled")):
             with self.subTest(reasoning=reasoning):
+                run_dir = self.root / f"run-uzu-{reasoning}"
+                run_dir.mkdir(mode=0o700)
                 plan = launcher.LaunchPlan(
                     f"uzu-{reasoning}", "uzu", "chat", copy.deepcopy(model),
                     str(self.root), 16_384, 1_024, reasoning, 18_123,
                     "custom", {}, runtime_binary=str(runtime),
                     chat={"systemPrompt": "", "sampling": "model"},
+                    run_dir=run_dir,
                 )
                 with (
                     mock.patch.object(
@@ -849,18 +1572,30 @@ class UzuBackendTests(unittest.TestCase):
                         str(runtime.resolve()), "server",
                         "--model", launcher.UZU_MODEL_REGISTRY_ID,
                         "--host", "127.0.0.1", "--port", "18123",
+                        "--api-key-file", str(run_dir / launcher.UZU_API_KEY_FILE_NAME),
+                        "--context-limit", "16384",
+                        "--max-output-tokens", "1024",
                         "--prefix-cache",
                     ]
                     self.assertEqual(plan.engine_argv, expected_argv)
                     self.assertEqual(plan.engine_env, {})
+                    key_file = launcher._validated_uzu_api_key_file(plan)
+                    self.assertEqual(stat.S_IMODE(key_file.stat().st_mode), 0o600)
+                    self.assertEqual(key_file.stat().st_nlink, 1)
+                    self.assertNotIn(plan.secrets["apiKey"], plan.engine_argv)
                     self.assertNotIn("--reasoning-effort", plan.engine_argv)
                     self.assertEqual(
                         launcher.UZU_NETWORK_SANDBOX_PROFILE,
                         "(version 1)(allow default)(deny network-outbound)",
                     )
-                    self.assertEqual(
-                        identities, ("runtime-sha256", fingerprint),
-                    )
+                    self.assertEqual(identities[:2], ("runtime-sha256", fingerprint))
+                    self.assertEqual(identities[2], launcher._llamacpp_strong_path_identity(key_file))
+                    catalog_bytes = self.resolved_path.read_bytes()
+                    self.resolved_path.write_text("{}")
+                    with self.assertRaisesRegex(ValueError, "offline catalog"):
+                        launcher.validate_uzu_launch_boundary(plan)
+                    self.resolved_path.write_bytes(catalog_bytes)
+                    self.assertEqual(launcher.validate_uzu_launch_boundary(plan), identities)
                     body = json.loads(launcher.build_chat_completion_request(
                         plan, {"messages": [{"role": "user", "content": "hello"}]},
                     ).data)
@@ -873,6 +1608,141 @@ class UzuBackendTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "fixed local-only"):
                         launcher.validate_uzu_launch_boundary(plan)
                     plan.engine_argv = bypassed
+                    launcher.dispose_plan_secrets(plan)
+                    self.assertFalse(key_file.exists())
+
+    def test_prepare_launch_uses_retained_fd_when_host_marks_it_executable(self) -> None:
+        runtime, sandbox, _sha256 = self.runtime_fixture()
+        plan = launcher.LaunchPlan(
+            "uzu-fd-handoff", "uzu", "chat",
+            {
+                "id": "uzu-fd", "name": "Uzu fd fixture", "uzuNative": True,
+                "backends": {"uzu": {}},
+            },
+            str(self.root), 16_384, 1_024, "auto", 18_145, "custom", {},
+            runtime_binary=str(runtime), run_dir=self.root / "run-uzu-fd",
+        )
+        plan.engine_argv = [
+            str(sandbox), "-p", launcher.UZU_NETWORK_SANDBOX_PROFILE,
+            str(runtime.resolve()), "server",
+        ]
+        expected = ("runtime", "model", "key", "revision")
+        with (
+            mock.patch.object(launcher, "UZU_RUNTIME_PATH", runtime),
+            mock.patch.object(
+                launcher, "_validated_uzu_route",
+                return_value=(runtime, {}, {}, expected),
+            ),
+            mock.patch.object(
+                launcher, "_uzu_inherited_executable_path",
+                side_effect=lambda opened: f"/dev/fd/{opened.fd}",
+            ),
+        ):
+            launch = launcher.prepare_uzu_executable_launch(plan, expected)
+        descriptor = launch.opened.fd
+        try:
+            self.assertTrue(launch.executes_from_fd)
+            self.assertEqual(launch.pass_fds, (descriptor,))
+            self.assertEqual(launch.argv[3], f"/dev/fd/{descriptor}")
+            self.assertEqual(plan.engine_argv[3], str(runtime.resolve()))
+            self.assertEqual(os.fstat(descriptor).st_ino, runtime.stat().st_ino)
+        finally:
+            launch.close()
+        with self.assertRaises(OSError):
+            os.fstat(descriptor)
+
+    def test_worker_passes_only_the_verified_uzu_fd_to_mocked_popen(self) -> None:
+        run_dir = self.root / "run-uzu-worker"
+        run_dir.mkdir(mode=0o700)
+        plan = launcher.LaunchPlan(
+            "uzu-worker", "uzu", "chat",
+            {"id": "uzu-worker", "name": "Uzu worker", "backends": {"uzu": {}}},
+            str(self.root), 16_384, 1_024, "auto", 18_146, "custom", {},
+            purpose="benchmark", run_dir=run_dir,
+        )
+        plan.engine_argv = ["sandbox-exec", "-p", "profile", "named-uzu", "server"]
+        fd_argv = ["sandbox-exec", "-p", "profile", "/dev/fd/42", "server"]
+        launch = mock.Mock(
+            argv=fd_argv, pass_fds=(42,), executes_from_fd=True,
+        )
+        process = mock.Mock(pid=4_242)
+        process.poll.return_value = None
+        manager = launcher.RunManager()
+        cancel_event = threading.Event()
+        manager.plan = plan
+        manager.cancel_event = cancel_event
+        fake_thread = mock.Mock()
+        expected = ("runtime", "model", "key", "revision")
+        with (
+            mock.patch.object(
+                launcher, "validate_uzu_launch_boundary", return_value=expected,
+            ),
+            mock.patch.object(
+                launcher, "prepare_uzu_executable_launch", return_value=launch,
+            ),
+            mock.patch.object(launcher.subprocess, "Popen", return_value=process) as popen,
+            mock.patch.object(manager, "_wait_ready"),
+            mock.patch.object(manager, "_verify_lmstudio_reasoning"),
+            mock.patch.object(manager, "_verify_client_api"),
+            mock.patch.object(launcher.threading, "Thread", return_value=fake_thread),
+        ):
+            manager._worker(plan, cancel_event)
+
+        popen.assert_called_once()
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0], fd_argv)
+        self.assertEqual(kwargs["pass_fds"], (42,))
+        self.assertTrue(kwargs["start_new_session"])
+        launch.close.assert_called_once_with()
+        self.assertIs(manager.process, process)
+
+    def test_worker_path_fallback_rechecks_fd_and_omits_pass_fds(self) -> None:
+        run_dir = self.root / "run-uzu-worker-fallback"
+        run_dir.mkdir(mode=0o700)
+        argv = ["sandbox-exec", "-p", "profile", "named-uzu", "server"]
+        plan = launcher.LaunchPlan(
+            "uzu-worker-fallback", "uzu", "chat",
+            {
+                "id": "uzu-worker-fallback", "name": "Uzu fallback",
+                "backends": {"uzu": {}},
+            },
+            str(self.root), 16_384, 1_024, "auto", 18_147, "custom", {},
+            purpose="benchmark", run_dir=run_dir, engine_argv=argv,
+        )
+        opened = mock.sentinel.opened_uzu_descriptor
+        launch = mock.Mock(
+            argv=argv, pass_fds=(), executes_from_fd=False, opened=opened,
+        )
+        process = mock.Mock(pid=4_243)
+        process.poll.return_value = None
+        manager = launcher.RunManager()
+        cancel_event = threading.Event()
+        manager.plan = plan
+        manager.cancel_event = cancel_event
+        expected = ("runtime", "model", "key", "revision")
+        with (
+            mock.patch.object(
+                launcher, "validate_uzu_launch_boundary", return_value=expected,
+            ),
+            mock.patch.object(
+                launcher, "prepare_uzu_executable_launch", return_value=launch,
+            ),
+            mock.patch.object(
+                launcher, "_confirm_open_uzu_executable",
+            ) as confirm_opened,
+            mock.patch.object(launcher.subprocess, "Popen", return_value=process) as popen,
+            mock.patch.object(manager, "_wait_ready"),
+            mock.patch.object(manager, "_verify_lmstudio_reasoning"),
+            mock.patch.object(manager, "_verify_client_api"),
+            mock.patch.object(launcher.threading, "Thread", return_value=mock.Mock()),
+        ):
+            manager._worker(plan, cancel_event)
+
+        _args, kwargs = popen.call_args
+        self.assertNotIn("pass_fds", kwargs)
+        confirm_opened.assert_called_once_with(opened)
+        launch.close.assert_called_once_with()
+        self.assertIs(manager.process, process)
 
     def test_uzu_reasoning_contract_is_request_scoped_and_binary(self) -> None:
         self.assertEqual(
@@ -888,6 +1758,98 @@ class UzuBackendTests(unittest.TestCase):
                 ValueError, "on or off",
             ):
                 launcher.apply_chat_reasoning_contract({}, "uzu", reasoning)
+
+    def test_uzu_one_use_key_is_private_and_generic_cleanup_is_idempotent(self) -> None:
+        run_dir = self.root / "uzu-private-key"
+        run_dir.mkdir(mode=0o700)
+        plan = launcher.LaunchPlan(
+            "uzu-private-key", "uzu", "chat",
+            {"id": "uzu-key", "name": "Uzu key fixture", "servedId": "uzu-key"},
+            str(self.root), 16_384, 1_024, "auto", 18_140, "custom", {},
+            purpose="benchmark", run_dir=run_dir,
+        )
+        key_file, api_key = launcher._create_plan_api_key_file(
+            plan, backend="uzu", filename=launcher.UZU_API_KEY_FILE_NAME,
+            label="Uzu",
+        )
+        details = key_file.lstat()
+        self.assertTrue(stat.S_ISREG(details.st_mode))
+        self.assertEqual(stat.S_IMODE(details.st_mode), 0o600)
+        self.assertEqual(details.st_nlink, 1)
+        self.assertEqual(key_file.read_text(encoding="utf-8"), api_key + "\n")
+        launcher.atomic_json(run_dir / "session-proxy.json", {"upstreamKey": api_key})
+        launcher.atomic_json(run_dir / "codex-proxy.json", {"upstreamKey": api_key})
+
+        launcher.dispose_plan_secrets(plan)
+        launcher.dispose_plan_secrets(plan)
+        self.assertFalse(key_file.exists())
+        self.assertFalse((run_dir / "session-proxy.json").exists())
+        self.assertFalse((run_dir / "codex-proxy.json").exists())
+        self.assertNotIn("apiKey", plan.secrets)
+
+    def test_live_uzu_listener_requires_auth_and_consumes_key_file(self) -> None:
+        run_dir = self.root / "uzu-live-auth"
+        run_dir.mkdir(mode=0o700)
+        plan = launcher.LaunchPlan(
+            "uzu-live-auth", "uzu", "chat",
+            {"id": "uzu-live", "name": "Uzu live fixture", "servedId": "uzu-live"},
+            str(self.root), 16_384, 1_024, "auto", 18_141, "custom", {},
+            purpose="benchmark", run_dir=run_dir,
+        )
+        key_file, _api_key = launcher._create_plan_api_key_file(
+            plan, backend="uzu", filename=launcher.UZU_API_KEY_FILE_NAME,
+            label="Uzu",
+        )
+        key_file.unlink()
+
+        class ModelsResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _kind, _value, _traceback):
+                return False
+
+            def read(self, _limit):
+                return json.dumps({"data": [{"id": plan.model["servedId"]}]}).encode()
+
+        seen = []
+
+        def protected_listener(request, timeout=0):
+            seen.append((request.full_url, request.get_header("Authorization"), timeout))
+            if request.full_url.endswith("/v1/models") and request.get_header(
+                "Authorization"
+            ) == f"Bearer {plan.secrets['apiKey']}":
+                return ModelsResponse()
+            raise launcher.urllib.error.HTTPError(
+                request.full_url, 401, "Unauthorized", {}, None,
+            )
+
+        manager = launcher.RunManager()
+        with mock.patch.object(
+            launcher.urllib.request, "urlopen", side_effect=protected_listener,
+        ) as urlopen:
+            manager._wait_ready(plan, manager.cancel_event)
+        self.assertEqual(urlopen.call_count, 5)
+        self.assertEqual(
+            seen[0][1], f"Bearer {plan.secrets['apiKey']}",
+            "readiness must first succeed with the exact retained bearer",
+        )
+        self.assertTrue(all(auth != seen[0][1] for _url, auth, _timeout in seen[1:]))
+
+        with mock.patch.object(
+            launcher.urllib.request, "urlopen", return_value=mock.MagicMock(),
+        ), self.assertRaisesRegex(RuntimeError, "accepted a request"):
+            launcher.RunManager._verify_uzu_native_security(plan)
+
+        key_file.write_text(plan.secrets["apiKey"] + "\n", encoding="utf-8")
+        key_file.chmod(0o600)
+        with mock.patch.object(
+            launcher.urllib.request, "urlopen",
+        ) as urlopen, self.assertRaisesRegex(RuntimeError, "did not consume"):
+            launcher.RunManager._verify_uzu_native_security(plan)
+        urlopen.assert_not_called()
 
     def test_private_relay_pins_uzu_reasoning_output_and_context(self) -> None:
         base = {
@@ -932,10 +1894,12 @@ class UzuBackendTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "x" * 12_000}],
             "max_completion_tokens": 4_096,
         }
-        with self.assertRaisesRegex(ValueError, "exceeds the selected Uzu context"):
-            session_proxy.transform_chat_request(
-                json.dumps(oversized).encode("utf-8"), base,
-            )
+        # Bytes are not tokens; the pinned native tokenizer enforces this.
+        forwarded = json.loads(session_proxy.transform_chat_request(
+            json.dumps(oversized).encode("utf-8"), base,
+        ))
+        self.assertEqual(forwarded["messages"], oversized["messages"])
+        self.assertEqual(forwarded["max_completion_tokens"], 4096)
 
         with self.assertRaisesRegex(ValueError, "sampling defaults"):
             session_proxy.transform_chat_request(
@@ -1012,7 +1976,7 @@ class UzuBackendTests(unittest.TestCase):
             "modelId": model["id"],
             "project": str(self.root),
             "context": 16_384,
-            "output": 1_024,
+            "output": 4_096,
             "reasoning": "auto",
             "suite": "quick",
             "options": {},
@@ -1067,7 +2031,7 @@ class UzuBackendTests(unittest.TestCase):
         self.assertNotIn("standard AR", json.dumps(report["doctor"]))
 
     def test_uzu_qualification_is_chat_only_and_binds_each_context(self) -> None:
-        for context in (16_384, 32_768):
+        for context in launcher.UZU_SAFE_CONTEXT_WINDOWS:
             with self.subTest(context=context):
                 model, payload, binary = self.qualification_fixture(context)
                 spec = launcher.route_qualification_spec(model, "uzu", context)
@@ -1078,6 +2042,11 @@ class UzuBackendTests(unittest.TestCase):
                 self.assertFalse(spec["clientAgnostic"])
                 self.assertEqual(spec["client"], "chat")
                 self.assertEqual(spec["modeLabel"], "Fixed DFlash + Weaver")
+                self.assertEqual(spec["version"], 5)
+                self.assertEqual(
+                    spec["id"],
+                    f"qwen36-uzu-dflash-weaver-{context // 1024}k-v5",
+                )
                 self.assertTrue(spec["memoryProofRequired"])
                 self.assertEqual(
                     spec["memoryCeilingBytes"],
@@ -1100,10 +2069,10 @@ class UzuBackendTests(unittest.TestCase):
                 self.assertFalse(contract["clientAgnostic"])
                 self.assertEqual(contract["client"], "chat")
                 self.assertEqual(contract["exactContext"], context)
-                self.assertEqual(contract["configuredOutputLimit"], 1_024)
+                self.assertEqual(contract["configuredOutputLimit"], 4_096)
                 self.assertEqual(
                     contract["measuredRequestMaxTokens"],
-                    launcher.ROUTE_QUALIFICATION_MAX_TOKENS,
+                    4096,
                 )
                 self.assertEqual(
                     contract["minimumCompletionTokens"],
@@ -1125,10 +2094,29 @@ class UzuBackendTests(unittest.TestCase):
                     contract["modelToolchainVersion"],
                     launcher.UZU_MODEL_TOOLCHAIN_VERSION,
                 )
-                self.assertEqual(contract["runtimeBinarySha256"], "b" * 64)
+                self.assertEqual(
+                    contract["runtimeBinarySha256"],
+                    launcher.UZU_RUNTIME_RELEASE_BINARY_SHA256,
+                )
+                self.assertEqual(
+                    contract["runtimeBinarySize"],
+                    launcher.UZU_RUNTIME_RELEASE_BINARY_SIZE,
+                )
+                self.assertEqual(
+                    contract["runtimeUpstreamCommit"],
+                    launcher.UZU_RUNTIME_UPSTREAM_COMMIT,
+                )
+                self.assertEqual(
+                    contract["runtimeSourcePatchSha256"],
+                    launcher.UZU_RUNTIME_SOURCE_PATCH_SHA256,
+                )
                 self.assertEqual(contract["fixedAcceleration"], "DFlash + Weaver")
                 self.assertEqual(contract["kvStateDataType"], "BF16")
                 self.assertTrue(contract["prefixCache"])
+                self.assertEqual(
+                    contract["promptExercisePolicy"],
+                    launcher.uzu_qualification_prompt_exercise_policy(context),
+                )
                 self.assertEqual(
                     contract["osReservePolicy"],
                     "max-4gib-or-10-percent-total-v1",
@@ -1149,6 +2137,32 @@ class UzuBackendTests(unittest.TestCase):
                     launcher.UZU_SANDBOX_PROFILE_SHA256,
                 )
                 self.assertTrue(contract["rawListenerProtected"])
+                self.assertEqual(
+                    contract["nativeBoundaryContractId"],
+                    launcher.UZU_NATIVE_BOUNDARY_CONTRACT_ID,
+                )
+                self.assertTrue(contract["nativeBearerAuthentication"])
+                self.assertTrue(contract["oneUseApiKeyFile"])
+                self.assertEqual(contract["nativeContextLimitTokens"], context)
+                self.assertEqual(contract["nativeMaxOutputTokens"], 4_096)
+
+                for legacy_version in (1, 2, 3, 4):
+                    legacy = self.qualification_record(spec, context=context)
+                    legacy["qualificationContract"]["id"] = (
+                        f"qwen36-uzu-dflash-weaver-{context // 1024}k-v{legacy_version}"
+                    )
+                    legacy["qualificationContract"]["version"] = legacy_version
+                    self.assertIsNone(
+                        launcher.route_qualification_metrics(legacy, spec),
+                        f"a v{legacy_version} receipt must never authorize the v4 Uzu route",
+                    )
+
+                missing_policy = self.qualification_record(spec, context=context)
+                del missing_policy["qualificationContract"]["promptExercisePolicy"]
+                self.assertIsNone(
+                    launcher.route_qualification_metrics(missing_policy, spec),
+                    "a receipt without the v4 prompt-exercise policy must fail closed",
+                )
 
     def test_uzu_output_contract_receipts_keep_separate_identities(self) -> None:
         model, _payload, _binary = self.qualification_fixture()
@@ -1159,7 +2173,9 @@ class UzuBackendTests(unittest.TestCase):
         second = copy.deepcopy(first)
         second.update({
             "id": "uzu-qualification-record-2048",
-            "createdAt": "2026-09-03T12:01:00Z",
+            "createdAt": (
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat(),
             "configuredOutputLimit": 2_048,
         })
         second["qualificationContract"]["configuredOutputLimit"] = 2_048
@@ -1204,7 +2220,7 @@ class UzuBackendTests(unittest.TestCase):
                 }
                 evidence = {
                     "context": context,
-                    "output": 1_024,
+                    "output": 4_096,
                     "client": "chat",
                     "reasoning": "auto",
                     "kv": "off",
@@ -1290,6 +2306,120 @@ class UzuBackendTests(unittest.TestCase):
                 {**disabled, "scope": "qualification"}, [model],
             )
 
+    def test_pi_transport_requires_exact_pair_and_ignores_untrusted_override(self) -> None:
+        model, _, _ = self.qualification_fixture()
+        capability = model["backends"]["uzu"]
+        capability["piTransportVersion"] = launcher.UZU_PI_TESTED_VERSION
+        capability["runtimeIdentity"]["binary"]["sha256"] = launcher.UZU_PI_TESTED_RUNTIME_SHA256
+        self.assertTrue(launcher.resolved_client_support("uzu", "pi", capability)["supported"])
+        for key, value in (("runnable", False), ("modelCommit", "changed"),
+                           ("modelRegistryId", "another-model"), ("piTransportVersion", "0.84.3"),
+                           ("runtimeIdentity", []), ("runtimeIdentity", {"binary": "bad"})):
+            changed = copy.deepcopy(capability)
+            changed[key] = value
+            changed["clientSupport"] = {"pi": {"supported": True}}
+            with self.subTest(key=key, value=value):
+                self.assertFalse(launcher.resolved_client_support("uzu", "pi", changed)["supported"])
+        for malformed in (None, [], "bad", True):
+            self.assertFalse(launcher.uzu_pi_transport_supported(malformed))
+        for client in ("codex", "opencode"):
+            self.assertFalse(launcher.resolved_client_support("uzu", client, capability)["supported"])
+        for mutation in ({"binaryIdentityPinned": False}, {"binary": {"sha256": "changed"}}):
+            changed = copy.deepcopy(capability)
+            changed["runtimeIdentity"].update(mutation)
+            self.assertFalse(launcher.uzu_pi_transport_supported(changed))
+
+    def test_pi_capacity_reuses_exact_chat_receipt_without_creating_agent_speed_evidence(self) -> None:
+        model, payload, _ = self.qualification_fixture()
+        capability = model["backends"]["uzu"]
+        capability["piTransportVersion"] = launcher.UZU_PI_TESTED_VERSION
+        capability["runtimeIdentity"]["binary"]["sha256"] = launcher.UZU_PI_TESTED_RUNTIME_SHA256
+        spec = launcher.route_qualification_spec(model, "uzu")
+        record = self.qualification_record(spec)
+        self.bind_qualification_record(model, payload, record, spec)
+        original = copy.deepcopy(record)
+        pi_request = {**payload, "client": "pi", "generation": {"sampling": "model"}}
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value="uzu-test-mac"):
+            self.assertIsNotNone(launcher._uzu_qualified_session_record(payload, model))
+            self.assertIsNotNone(launcher._uzu_qualified_session_record(pi_request, model))
+            for key, value in (("context", 32768), ("output", 8192),
+                               ("reasoning", "off"), ("client", "opencode")):
+                with self.subTest(key=key):
+                    self.assertIsNone(launcher._uzu_qualified_session_record({**pi_request, key: value}, model))
+            evidence = launcher.optimizer_evidence(model, payload["context"], payload["output"],
+                "pi", "auto", "off", payload["chat"])
+            launcher.add_benchmark_engine_evidence(evidence, model, payload["options"], ["uzu"])
+            self.assertIsNone(launcher.verified_route_qualification(model, "uzu", evidence))
+            with mock.patch.object(launcher, "optimal_request", return_value={
+                "backend": "uzu", "modelId": model["id"], "options": payload["options"],
+            }):
+                selected = launcher.best_engine_request(pi_request, [model])
+            self.assertEqual(selected["engineNextAction"]["id"], "keep-current")
+            self.assertFalse(selected["engineNextAction"]["requiresCalibration"])
+            self.assertEqual(selected["engineEvidenceTier"], "local-capacity-only")
+            self.assertEqual(selected["qualifiedRoutes"], [])
+            self.assertNotIn("engineEvidenceBinding", selected)
+            self.assertFalse(launcher.benchmark_backend_eligibility(model, "uzu", "pi", "auto", "off")[0])
+            with self.assertRaisesRegex(ValueError, "Pi speed testing is not yet available"):
+                launcher.validated_benchmark_request(pi_request, [model])
+            self.assertEqual(record, original)
+            record["createdAt"] = "2000-01-01T00:00:00+00:00"
+            self.assertIsNone(launcher._uzu_qualified_session_record(pi_request, model))
+
+    def test_uzu_capacity_reuses_same_probe_budget_across_response_ceilings(self) -> None:
+        model, payload, _ = self.qualification_fixture(131_072)
+        payload["output"] = 50_000
+        capability = model["backends"]["uzu"]
+        capability["piTransportVersion"] = launcher.UZU_PI_TESTED_VERSION
+        capability["runtimeIdentity"]["binary"]["sha256"] = launcher.UZU_PI_TESTED_RUNTIME_SHA256
+        spec = launcher.route_qualification_spec(model, "uzu", 131_072)
+        record = self.qualification_record(spec, context=131_072, configured_output=50_000)
+        self.bind_qualification_record(model, payload, record, spec)
+        original = copy.deepcopy(record)
+        with mock.patch.object(launcher, "hardware_fingerprint", return_value="uzu-test-mac"):
+            for client in ("chat", "pi"):
+                for output in (8_192, 16_384, 64_000):
+                    request = {**payload, "client": client, "output": output, "generation": {"sampling": "model"}}
+                    with self.subTest(client=client, output=output):
+                        reused = launcher._uzu_qualified_session_record(request, model)
+                        self.assertIsNotNone(reused)
+                        self.assertEqual(reused["configuredOutputLimit"], 50_000)
+            for changes in ({"output":4096}, {"context":65536}, {"reasoning":"off"}, {"client":"opencode"}):
+                self.assertIsNone(launcher._uzu_qualified_session_record({**payload, **changes}, model))
+            evidence = launcher.optimizer_evidence(model, 131_072, 64_000, "chat", "auto", "off", payload["chat"])
+            launcher.add_benchmark_engine_evidence(evidence, model, payload["options"], ["uzu"])
+            self.assertIsNone(launcher.verified_route_qualification(model, "uzu", evidence), "speed evidence remains exact")
+            for field, bad in (("runtimeVersion", "changed"), ("benchmarkModelFingerprint", "changed")):
+                before = capability[field]
+                capability[field] = bad
+                self.assertIsNone(launcher._uzu_qualified_session_record({**payload, "output":64_000}, model))
+                capability[field] = before
+            self.assertEqual(record, original)
+            record["createdAt"] = "2000-01-01T00:00:00Z"
+            self.assertIsNone(launcher._uzu_qualified_session_record({**payload, "output":64_000}, model))
+
+    def test_pi_session_keeps_pi_plan_but_checks_normalized_capacity_request(self) -> None:
+        model, payload, binary = self.qualification_fixture()
+        capability = model["backends"]["uzu"]
+        capability["piTransportVersion"] = launcher.UZU_PI_TESTED_VERSION
+        capability["runtimeIdentity"]["binary"]["sha256"] = launcher.UZU_PI_TESTED_RUNTIME_SHA256
+        payload.update({"client": "pi", "agentHost": "console", "context": "16384", "output": "4096", "options": None})
+        with mock.patch.dict(launcher.BINARIES, {"mirai": str(binary), "pi": "/test/pi"}), \
+             mock.patch.object(launcher, "free_port", side_effect=[18080, 18081]), \
+             mock.patch.object(launcher, "verified_route_qualification", return_value={"id": "qualified"}) as verified, \
+             mock.patch.object(launcher, "build_engine_plan"), \
+             mock.patch.object(launcher, "build_client_plan"):
+            plan = launcher.normalized_request(payload, [model], purpose="session")
+        self.assertEqual(plan.client, "pi")
+        self.assertEqual(plan.agent_host, "console")
+        evidence = verified.call_args.args[2]
+        self.assertEqual(evidence["client"], "chat")
+        self.assertEqual(evidence["context"], 16384)
+        self.assertEqual(evidence["output"], 4096)
+        with mock.patch.object(launcher, "command_version", return_value="changed"), \
+             self.assertRaisesRegex(ValueError, "Pi version changed"):
+            launcher.build_pi_client(plan, launcher.ClientRoute("fixture", "fixture", "http://127.0.0.1/v1", "fixture"))
+
     def test_uzu_session_and_route_check_require_a_matching_qualification(self) -> None:
         model, payload, binary = self.qualification_fixture()
         for purpose in ("session", "route-check"):
@@ -1363,6 +2493,12 @@ class UzuBackendTests(unittest.TestCase):
             lambda value: value["modes"]["ar"]["samples"][0].update(
                 {"completionTokens": 127},
             ),
+            lambda value: value["modes"]["ar"]["samples"][3].update(
+                {"promptTokens": 1_024},
+            ),
+            lambda value: value["modes"]["ar"]["samples"][3].update(
+                {"targetPromptTokens": 1_024},
+            ),
             lambda value: value["qualificationContract"].update(
                 {"exactContext": 32_768},
             ),
@@ -1374,6 +2510,64 @@ class UzuBackendTests(unittest.TestCase):
             broken = copy.deepcopy(record)
             mutation(broken)
             self.assertIsNone(launcher.route_qualification_metrics(broken, spec))
+
+    def test_high_context_receipts_require_authoritative_near_tier_prompt_usage(self) -> None:
+        for context in (65_536, 131_072):
+            model, _payload, _binary = self.qualification_fixture(context)
+            spec = launcher.route_qualification_spec(model, "uzu", context)
+            self.assertIsNotNone(spec)
+            assert spec is not None
+            minimum = (context * 9 + 9) // 10
+            for scenario in launcher.UZU_QUALIFICATION_NEAR_TIER_SCENARIOS:
+                with self.subTest(context=context, scenario=scenario):
+                    boundary = self.qualification_record(spec, context=context)
+                    sample = next(
+                        item for item in boundary["modes"]["ar"]["samples"]
+                        if item["scenario"] == scenario
+                    )
+                    sample["promptTokens"] = minimum
+                    rows = boundary["modes"]["ar"]["samples"]
+                    rows[3]["targetPromptTokens"] = (
+                        rows[2]["promptTokens"] + rows[2]["completionTokens"] + 128
+                    )
+                    if scenario == "toolIngest":
+                        rows[3]["promptTokens"] = rows[3]["targetPromptTokens"]
+                    self.assertIsNotNone(
+                        launcher.route_qualification_metrics(boundary, spec),
+                        "the exact 90% ceiling boundary must remain admissible",
+                    )
+
+                    underfilled = copy.deepcopy(boundary)
+                    underfilled_sample = next(
+                        item for item in underfilled["modes"]["ar"]["samples"]
+                        if item["scenario"] == scenario
+                    )
+                    underfilled_sample["promptTokens"] = minimum - 1
+                    self.assertIsNone(
+                        launcher.route_qualification_metrics(underfilled, spec),
+                        "one token below the near-tier boundary must fail closed",
+                    )
+
+                    unauthoritative = copy.deepcopy(boundary)
+                    unauthoritative_sample = next(
+                        item for item in unauthoritative["modes"]["ar"]["samples"]
+                        if item["scenario"] == scenario
+                    )
+                    unauthoritative_sample["authoritativeUsage"] = False
+                    self.assertIsNone(
+                        launcher.route_qualification_metrics(unauthoritative, spec),
+                    )
+
+                    retargeted = copy.deepcopy(boundary)
+                    retargeted_sample = next(
+                        item for item in retargeted["modes"]["ar"]["samples"]
+                        if item["scenario"] == scenario
+                    )
+                    retargeted_sample["targetPromptTokens"] = minimum
+                    self.assertIsNone(
+                        launcher.route_qualification_metrics(retargeted, spec),
+                        "the exact generated target remains receipt-bound",
+                    )
 
     def test_uzu_qualification_request_uses_packaged_sampling_and_bounded_field_names(self) -> None:
         plan = mock.Mock(
@@ -1387,7 +2581,7 @@ class UzuBackendTests(unittest.TestCase):
         request = launcher.build_benchmark_completion_request(
             plan,
             "generated qualification prompt",
-            launcher.ROUTE_QUALIFICATION_MAX_TOKENS,
+            launcher.UZU_QUALIFICATION_SAMPLE_MAX_TOKENS,
             {
                 "temperature": 0.0,
                 "top_p": 1.0,
@@ -1400,7 +2594,7 @@ class UzuBackendTests(unittest.TestCase):
         body = json.loads(request.data)
         self.assertEqual(
             body["max_completion_tokens"],
-            launcher.ROUTE_QUALIFICATION_MAX_TOKENS,
+            launcher.UZU_QUALIFICATION_SAMPLE_MAX_TOKENS,
         )
         self.assertNotIn("max_tokens", body)
         self.assertNotIn("stream_options", body)
@@ -1410,6 +2604,145 @@ class UzuBackendTests(unittest.TestCase):
             "frequency_penalty", "seed",
         ):
             self.assertNotIn(key, body)
+
+    def test_uzu_budget_is_separate_from_ssd_budget_and_preserves_visible_limit(self) -> None:
+        for backend, expected in (("uzu", 4096), ("llamacpp", 512)):
+            job = {"backend": backend, "output": 4096, "suite": {}}
+            launcher.apply_route_qualification_budget(job)
+            self.assertEqual(job["output"], 4096)
+            self.assertEqual(job["suite"]["maxTokens"], expected)
+            with self.assertRaisesRegex(ValueError, "requires at least"):
+                launcher.apply_route_qualification_budget({"backend": backend, "output": (2048 if backend == "uzu" else expected) - 1, "suite": {}})
+
+    def test_old_short_budget_cannot_authorize_new_uzu_contract(self) -> None:
+        model, _, _ = self.qualification_fixture()
+        spec = launcher.route_qualification_spec(model, "uzu", 16384)
+        record = self.qualification_record(spec)
+        for target in (record, record["qualificationContract"]):
+            target["measuredRequestMaxTokens"] = 512
+        record["outputMin"] = record["outputMax"] = 512
+        record["qualificationContract"]["sampleMaxTokens"] = 512
+        self.assertIsNone(launcher.route_qualification_metrics(record, spec))
+
+    def test_old_synthetic_reply_policy_cannot_authorize_conversation_route(self) -> None:
+        model, _, _ = self.qualification_fixture()
+        spec = launcher.route_qualification_spec(model, "uzu", 16384)
+        record = self.qualification_record(spec)
+        record["qualificationContract"]["promptExercisePolicy"]["id"] = (
+            "uzu-near-tier-authoritative-prompt-v3-code-fixture"
+        )
+        self.assertIsNone(launcher.route_qualification_metrics(record, spec))
+
+    def test_unusable_uzu_sample_fails_before_followup_requests(self) -> None:
+        sample = {
+            "terminalComplete": True, "responseLimitReached": False,
+            "reasoningObserved": True, "answerObserved": True,
+            "promptTokens": 49100,
+        }
+        case = {"label": "Cold agent turn", "targetPromptTokens": 49152}
+        launcher.validate_uzu_qualification_sample(sample, case, 512)
+        for change in (
+            {"terminalComplete": False}, {"responseLimitReached": True},
+            {"reasoningObserved": False}, {"answerObserved": False},
+        ):
+            with self.subTest(change=change), self.assertRaisesRegex(RuntimeError, "later turns"):
+                launcher.validate_uzu_qualification_sample({**sample, **change}, case, 512)
+        with self.assertRaisesRegex(RuntimeError, "intended prompt size"):
+            launcher.validate_uzu_qualification_sample({**sample, "promptTokens": 59225}, case, 512)
+
+    def test_failed_uzu_sample_reports_channels_without_generated_text(self) -> None:
+        case = {"label": "Cold agent turn", "targetPromptTokens": 49152}
+        sample = {
+            "terminalComplete": False, "responseLimitReached": True,
+            "reasoningObserved": True, "answerObserved": False,
+            "completionTokens": 2048, "reasoningCharacters": 8192,
+            "answerCharacters": 0, "content": "PRIVATE GENERATED TEXT",
+            "finishReason": "PRIVATE FINISH STRING",
+        }
+        for answer, expected in (
+            (False, "Only reasoning output was observed"),
+            (True, "Reasoning and answer output were both observed"),
+        ):
+            with self.subTest(answer=answer), self.assertRaises(RuntimeError) as caught:
+                launcher.validate_uzu_qualification_sample(
+                    {**sample, "answerObserved": answer}, case, 2048,
+                )
+            message = str(caught.exception)
+            self.assertIn(expected, message)
+            self.assertIn("2,048 output tokens", message)
+            self.assertIn("8,192 reasoning characters", message)
+            self.assertIn("runtime reported a length limit", message)
+            self.assertNotIn("PRIVATE", message)
+
+    def test_uzu_conversation_preserves_actual_replies_and_reserves_context(self) -> None:
+        suite = launcher.BENCHMARK_SUITES[launcher.ROUTE_QUALIFICATION_UZU_64K_SUITE]
+        cases = launcher.benchmark_agentic_cases(suite, require_complete_answer=True)
+        history = []
+        previous = None
+        for index, template in enumerate(cases):
+            case = launcher.uzu_conversation_case(template, history, previous, 65536, 2048)
+            self.assertEqual(case["messages"][:-1], history if index else template["messages"][:-1])
+            self.assertLessEqual(case["targetPromptTokens"] + 2048, 65536)
+            self.assertNotIn("reasoning_content", repr(template))
+            reply = {"role": "assistant", "content": f" answer {index}\n",
+                     "reasoning_content": f" exact reasoning {index} λ\n"}
+            history = [*case["messages"], reply]
+            previous = {"promptTokens": case["targetPromptTokens"], "completionTokens": 1024}
+        self.assertEqual([m for m in history if "reasoning_content" in m], [
+            {"role": "assistant", "content": f" answer {i}\n",
+             "reasoning_content": f" exact reasoning {i} λ\n"} for i in range(4)
+        ])
+        with self.assertRaisesRegex(RuntimeError, "response reserve"):
+            launcher.uzu_conversation_case(cases[3], history, {
+                "promptTokens": 64000, "completionTokens": 2048,
+            }, 65536, 2048)
+        with self.assertRaisesRegex(RuntimeError, "missing"):
+            launcher.uzu_conversation_case(cases[1], [], previous, 65536, 2048)
+
+    def test_uzu_adaptive_output_is_bounded_and_receipt_verified(self) -> None:
+        self.assertEqual(launcher.benchmark_repeated_phrase_fraction("short output"), 0)
+        self.assertEqual(launcher.benchmark_repeated_phrase_fraction(" ".join(str(i) for i in range(100))), 0)
+        self.assertGreater(launcher.benchmark_repeated_phrase_fraction(" repeat this sentence" * 100), .9)
+        self.assertEqual(launcher.uzu_qualification_request_tokens("cold", 49152, 65536, 8192), 8192)
+        self.assertEqual(launcher.uzu_qualification_request_tokens("toolIngest", 60416, 65536, 8192), 2432)
+        self.assertEqual(launcher.uzu_qualification_request_tokens("steadyTurn", 61056, 65536, 8192), 3968)
+        self.assertEqual(launcher.route_qualification_sample_tokens("uzu", 4096), 4096)
+        model, _, _ = self.qualification_fixture(65536)
+        spec = launcher.route_qualification_spec(model, "uzu", 65536)
+        record = self.qualification_record(spec, context=65536)
+        for output in (2048, 4096, 8192, 16384):
+            with self.subTest(output=output):
+                bounded = self.qualification_record(spec, context=65536, configured_output=output)
+                restored = json.loads(json.dumps(bounded))
+                self.assertIsNotNone(launcher.route_qualification_metrics(restored, spec))
+                self.assertTrue(launcher.benchmark_record_output_contract_verified(restored, output))
+                self.assertLessEqual(restored["outputMax"], min(output, 8192))
+        self.assertIsNotNone(launcher.route_qualification_metrics(record, spec))
+        self.assertTrue(launcher.benchmark_record_output_contract_verified(record, 4096))
+        self.assertFalse(launcher.benchmark_record_output_contract_verified(record, 8192))
+        for mutate in (
+            lambda r: r["modes"]["ar"]["samples"][2].update(requestedMaxTokens=8192),
+            lambda r: r.update(outputMin=8192),
+            lambda r: r["qualificationContract"]["outputBudgetPolicy"].update(promptReserveTokens=0),
+        ):
+            altered = copy.deepcopy(record)
+            mutate(altered)
+            self.assertIsNone(launcher.route_qualification_metrics(altered, spec))
+            self.assertFalse(launcher.benchmark_record_output_contract_verified(altered, 4096))
+
+    def test_uzu_long_context_cases_supply_code_and_preserve_shared_prefix(self) -> None:
+        suite = launcher.BENCHMARK_SUITES[launcher.ROUTE_QUALIFICATION_UZU_64K_SUITE]
+        cases = launcher.benchmark_agentic_cases(suite, require_complete_answer=True)
+        self.assertEqual([c["scenario"] for c in cases], launcher.ROUTE_QUALIFICATION_SCENARIOS)
+        base = cases[0]["messages"][:3]
+        for case in cases:
+            self.assertEqual(case["messages"][:3], base)
+            self.assertIn("def reply(model, prompt, reasoning)", case["messages"][1]["content"])
+            self.assertIn("context padding", case["messages"][0]["content"])
+            self.assertNotIn("detailed engineering assessment", case["messages"][-1]["content"])
+        self.assertIn("two regression tests", cases[1]["messages"][-1]["content"])
+        self.assertIn("(model, prompt)", cases[2]["messages"][-1]["content"])
+        self.assertIn("revision integer", cases[3]["messages"][-1]["content"])
 
     def test_uzu_live_guard_stops_only_after_sustained_whole_mac_pressure(self) -> None:
         def run_guard(free_percentages: list[float]) -> tuple[bool, mock.Mock, mock.Mock]:

@@ -49,3 +49,7 @@ coverage/
 *.onnx
 *.mlmodelc/
 .cache/huggingface/
+
+# Private development captures and unrelated local task prompts
+docs/harness-results/
+OX_ALPHA_VM_PROMPT_SPEC.md

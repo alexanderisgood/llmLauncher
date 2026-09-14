@@ -15,6 +15,46 @@
   const MIN_CONTEXT = 1024;
   const MIN_OUTPUT = 256;
   const MIN_PROMPT_BUDGET = 1024;
+  const SETUP_STORAGE_KEY = "llm-launcher-visible-settings-v1";
+  // Only non-secret form controls. Never persist prompts, project paths,
+  // credentials, consent checkboxes, or a claim that a route is qualified.
+  const SETUP_FIELDS = Object.freeze([
+    "contextInput", "outputInput", "reasoningSelect", "samplingMode",
+    "temperatureInput", "topPInput", "topKInput", "presencePenaltyInput",
+    "frequencyPenaltyInput", "repetitionPenaltyInput", "seedInput",
+    "accelerationSelect", "depthInput", "profileSelect", "fanSelect",
+    "omlxKv", "mtplxKv", "burstSelect", "dflashVerifySelect", "dflashDraftQuantSelect",
+    "anePrefillSelect", "memoryGuardSelect", "gpuSelect", "parallelInput",
+    "mtpMinTokensInput", "mtpMinContinueProbabilityInput", "mtplxOperatorRouteSelect",
+  ]);
+
+  function normaliseSetup(value, route) {
+    if (!value || routeKey(value.route) !== routeKey(route) || !routeKey(route)) return null;
+    const controls = {};
+    for (const key of SETUP_FIELDS) {
+      const field = value.controls?.[key];
+      if (typeof field === "string" && field.length <= 64 && /^[a-zA-Z0-9_.+-]*$/.test(field)) controls[key] = field;
+    }
+    return {version:1, route:normaliseRoute(route), controls};
+  }
+
+  function readSetup(storage, route) {
+    try {
+      const raw = storage?.getItem?.(SETUP_STORAGE_KEY);
+      if (!raw || raw.length > 8192) return null;
+      const value = JSON.parse(raw);
+      return value?.version === 1 ? normaliseSetup(value, route) : null;
+    } catch (_error) { return null; }
+  }
+
+  function writeSetup(storage, route, controls) {
+    const value = normaliseSetup({route, controls}, route);
+    if (!value) return false;
+    try {
+      storage?.setItem?.(SETUP_STORAGE_KEY, JSON.stringify(value));
+      return Boolean(storage?.setItem);
+    } catch (_error) { return false; }
+  }
 
   function normaliseRoute(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -91,7 +131,7 @@
     return Object.freeze({...available[0], source:"available"});
   }
 
-  function reconcileRuntimeLimits({context, output, contextWindows = []} = {}) {
+  function reconcileRuntimeLimits({context, output, contextWindows = [], outputMaximum} = {}) {
     const requestedContext = Number(context);
     const requestedOutput = Number(output);
     const windows = [...new Set((Array.isArray(contextWindows) ? contextWindows : [])
@@ -107,8 +147,11 @@
       nextContext = windows.filter(value => value <= requestedContext).at(-1) || windows[0];
     }
     let nextOutput = requestedOutput;
-    const maximumOutput = Number.isInteger(nextContext)
+    const contextMaximum = Number.isInteger(nextContext)
       ? nextContext - MIN_PROMPT_BUDGET : Number.NaN;
+    const runtimeMaximum = Number(outputMaximum);
+    const maximumOutput = Number.isInteger(runtimeMaximum) && runtimeMaximum >= MIN_OUTPUT
+      ? Math.min(contextMaximum, runtimeMaximum) : contextMaximum;
     if (
       Number.isInteger(requestedOutput)
       && requestedOutput >= MIN_OUTPUT
@@ -130,5 +173,6 @@
     STORAGE_KEY, VERSION, MAX_MODEL_ID, MIN_CONTEXT, MIN_OUTPUT, MIN_PROMPT_BUDGET,
     normaliseRoute, readRoute, writeRoute, routeKey,
     availableRoutes, isRouteAvailable, selectInitialRoute, reconcileRuntimeLimits,
+    SETUP_STORAGE_KEY, SETUP_FIELDS, normaliseSetup, readSetup, writeSetup,
   });
 });

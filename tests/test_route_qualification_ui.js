@@ -176,6 +176,10 @@ assert.match(qualificationMarkup, /Clean unload · Passed/);
 const bindingHelperStart = app.indexOf("function completedCalibrationEvidenceBinding");
 const bindingHelperEnd = app.indexOf("\nfunction promoteCompletedCalibrationResult", bindingHelperStart);
 assert.ok(bindingHelperStart >= 0 && bindingHelperEnd > bindingHelperStart);
+const copyBindingStart = app.indexOf("function copiedEvidenceBinding");
+const copyBindingEnd = app.indexOf("\nfunction clearActiveEvidenceBinding", copyBindingStart);
+assert.ok(copyBindingStart >= 0 && copyBindingEnd > copyBindingStart);
+vm.runInContext(app.slice(copyBindingStart, copyBindingEnd), resultMetricContext);
 vm.runInContext(app.slice(bindingHelperStart, bindingHelperEnd), resultMetricContext);
 const immutableBinding = {scope: "route", suite: "route-qualification-8k", preference: "throughput", recordId: "route-record"};
 const copiedBinding = resultMetricContext.completedCalibrationEvidenceBinding({
@@ -247,11 +251,7 @@ assert.ok(parityStart >= 0 && parityEnd > parityStart);
 vm.runInContext(app.slice(parityStart, parityEnd), context);
 const parityNote = context.calibrationParityRejectionNote({
   backend: "omlx",
-  tuningSweep: {candidates: [{
-    qualityMatchesAR: false,
-    medianSpeedupVsAR: 1.42,
-    medianEndToEndTokensPerSecond: 987.6,
-  }]},
+  settingsSearch: {rejectedFasterCandidateCount: 1},
 });
 assert.match(parityNote, /faster raw DFlash 2 candidate was excluded/);
 assert.match(parityNote, /failing greedy output parity with AR/);
@@ -259,10 +259,7 @@ assert.match(parityNote, /TPS is not trusted or used here/);
 assert.doesNotMatch(parityNote, /987|tok\/s/);
 assert.equal(context.calibrationParityRejectionNote({
   backend: "omlx",
-  tuningSweep: {candidates: [{
-    qualityMatchesAR: false,
-    medianSpeedupVsAR: 0.98,
-  }]},
+  settingsSearch: {rejectedFasterCandidateCount: 0},
 }), "");
 assert.match(app, /const parityRejectionNote = calibrationParityRejectionNote\(engine\)/);
 

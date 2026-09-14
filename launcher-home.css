@@ -1,0 +1,287 @@
+/* Everyday launch and Hub layouts stay compact at either information level. */
+:root .simple-launcher .app-workspace{grid-template-columns:minmax(0,1fr);max-width:832px;border:0}
+:root .simple-launcher .inspector{display:none!important}
+:root .simple-launcher .app-bar{padding:0 24px;height:52px;background:var(--surface-heading);border-bottom:1px solid var(--line-soft)}
+:root .simple-launcher .app-title strong{font-size:15px;letter-spacing:-.03em}
+:root .simple-launcher .app-title small{font-size:11px}
+:root .simple-launcher .brandmark{border-radius:11px;width:34px;height:34px}
+:root .simple-launcher .toolbar-button{font-size:12px;min-height:36px;border-radius:9px}
+:root .simple-launcher .status-pill{font-size:10px}
+:root .simple-launcher .status-pill:is(.idle,.running,.neutral),:root .simple-launcher .toolbar-separator{display:none}
+:root .simple-launcher .hub-tools-menu{width:240px;right:0;padding:8px}
+:root .simple-launcher .hub-tools-menu :is(button,a){display:flex;justify-content:space-between;min-height:36px;padding:8px 10px;font-size:13px;margin:0}
+:root .simple-launcher .hub-tools-menu hr{border:0;border-top:1px solid var(--line-soft);margin:6px 4px}
+:root .simple-launcher .theme-menu{right:0}
+:root .simple-launcher .theme-menu button{min-height:38px}
+:root .simple-launcher .config-pane{background:transparent;min-height:0}
+:root .simple-launcher .pane-heading{padding:22px 36px 14px;background:transparent;border:0;align-items:flex-start}
+:root .simple-launcher .pane-heading h1{font-size:30px;letter-spacing:-.045em;font-weight:650}
+:root .simple-launcher .pane-heading p{font-size:14px;margin-top:9px;line-height:1.5}
+:root .simple-launcher #interfaceDetailButton,:root .simple-launcher #localChip{display:none}
+:root .simple-launcher #focusedRunStatus{display:flex;max-width:260px;background:var(--surface-raised);border:1px solid var(--line-soft);border-radius:12px;padding:8px 10px}
+:root .simple-launcher #focusedRunStatus[data-phase="idle"]{display:none}
+:root .simple-launcher #focusedRunStatus [hidden]{display:none!important}
+:root .simple-launcher #focusedRunStatus:has(#focusedConsoleButton:not([hidden])) #focusedRunMessage{display:none}
+:root .simple-launcher #focusedConsoleButton{color:var(--accent);font-size:12px;white-space:nowrap}
+:root .simple-launcher .config-scroll{padding:12px 36px 24px;scrollbar-gutter:auto}
+:root .simple-launcher #customLaunchEditor{max-width:760px;margin:auto}
+:root .simple-launcher .config-section{padding:12px 0;background:transparent;border:0;border-radius:0}
+:root .simple-launcher .config-section+.config-section{margin-top:0;border-top:1px solid var(--line-soft)}
+:root .simple-launcher .section-head{margin-bottom:14px}
+:root .simple-launcher .section-head h2{font-size:14px;font-weight:650}
+:root .simple-launcher #customLaunchEditor>.config-section>.section-head>span{display:none}
+:root .simple-launcher .model-section{padding-top:4px}
+:root .simple-launcher #modelSelect{height:54px;font-size:17px;font-weight:600;padding:0 18px;border-radius:13px;background:var(--field);letter-spacing:-.02em}
+:root .simple-launcher .field>span{font-size:12px}
+:root .simple-launcher .field input,:root .simple-launcher .field select{font-size:13px;min-height:42px}
+:root .simple-launcher #projectPath{height:46px;border-radius:10px;font-size:13px}
+:root .simple-launcher .engine-picker{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px}
+:root .simple-launcher .engine-picker select{max-width:195px;border:1px solid var(--line-soft);border-radius:8px;background:var(--field);color:var(--text);padding:7px 9px;font:inherit;font-size:12px}
+:root .simple-launcher .model-information{margin-top:12px;color:var(--muted);font-size:12px}
+:root .simple-launcher .model-information>summary{cursor:pointer;width:fit-content;min-height:24px;line-height:24px}
+:root .simple-launcher .model-information .model-card{margin-top:10px;padding:12px;border:1px solid var(--line-soft);border-radius:10px}
+:root .simple-launcher #clientChoices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;padding:0;border:0;background:transparent}
+:root .simple-launcher #clientChoices button{height:44px;display:flex;align-items:center;justify-content:center;gap:8px;padding:8px;border:1px solid var(--line);border-radius:9px;text-align:left;background:var(--field);color:var(--text)}
+:root .simple-launcher #clientChoices button b{font-size:17px;margin:0;color:var(--muted)}
+:root .simple-launcher #clientChoices button strong{display:block;font-size:13px;font-weight:650}
+:root .simple-launcher #clientChoices button small{display:none}
+:root .simple-launcher #clientChoices button[aria-pressed="true"]{border-color:var(--accent);background:rgba(var(--accent-rgb),.08);box-shadow:0 0 0 1px rgba(var(--accent-rgb),.12)}
+:root .simple-launcher #clientChoices button[aria-pressed="true"] b{color:var(--accent)}
+:root .simple-launcher #clientChoices button:disabled{opacity:.4}
+:root .simple-launcher #compatibilityLine{display:block!important;font-size:11px;min-height:0;margin:10px 0 0;color:var(--muted)}
+:root .simple-launcher .launch-settings{border:1px solid var(--line-soft);border-radius:12px;background:var(--surface-raised);margin-top:4px}
+:root .simple-launcher .launch-settings>summary{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:14px 18px;cursor:pointer;list-style:none}
+:root .simple-launcher .launch-settings>summary::-webkit-details-marker{display:none}
+:root .simple-launcher .launch-settings>summary strong{font-size:13px;font-weight:600;display:block}
+:root .simple-launcher .launch-settings>summary small{display:block;color:var(--muted);font-size:11px;margin-top:5px;line-height:1.5}
+:root .simple-launcher .launch-settings-body{border-top:1px solid var(--line-soft);padding:0 18px 18px}
+:root .simple-launcher .launch-settings-body .config-section{padding:18px 0}
+:root .simple-launcher .launch-settings .invariant{display:none}
+:root .simple-launcher .launch-settings .section-head>span{display:none}
+:root .simple-launcher .launch-settings .field small{font-size:11px;line-height:1.5}
+:root .simple-launcher #notice{max-width:760px;margin:12px auto 0;font-size:12px;line-height:1.5}
+:root .simple-launcher .launch-dock{display:block!important;max-width:832px;width:100%;margin:0 auto;padding:0 36px 24px;border:0;background:var(--panel);box-shadow:none}
+:root .simple-launcher .launch-dock.hidden{display:none!important}
+:root .simple-launcher .launch-tools{border-bottom:1px solid var(--line-soft);margin-bottom:18px;padding:0 0 14px}
+:root .simple-launcher .launch-tools>summary{color:var(--muted);font-size:11px;cursor:pointer;list-style:none;min-height:28px;line-height:28px}
+:root .simple-launcher .launch-tools>summary::-webkit-details-marker{display:none}
+:root .simple-launcher .launch-tools>summary span{margin-left:8px}
+:root .simple-launcher .launch-tools[open]>.optimization-panel{display:grid!important;padding:12px 0;gap:12px}
+:root .simple-launcher .diagnostic-actions{display:flex;gap:8px;padding-bottom:8px}
+:root .simple-launcher .diagnostic-actions button{display:inline-flex!important;font-size:12px;min-height:36px}
+:root .simple-launcher .dock-actions{display:flex!important;align-items:center;justify-content:space-between;gap:20px;width:100%}
+:root .simple-launcher .launch-reassurance strong{font-size:13px;font-weight:550;display:block}
+:root .simple-launcher .launch-reassurance{flex:1;min-width:0}
+:root .simple-launcher .launch-memory-estimate{flex:none;padding:6px 0;border:0;background:transparent;color:var(--muted);font-size:11px;line-height:1.4;white-space:nowrap;cursor:pointer}
+:root .simple-launcher .launch-memory-estimate:hover{color:var(--text);text-decoration:underline}
+:root .simple-launcher .launch-memory-estimate[data-pressure="true"]{color:var(--warning)}
+@media(max-width:640px){:root .simple-launcher .dock-actions{display:grid!important;grid-template-columns:minmax(0,1fr) auto}:root .simple-launcher .launch-reassurance{grid-column:1/-1}:root .simple-launcher .launch-memory-estimate{text-align:left;white-space:normal}:root .simple-launcher .dock-actions>#launchButton{width:auto;min-width:120px;padding:10px 14px}}
+:root .simple-launcher .launch-reassurance small{display:block;font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5;max-width:390px}
+:root .simple-launcher #launchButton{flex:none;min-width:168px;min-height:54px;padding:12px 24px;border-radius:12px;justify-content:center;box-shadow:0 4px 14px rgba(var(--accent-rgb),.12)}
+:root .simple-launcher #launchButton strong{font-size:15px}
+:root .simple-launcher #launchButton small{font-size:10px;margin-top:3px}
+:root .simple-launcher .launch-preparation{border:1px solid rgba(var(--accent-rgb),.3);border-radius:12px;padding:16px;margin:0 0 18px;background:rgba(var(--accent-rgb),.045)}
+:root .simple-launcher .launch-preparation[hidden]{display:none}
+:root .simple-launcher .preparation-heading{display:flex;align-items:center;gap:10px}
+:root .simple-launcher .preparation-heading strong{font-size:13px;flex:1}
+:root .simple-launcher .preparation-heading button{border:0;background:transparent;color:var(--muted);font-size:12px;padding:6px;cursor:pointer}
+:root .simple-launcher .launch-preparation p{font-size:12px;color:var(--muted);line-height:1.6;margin:10px 0}
+:root .simple-launcher .launch-preparation progress{width:100%;height:5px;accent-color:var(--accent)}
+:root .simple-launcher .launch-preparation[data-phase="error"]{border-color:rgba(var(--danger-rgb),.4)}
+:root .simple-launcher .launch-preparation[data-phase="error"] .preparation-heading{color:var(--red)}
+:root .simple-launcher #continueLaunchPreparation{min-height:38px;font-size:12px}
+:root .simple-launcher .legacy-runtime-controls[hidden]{display:none!important}
+:root .simple-launcher #quickStart{max-width:760px;margin:0 auto 16px}
+:root .simple-launcher #chatWorkspace,:root .simple-launcher #agentWorkspace{min-height:0}
+:root .simple-launcher :is(button,input,select,summary):focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+@media(min-width:1001px){:root .simple-launcher .app-workspace{max-width:832px}:root .simple-launcher .config-pane{grid-template-rows:auto minmax(0,1fr) auto}}
+@media(max-width:1000px){:root .simple-launcher .launch-dock{position:relative}:root .simple-launcher .config-pane{display:block}:root .simple-launcher .config-scroll{overflow:visible}}
+@media(max-width:640px){:root .simple-launcher .app-bar{padding:0 12px;height:56px}:root .simple-launcher .pane-heading{padding:24px 20px 14px}:root .simple-launcher .pane-heading h1{font-size:26px}:root .simple-launcher .pane-heading p{font-size:12px}:root .simple-launcher .config-scroll{padding:8px 20px 20px}:root .simple-launcher .launch-dock{padding:0 20px 24px}:root .simple-launcher #clientChoices{grid-template-columns:repeat(2,minmax(0,1fr))}:root .simple-launcher #clientChoices button{height:65px}:root .simple-launcher .dock-actions{align-items:stretch;flex-direction:column;gap:14px}:root .simple-launcher #launchButton{width:100%}:root .simple-launcher .engine-picker{gap:5px}:root .simple-launcher .engine-picker select{max-width:145px}:root .simple-launcher .section-head h2{font-size:13px}:root .simple-launcher #focusedRunStatus{max-width:150px}:root .simple-launcher .focused-run-copy small{display:none}:root .simple-launcher #modelSelect{font-size:14px}}
+@media(prefers-reduced-motion:reduce){:root .simple-launcher *{scroll-behavior:auto!important}}
+
+:root .simple-launcher .app-workspace:has(#configScroll.hidden){max-width:1440px}
+:root .simple-launcher .config-pane:has(#configScroll.hidden) .pane-heading{padding:14px 20px}
+:root .simple-launcher .config-pane:has(#configScroll.hidden) .pane-heading h1{font-size:20px}
+
+:root .simple-launcher .app-shell{grid-template-rows:52px minmax(0,1fr)}
+@media(max-width:640px){:root .simple-launcher .app-shell{grid-template-rows:56px minmax(0,1fr)}}
+:root .simple-launcher #customLaunchEditor [hidden],
+:root .simple-launcher #launchDock [hidden]{display:none!important}
+:root .simple-launcher[data-preparing-launch="true"] #notice,
+:root .simple-launcher[data-preparing-launch="true"] #focusedRunStatus{display:none!important}
+:root .simple-launcher .home-engine-action{display:flex;align-items:center;gap:14px;margin-top:12px}
+:root .simple-launcher #homeFastestEngine{display:inline-flex;align-items:center;justify-content:center;gap:7px;flex:none;min-height:36px;padding:8px 12px;font-size:12px;border-radius:9px;border-color:rgba(var(--accent-rgb),.3);color:var(--accent);background:rgba(var(--accent-rgb),.04)}
+:root .simple-launcher #homeFastestEngine strong{font-size:12px;font-weight:600}
+:root .simple-launcher #homeFastestEngineHelp{margin:0;color:var(--muted);font-size:11px;line-height:1.5;max-width:350px}
+@media(max-width:640px){:root .simple-launcher .home-engine-action{align-items:flex-start;flex-direction:column;gap:8px}:root .simple-launcher #homeFastestEngine{width:100%}}
+:root .simple-launcher #homeFastestEngineHelp{flex:1;max-width:none}
+:root .simple-launcher #compatibilityLine[data-available="true"]{display:none!important}
+:root .simple-launcher .config-pane:not(:has(#configScroll.hidden)) .pane-heading{padding-top:16px;padding-bottom:10px}
+:root .simple-launcher #customLaunchEditor>.config-section>.section-head{margin-bottom:10px}
+
+/* The Hub's existing toolbar carries its identity; no separate title banner. */
+:root .simple-launcher:has(#agentWorkspace:not(.hidden)) .app-bar {display:none}
+:root .simple-launcher .config-pane:has(#agentWorkspace:not(.hidden)) > .pane-heading {display:none}
+:root .simple-launcher .config-pane:has(#agentWorkspace:not(.hidden)) {
+  display:grid; grid-template-rows:minmax(0,1fr); min-height:0;
+}
+:root .simple-launcher .agent-console-header {padding:7px 12px;min-height:42px;gap:12px}
+.simple-launcher .agent-console-heading-inline {display:flex;align-items:center;gap:14px;min-width:0;flex:1}
+.simple-launcher .agent-console-heading-inline h2 {flex:none;margin:0;font-size:12px}
+.simple-launcher #agentConsoleHeadingDetail {min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#aeb6c2}
+:root .simple-launcher .agent-console-heading-inline #agentConsoleMeta {display:none}
+.simple-launcher .agent-console-header-actions {flex:none}
+/* Keep the Hub as a viewport at narrow widths too. The launch form's mobile
+   page-scrolling layout otherwise makes the transcript grow without a limit. */
+:root .simple-launcher:has(#agentWorkspace:not(.hidden)) {overflow:hidden}
+:root .simple-launcher:has(#agentWorkspace:not(.hidden)) .app-shell {height:100dvh;min-height:0;max-height:100dvh;grid-template-rows:minmax(0,1fr)}
+:root .simple-launcher:has(#agentWorkspace:not(.hidden)) .app-workspace {height:100%;min-height:0;overflow:hidden}
+:root .simple-launcher:has(#agentWorkspace:not(.hidden)) .config-pane {height:100%;overflow:hidden}
+:root .simple-launcher .agent-workspace .agent-terminal-shell {min-height:0}
+:root .simple-launcher .agent-workspace .agent-pi-timeline-viewport,
+:root .simple-launcher .agent-workspace .agent-terminal-viewport {min-height:0;overscroll-behavior:contain;overflow-anchor:none}
+:root .simple-launcher .agent-workspace .agent-console-composer {max-height:50dvh;overflow:auto}
+@media(max-width:640px) {
+  .simple-launcher .agent-console-heading-inline {gap:4px;align-items:flex-start;flex-direction:column}
+  .simple-launcher #agentConsoleHeadingDetail {max-width:100%;font-size:9px}
+  .simple-launcher .agent-console-header-actions {gap:4px}
+}
+
+/* A quiet receipt beneath the answer, wrapping naturally on small screens. */
+.agent-pi-prompt-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  width: min(96%, 820px);
+  align-self: flex-start;
+  padding: 2px 8px 10px;
+  box-sizing: border-box;
+  color: #929ca9;
+  font: 11px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+.agent-pi-prompt-summary strong { color: #bdc8d4; font-weight: 500; }
+
+/* One console bar: tabs, route/measurements, then actions. */
+:root .simple-launcher .app-workspace:has(#agentWorkspace:not(.hidden)) {max-width:none;width:100%}
+:root .simple-launcher .agent-workspace {grid-template-rows:auto minmax(0,1fr) auto}
+:root .simple-launcher .agent-console-toolbar {
+  position:relative;z-index:5;display:grid;
+  grid-template-columns:minmax(100px,auto) minmax(0,1fr) auto;
+  align-items:center;gap:16px;padding:6px 14px;
+  background:#0c0e11;color:#e6ebf2;border-bottom:1px solid #292e36;
+}
+:root .simple-launcher .agent-console-toolbar:has(.agent-console-tab:only-child) {grid-template-columns:minmax(0,1fr) auto}
+:root .simple-launcher .agent-console-tabs:has(.agent-console-tab:only-child) {display:none}
+:root .simple-launcher .agent-console-toolbar:has(.agent-console-tab:only-child) .agent-console-status-panel {grid-column:1}
+:root .simple-launcher .agent-console-toolbar:has(.agent-console-tab:only-child) .agent-console-header-actions {grid-column:2}
+:root .simple-launcher .agent-console-toolbar .agent-console-header {display:contents}
+:root .simple-launcher .agent-console-heading-inline {position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+:root .simple-launcher .agent-console-toolbar .agent-console-header-actions {grid-column:3;grid-row:1;width:auto;flex-direction:row;gap:6px}
+:root .simple-launcher .agent-console-navigation {grid-column:1;grid-row:1;border:0;max-width:360px;min-width:0}
+:root .simple-launcher .agent-console-tabs-row {padding:0;display:block}
+:root .simple-launcher .agent-console-tab {min-width:82px;min-height:34px;padding:5px 8px;grid-template-columns:7px minmax(0,1fr)}
+:root .simple-launcher .agent-console-tab em {display:none}
+:root .simple-launcher .agent-console-tab small {font-size:9px}
+:root .simple-launcher .agent-console-tab strong {font-size:11px}
+:root .simple-launcher .agent-console-status-panel {grid-column:2;grid-row:1;border:0}
+:root .simple-launcher .agent-console-status-panel>summary {min-height:34px;grid-template-columns:minmax(0,1fr) auto auto;padding:0;gap:14px;border:0}
+:root .simple-launcher .agent-console-status-route {grid-template-columns:minmax(0,1fr)}
+:root .simple-launcher .agent-console-status-route>i {display:none}
+:root .simple-launcher .agent-console-status-route>span {display:flex;align-items:baseline;gap:10px;min-width:0}
+:root .simple-launcher #agentConsoleStatusSurface {display:block;flex:none;font-size:11px;color:#dce4ef}
+:root .simple-launcher #agentConsoleStatusModel {font-size:11px;margin:0}
+:root .simple-launcher .agent-console-status-signals {display:flex;grid-column:auto;grid-row:auto;padding:0;border:0;gap:0}
+:root .simple-launcher .agent-console-status-signal {min-width:90px;padding:0 12px}
+:root .simple-launcher .agent-console-status-signal small {font-size:9px}
+:root .simple-launcher .agent-console-status-signal strong {font-size:11px}
+:root .simple-launcher .agent-console-status-tail {grid-column:auto;grid-row:auto}
+:root .simple-launcher .agent-console-status-details,
+:root .simple-launcher .agent-console-search {
+  position:absolute;top:calc(100% + 4px);right:12px;left:auto;
+  width:min(680px,calc(100vw - 24px));box-sizing:border-box;
+  border:1px solid #353d49;border-radius:10px;background:#12161d;
+  box-shadow:0 12px 32px #0008;padding:12px;z-index:7;
+}
+:root .simple-launcher .agent-console-live-phase {display:none!important}
+:root .simple-launcher .agent-console-composer {padding:10px 14px;gap:8px}
+:root .simple-launcher .agent-console-composer>label {gap:0}
+:root .simple-launcher .agent-workspace [hidden] {display:none!important}
+.simple-launcher .agent-console-composer>p {margin:0}
+.agent-console-actions-menu {position:relative}
+.agent-console-actions-menu>summary {display:grid;place-items:center;list-style:none;cursor:pointer;min-width:34px;min-height:32px;border:1px solid #39414d;border-radius:7px;color:#dfe7f2}
+.agent-console-actions-menu>summary::-webkit-details-marker {display:none}
+.agent-console-actions-menu>summary:focus-visible {outline:2px solid #78b6ff;outline-offset:2px}
+.agent-console-actions-menu>div {position:absolute;right:0;top:calc(100% + 8px);display:grid;gap:6px;min-width:150px;padding:8px;border:1px solid #39414d;border-radius:9px;background:#12161d;box-shadow:0 12px 32px #0008;z-index:8}
+:root .simple-launcher #agentConsolePrefillClock {color:#d0b3ff;font-variant-numeric:tabular-nums;letter-spacing:0;text-transform:none;white-space:nowrap}
+:root .simple-launcher .agent-pi-timeline {width:100%;max-width:none}
+:root .simple-launcher .agent-pi-event-thinking,
+:root .simple-launcher .agent-pi-event-tool-call,
+:root .simple-launcher .agent-pi-event-tool-result {width:100%}
+:root .simple-launcher .agent-pi-event-answer {width:96%;max-width:none}
+:root .simple-launcher .agent-pi-event-user {width:fit-content;max-width:85%}
+:root .simple-launcher .agent-pi-event-body {font-size:12px}
+:root .simple-launcher .agent-pi-event>summary+.agent-pi-event-body {font-size:11.5px;line-height:1.55}
+@media(max-width:1100px) {
+  :root .simple-launcher .agent-console-toolbar {gap:8px;padding:6px 8px}
+  :root .simple-launcher .agent-console-status-route>span {align-items:flex-start;flex-direction:column;gap:3px}
+  :root .simple-launcher .agent-console-status-panel>summary {grid-template-columns:minmax(0,1fr) auto auto;gap:6px}
+  :root .simple-launcher .agent-console-status-signal {min-width:70px;padding:0 8px}
+  :root .simple-launcher .agent-console-navigation {max-width:220px}
+}
+@media(max-width:760px) {
+  :root .simple-launcher .agent-console-toolbar {grid-template-columns:minmax(0,1fr) auto;gap:6px}
+  :root .simple-launcher .agent-console-navigation {max-width:none}
+  :root .simple-launcher .agent-console-toolbar .agent-console-header-actions {grid-column:2}
+  :root .simple-launcher .agent-console-status-panel,
+  :root .simple-launcher .agent-console-toolbar:has(.agent-console-tab:only-child) .agent-console-status-panel {grid-column:1/-1;grid-row:1}
+  /* Keep a real summary box for keyboard focus; reserve the right corner for
+     Home and the action menu while measurements use the entire next row. */
+  :root .simple-launcher .agent-console-status-panel>summary {grid-template-columns:minmax(0,1fr) auto 98px}
+  :root .simple-launcher .agent-console-toolbar .agent-console-header-actions {align-self:start;position:relative;z-index:1}
+  :root .simple-launcher .agent-console-status-route {grid-column:1;grid-row:1}
+  :root .simple-launcher .agent-console-status-signals {grid-column:1/-1;grid-row:2}
+  :root .simple-launcher .agent-console-status-tail {grid-column:2;grid-row:1}
+  :root .simple-launcher .agent-console-navigation:has(.agent-console-tab:not(:only-child)) {grid-column:1/-1;grid-row:3}
+  :root .simple-launcher .agent-console-status-signals {justify-content:space-between;min-width:0}
+  :root .simple-launcher .agent-console-status-signal {min-width:0;padding:0 6px}
+  :root .simple-launcher .agent-console-status-signal strong {font-size:10px}
+  :root .simple-launcher .agent-console-status-disclosure b {display:none}
+}
+:root .simple-launcher:has(#agentWorkspace:not(.hidden)) .app-shell {grid-template-columns:minmax(0,1fr)}
+:root .simple-launcher .agent-console-toolbar {min-width:0}
+@media(max-width:400px) {
+  :root .simple-launcher .agent-console-status-signals {display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+  :root .simple-launcher .agent-console-status-signal {padding:0 4px}
+  :root .simple-launcher .agent-console-status-signal strong {overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  :root .simple-launcher .agent-console-keys {gap:4px;flex-wrap:wrap}
+  :root .simple-launcher .agent-console-keys button {padding-left:6px;padding-right:6px;font-size:10px}
+}
+:root .simple-launcher .agent-console-context-tokens {display:block;max-width:220px;margin-top:2px;color:#aab6c5;font-size:10px;line-height:1.35;font-variant-numeric:tabular-nums;white-space:normal}
+:root .simple-launcher .agent-console-context-tokens[hidden] {display:none}
+:root .simple-launcher #agentConsoleStatusContext {min-width:150px}
+:root .simple-launcher #agentConsoleSteerButton {border-color:#7471a6;color:#cec5ff;background:#242033}
+@media(max-width:760px) {
+  :root .simple-launcher #agentConsoleStatusContext {min-width:0;flex:1.4}
+  :root .simple-launcher .agent-console-context-tokens {font-size:9px;max-width:150px}
+  :root .simple-launcher .agent-console-keys {flex-wrap:wrap}
+}
+:root .profile-run-notice{display:flex;align-items:center;gap:14px;margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:9px;background:var(--surface-raised);color:var(--text);font-size:12px;line-height:1.5}
+:root .profile-run-notice span{flex:1}
+:root .profile-run-notice button{flex:none}
+:root .simple-launcher .profile-edit-banner{display:flex;align-items:center;gap:16px;margin:0 0 18px;padding:14px 16px;border:1px solid var(--accent);border-radius:10px;background:var(--surface-raised);color:var(--text)}
+:root .profile-edit-banner>div:first-child{flex:1;min-width:0}
+:root .profile-edit-banner strong{font-size:14px;overflow-wrap:anywhere}
+:root .profile-edit-banner p{margin:5px 0 0;color:var(--muted);font-size:12px;line-height:1.5}
+:root .profile-edit-actions{display:flex;gap:8px;flex-shrink:0}
+:root .profile-edit-actions button{min-height:36px;font-size:12px}
+:root .profile-run-notice[hidden],:root .profile-run-notice button[hidden],:root .simple-launcher .profile-edit-banner[hidden]{display:none}
+@media(max-width:600px){:root .profile-run-notice,:root .simple-launcher .profile-edit-banner{align-items:stretch;flex-direction:column}:root .profile-edit-actions button{flex:1}}
+
+.agent-console-drafts-dialog{width:min(560px,calc(100vw - 32px))}
+.agent-console-drafts-dialog>p{color:var(--muted);font-size:13px;line-height:1.5}
+#agentConsoleDraftsList{display:grid;gap:8px;max-height:55vh;overflow:auto}
+.agent-console-drafts-dialog .agent-console-saved-draft{display:flex;height:auto;min-height:56px;padding:12px;align-items:stretch;flex-direction:column;gap:6px;text-align:left;white-space:normal;overflow-wrap:anywhere}
+.agent-console-saved-draft span{font-size:13px;line-height:1.4}
+.agent-console-saved-draft small{color:var(--muted);font-size:11px}

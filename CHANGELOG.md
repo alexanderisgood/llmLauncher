@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add the pinned Slotstream 0.2.17 Qwen3.8 Flash-Next adapter with full-expert
+  SSD streaming, explicit native MTP, 16K–256K context choices and checked memory budgets.
+- Verify the complete model before every load, preserve authenticated session
+  controls, and show incomplete model downloads without allowing an early launch.
+- Support Chat, Pi and OpenCode; keep Responses, vision and custom sampling
+  unavailable on this initial route. No local speed claim is inferred from availability.
+
 ## 1.67.0-alpha.1 — 14 September 2026
 
 - Simplify everyday launch controls and consolidate the Pi Hub toolbar to make

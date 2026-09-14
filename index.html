@@ -74,6 +74,7 @@
           <section class="config-section model-section" aria-labelledby="modelTitle">
             <div class="section-head"><h2 id="modelTitle">Choose your model</h2><label class="engine-picker" for="homeEngineSelect">Engine <select id="homeEngineSelect" aria-label="Engine"></select></label></div>
             <label class="field"><span class="sr-only">Detected model</span><select id="modelSelect"><option>Scanning models…</option></select></label>
+            <small id="slotstreamDownloadStatus" class="hidden" role="status"></small>
             <div class="home-engine-action">
               <button id="homeFastestEngine" type="button" class="secondary" data-optimizer-scope="engine" data-engine-preference="throughput" aria-describedby="homeFastestEngineHelp"><span aria-hidden="true">ϟ</span><strong>Choose fastest engine</strong></button>
               <p id="homeFastestEngineHelp">Uses saved calibration, or measures compatible engines.</p>
@@ -246,6 +247,10 @@
                   <label class="field optimizable" data-opt-key="queueLimit"><span>Waiting requests</span><select id="mferenceQueueLimit"><option value="1">1</option><option value="2">2</option><option value="4" selected>4 · recommended</option><option value="8">8</option><option value="16">16</option><option value="32">32</option></select><small>Generation remains single-lane; this only bounds waiting work.</small></label>
                 </div>
               </div>
+              <div id="slotstreamControls" class="backend-controls hidden">
+                <div class="ssd-control-intro"><span aria-hidden="true">SSD</span><div><strong>Full Qwen experts with native MTP</strong><small>Experts and n-grams stay on SSD. MTP verifies drafts with the full model; prefix caching speeds up follow-up turns. 64K is the starting context recommendation for this 48 GB Mac; larger windows must pass the memory planner.</small></div></div>
+                <label class="field optimizable" data-opt-key="memoryGB"><span>Process memory budget</span><input id="slotstreamMemoryGB" type="number" min="12" max="36" step="1" value="30"><small>GB for the whole model process, including MTP and context. Close other model sessions before loading. Auto acceleration selects MTP depth 2 when its head is installed; it never silently disables selected MTP to fit.</small></label>
+              </div>
               <div id="whallmControls" class="backend-controls hidden">
                 <div class="ssd-control-intro"><span aria-hidden="true">SSD</span><div><strong>Full 512-expert Qwen route</strong><small>Whallm owns its pinned MXFP4 model and streams routed experts from SSD. This 48 GiB Mac is experimental because upstream publishes a 64 GiB support floor.</small></div></div>
                 <div class="freetoken-control-facts"><span><small>Model process</small><b>Whallm owned</b></span><span><small>Measured M5 Pro decode</small><b>9.7–10.4 tok/s</b></span><span><small>Measured input</small><b>Up to 16K</b></span></div>
@@ -314,6 +319,7 @@
                   <div class="ssd-runtime-choices" role="group" aria-label="SSD-streaming runtime">
                     <button type="button" class="choice" data-backend="swiftlm" aria-pressed="false"><span class="choice-icon swiftlm" aria-hidden="true">S</span><span><strong>SwiftLM</strong><small>Streams MLX experts</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                     <button type="button" class="choice" data-backend="mference" aria-pressed="false"><span class="choice-icon mference" aria-hidden="true">MF</span><span><strong>Mference</strong><small>Verified .gturbo models</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                    <button type="button" class="choice" data-backend="slotstream" aria-pressed="false"><span class="choice-icon" aria-hidden="true">SS</span><span><strong>Slotstream</strong><small>Qwen · SSD + MTP</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                     <button type="button" class="choice" data-backend="whallm" aria-pressed="false"><span class="choice-icon whallm" aria-hidden="true">W</span><span><strong>Whallm</strong><small>Full Qwen experts</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                     <button type="button" class="choice ssd-ple-choice" data-backend="llamacpp" aria-pressed="false" hidden disabled><span class="choice-icon llamacpp" aria-hidden="true">LC</span><span><strong>llama.cpp · SSD PLE</strong><small>Pinned Flash-Next · 8K</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                   </div>

@@ -52,6 +52,7 @@ from log_tail import read_log_tail
 from mtplx_reasoning import preserved_qwopus_template
 from model_modalities import pi_model_inputs, prepare_mtplx_image_processor
 import whallm_runtime
+import slotstream_runtime
 import whallm_telemetry
 import dflash_budget_patch
 
@@ -95,6 +96,8 @@ CONTROLLER_SOURCE_PATHS = (
     APP_DIR / "pi_context_recovery.js",
     APP_DIR / "mtplx_reasoning.py",
     APP_DIR / "model_modalities.py",
+    APP_DIR / "slotstream_runtime.py",
+    APP_DIR / "slotstream_manifest.json",
     APP_DIR / "whallm_runtime.py",
     APP_DIR / "whallm_telemetry.py",
     APP_DIR / "session_proxy.py",
@@ -569,6 +572,15 @@ RUNTIME_RELEASE_CATALOG: dict[str, dict[str, Any]] = {
             "Run mtplx models --check, then repeat the same local benchmark on 2.11.2 before preferring it for TPS.",
         ],
     },
+    "slotstream": {
+        "version": "0.2.17", "displayVersion": "0.2.17", "channel": "experimental",
+        "releaseUrl": "https://github.com/carloslfu/slotstream/releases/tag/v0.2.17",
+        "summary": "Pinned full-expert Qwen3.8 Flash-Next with SSD n-grams, native MTP and context-aware memory planning.",
+        "highlights": [{"value": "512", "label": "experts preserved"}, {"value": "MTP", "label": "native draft head"}],
+        "workflow": ["Install the audited macOS 26 arm64 archive, with mlx.metallib beside the executable.",
+                     "Use the pinned pull command to download or resume the separate 105.3 GB model, then rescan.",
+                     "Select a context, MTP setting and process budget; native memory planning runs before every load."],
+    },
     "swiftlm": {
         "version": "b709", "displayVersion": "b709",
         "channel": "stable", "releasedAt": "2026-08-31T15:48:40Z",
@@ -753,7 +765,7 @@ ENGINE_SETTINGS_SWEEP_MAX_GENERATED_REQUESTS = 512
 SSD_STREAMING_CONTRACT_VERSION = 1
 SSD_STREAMING_MIN_WEIGHT_RATIO = 0.85
 SSD_STREAMING_PREFILL_SIZES = (128, 256, 512, 1_024, 2_048)
-SSD_STREAMING_BACKENDS = ("swiftlm", "mference", "whallm")
+SSD_STREAMING_BACKENDS = ("swiftlm", "mference", "whallm", "slotstream")
 SSD_ARTIFACT_BACKENDS = ("swiftlm", "mference")
 LLAMACPP_ATOMIC_REPO = "AtomicChat/Qwen3.8-Flash-Next-GGUF"
 LLAMACPP_ATOMIC_REVISION = "97d5aea2811eda4a58246da777b9a0fa9df22574"
@@ -885,6 +897,7 @@ LLAMACPP_PLE_MINIMUM_DECODE_TPS = 15.0
 APPLE_IOGPU_WIRED_LIMIT_MAX_MIB = 1024**2
 MFERENCE_CONTEXT_WINDOWS = (4_096, 8_192, 16_384, 32_768, 65_536, 128_000)
 SSD_STREAMING_RUNTIME_URLS = {
+    "slotstream": "https://github.com/carloslfu/slotstream",
     "swiftlm": "https://github.com/SharpAI/SwiftLM",
     "mference": "https://github.com/NeelM0906/Mference",
     "whallm": "https://github.com/yanun0323/Whallm",
@@ -1181,6 +1194,7 @@ OPTIMIZER_KEYS = {
     "swiftlm": ("prefillSize", "nativeExpertTopK"),
     "mference": ("promptCacheMode", "queueLimit"),
     "whallm": (),
+    "slotstream": ("acceleration", "depth", "memoryGB"),
     "llamacpp": (),
     "uzu": (),
 }
@@ -1192,6 +1206,7 @@ BENCHMARK_ENGINE_SETTING_KEYS = {
     "swiftlm": ("prefillSize", "nativeExpertTopK", "ssdCacheState"),
     "mference": ("promptCacheMode", "queueLimit", "ssdCacheState"),
     "whallm": ("ssdCacheState",),
+    "slotstream": ("memoryGB", "ssdCacheState"),
     "llamacpp": (),
     "uzu": (),
 }
@@ -1850,6 +1865,9 @@ RUNTIME_CANDIDATE_SPECS: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("source-build", "~/Documents/Code/Mference/.build/release/MferenceServer", "Source release build"),
         ("path", "MferenceServer", "Shell PATH"),
     ),
+    "slotstream": (
+        ("user-cli", "~/.slotstream/bin/slotstream", "Pinned Slotstream CLI"),
+    ),
     "whallm": (
         ("system-app", "/Applications/Whallm.app/Contents/MacOS/dsv4-app", "Whallm app"),
         ("user-app", "~/Applications/Whallm.app/Contents/MacOS/dsv4-app", "User Whallm app"),
@@ -2333,6 +2351,7 @@ BINARIES = {
     "swiftlm": preferred_runtime_binary("swiftlm"),
     "mference": preferred_runtime_binary("mference"),
     "whallm": preferred_runtime_binary("whallm"),
+    "slotstream": preferred_runtime_binary("slotstream"),
     "llamacpp": preferred_runtime_binary("llamacpp"),
     "freetoken_native": _SELECTED_FREETOKEN_NATIVE_BINARY,
     "freetoken": (
@@ -2406,6 +2425,9 @@ ENGINE_ADAPTERS: dict[str, AdapterDescriptor] = {
     ),
     "mference": AdapterDescriptor(
         "mference", "Mference", "engine", "mference", "openai-compatible-ssd-expert-streaming",
+    ),
+    "slotstream": AdapterDescriptor(
+        "slotstream", "Slotstream", "engine", "slotstream", "openai-compatible-ssd-expert-streaming",
     ),
     "whallm": AdapterDescriptor(
         "whallm", "Whallm", "engine", "whallm", "shared-openai-compatible-ssd-expert-streaming",
@@ -2500,6 +2522,12 @@ CLIENT_SUPPORT: dict[str, dict[str, dict[str, Any]]] = {
         "pi": {"supported": True, "reason": "OpenAI Chat Completions with function tools"},
         "opencode": {"supported": True, "reason": "OpenAI Chat Completions with function tools"},
         "codex": {"supported": False, "reason": "Mference does not expose the Responses API required by Codex"},
+        "chat": {"supported": True, "reason": "Built-in streaming Chat Completions"},
+    },
+    "slotstream": {
+        "pi": {"supported": True, "reason": "OpenAI Chat Completions with function tools"},
+        "opencode": {"supported": True, "reason": "OpenAI Chat Completions with function tools"},
+        "codex": {"supported": False, "reason": "Slotstream does not expose the Responses API required by Codex."},
         "chat": {"supported": True, "reason": "Built-in streaming Chat Completions"},
     },
     "whallm": {
@@ -4656,6 +4684,10 @@ def runtime_inventory() -> dict[str, Any]:
         },
     })
     for runtime_id, label, minimum, detail in (
+        (
+            "slotstream", "Slotstream", "Audited 0.2.17 · macOS 26 · Apple Silicon",
+            "Full Qwen experts and n-grams streamed from SSD, explicit MTP, and context memory planning.",
+        ),
         (
             "swiftlm", "SwiftLM", "macOS 14 · Apple Silicon",
             "Streams routed experts from ordinary MLX MoE checkpoints with native expert routing preserved.",
@@ -13863,6 +13895,23 @@ def scan_models() -> list[dict[str, Any]]:
                 installed_memory,
             )
             records[native_record["id"]] = native_record
+    slotstream_install = slotstream_runtime.discover(BINARIES.get("slotstream"))
+    if slotstream_install:
+        slotstream_record = slotstream_runtime.model_record(
+            slotstream_install, [(key, value.label) for key, value in ENGINE_ADAPTERS.items()], installed_memory,
+        )
+        slot_cap = slotstream_record["backends"]["slotstream"]
+        slot_history = matching_benchmark_records(
+            benchmark_records, "slotstream", slot_cap["benchmarkModelFingerprint"],
+            slot_cap["runtimeVersion"], slot_cap, machine_fingerprint or None,
+        )
+        slot_cap["benchmarkHistoryCount"] = len(slot_history)
+        slot_cap["localBenchmarks"] = latest_benchmark_records_by_identity(slot_history)
+        if slot_cap["localBenchmarks"]:
+            slot_cap["localBenchmark"] = slot_cap["localBenchmarks"][-1]
+            slot_cap["preferredAccelerationSource"] = "local-benchmark"
+            slot_cap["preferredAcceleration"] = "mtp" if slot_cap["localBenchmark"].get("winner") == "mtp" else "off"
+        records[slotstream_record["id"]] = slotstream_record
     for scanned_model in records.values():
         capabilities = scanned_model.get("backends")
         if not isinstance(capabilities, dict):
@@ -14568,6 +14617,14 @@ def fastest_safe_options(
             "Use the verified .gturbo expert layout and one model-native routed-expert path.",
             "Keep the prompt cache enabled for repeated agent prefixes without changing generated tokens.",
         ])
+    elif backend == "slotstream":
+        measured_depth = (local_benchmark.get("settings") or {}).get("depth") if local_verified else None
+        options.update({"acceleration": preferred,
+                        "depth": int(measured_depth or capability.get("depth") or 2) if preferred == "mtp" else 1,
+                        "kv": "off", "memoryGB": int(measured_engine_settings.get("memoryGB") or options.get("memoryGB") or slotstream_runtime.DEFAULT_MEMORY_GB)})
+        evidence_tier = "local-benchmark" if local_verified else "pinned-runtime-default"
+        evidence_label = "Locally measured Slotstream route" if local_verified else "Slotstream starting preset · not locally benchmarked"
+        rationale.append("Keep all 512 experts and native routing, with an explicit MTP choice and a checked process memory budget.")
     elif backend == "whallm":
         options.update({"acceleration": "off", "depth": 1, "kv": "off"})
         evidence_tier = "shared-pinned-ssd-route"
@@ -14684,6 +14741,7 @@ def validate_runtime_context(backend: str, context: int) -> None:
     choices_for_backend = (
         MFERENCE_CONTEXT_WINDOWS if backend == "mference" else
         WHALLM_CONTEXT_WINDOWS if backend == "whallm" else
+        slotstream_runtime.CONTEXTS if backend == "slotstream" else
         (LLAMACPP_PLE_CONTEXT,) if backend == "llamacpp" else
         UZU_SAFE_CONTEXT_WINDOWS if backend == "uzu" else
         None
@@ -14943,6 +15001,8 @@ def sampling_route_enforcement(
         fields = (
             RESPONSES_SAMPLING_FIELDS.get(backend, frozenset())
             if selected_protocol == "responses" else
+            frozenset({"temperature", "top_p", "top_k", "presence_penalty", "seed"})
+            if backend == "slotstream" else
             frozenset()
             if capability.get("customSampling") is False else
             frozenset(SUPPORTED_SAMPLING_FIELDS)
@@ -16193,6 +16253,7 @@ def optimizer_backend_eligibility(
         "swiftlm": {"off"},
         "mference": {"off"},
         "whallm": {"off"},
+        "slotstream": {"off"},
         "llamacpp": {"off"},
     }[backend]
     if kv not in allowed_kv or (kv != "off" and capability.get("kv") is not True):
@@ -17538,6 +17599,8 @@ def benchmark_acceleration_reason(
         if capability.get("dflash") is True and kv != "off":
             return f"DFlash excluded to preserve {kv.upper()} KV"
         return "This model has no verified oMLX accelerator"
+    if backend == "slotstream":
+        return mtp_reason or "The pinned MTP head is not installed"
     if backend in SSD_STREAMING_BACKENDS:
         return "Exact SSD streaming uses native expert routing; speculative decoding is excluded"
     return mtp_reason or "This model has no verified accelerator"
@@ -17578,6 +17641,8 @@ def benchmark_engine_settings_label(backend: str, settings: Any) -> str:
         cache = "prompt cache" if str(values.get("promptCacheMode") or "on") == "on" else "no prompt cache"
         queue = safe_int(values.get("queueLimit"), 4, 1, 32)
         return f"Verified .gturbo streaming · {cache} · queue {queue}"
+    if backend == "slotstream":
+        return f"Full 512-expert SSD stream · {values.get('memoryGB', slotstream_runtime.DEFAULT_MEMORY_GB)} GB process budget · prefix cache"
     if backend == "whallm":
         return "Full 512-expert SSD stream · Whallm-owned MXFP4"
     if backend == "uzu":
@@ -19072,7 +19137,7 @@ def best_engine_request(payload: dict[str, Any], models: list[dict[str, Any]]) -
 
 PROFILE_OPTION_KEYS = {
     "acceleration", "depth", "profile", "kv", "fan", "burst",
-    "mtplxOperatorRoute",
+    "mtplxOperatorRoute", "memoryGB",
     "dflashVerify", "dflashDraftQuant", "anePrefill", "memoryGuard", "gpu", "parallel",
     "mtpMinTokens", "mtpMinContinueProbability",
     "maxBatchSize", "expertCacheSize", "prefixCacheEntries",
@@ -19442,6 +19507,20 @@ def validated_profile_options(
                 raw, "ssdCacheState", "natural-cold-to-warm",
                 {"natural-cold-to-warm"}, "SSD cache state",
             ),
+        }
+    if backend == "slotstream":
+        acceleration = _profile_choice(raw, "acceleration", "auto", {"auto", "off", "mtp"}, "Slotstream acceleration")
+        automatic = acceleration == "auto"
+        if automatic:
+            acceleration = "mtp" if capability.get("mtp") is True else "off"
+        if acceleration == "mtp" and capability.get("mtp") is not True:
+            raise ValueError("Slotstream requires the pinned MTP head for this setting.")
+        return {
+            "acceleration": acceleration,
+            "depth": _profile_integer(None if automatic else raw.get("depth"), 2, 1, 4, "MTP draft depth") if acceleration == "mtp" else 1,
+            "kv": _profile_choice(raw, "kv", "off", {"off"}, "Slotstream KV precision"),
+            "memoryGB": _profile_integer(raw.get("memoryGB"), slotstream_runtime.DEFAULT_MEMORY_GB, 12, 36, "Slotstream process memory (GB)"),
+            "ssdCacheState": _profile_choice(raw, "ssdCacheState", "natural-cold-to-warm", {"natural-cold-to-warm"}, "SSD cache state"),
         }
     if backend == "whallm":
         return {
@@ -24250,6 +24329,29 @@ def build_mference(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     ])
 
 
+def build_slotstream(plan: LaunchPlan, cap: dict[str, Any]) -> None:
+    if cap.get("runnable") is not True or not plan.model.get("slotstream"):
+        raise ValueError("Choose the complete pinned Slotstream model.")
+    install = slotstream_runtime.inspect_install(plan.runtime_binary or BINARIES.get("slotstream"), plan.model.get("path"))
+    if install != plan.model["slotstream"] or not install["ready"]:
+        raise ValueError("Slotstream's runtime or model changed. Rescan before launching.")
+    options = validated_profile_options("slotstream", plan.model, cap, plan.options)
+    plan.options.update(options)
+    plan.options["_slotstreamMemoryPlan"] = slotstream_runtime.doctor(install, plan.context, options)
+    native_argv = [install["binary"], "serve", "--port", str(plan.port),
+                   *slotstream_runtime.planning_arguments(install, plan.context, options)]
+    assert plan.run_dir
+    config_path = plan.run_dir / "slotstream.json"
+    atomic_json(config_path, {"install": install, "argv": native_argv, "depth": options["depth"]})
+    plan.engine_argv = [sys.executable, "-I", "-S", "-B", str(APP_DIR / "slotstream_runtime.py"), str(config_path)]
+    plan.engine_env = {"SLOTSTREAM_DRAFT_DEPTH": str(options["depth"])}
+    plan.model["servedId"] = slotstream_runtime.MODEL_ID
+    # The native loopback server ignores auth; the shared relay still requires
+    # a valid opaque upstream header in addition to its enforced surface key.
+    plan.secrets["apiKey"] = secrets.token_urlsafe(32)
+    plan.warnings.append("Slotstream verifies the pinned weights at startup and streams all experts and n-grams from SSD. Long first prompts can take several minutes; subsequent turns reuse the prefix cache.")
+
+
 def build_whallm(plan: LaunchPlan, cap: dict[str, Any]) -> None:
     """Launch the pinned local install, or bridge an independently running Whallm."""
     if plan.model.get("nativeWhallm"):
@@ -24931,6 +25033,7 @@ ENGINE_BUILDERS = {
     "swiftlm": build_swiftlm,
     "mference": build_mference,
     "whallm": build_whallm,
+    "slotstream": build_slotstream,
     "llamacpp": build_llamacpp,
 }
 
@@ -25215,7 +25318,7 @@ def apply_chat_reasoning_contract(
     """Pin request-level thinking controls without merging reasoning into content."""
     if reasoning not in CHAT_REASONING_LEVELS:
         raise ValueError("Unknown reasoning level.")
-    if backend not in {"whallm", "omlx", "uzu"}:
+    if backend not in {"whallm", "omlx", "uzu", "slotstream"}:
         return body
 
     # These top-level controls belong to Whallm. oMLX pins the same visible
@@ -25229,6 +25332,11 @@ def apply_chat_reasoning_contract(
         if reasoning not in {"auto", "off"}:
             raise ValueError("This Qwen3.6 Uzu artifact supports reasoning on or off, not effort levels.")
         body["reasoning_effort"] = "disabled" if reasoning == "off" else "default"
+        return body
+    if backend == "slotstream":
+        body.pop("think", None)
+        if reasoning != "auto":
+            body["reasoning_effort"] = "none" if reasoning == "off" else reasoning
         return body
     if backend == "omlx" or reasoning == "auto":
         return body
@@ -27613,6 +27721,20 @@ def launch_memory_estimate(
     context = int(request.get("context") or 0)
     requested_kv = str(options.get("kv") or "off")
     kv = effective_kv_precision(backend, options)
+    if backend == "slotstream" and model.get("slotstream"):
+        memory_gb = _profile_integer(options.get("memoryGB"), slotstream_runtime.DEFAULT_MEMORY_GB, 12, 36, "Slotstream process memory (GB)")
+        budget = memory_gb * 1_000_000_000
+        total = int(resource.get("totalMemoryBytes") or 0)
+        reserve = max(SESSION_OS_RESERVE_MIN_BYTES, round(total * SESSION_OS_RESERVE_FRACTION))
+        return {"version": SESSION_MEMORY_ESTIMATE_VERSION, "modelBytes": 0,
+                "ssdWeightBytes": int(model["size"]), "companionBytes": 0, "companionLabels": [],
+                "kvCacheBytes": 0, "kvPrecision": "native · included in process budget", "kvScalarBytes": None,
+                "contextTokens": context, "parallelLanes": 1, "runtimeReserveBytes": budget,
+                "estimatedWorkingSetBytes": budget, "osReserveBytes": reserve,
+                "requiredHeadroomBytes": budget + reserve, "geometryReady": True,
+                "geometry": {"ready": True, "slotstream": True},
+                "memoryCeilingBytes": budget + 2 * 1024**3, "ssdStreaming": True,
+                "basis": "Explicit total process budget including expert cache, MTP, active context and retained prefix. The native memory planner rechecks full selected-context feasibility before launch; this is a budget, not a measured peak."}
     if backend == "whallm" and model.get("nativeWhallm"):
         working_set = whallm_runtime.WORKING_SET_BYTES
         total = int(resource.get("totalMemoryBytes") or 0)
@@ -28322,6 +28444,13 @@ def session_memory_admission(
         launchable = True
         label = "Whallm route is already loaded"
         detail = "Whallm already owns the model and SSD cache; this launch adds only a private loopback bridge and the selected work surface. The 48 GiB host remains an experimental upstream configuration."
+    elif request.get("backend") == "slotstream" and model.get("slotstream"):
+        required = int(estimate["requiredHeadroomBytes"])
+        launchable = bool(resource.get("memoryAvailable") is True and headroom >= required)
+        requires_acknowledgement = False
+        decision = "ready" if launchable else "pressure"
+        label = "Slotstream is ready to plan" if launchable else "Free memory before loading Slotstream"
+        detail = f"The selected process budget needs {required / 1024**3:.1f} GiB of free headroom including the macOS reserve. The native planner also checks the selected context and MTP before loading."
     elif request.get("backend") == "whallm" and model.get("nativeWhallm"):
         conflict = whallm_qualification_conflict(timeout=0.35)
         required = int(estimate["requiredHeadroomBytes"])
@@ -32693,6 +32822,10 @@ class RunManager:
                     "MTPLX_NAX_FLASH_ROUTE",
                 ):
                     env.pop(key, None)
+            if plan.backend == "slotstream":
+                env = slotstream_runtime.clean_environment(env)
+                if slotstream_runtime.inspect_install(plan.runtime_binary or BINARIES.get("slotstream"), plan.model.get("path")) != plan.model.get("slotstream"):
+                    raise ValueError("Slotstream changed after planning. Rescan before launching.")
             env.update(plan.engine_env)
             if plan.backend in {"llamacpp", "uzu"} or plan.model.get("nativeWhallm"):
                 env = _environment_without_dyld(env)
@@ -32768,6 +32901,13 @@ class RunManager:
                         guard = threading.Thread(
                             target=self._guard_uzu_memory,
                             args=(plan, process, cancel_event), daemon=True,
+                        )
+                        self.llamacpp_guard_thread = guard
+                        guard.start()
+                    elif plan.backend == "slotstream":
+                        guard = threading.Thread(
+                            target=self._guard_owned_memory,
+                            args=(plan, process, cancel_event, "Slotstream", int(plan.options["memoryGB"]) * 1_000_000_000 + 2 * 1024**3), daemon=True,
                         )
                         self.llamacpp_guard_thread = guard
                         guard.start()
@@ -32970,10 +33110,12 @@ class RunManager:
                 with urllib.request.urlopen(request, timeout=3) as response:
                     data = json.loads(response.read(2_000_000))
                 ids = [str(item.get("id")) for item in data.get("data", []) if isinstance(item, dict)]
-                if plan.backend in SSD_STREAMING_BACKENDS and len(ids) == 1 and ids[0]:
+                if plan.backend in SSD_STREAMING_BACKENDS and plan.backend != "slotstream" and len(ids) == 1 and ids[0]:
                     plan.model["servedId"] = ids[0]
                     return
                 if plan.model["servedId"] in ids:
+                    if plan.backend == "slotstream":
+                        slotstream_runtime.validate_served_catalog(data, plan.context)
                     if plan.backend == "uzu":
                         self._verify_uzu_native_security(plan)
                     if plan.backend == "freetoken" and plan.model.get("nativeFreetoken") is True:

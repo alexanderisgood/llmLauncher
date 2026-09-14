@@ -264,6 +264,9 @@ class LauncherTests(unittest.TestCase):
             cls.real_models = launcher.scan_models()
 
     def setUp(self) -> None:
+        slotstream_patch = mock.patch.object(launcher.slotstream_runtime, "discover", return_value=None)
+        slotstream_patch.start()
+        self.addCleanup(slotstream_patch.stop)
         self.temp = tempfile.TemporaryDirectory(prefix="llm-launcher-tests-")
         self.state = Path(self.temp.name) / "state"
         launcher.STATE_DIR = self.state
@@ -3349,7 +3352,7 @@ class LauncherTests(unittest.TestCase):
             set(engines),
             {
                 "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm",
-                "mference", "whallm", "llamacpp", "uzu",
+                "mference", "whallm", "llamacpp", "uzu", "slotstream",
             },
         )
         for engine in (engines[item] for item in {"omlx", "lmstudio", "mtplx"}):

@@ -58,7 +58,7 @@ CLIENTS = {"chat", "pi", "opencode", "codex"}
 CLIENT_LABELS = {"chat": "Chat", "pi": "Pi", "opencode": "OpenCode", "codex": "Codex"}
 SUPPORTED_BACKENDS = {
     "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
-    "llamacpp", "uzu",
+    "llamacpp", "uzu", "slotstream",
 }
 UZU_CONTEXT_WINDOWS = frozenset({16_384, 32_768, 65_536, 131_072})
 CHAT_REASONING_LEVELS = frozenset({
@@ -1045,6 +1045,10 @@ def transform_chat_request(
             value.update({"thinking_mode": "chat", "reasoning_effort": "none"})
         else:
             value.update({"thinking_mode": "thinking", "reasoning_effort": reasoning})
+    elif backend == "slotstream":
+        value.pop("think", None)
+        if reasoning != "auto":
+            value["reasoning_effort"] = "none" if reasoning == "off" else reasoning
     elif backend == "uzu":
         if reasoning not in {"auto", "off"}:
             raise ValueError("Uzu Qwen3.6 reasoning must be auto or off")

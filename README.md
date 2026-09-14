@@ -15,6 +15,12 @@ Its primary in-memory engines are **oMLX**, **LM Studio**, and **MTPLX**. The so
 
 > **Alpha software:** this is an early public release for macOS and Apple Silicon enthusiasts. It is not signed or notarized yet, runtime interfaces may change, and you should review a route before trusting it with important work.
 
+## Slotstream Qwen3.8 Flash-Next
+
+The pinned Slotstream 0.2.17 adapter adds full-expert SSD streaming, native MTP,
+longer context choices and checked process-memory budgets. See the
+[Slotstream setup and execution contract](docs/SLOTSTREAM.md).
+
 ## Launching a model
 
 Choose an installed engine and model, select Chat or a coding agent, and press

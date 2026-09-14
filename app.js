@@ -562,6 +562,7 @@ const optimizerControls = {
   nativeExpertTopK: "swiftlmTopK",
   promptCacheMode: "mferencePromptCache",
   queueLimit: "mferenceQueueLimit",
+  memoryGB: "slotstreamMemoryGB",
 };
 const optimizerKeys = {
   mtplx: ["acceleration", "depth", "profile", "mtplxOperatorRoute", "fan"],
@@ -574,6 +575,7 @@ const optimizerKeys = {
   swiftlm: ["prefillSize", "nativeExpertTopK"],
   mference: ["promptCacheMode", "queueLimit"],
   whallm: [],
+  slotstream: ["acceleration", "depth", "memoryGB"],
   llamacpp: [],
 };
 const enginePreferenceLabels = {
@@ -676,7 +678,7 @@ function orderedRouteIds(collection, fallback) {
 }
 
 function visibleRouteCatalog() {
-  const backends = orderedRouteIds("engines", ["omlx", "lmstudio", "mtplx", "uzu", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"])
+  const backends = orderedRouteIds("engines", ["omlx", "lmstudio", "mtplx", "uzu", "freetoken", "swiftlm", "mference", "whallm", "slotstream", "llamacpp"])
     .filter(uiEngineVisible);
   const clients = orderedRouteIds("workSurfaces", ["pi", "opencode", "codex", "chat"]);
   const routes = [];
@@ -868,7 +870,7 @@ function updateOmlxKvControl() {
 }
 
 function setRuntimeKvValue(backend, value) {
-  if (["lmstudio", "uzu", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"].includes(backend)) return value === "off";
+  if (["lmstudio", "uzu", "freetoken", "swiftlm", "mference", "whallm", "slotstream", "llamacpp"].includes(backend)) return value === "off";
   const control = backend === "omlx" ? $("omlxKv") : $("mtplxKv");
   const option = [...control.options].find(item => item.value === String(value));
   if (!option) return false;
@@ -900,6 +902,9 @@ function gatherOptions() {
       promptCacheMode:$("mferencePromptCache").value,
       queueLimit:Number($("mferenceQueueLimit").value),
     };
+  }
+  if (state.backend === "slotstream") {
+    return {acceleration:$("accelerationSelect").value, depth:Number($("depthInput").value), kv:"off", memoryGB:Number($("slotstreamMemoryGB").value)};
   }
   if (["uzu", "whallm", "llamacpp"].includes(state.backend)) {
     return {acceleration:"off", depth:1, kv:"off"};
@@ -1709,17 +1714,17 @@ function renderAneReadiness(cap = {}) {
 
 function backendName(backend) {
   return adapterDescriptor("engines", backend)?.label
-    || ({omlx:"oMLX", lmstudio:"LM Studio", mtplx:"MTPLX", uzu:"Uzu · Mirai", mirai:"Uzu · Mirai", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm", llamacpp:"llama.cpp · SSD PLE"})[backend]
+    || ({omlx:"oMLX", lmstudio:"LM Studio", mtplx:"MTPLX", uzu:"Uzu · Mirai", mirai:"Uzu · Mirai", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm", slotstream:"Slotstream", llamacpp:"llama.cpp · SSD PLE"})[backend]
     || backend;
 }
 
 function backendMark(backend) {
-  return ({omlx:"O", lmstudio:"LM", mtplx:"M", uzu:"U", mirai:"U", freetoken:"FT", swiftlm:"S", mference:"MF", whallm:"W", llamacpp:"LC", lms:"LM"})[backend] || "?";
+  return ({omlx:"O", lmstudio:"LM", mtplx:"M", uzu:"U", mirai:"U", freetoken:"FT", swiftlm:"S", mference:"MF", whallm:"W", slotstream:"SS", llamacpp:"LC", lms:"LM"})[backend] || "?";
 }
 
 function backendBinaryKey(backend) {
   return adapterDescriptor("engines", backend)?.binaryKey
-    || ({omlx:"omlx", lmstudio:"lms", mtplx:"mtplx", uzu:"mirai", freetoken:"freetoken", swiftlm:"swiftlm", mference:"mference", whallm:"whallm", llamacpp:"llamacpp"})[backend]
+    || ({omlx:"omlx", lmstudio:"lms", mtplx:"mtplx", uzu:"mirai", freetoken:"freetoken", swiftlm:"swiftlm", mference:"mference", whallm:"whallm", slotstream:"slotstream", llamacpp:"llamacpp"})[backend]
     || backend;
 }
 
@@ -1802,7 +1807,7 @@ function engineShootoutRoutes(model = selectedModel()) {
   const binaryKeys = Object.fromEntries(
     visibleEngineAdapters().map(adapter => [adapter.id, adapter.binaryKey]),
   );
-  const kvChoices = {omlx:["off","q8","q6","q4"], lmstudio:["off"], mtplx:["off","q8","q4"], uzu:["off"], freetoken:["off"], swiftlm:["off"], mference:["off"], whallm:["off"], llamacpp:["off"]};
+  const kvChoices = {omlx:["off","q8","q6","q4"], lmstudio:["off"], mtplx:["off","q8","q4"], uzu:["off"], freetoken:["off"], swiftlm:["off"], mference:["off"], whallm:["off"], slotstream:["off"], llamacpp:["off"]};
   const ssdLane = model.ssdStreaming?.recommended === true;
   const ssdBackends = model.ssdStreaming?.calibration?.engines || ["swiftlm", "mference"];
   const backends = visibleEngineAdapters().map(adapter => adapter.id)
@@ -2020,7 +2025,7 @@ function updateAccelerationState() {
 
 function updateChatSamplingControls() {
   const capability = selectedModel()?.backends?.[state.backend] || {};
-  const customSupported = capability.customSampling !== false;
+  const customSupported = Boolean(selectedModel()) && capability.customSampling !== false;
   const customOption = $("samplingMode").querySelector('option[value="custom"]');
   if (customOption) customOption.disabled = !customSupported;
   if (!customSupported && $("samplingMode").value === "custom") $("samplingMode").value = "model";
@@ -2525,6 +2530,7 @@ function updateBackend(preserveOptimization = false) {
   $("freetokenControls").classList.toggle("hidden", state.backend !== "freetoken");
   $("swiftlmControls").classList.toggle("hidden", state.backend !== "swiftlm");
   $("mferenceControls").classList.toggle("hidden", state.backend !== "mference");
+  $("slotstreamControls").classList.toggle("hidden", state.backend !== "slotstream");
   $("whallmControls").classList.toggle("hidden", state.backend !== "whallm");
   $("llamacppControls").classList.toggle("hidden", state.backend !== "llamacpp");
   $("sharedRuntimeControls").classList.toggle("hidden", ["uzu", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"].includes(state.backend));
@@ -2532,10 +2538,10 @@ function updateBackend(preserveOptimization = false) {
     mtplx:"MTPLX controls", omlx:"oMLX controls", lmstudio:"LM Studio controls",
     uzu:"Uzu · Mirai · fixed acceleration",
     freetoken:"FreeToken route controls", swiftlm:"SwiftLM SSD controls",
-    mference:"Mference SSD controls", whallm:"Whallm SSD route",
+    mference:"Mference SSD controls", whallm:"Whallm SSD route", slotstream:"Slotstream · MTP and SSD",
     llamacpp:"llama.cpp · SSD PLE route",
   })[state.backend];
-  if (["swiftlm", "mference", "whallm", "llamacpp"].includes(state.backend)) $("ssdRuntimeDisclosure").open = true;
+  if (["swiftlm", "mference", "whallm", "slotstream", "llamacpp"].includes(state.backend)) $("ssdRuntimeDisclosure").open = true;
   const swiftReady = Boolean(state.binaries?.swiftlm?.installed);
   const mferenceReady = Boolean(state.binaries?.mference?.installed);
   const whallmReady = Boolean(state.binaries?.whallm?.installed);
@@ -2547,7 +2553,9 @@ function updateBackend(preserveOptimization = false) {
     backend:"whallm", modelName:whallmModel.name, modelReady:whallmModel.ready,
   }) : null;
   const whallmModelReady = whallmRoute?.tone === "good";
-  $("ssdRuntimeStatus").textContent = state.backend === "llamacpp"
+  $("ssdRuntimeStatus").textContent = state.backend === "slotstream"
+    ? (state.models.find(model => model.slotstream)?.backends?.slotstream?.reason || "Install the pinned Slotstream runtime and its Qwen model, then rescan.")
+    : state.backend === "llamacpp"
     ? llamaCppModel
       ? "Pinned verified artifact route ready · fixed 8K context."
       : llamaCppChecking
@@ -2570,7 +2578,17 @@ function updateBackend(preserveOptimization = false) {
   renderModelOptions();
 }
 
+function slotstreamDownloadMessage(model) {
+  const install = model?.slotstream;
+  if (!install || (install.ready && install.mtp)) return "";
+  return `Slotstream download: ${Number(install.completeFiles || 0)} of ${Number(install.totalFiles || 25)} files complete. ${install.ready ? "The model can run; its MTP head is still missing." : "Launch becomes available after all required files pass verification."} This view refreshes while the download finishes.`;
+}
+
 function renderModelOptions() {
+  const downloadStatus = $("slotstreamDownloadStatus");
+  const downloadMessage = state.backend === "slotstream" ? slotstreamDownloadMessage(state.models.find(model => model.slotstream)) : "";
+  downloadStatus.textContent = downloadMessage;
+  downloadStatus.classList.toggle("hidden", !downloadMessage);
   const select = $("modelSelect");
   const previous = select.value;
   if (!uiEngineVisible(state.backend)) state.backend = "mtplx";
@@ -2612,6 +2630,18 @@ function applyModelChatDefaults(model) {
   updateChatSamplingControls();
 }
 
+function clearUnavailableModelControls() {
+  const acceleration = $("accelerationSelect");
+  acceleration.querySelector('option[value="mtp"]').disabled = true;
+  acceleration.querySelector('option[value="dflash"]').disabled = true;
+  if (["mtp", "dflash"].includes(acceleration.value)) acceleration.value = "auto";
+  $("accelerationHelp").textContent = "Finish the model download to inspect its available acceleration.";
+  $("contextInput").removeAttribute("max");
+  $("outputInput").removeAttribute("max");
+  updateAccelerationState();
+  updateChatSamplingControls();
+}
+
 function modelChanged() {
   const model = selectedModel();
   const previousId = state.selected?.id || "";
@@ -2621,6 +2651,7 @@ function modelChanged() {
   state.selected = model;
   const card = $("modelCard");
   if (!model) {
+    clearUnavailableModelControls();
     const freeTokenMissing = state.backend === "freetoken";
     card.innerHTML = freeTokenMissing
       ? state.freeToken?.native?.installed
@@ -13673,6 +13704,7 @@ function applyProfileRequest(request) {
     if (options[key] !== undefined) setProfileSelect(id, options[key], `The saved ${key} control`);
   }
   if (options.depth !== undefined) $("depthInput").value = String(options.depth);
+  if (request.backend === "slotstream" && options.memoryGB !== undefined) $("slotstreamMemoryGB").value = String(options.memoryGB);
   if (options.parallel !== undefined) $("parallelInput").value = String(options.parallel);
   if (options.mtpMinTokens !== undefined) $("mtpMinTokensInput").value = String(options.mtpMinTokens);
   if (options.mtpMinContinueProbability !== undefined) $("mtpMinContinueProbabilityInput").value = String(options.mtpMinContinueProbability);
@@ -14345,7 +14377,7 @@ function applyBootstrapData(boot, setProject = false) {
   const binaries = Object.entries(state.binaries).filter(([name]) => (
     uiFeatureEnabled("freetoken") || !String(name).startsWith("freetoken")
   ));
-  const binaryLabels = {lms:"LM Studio", mirai:"Uzu · Mirai", hf:"Model downloader", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm", llamacpp:"llama.cpp · SSD PLE"};
+  const binaryLabels = {lms:"LM Studio", mirai:"Uzu · Mirai", hf:"Model downloader", freetoken:"FreeToken", swiftlm:"SwiftLM", mference:"Mference", whallm:"Whallm", slotstream:"Slotstream", llamacpp:"llama.cpp · SSD PLE"};
   $("toolCount").textContent = `${binaries.filter(([,value]) => value.installed).length}/${binaries.length} ready`;
   $("binaryList").innerHTML = binaries.map(([name, value]) => `<div class="binary ${value.installed ? "" : "missing"}"><div><strong>${esc(binaryLabels[name] || name)}</strong><span title="${esc(value.path || "")}">${esc(value.version)}</span></div><em>${value.installed ? "Ready" : "Missing"}</em><i aria-hidden="true"></i></div>`).join("");
   if (setProject && !$("projectPath").value) {
@@ -15508,6 +15540,11 @@ async function selectRuntime(runtime, candidateId, button) {
     state.runtimeLoading = false;
   }
 }
+
+statusPoller.add("slotstreamDownload", {
+  interval:() => state.backend === "slotstream" && state.models.some(model => model.slotstream && (!model.ready || !model.slotstream.mtp)) ? 30_000 : Infinity,
+  run:() => loadModels(false),
+});
 
 statusPoller.add("sessionSets", {
   interval:() => $("sessionSetDialog").open || sessionSetIsActive()

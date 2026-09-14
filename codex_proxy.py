@@ -37,7 +37,7 @@ OMLX_PROMPT_FIXED_RESERVE_TOKENS = 1_024
 OMLX_PROMPT_ITEM_RESERVE_TOKENS = 32
 SUPPORTED_BACKENDS = {
     "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
-    "llamacpp", "uzu",
+    "llamacpp", "uzu", "slotstream",
 }
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",

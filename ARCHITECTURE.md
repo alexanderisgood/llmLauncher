@@ -278,3 +278,9 @@ The registry completeness test intentionally makes partial additions fail. A new
 - Route checks never open a work surface, read project content, or retain generated response text, and their temporary model allocation is stopped through the normal ownership boundary.
 
 The next sensible extraction, if the launcher grows beyond the current adapters, is to move each builder into a small module while keeping these registries and contracts stable. Dynamic third-party adapter loading should wait until there is a signed package, permission, versioning, and sandbox story.
+
+## Slotstream ownership
+
+`slotstream_runtime.py` and `slotstream_manifest.json` implement a dedicated pinned artifact route. Read-only inventory checks complete file sizes and hashes small configuration/template files; the owned startup runner invokes native `pull --verify` for all weight hashes before executing the server. Runtime hashes and model stat identities are rebound at planning, process creation and post-verification. This is necessary because upstream does not verify its pinned manifest for an explicit model-directory argument.
+
+Slotstream owns one loopback model process and uses the common authenticated session relay for Chat, Pi and OpenCode. Explicit MTP on/off, draft depth, fixed total-process budget and context pass the native doctor before loading. Admission cannot bypass low headroom through an acknowledgement; the standard process-group memory guard protects startup and serving. The scanner advertises no custom sampling, vision or Responses support. AR/MTP evidence uses the existing SSD lifecycle and a distinct pinned artifact comparison identity, so Whallm evidence cannot promote this route.

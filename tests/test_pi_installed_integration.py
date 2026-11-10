@@ -149,6 +149,8 @@ class InstalledPiIntegration(unittest.TestCase):
 
                 send("prompt", "first")
                 wait_for(first_received.is_set)
+                self.assertNotIn("store", requests[0][2],
+                                 "Local engines must not receive OpenAI response-storage fields")
                 wait_for(lambda: "Fixture thinking." in transcript())
                 self.assertEqual(send("prompt", "queued")["pendingMessages"], 1)
                 release_first.set()

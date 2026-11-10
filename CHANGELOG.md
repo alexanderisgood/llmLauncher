@@ -2,6 +2,570 @@
 
 ## Unreleased
 
+- Fix Splash 1.4 discovery of installed 6-bit 27B MLX checkpoints, restore
+  persistent OMP discovery, and remove the fixed 32 GiB streaming ceiling and
+  duplicate memory reserves. Prefer the pinned BF16 embedding-row loader fix
+  so Flash-Next's original 160-column n-gram rows load without changing weights.
+
+- Prepare Flash-Next with unchanged Q4_K_M main tensors and the original BF16
+  n-gram table. Verify source checksums and per-tensor byte parity, validate
+  the combined GGUF with Splash, and show PLE precision separately in the
+  model catalog. Retire the redundant sources only after native preparation.
+
+- Support Splash 1.4.0 and Qwen3.8 Flash-Next GGUF, including split models.
+  Use native local preparation and thinking limits, keep every shard in the
+  source identity, and budget expert/PLE/KV SSD streaming against fresh memory
+  headroom. Keep older runtimes available; current Splash requires original
+  checkpoints rather than legacy packs.
+
+- Separate complete Route Check, ANE tuning/FP16 clone and Session Set opening
+  operations. Bind every temporary request and workspace action to the exact
+  accepted run and cancellation event. Keep Stop available during response reads,
+  reject stale-owner probes/admin calls and require clean unload before saving
+  new readiness/tuning proof. Preserve cancellation during workspace preparation
+  and release failed worker publications without stopping another route.
+  Anchor clone writes to their created directory descriptor and publish only
+  after exclusive destination, current parent/source and created-inode checks.
+  Dispose unpublished attachment credentials while preserving accepted surfaces,
+  unrelated files and symlink targets. Generated fixtures preserve full plans,
+  results, settings and clone contents; these changes claim no inference TPS gain.
+
+- Extract the complete Launch and resident-session workspace with private settings,
+  explicit memory review, exact measured Apply and scoped model/session actions.
+  Keep pending idle-unload choices visible, reject retired-owner replies and stale
+  status reads, and preserve unchanged request/cache controls. Sessions now uses
+  plain memory/model/request copy. Generated desktop/mobile checks preserve exact
+  limits, reasoning, sampling, KV and acknowledgement; no UI timing is inference TPS.
+
+- Separate complete model acquisition and setup previews, public metadata
+  queries, pinned commands and current artifact verification. Preserve exact
+  file/revision/license/destination consent and checksum checks. Bound CLI
+  output while reading it, retain the existing character quota, and retire only
+  the owned unreaped process session on limits, timeout or cancellation.
+
+- Extract complete Benchmark Lab and Calibration controls into an independent
+  workspace with private state and exact measured Apply references. Preserve
+  focused saved results during unchanged updates, keep refresh/action failures
+  visible with recovery, and fence stale status, plan, history and review replies.
+  Generated desktop/mobile checks cover exact record/suite commits, Stop and
+  typed profile-save recovery; UI DOM measurements are separate from inference TPS.
+
+- Separate complete measured-route selection, engine ranking, Apply bindings and
+  history presentation. Retain exact model/runtime/hardware/sampling/limits and
+  fresh evidence checks through narrow callbacks. Reuse immutable configuration
+  only while current policy inputs match. Index verified record identities to
+  avoid repeated full-record comparisons; an equal record rejected by its own
+  current check remains visible. Generated membership CPU work fell from about
+  179 µs to 9 µs, without an inference TPS claim.
+
+- Extract complete runtime inventory, installed pack contracts and update/adoption/
+  promotion review plans into an independent catalog. Preserve exact audited
+  releases, fresh trust/capacity checks, explicit approval and rollback; leave
+  installation and selection separate. Restore Runtime Manager's missing Splash
+  documentation link. Bind bounded raw kernel receipts to current executable,
+  interpreter and package files, preventing stale readiness after replacements.
+  Reuse immutable wiring with policy-change invalidation; measured setup overhead
+  fell from about 137 to 2.6 microseconds, without an inference TPS claim.
+
+- Extract complete model discovery, artifact records and Model Library readiness
+  across all twelve engines. Preserve current SHA proof, source pairing, native
+  precision, sampling/defaults and compatibility reasons through frozen policy
+  and explicit ports. Keep persisted AtomicChat presentation data outside launch
+  authority. Bind native inspection receipt reuse to current file/link identity
+  and revalidate its fields each time, preventing a preserved modification time
+  from hiding an executable or checkpoint replacement.
+  Recover safely when the AtomicChat verifier thread cannot start: show a
+  bounded failure, clear its publication and allow rescan to retry without
+  accepting incomplete proof. Remove repeated catalog wiring from the pure
+  memory-geometry facade while reading its current policy inputs each time;
+  private helper CPU overhead fell from about 112 to 1 microsecond, without an
+  inference TPS claim.
+
+- Separate the complete Chat workspace and keep its draft, queue, history,
+  recovery and stream state private. Preserve saved-route review and Console
+  navigation through narrow callbacks. Reuse unchanged completed message DOM,
+  preserving keyboard focus, edits and reasoning panels during streaming.
+  Generated 160-message browser checks reduced repeated render work from about
+  29 ms to about 1 ms; this measures UI rendering, not model inference speed.
+- Separate the complete work-surface planner for Pi, oh-my-pi, OpenCode, Codex
+  and Chat. Preserve exact private providers, limits, reasoning, model identity
+  and local helper routing without writing global agent configuration.
+
+- Extract complete Chat, benchmark and Route Check inference requests and
+  streaming interpretation. Preserve exact wire limits, sampling, reasoning,
+  native generation timing, tool-call proof and cancellation/EOF behavior;
+  relay Chat bytes through explicit HTTP output callbacks and retain scoped
+  cache observations. Verify all twelve engines against frozen requests and
+  generated local HTTP/SSE fixtures without loading models.
+  Close upstream connections on early browser disconnect and close bounded
+  HTTP error responses. Decode complete non-stream JSON metadata within a
+  fixed quota, preserving response bytes and correct usage across formatting;
+  do not credit partial or oversized metadata or infer native TPS from delivery.
+- Separate the full Runtime Manager interface, including update/comparison
+  review, explicit promotion, app opening and runtime selection. Bind approval
+  to the exact plan, fence stale replies and restore controls for retries.
+  Keep focused cards, disclosures and cached inventory usable on errors;
+  desktop/mobile flows pass with generated replies.
+
+- Extract all twelve engine builders, current artifact checks and immediate
+  Uzu/llama.cpp handoffs into one independent planning domain, preserving public
+  call shapes and twenty frozen complete native/variant launch outputs. Dispose
+  fixed engine/bridge credential files and plan-owned credential environment
+  fields on previews, rejected starts and shutdown. Keep unrelated files and
+  symlink targets intact, traverse nested oMLX cleanup through verified directory
+  descriptors, and preserve preexisting key files on exclusive-create collisions.
+
+- Separate complete benchmark, ANE and runtime-comparison storage. Read larger
+  histories without silently treating them as empty; preserve unsupported or
+  damaged files with visible errors. Serialize concurrent appends, reject
+  external edits before commit and bound lock waits. Reuse unchanged decoded
+  files while keeping route eligibility fresh; generated repeated-read CPU
+  overhead improved about 3.8× without an inference-speed claim.
+
+- Extract the complete owned session lifecycle, including engines, private
+  proxies, attachments, idle/cache policy and Pi/oh-my-pi Console transport.
+  Preserve exact launch contracts, executable handoff, live memory guards,
+  cancellation epochs, once-only cleanup and scoped LM Studio model unload.
+  Keep public controller call shapes compatible and verify them against frozen
+  source and disposable process/RPC fixtures.
+- Extract the full audited runtime-update job, preserving official-wheel and
+  full-commit dependency checks, side-by-side paths, final-path smoke tests and
+  explicit runtime selection. Drain command output while it runs to prevent
+  pipe-buffer timeouts; keep output bounded and owned-process cleanup complete.
+  Reject cancellation/publication and late-inspection races without recording
+  trust for incomplete work. Recover from worker/output-reader start failures
+  and preserve preexisting staging directories on a name collision. Release
+  a failed launch worker's plan and bearer files so Stop and retry remain usable.
+  Prepared route-check, tuning, clone and Session Set jobs also release failed
+  worker publications; existing Session Set surfaces stay available.
+- Centralize exact launch contracts and validate current runtime/model receipts
+  before ports, credentials or launch files are allocated. Keep live/saved
+  defaults, sampling, KV, reasoning and experimental consent unchanged, and
+  retain fresh artifact checks in engine builders. Reject native Whallm's
+  reserved port before allocation. Move late oMLX draft/adapter and MTPLX
+  inverse-baseline/Hub-Python gates before catalog, key or template writes;
+  invalid settings leave no launch artifacts.
+- Separate saved launch/Session Set storage and their complete browser managers.
+  Read all permitted saved system prompts instead of silently treating a file
+  over 4 MiB as empty. Preserve corrupt or future-format files, retain cached
+  visible entries on errors, and keep exact review/apply/launch contracts.
+- Separate Setup Assistant and Model Acquisition jobs; fix cancellation races
+  around process publication, verification and final status. Retain partial
+  downloads for resume and retire owned downloader groups before verification.
+- Separate the complete Model Library and acquisition interface. Preserve
+  selected routes during filtering, keep exact file/license/revision review,
+  and make inspection, download and retry errors readable on desktop and mobile.
+- Extract exact benchmark evidence and tuning replay. Preserve local model,
+  hardware, runtime, sampling, context, output and KV proof, including native
+  generation metrics; cache only immutable wiring, never eligibility decisions.
+- Extract complete Benchmark Lab, tuning, qualification and runtime comparison
+  jobs into an execution service. Bind process, port and safety access to the
+  exact accepted plan and cancellation epoch; preserve fresh loads and native
+  workload contracts. Make evidence commit atomic with cancellation, retain
+  rollback identity, and recover cleanly from worker or telemetry failure.
+  Reject incomplete owned-unload proof before saving or loading another route;
+  shared LM Studio uses explicit model-unload evidence while retaining its server.
+- Extract complete Chat History/recovery and saved-chat resume review features.
+  Bound incremental store I/O to the declared transcript/journal limits, retain
+  corrupt or future-format files with visible errors, and preserve exact route
+  review, apply and launch behavior. Extract executable identity verification
+  into an independent module without changing retained-descriptor launch proof.
+- Carry native Kolibri and Splash generation timing through live status and
+  saved benchmarks. Validate rates against exact token counts and durations;
+  preserve request latency separately and exclude buffered delivery rates from
+  automatic generation-speed selection. Real Pi and oh-my-pi tool/history turns
+  passed on both installed engines within the protected macOS reserve.
+- Refactor stream framing, response metrics, controller reads, native resource
+  telemetry and UI presentation into separate modules. Cache unchanged runtime
+  probes, share catalog refreshes, scan fragmented events incrementally and
+  accumulate tool arguments without repeatedly copying their entire prefix.
+  Local synthetic tool-stream processing improved 4.84×; memory-read overhead
+  fell from 1.94 ms to 0.015 ms. These measurements do not establish model TPS.
+- Refresh the launch screen with model search, engine guidance, saved decode
+  speed and first-token results, clearer readiness, responsive setup controls
+  and fewer DOM writes during polling.
+- Add oh-my-pi in Terminal and verified 18.6.3 Hub Console with a session-only provider and settings overlay.
+  Keep helper roles on the selected local model, disable automatic fallback,
+  preserve real reasoning across tool turns and pass exact context/response
+  limits. Real oh-my-pi tools, reasoning history, native framing, queued turns,
+  abort and local commands passed with generated data. Separate the complete
+  semantic Console feature from controller process ownership and transport.
+- Add visible **Quit** controls. Cancel launcher jobs and delayed Terminal
+  launches, stop primary and attached agents plus recognised local engine
+  servers, unload LM Studio, report remaining processes/errors, then close the
+  controller. Ordinary Stop retains its session scope.
+- Reduce Kolibri SSD reader planning overhead by making span merges linear and
+  caching immutable tensor strides. Packed expert byte ranges remain identical;
+  CPU planning measured about 1.4–1.5× faster. Tiny native MLX checks passed Q8/Q6/Q4
+  cache execution and hybrid-prefix restoration; no inference TPS or full-256K
+  claim follows from these checks.
+- Reuse original resident Q6 experts during Kolibri prefill, preserving router
+  order, exact outputs and final warm-cache order. Original-row native fixtures
+  reduced a 64-token expert sweep from 11.69 to 8.55 ms; full-model measurements
+  remain separate. Bound mini-pools to the configured batch size and retain the
+  legacy comparison path.
+- Extract model tensor inventories and Qwen PLE/expert storage contracts.
+  Revalidate current files and headers while reusing immutable header decoding;
+  enumerate PLE primes once instead of restarting for every head. Reject a
+  corrupt present checkpoint index explicitly.
+- Handle renamed, automatically restarted local engine services in Quit by
+  verifying and unloading their exact user LaunchAgent before the process sweep.
+  Preserve process-birth receipts for workers that become orphans; unrelated
+  services and arbitrary shell jobs remain unaffected.
+- Recognise manually started, retitled oMLX servers through native process and
+  installed mapped-library proof. Recheck kernel birth and executable before
+  signals; retain independent receipts for multiple Terminal agent instances.
+- Correct Mac capacity accounting: use current native reclaimable page bytes
+  for loading and OS reserves, while retaining memory pressure separately.
+  Older pressure-only measurements remain historic speed evidence but cannot
+  qualify physical capacity. Keep the existing limits and reserves unchanged.
+- Verify the Kolibri prefill refactor on the full original checkpoint: the same
+  8 GB/2K/128-output contract produced identical tokens and 24.8%/18.8% higher
+  cold/warm prefill throughput in one process pair. Decode varied in both directions;
+  these results do not establish a generation-TPS gain.
+
+- Default Kolibri SSD prefill to 64 tokens, freeing 18 GiB of reserved attention
+  workspace versus 256-token chunks at 256K context with quantized KV. Assign
+  the remaining admissible memory to Q6 experts. Keep explicit saved chunk
+  settings available. Catch short repeated reasoning paragraphs in Pi's
+  fallback guard and omit aborted thinking-only loops from resumed context
+  while preserving the saved transcript.
+
+- Enable Pi for Kolibri SSD with native JSON function-tool responses, tool
+  history and reasoning controls. Include tool schemas in the tokenizer context
+  guard, expose recognisable context-overflow errors, and bound Pi summaries to
+  4K output with reasoning off. Pi uses the selected Kolibri context, response,
+  KV, prefill and memory settings. Tests and live Pi verification were skipped
+  at the user's request.
+
+- Raise Kolibri's context ceiling from 8K to its native 256K and maximum
+  response to 64K. Add Q8/Q6/Q4 KV for its ten full-attention layers, preserving
+  native BF16 sliding caches. Correct the installed mlx-lm Q6 packed cache
+  allocation inside the owned worker. Add prefill and retained prompt-cache
+  controls with memory reserves, saved settings and strict live route checks.
+  Fix hybrid prefix snapshots so consecutive chat turns reuse the quantized
+  cache. Three real turns passed with 256K configured and Q8 KV; full-window
+  capacity was not exercised.
+
+- Expand Splash discovery to every supported local GGUF variant, MLX affine
+  Q4 checkpoint and existing Q4 pack. Use Splash 1.2.1's native header checks,
+  matching DFlash2 drafts and model-directory server contract. Reuse target
+  weights through verified links and preserve native thinking/tool constraints.
+  Live checks passed for the installed 35B Q6_K and 27B Q4 pack.
+
+- Add Kolibri Q6 SSD offloading to built-in Chat. Automatic sizing spends the
+  available memory on expert weights after context, runtime and macOS reserves,
+  with a 40 GB default ceiling and a final startup recheck. Keep the complete
+  Q6 checkpoint in its existing folder and authenticate the owned native server.
+
+- Fix release-review blockers: retain Python 3.10/3.11 parsing compatibility,
+  pass Splash's private key to its native server, distinguish Splash packs in
+  the catalog, and ignore stale acceleration controls on engine-managed routes.
+  Standalone Splash hosting now validates its install and pack, uses the native
+  thinking-budget adapter, and authenticates readiness checks. Both hosting
+  helpers clean up their children on stop; Qwen handles SIGTERM as well as
+  Ctrl-C. Exclude local benchmark runtimes, derived packs and run state from
+  staging, and include JavaScript module tests in CI.
+
+- Enforce a separate thinking budget in Splash decoding (low 1K, medium 4K,
+  xhigh/default 32K, at most half the response allowance). The native decoder
+  closes thinking and continues to answer/tools in the same request, including
+  across DFlash speculative batches. Keep grammar validation and Unicode
+  intact. Omit previous length-ended thinking-only attempts from Pi context
+  without deleting saved history. This addresses 64K circular-thinking turns
+  that changing-wording repetition guards cannot detect.
+
+- Remove Splash's artificial 32K Max response ceiling. Larger allowances now
+  follow the selected context with prompt room, propagate into the native
+  server and Pi, and receive a proportional native request deadline. Detect
+  the observed Pi failure that generated thousands of decimal digits in
+  reasoning; stop the stream, retain the saved transcript, and omit damaged
+  thinking from retry/compaction context. Splash checkpoints use thinking off
+  and a 4K allowance; Pi exposes the engine's actual reasoning levels.
+  Live Pi/Splash write/read/final-answer verification passed with a 65,536-token
+  allowance. This contains numeric runaway; it does not claim to fix its
+  underlying model/runtime cause.
+
+- Fix **Pi on Splash**: the engine compiles tool schemas into a per-property
+  grammar and rejects a top-level `anyOf`, which Pi's `browser_check` uses for
+  its per-action requirements — every Pi turn failed with
+  `400 unsupported top-level tool schema keyword(s): anyOf`. The relay now
+  forwards a Splash-compatible schema (`splash_runtime.compatible_tool_schema`,
+  applied by `relax_tool_schemas` in `session_proxy.transform_chat_request` for
+  the `splash` backend only): unsupported *root* keywords are dropped, every
+  nested keyword, enum, description and required name the engine can compile
+  is preserved, and one notice is logged per relaxed request. The tool keeps
+  validating its own arguments, so the contract still fails closed. Verified
+  against the installed engine's own schema compiler (it rejects the original
+  and compiles the relaxed schema) and end to end: the real captured Pi request
+  with 9 tools returned `HTTP 200` through a live relay on the running engine.
+
+- Measure the follow-up-turn comparison that decides agent workloads: on a
+  112,881-token context Splash returns its first token in **390 ms** with
+  112,864 tokens served from the prefix cache, while MTPLX's "warm" request
+  reports `cachedPromptTokens: 0` and takes **439 s** — its session-bank entry
+  is evicted at this context (`bank_entries_evicted: 1, bank_bytes_after: 0`),
+  so every turn re-prefills the whole prompt (Q8 the same: 438 s). Roughly a
+  thousand-fold difference per turn; the guidance is one Splash server with a
+  stable prefix and at most four agent lanes, which is also the engine's
+  concurrency cap (4 streams ≈ 79-81 tok/s aggregate, 8 streams no better).
+
+- Make **Splash a first-class launcher engine**. New `splash_runtime.py`
+  discovers the Homebrew install and verifies the release hashes from
+  `libexec/release.json`, scans every pack under
+  `~/Library/Application Support/Splash/models/<owner>/<repo>` (manifest plus
+  `target/`, `draft/`, `tokenizer/` required), and exposes one model record per
+  pack with fixed 16K/32K/64K/128K/256K context windows. `launcher.py` registers
+  the adapter, the engine button and its control panel, a memory estimate
+  (packed weights + ~32.5 KiB per context token of paged KV + a 2 GiB reserve),
+  reasoning pinning (`off`/`low`/`medium`/`xhigh`), and a launch path that runs
+  the engine's own `server.py` on a launcher-allocated loopback port — the
+  Homebrew CLI's hardcoded 8000, which the oMLX route owns, is never touched.
+  The launch re-verifies the engine release and pack manifest identity before
+  loading and the health check validates `/v1/models`; a changed install or
+  pack fails closed with a rescan request. Verified end to end on this Mac:
+  the wrapper started the real pack at 128K, `/v1/models` returned
+  `incoai/Qwen3.8-27B-Splash`, a chat completion answered, and the engine
+  stopped with the run. Docs: `docs/SPLASH.md`; tests:
+  `tests/test_splash_runtime.py`, `tests/test_splash_ui.js`.
+  Live API check: `/api/launch` accepted the route, the launcher-managed
+  engine reported Ready at 128K on its allocated port, `/api/chat` streamed a
+  real answer (reasoning content included) through the private relay, and
+  `/api/stop` released the run. Splash validates `top_k >= 1` even when
+  decoding is greedy, so the launcher pins `top_k: 1` on that route when a
+  locked contract carries `top_k: 0` (temperature 0 selects the engine's
+  greedy cohort, so the value is unused and the measured contract is
+  preserved).
+
+- Close the Splash **execution-geometry** TPS lane with engine-native
+  evidence. A pack's `manifest.json` carries `execution_geometry`, and the
+  native binary parses those keys — but it does not honour edits to them:
+  `maximum_batch_width: 8` and even `: 1` still produced
+  `memory_plan.budget.maximum_batch_width = 4`, and
+  `draft_proposal_tokens: 12` still produced 7 drafts per step with
+  bit-identical acceptance (693 drafted / 156 accepted / 0.2251 in both arms).
+  The derived-pack machinery built for the test stays in the bench tools
+  (`bench/derived/`, `bench/run.py --splash-pack`, native `/status` capture in
+  every Splash result), and the apparent 14% `prefill_token_budget` gain turned
+  out to be session drift. `--max-memory 44G` also leaves the geometry at 4.
+  What remains is the serving shape: 4 concurrent streams reach 79.2 tok/s
+  aggregate (engine metric 81.0) and 8 streams only 80.3, because the engine
+  caps decode batches at width 4 — so one Splash server and up to four agent
+  lanes per Mac is the correct topology, with the prefix cache doing the rest.
+  Full detail: `bench/notes/splash-tps.md`.
+
+- Make the Splash route runnable on this Mac: `tools/run_splash_128k.py` starts
+  Inco's engine on a free loopback port (8010 by default) instead of the CLI's
+  hardcoded 8000, which the launcher's oMLX server owns, with `--check` to
+  validate the install and package without launching. Verified live: serves
+  alongside oMLX, `/v1/models` and chat completions answer correctly, Ctrl-C
+  stops the engine. `docs/SPLASH.md` documents the install, the measured
+  numbers and the concurrency guidance; `tests/test_splash_route.py` pins the
+  argv construction and the fail-closed package checks.
+
+- Measure Inco's new **Splash 1.0** engine (`incoai/splash`) on the standing
+  128K prompt and add it to the benchmark harness (`bench/run.py --engine splash`,
+  which drives `server.py --port` so the user's oMLX service keeps port 8000).
+  Cold prefill **324.5 / 337.9 tok/s** and decode **25.30 / 25.33 tok/s** over
+  two runs, with a cached-prefix TTFT of **390 ms** on a 112,881-token prompt —
+  the fastest 27B prefill and decode measured on this machine, +7% prefill and
+  +31% decode over the MTPLX route, 5.5× decode the original launcher baseline
+  but 1.38× prefill (still short of the 1.5× bar). The pack is a repacked
+  `mlx-community/Qwen3.8-27B-4bit` target plus Inco's DFlash 2 draft, so the
+  win comes from shape-specialised kernels and speculative decode, not from a
+  lower-precision model. Details, caveats and the (not yet done) launcher
+  integration: `bench/notes/splash-engine.md`.
+
+- Probe the last structural lever for 27B prefill speed — ANE offload — and
+  record exactly where it stands (`bench/notes/ane-prefill-probe.md`). The
+  launcher's own scan reports the locally installed
+  `lmstudio-community/Qwen3.8-27B-MLX-6bit` and `-8bit` checkpoints as
+  **ANE-ready** (the 4-bit Speed pack is not: group size 32 vs the required
+  64/128), so no download is needed. Two blockers were measured: (1) with the
+  managed `omlx-0.7.0.dev2` selected, the launcher's ANE tuner dies on
+  `HTTP 401: Admin authentication required` because 0.7.x gates
+  `/admin/api/bench/ane-tune/*` behind an admin session cookie, while the
+  managed 0.6.4 runtime accepts the same bearer key (minimum supported ANE
+  runtime is 0.6.3rc2); (2) driven directly against 0.6.4 the tuner calibrates
+  a real split — GPU-only 140.5 tok/s at a 2,048-token prefill, MLP **ANE
+  53.0%**, GDN **ANE 37.5% / GPU 62.5%** — then fails to verify it under
+  Apple's default Metal cap (`PrefillMemoryExceededError: ~44.74 GB peak vs
+  35.57 GB ceiling`), which oMLX says to fix with
+  `sudo sysctl iogpu_wired_limit_mb=43008`. That is a user-level action, so
+  the route is parked pending approval rather than silently changed.
+
+- Fix the launcher side of that probe: **ANE Tuner now works with the modern
+  oMLX runtimes.** oMLX 0.7.x gates `/admin/api/*` behind an admin session
+  cookie, so the tuner's bearer-only requests died with
+  `401 Admin authentication required`; `ANETunerManager` now logs in once
+  (`POST /admin/api/login` with the private engine's own key), caches the
+  `omlx_admin_session` cookie per port and retries, and the cookie is reused
+  for every later call. Verified live against the managed `omlx-0.7.0.dev2`:
+  a 6-bit 27B ANE run now reaches the measurement phases (GPU-only baseline
+  141.6 tok/s) instead of failing at the first request, and a unit test locks
+  the retry/caching behaviour in. The remaining ANE blocker is Apple's Metal
+  wired cap, which needs the user's sudo.
+
+- Keep the benchmark harness on the runtime we ship: `bench/harness.py` was
+  still pinning the obsolete `0.2.17-q8.2` Slotstream binary and applying no
+  Q8 switches, so any arm that did not pass `--binary`/`--extra-env` explicitly
+  measured a superseded engine. It now defaults to the pinned `0.2.20-q8.1`
+  runtime and merges `slotstream_runtime.Q8_OPTIMIZATION_ENV` (4,096-token
+  prefill passes, the twelve read-path switches and the 4,096-token workspace
+  tile) into every Q8 launch.
+
+- Close the 27B's remaining prefill-attention lane with evidence rather than a
+  flag. A kernel workstream reproduced MLX's own NAX attention kernel
+  (`attention_nax_dsplit`) through `mx.fast.metal_kernel` at several tilings:
+  the replicas are **bit-exact** against the stock kernel (max|d| = 0, which is
+  the hard part) but slower — `dsplit128` 0.80x/0.87x, `dsplit64` (the stock
+  tiling, re-hosted) 0.84x/0.84x at kv = 32,768/113,000, and the no-head-split
+  variants collapse to 0.26-0.31x. With the flag campaign already closed
+  (`bench/notes/27b-prefill-hunt.md`: async rungs = no-op, chunk 1024 = −1%,
+  4096 = −12%, 8192 = −3.6%, blocked GDN = +1.2% but not byte-identical, max
+  fans = −2.5%), the 27B prefill is at the achievable ceiling of the current
+  stack: 27.9-28.3 TFLOP/s GEMM against a 29.5-30.2 bf16 GEMM ceiling, and an
+  18-21 TFLOP/s attention kernel we cannot beat from Python. Details and the
+  remaining non-flag options (ANE prefill via oMLX ≥ 0.6.3rc2, a
+  research-grade kernel, or quality-trading sparse prefill) are recorded in
+  `bench/notes/RESULTS.md`.
+
+- Raise Slotstream's MoE workspace tile to 4,096 for Q8 launches
+  (`SLOTSTREAM_OPT_WORKSPACE_TILE=4096`, added to the launcher's Q8 switch
+  set, applied to both the serve and the doctor ledger). The engine's default
+  of 256 tokens of workspace per tile serialises 32 tiles per layer per read
+  scope at a 4,096-token prefill pass, each tile ending in its own `eval`.
+  Paired same-session arms at a 112,881-token prompt on the pinned
+  `0.2.20-q8.1` binary: prefill **133.7 → 167.4 tok/s** (+25.2%) and a repeat
+  with the full 256-token probe **168.9 tok/s**, decode 11.07 → 11.16/11.34
+  tok/s (flat), greedy continuation byte-identical to the recorded reference
+  `dcb56fb102e8…`, drafting unchanged at 130 of 250 drafts accepted. Flash-Next
+  long-context prefill therefore goes from 1.58x to **2.0x** the original
+  83.8 tok/s baseline. Evidence: `bench/results/20260918-234936-flash-tile-4096.json`,
+  `bench/results/20260919-000134-flash-tile-4096-rep2.json`.
+
+- Measure the MTPLX 2.11.2 runtime's own kernels on this Mac to explain the
+  27B's 128K prefill ceiling: 4-bit qmm 27.9-28.3 TFLOP/s, bf16 GEMM
+  29.5-30.2, fused causal attention at head_dim 256 / 24 q-heads / 4 kv-heads /
+  q=2048 / kv=113,000 only 15.5-16.9 TFLOP/s. Those three numbers reproduce the
+  whole 358 s prefill (~184 s GEMM + ~164 s attention + ~10 s GatedDeltaNet),
+  so the route is at the stack's measured ceiling and the remaining prefill
+  knobs are percent-level. Recorded with the microbenchmark harness
+  `bench/microbench_mlx.py` and the arm log `bench/notes/27b-prefill-hunt.md`;
+  the kernel project that could move the ceiling (`runtime-patches/mtplx-nax-prefill/`)
+  and the two rejected "obvious" levers (maximum fans: 282.3 against 289.5
+  tok/s same-session; session-to-session comparisons: the same config measured
+  315.0 and 289.5 tok/s six hours apart) are documented there too.
+
+- Keep acceptance honest at 128K: the shipped 27B route (MTPLX, full-precision
+  KV, turbo, MTP depth 3) accepts 78%/65%/35% by depth at a 112,881-token
+  prompt (2.78 tokens per verify round) and Flash-Next's Slotstream Q8 route
+  accepts 130/250 drafts (52%). Bonsai-2's published Bonsai-1 dspark drafter is
+  byte-exact but collapses from 64.3% acceptance at 4K to 1.8% at 128K, so
+  speculation there is rejected rather than shipped.
+
+- Document Bonsai-2-27B's two 128K routes and close the speculation question:
+  MLX/MLX runtime at full-precision KV is 177.4 prefill / 9.0 decode, llama.cpp
+  with `-ctk f16 -ctv f16 -fa on -ub 512 --load-mode mlock` is 128.2 / 11.8
+  (against 122.8 / 9.5 on Q8 KV), and the dspark drafter experiment (1.42x at
+  4K) is dead at 128K for economics rather than correctness. `docs/LONG_CONTEXT_128K.md`
+  carries the table. The same llama.cpp route measured at the pack's native
+  256K window on a 234,952-token prompt: **77.4 prefill / 7.56 decode**, no
+  memory cliff (ttft 3,036 s; `bench/results/20260919-005828-bonsai2-gguf-256k-f16kv.json`),
+  which completes the capacity sweep: 32K 266/21, 128K 128.2/11.8, 256K 77.4/7.6.
+
+- Document the measured 128K long-context optima and the settings that produce
+  them in `docs/LONG_CONTEXT_128K.md`: Qwen3.8-27B on MTPLX with full-precision
+  KV (315.7 prefill / 19.3 decode tok/s at a 112,881-token prompt),
+  Qwen3.8 Flash-Next on the Q8 Slotstream runtime (132.3 / 11.9), and the
+  local 35B MoE through `tools/run_qwen35_moe_128k.py` (392.1 / 32.5). The
+  document also records the alternatives that measured worse, so the
+  trade-offs are not re-litigated.
+
+- Record a measured kernel experiment that is **not adopted**: staging the Q8
+  reduce kernel's row maximum and per-part softmax weights in threadgroup
+  memory removes ~195M redundant `exp` calls per speculative round, builds
+  cleanly, passes all 45 q8-cache assertions and reproduces the greedy output
+  byte-for-byte — but two runs (12.14 and 11.71 decode tok/s) are
+  indistinguishable from the five runs of the shipped kernel (11.84-11.96).
+  The pinned runtime therefore stays `0.2.20-q8.1`; the patch is kept at
+  `runtime-patches/slotstream-q8/q8-kernel-reduce-staged.patch` as evidence.
+
+- Import the user's Qwen3.8-35B-A3B Q6_K GGUF into the scanned LM Studio
+  model root (hard-linked, no duplicate 27 GB) and add
+  `tools/run_qwen35_moe_128k.py`, which serves it through the launcher-managed
+  llama.cpp at 128K with Q8 KV and the measured-fastest flags. At a
+  112,881-token prompt: **392.1 prefill / 32.5 decode tok/s** with
+  `--load-mode mlock` (358.5 / 31.5 with mmap), byte-identical greedy output.
+  The launcher's LM Studio route cannot express `mlock`, so the helper is the
+  documented way to run the maxed configuration.
+
+- Rebase the local Slotstream Q8 KV fork onto upstream v0.2.20 as
+  `0.2.20-q8.1` (same Q8 cache arithmetic, upstream's decode-lookahead,
+  prefix-state and correctness work included) and enable the engine's
+  validated read-path switches for Q8 launches. Paired measurement at a
+  112,881-token prompt with the corrected tap sidecar present in both arms:
+  cold prefill 90.4 → 124.7 tok/s and decode 8.62 → 10.74 tok/s, with
+  byte-identical greedy probes. The maintainer's Metal toolchain component
+  must be installed for rebuilds; the recipe and hashes are pinned in
+  `runtime-patches/slotstream-q8/`.
+
+- Use 4,096-token Slotstream prefill passes for Q8 launches. At the same
+  112,881-token prompt the larger pass measured 128.6 prefill / 11.26 decode
+  tok/s against 124.7 / 10.74 at the planner's 2,048 default, even though it
+  costs ~2.6 GB of the process budget; the engine accepts 256-4,096.
+
+- Add the engine's launch-reduction switches to Q8 Slotstream launches
+  (compiled final norm, fused GDN recording, slot-word writes, workspace
+  pieces). Measured at 112,881 tokens: prefill 127.7 → 132.3 tok/s with an
+  unchanged 11.84 decode and byte-identical greedy output. The individual
+  contribution of each switch is not yet bisected.
+
+- Raise Slotstream's default whole-process ceiling from 30 GB to 36 GB so the
+  native auto planner may keep a larger expert pool. At a 112,881-token prompt
+  with Q8 KV and MTP depth 2 this took the expert cache from 12.9 GB to
+  19.0 GB, the hit rate from 75.9% to 90.1% and decode from 7.03 to
+  9.68 tok/s (+38%); prefill was unchanged. The engine still sizes down to
+  live reclaimable memory and the capacity check still fails closed.
+
+- Lift MTPLX's compiled-verify fence to the selected window above 32,768
+  tokens. The turbo profile pinned `MTPLX_COMPILED_VERIFY_MAX_CONTEXT` at
+  32,768, so every speculative verify at a larger context ran the eager path.
+  A local A/B at a 112,881-token prompt with paged KV Q8 and MTP depth 3
+  measured decode 4.56 -> 10.05 tok/s with a byte-identical greedy
+  continuation; the fence is now launcher-owned and stripped from any
+  inherited shell environment. Prefill was unchanged within run-to-run spread.
+
+- Add checksum-pinned oMLX 0.7.0.dev2 as a selectable preview with isolated
+  installation, exact development-version identity and preserved rollback provenance.
+  Make the verified full Flash Q4 pack selectable with expert and PLE SSD offload,
+  adjustable expert RAM share and a user RAM ceiling. Preserve upstream MTP/DFlash
+  incompatibility with expert offload; show native oMLX prompt/decode timing.
+
+- Report Slotstream Q8 native prompt processing as soon as prefill completes,
+  excluding reused tokens; show native decode speed, MTP acceptance and expert-cache
+  allocation/hits on completed requests.
+
+- Add a separately pinned Slotstream Q8 KV runtime with main/MTP cache
+  quantization, fused sparse attention, prefix-safe rollback, and memory
+  accounting. The launcher preserves the explicit Q8/full-precision choice.
+
+- Remove the Slotstream-specific 36 GB input cap; native available-memory and
+  Metal checks still determine what can actually be allocated.
+- Stop Pi from sending the unsupported OpenAI response-storage field to local engines.
+
+- Fix Slotstream startup on busy Macs with automatic expert-cache sizing inside
+  the selected memory ceiling, preserving context and MTP; retain fixed sizing.
+- Remove the launcher-only 32K response cap for Slotstream. Responses may use
+  the chosen context minus at least 1,024 tokens for instructions and history.
+
+- Stop every guarded native engine on watchdog exceptions or loss of the guard.
+- Bound concurrent relay uploads and retained request bodies before parsing,
+  enforce upload deadlines, and reap disconnected queued requests.
+- Classify incomplete/error streams separately from successful completion;
+  exclude buffered or insufficiently timed responses from decode-speed rankings.
+- Preserve an explicit acceleration selection when a model rescan makes it
+  unavailable, and block launch until the request is valid or changed explicitly.
 - Add the pinned Slotstream 0.2.17 Qwen3.8 Flash-Next adapter with full-expert
   SSD streaming, explicit native MTP, 16K–256K context choices and checked memory budgets.
 - Verify the complete model before every load, preserve authenticated session

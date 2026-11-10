@@ -105,33 +105,49 @@ def clone_model(source: Path, destination: Path) -> None:
 
     validate_conversion(shards)
     destination.mkdir(mode=0o700)
-    for item in sorted(source.iterdir(), key=lambda value: value.name):
-        if item.suffix == ".safetensors":
-            continue
-        target = destination / item.name
-        if item.is_dir():
-            shutil.copytree(item, target)
-        elif item.name == "config.json":
-            clone_config(item, target)
-        else:
-            shutil.copy2(item, target)
+    staging_fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    previous_cwd_fd = None
+    try:
+        staging_identity = os.fstat(staging_fd)
+        emit("staging-created", device=staging_identity.st_dev,
+             inode=staging_identity.st_ino, uid=staging_identity.st_uid)
+        previous_cwd_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+        os.fchdir(staging_fd)
+        for item in sorted(source.iterdir(), key=lambda value: value.name):
+            if item.suffix == ".safetensors":
+                continue
+            target = Path(item.name)
+            if item.is_dir():
+                shutil.copytree(item, target)
+            elif item.name == "config.json":
+                clone_config(item, target)
+            else:
+                shutil.copy2(item, target)
 
-    for index, shard in enumerate(shards, start=1):
-        target = destination / shard.name
-        temporary = destination / f".{shard.name}.partial.safetensors"
-        with safe_open(shard, framework="np") as handle:
-            metadata = handle.metadata() or {}
-        tensors = mx.load(str(shard))
-        converted = {
-            name: value.astype(mx.float16) if value.dtype == mx.bfloat16 else value
-            for name, value in tensors.items()
-        }
-        mx.save_safetensors(str(temporary), converted, metadata=metadata)
-        temporary.replace(target)
-        del converted, tensors
-        mx.clear_cache()
-        emit("converted", current=index, total=len(shards), file=shard.name)
-    emit("completed", current=len(shards), total=len(shards))
+        for index, shard in enumerate(shards, start=1):
+            target = Path(shard.name)
+            temporary = Path(f".{shard.name}.partial.safetensors")
+            with safe_open(shard, framework="np") as handle:
+                metadata = handle.metadata() or {}
+            tensors = mx.load(str(shard))
+            converted = {
+                name: value.astype(mx.float16) if value.dtype == mx.bfloat16 else value
+                for name, value in tensors.items()
+            }
+            mx.save_safetensors(str(temporary), converted, metadata=metadata)
+            temporary.replace(target)
+            del converted, tensors
+            mx.clear_cache()
+            emit("converted", current=index, total=len(shards), file=shard.name)
+        emit("completed", current=len(shards), total=len(shards))
+
+    finally:
+        if previous_cwd_fd is not None:
+            try:
+                os.fchdir(previous_cwd_fd)
+            finally:
+                os.close(previous_cwd_fd)
+        os.close(staging_fd)
 
 
 def main() -> None:

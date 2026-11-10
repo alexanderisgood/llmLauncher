@@ -1,4 +1,5 @@
 """Core-engine calibration protects whole-Mac memory, even without a child PID."""
+from tests.memory_fixtures import physical_snapshot
 import copy
 import threading
 from types import SimpleNamespace
@@ -9,17 +10,24 @@ import launcher
 
 
 class BenchmarkMemoryGuardTests(unittest.TestCase):
-    HEALTHY = {"memoryAvailable":True, "totalBytes":48 * 1024**3, "freePercent":60.0}
-    LOW = {**HEALTHY, "freePercent":8.0}
+    HEALTHY = physical_snapshot({"memoryAvailable":True, "totalBytes":48 * 1024**3, "freePercent":60.0})
+    LOW = physical_snapshot({**HEALTHY, "freePercent":8.0})
 
     def exercise(self, backend, mode, samples, stage, process_state):
         run = mock.Mock(plan=None, process=None, llamacpp_safety_violation=None,
                         codex_proxy_port=None, session_proxy_port=None)
+        run.lock = threading.RLock()
+        run.lifecycle_lock = threading.Lock()
+        run.cancel_event = threading.Event()
         if process_state != "absent":
             run.process = mock.Mock(pid=12345)
             run.process.poll.return_value = None if process_state == "running" else 0
-        plan = SimpleNamespace(backend=backend, port=1234, client_port=1235)
-        run.start.side_effect = lambda p: setattr(run, "plan", p)
+        plan = SimpleNamespace(backend=backend, port=1234, client_port=1235,
+                               run_dir=None, secrets={})
+        def accept(p):
+            run.plan = p
+            run.cancel_event = threading.Event()
+        run.start.side_effect = accept
         manager = launcher.BenchmarkManager(run)
         manager.state = {"phase":"queued", "job":{}, "modes":{}, "result":None, "events":[]}
         job = {"backend":backend, "suiteName":"quick", "modes":["ar",mode] if mode != "ar" else ["ar"]}
@@ -56,8 +64,8 @@ class BenchmarkMemoryGuardTests(unittest.TestCase):
         ):
             with self.assertRaises(launcher.QualificationSafetyFailure) as raised:
                 manager._measure_mode(job, [], mode, 0, 6)
-            stop_thread.assert_called_once_with(target=run.stop, kwargs={"expected_plan":plan}, daemon=True)
-            run.stop.assert_called_once_with(expected_plan=plan)
+            stop_thread.assert_called_once_with(target=manager.owner.stop, kwargs={"expected_plan":plan}, daemon=True)
+            run.stop.assert_called_once_with(expected_plan=plan, expected_cancel_event=run.cancel_event)
             save.assert_not_called()
             self.assertEqual(completion.call_count, int(stage == "request"))
         self.assertIsNone(manager.state["result"])

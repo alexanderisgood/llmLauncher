@@ -7,25 +7,22 @@ const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
 const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const consoleWorkspace = require("./helpers/workspace_sources.js").consoleWorkspace;
 const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 
-function sourceBetween(startMarker, endMarker) {
-  const start = app.indexOf(startMarker);
-  const end = app.indexOf(endMarker, start + startMarker.length);
-  assert.ok(start >= 0, `missing production marker: ${startMarker}`);
-  assert.ok(end > start, `missing production end marker: ${endMarker}`);
-  return app.slice(start, end);
-}
+const sourceBetween = require("./helpers/workspace_sources.js").between;
 
 const chatProduction = [
   sourceBetween("function updateWorkspaceChrome()", "\nfunction updateChatWorkspace"),
-  sourceBetween("function sessionRouteActive(run, phase)", "\nfunction renderChatRoute"),
+  sourceBetween("function sessionRouteActive(run, phase)", "\nfunction retainChatPostmortem"),
+  sourceBetween("function retainChatPostmortem(", "\nfunction clearChatForReplacement"),
+  sourceBetween("function clearChatForReplacement()", "\nfunction renderChatRoute"),
   sourceBetween("function updateChatWorkspace(run, phase)", "\nfunction agentConsoleBaseOffset"),
 ].join("\n");
 
 const agentProduction = [
   sourceBetween("function updateWorkspaceChrome()", "\nfunction updateChatWorkspace"),
-  sourceBetween("function sessionRouteActive(run, phase)", "\nfunction renderChatRoute"),
+  sourceBetween("function sessionRouteActive(run, phase)", "\nfunction retainChatPostmortem"),
   sourceBetween("function retainAgentConsoleView(view, phase, message)", "\nfunction enterAgentConsole"),
   sourceBetween("function updateAgentWorkspace(run, phase)", "\nfunction scheduleAgentConsoleRead"),
 ].join("\n");
@@ -84,7 +81,9 @@ function chatHarness() {
   };
   const context = {
     console,
-    state,
+    state, agentConsoleIsVisible:()=>state.agentConsoleVisible,
+    navigation:{setConsoleVisible:visible=>{if(visible)(elements.chatWorkspace||(elements.chatWorkspace=element())).classList.add("hidden");return !(elements.chatWorkspace||(elements.chatWorkspace=element())).classList.contains("hidden");},
+      updateChrome:()=>context.updateWorkspaceChrome(),setSubtitle:label=>{(elements.configSubtitle||(elements.configSubtitle=element())).textContent=label;},showSettings:()=>{}},
     $:id => elements[id] || (elements[id] = element()),
     activateChatDraft:() => {},
     chatSurfaceRoute:run => {
@@ -158,7 +157,9 @@ function agentHarness() {
   const context = {
     console,
     Object,
-    state,
+    state, agentConsoleIsVisible:()=>state.agentConsoleVisible,
+    navigation:{setConsoleVisible:visible=>{if(visible)(elements.chatWorkspace||(elements.chatWorkspace=element())).classList.add("hidden");return !(elements.chatWorkspace||(elements.chatWorkspace=element())).classList.contains("hidden");},
+      updateChrome:()=>context.updateWorkspaceChrome(),setSubtitle:label=>{(elements.configSubtitle||(elements.configSubtitle=element())).textContent=label;},showSettings:()=>{}},
     $:id => elements[id] || (elements[id] = element()),
     AgentConsoleTabsCore:{consoleNeedsReplay:() => false},
     PiTimelineCore:{safeRevision:value => Number(value) || 0},
@@ -261,8 +262,8 @@ function run() {
 
   assert.match(styles, /chat-status-panel\[data-route-state="failed"\]/);
   assert.match(styles, /chat-route-card\[data-state="stopped"\]/);
-  assert.match(app, /retainChatPostmortem\([\s\S]*Partial output was retained/);
-  assert.match(app, /if \(!allowed\.has\(id\)\) \{[\s\S]*retainAgentConsoleView/);
+  assert.match(require("./helpers/workspace_sources.js").chatWorkspace, /retainChatPostmortem\([\s\S]*Partial output was retained/);
+  assert.match(consoleWorkspace, /if \(!allowed\.has\(id\)\) \{[\s\S]*retainAgentConsoleView/);
   assert.doesNotMatch(
     sourceBetween("function updateChatWorkspace(run, phase)", "\nfunction agentConsoleBaseOffset"),
     /if \(!run[^)]*\)[\s\S]{0,500}resetChatConversation/,

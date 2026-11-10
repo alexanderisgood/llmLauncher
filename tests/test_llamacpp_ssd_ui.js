@@ -1,4 +1,5 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -6,7 +7,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const app = benchmarkSources.controllerSource;
 const index = fs.readFileSync(path.join(root, "index.html"), "utf8");
 const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 
@@ -30,7 +31,7 @@ const visibleContext = {
   uiFeatureEnabled: () => false,
 };
 vm.createContext(visibleContext);
-vm.runInContext(app.slice(visibleStart, visibleEnd), visibleContext);
+benchmarkSources.runInContext(app.slice(visibleStart, visibleEnd), visibleContext);
 assert.equal(visibleContext.uiEngineVisible("llamacpp"), false);
 visibleContext.state.adapters.engines.push({id: "llamacpp", label: "llama.cpp · SSD PLE"});
 assert.equal(visibleContext.uiEngineVisible("llamacpp"), true);
@@ -40,7 +41,7 @@ const modelEnd = app.indexOf("\nfunction clientName", modelStart);
 assert.ok(modelStart >= 0 && modelEnd > modelStart);
 const modelContext = {state: {models: []}};
 vm.createContext(modelContext);
-vm.runInContext(app.slice(modelStart, modelEnd), modelContext);
+benchmarkSources.runInContext(app.slice(modelStart, modelEnd), modelContext);
 assert.equal(modelContext.controllerRouteQualificationBackend({
   routeQualification: false, request: {backend: "llamacpp"},
 }), "");
@@ -109,7 +110,7 @@ const reasoningContext = {
   $: id => { assert.equal(id, "reasoningSelect"); return reasoningSelect; },
 };
 vm.createContext(reasoningContext);
-vm.runInContext(app.slice(reasoningStart, reasoningEnd), reasoningContext);
+benchmarkSources.runInContext(app.slice(reasoningStart, reasoningEnd), reasoningContext);
 assert.equal(reasoningContext.normalizeReasoningSelection(), "auto");
 assert.equal(reasoningSelect.value, "auto");
 assert.match(app, /function refreshLaunchability\(\) \{[^]*normalizeReasoningSelection\(\);/);
@@ -121,7 +122,7 @@ assert.doesNotMatch(app, /Qualified pinned (?:Qwen3\.8 )?Flash-Next route/);
 const exactContractStart = app.indexOf("function llamaQualificationContractExact");
 const exactContractEnd = app.indexOf("\nfunction firstQualificationMetric", exactContractStart);
 assert.ok(exactContractStart >= 0 && exactContractEnd > exactContractStart);
-vm.runInContext(app.slice(exactContractStart, exactContractEnd), modelContext);
+benchmarkSources.runInContext(app.slice(exactContractStart, exactContractEnd), modelContext);
 const exactPlan = {
   routeQualification: true,
   model: {id: qualified.id},
@@ -237,32 +238,33 @@ qualified.backends.llamacpp.runtimeVersion = "different runtime";
 assert.equal(modelContext.llamaQualificationContractExact(exactPlan), false, "capability runtime");
 qualified.backends.llamacpp.runtimeVersion = "llama.cpp b10740 qualification runtime";
 
-assert.match(app, /if \(\["uzu", "whallm", "llamacpp"\]\.includes\(state\.backend\)\) \{\s*return \{acceleration:"off", depth:1, kv:"off"\};/);
-assert.match(app, /const verifyingPle = button\.dataset\.backend === "llamacpp"[^]*const qualifiedPle = button\.dataset\.backend !== "llamacpp"[^]*Boolean\(llamaCppPleModel\(\)\) \|\| verifyingPle/);
+assert.match(app, /if \(\["uzu", "whallm", "splash", "llamacpp"\]\.includes\(state\.backend\)\) \{\s*return \{acceleration:"off", depth:1, kv:"off"\};/);
+assert.match(app, /const verifyingPle = button\.dataset\.backend === "llamacpp"[^]*const qualifiedPle = button\.dataset\.backend !== "llamacpp"[^]*Boolean\(registryPort\.llamaCppPleModel\(\)\) \|\| verifyingPle/);
 assert.match(app, /filter\(backend => backend !== "llamacpp"\)/);
-assert.match(app, /if \(backend === "llamacpp"\) return \[\{\s*id:"ar", label:"SSD PLE", available:llamaCppPleCapabilityQualified\(cap\)/);
-assert.match(app, /if \(backend === "llamacpp" && !llamaCppPleQualified\(model\)\) continue/);
-assert.match(app, /state\.backend !== "llamacpp" \|\| llamaCppPleQualified\(model\)/);
+assert.match(app, /if \(backend === "llamacpp"\) return \[\{\s*id:"ar", label:"SSD PLE", available:capabilities\.llamaCppPleCapabilityQualified\(cap\)/);
+assert.match(app, /if \(backend === "llamacpp" && !registryPort\.llamaCppPleQualified\(model\)\) continue/);
+assert.match(app, /state\.backend !== "llamacpp" \|\| registryPort\.llamaCppPleQualified\(model\)/);
 assert.match(app, /capability\?\.llamacppPle === true[^]*capability\?\.atomicPle\?\.ready === true[^]*capability\?\.currentProcessVerified === true[^]*capability\?\.atomicPle\?\.currentProcessVerified === true[^]*\^\[0-9a-f\]\{64\}\$\/\.test\(capability\.receiptFingerprint\)/);
-assert.match(app, /modelVerificationTimer: null, modelVerificationLoading: false/);
+assert.match(require("./helpers/launch_sources.js").workspace, /modelVerificationTimer:\s*null/);
+assert.match(require("./helpers/launch_sources.js").workspace, /modelVerificationLoading:\s*false/);
 assert.match(app, /model\.verificationState === "checking"[^]*setTimeout\(\(\) => \{ void loadModels\(false\); \}, 700\)/);
 assert.match(app, /Verifying the pinned artifact in this controller[^]*verificationProgress\?\.completed/);
-assert.match(app, /const modelReady = Boolean\([^]*state\.backend !== "llamacpp" \|\| llamaCppPleQualified\(model\)/);
+assert.match(app, /const modelReady = Boolean\([^]*state\.backend !== "llamacpp" \|\| registryPort\.llamaCppPleQualified\(model\)/);
 assert.match(app, /llamacpp:"llama\.cpp · SSD PLE"/);
 assert.match(app, /LLAMACPP_PLE_QUALIFICATION_CONTEXT = 8192/);
 assert.match(app, /LLAMACPP_PLE_QUALIFICATION_MEMORY_LIMIT_BYTES = 44 \* 1024 \*\* 3/);
 assert.match(app, /LLAMACPP_PLE_QUALIFICATION_SUITE = "route-qualification-8k"/);
-assert.match(app, /qualificationBackend === "llamacpp"[^]*return LLAMACPP_PLE_QUALIFICATION_SUITE/);
-assert.match(app, /suite === LLAMACPP_PLE_QUALIFICATION_SUITE \? "agentic" : suite/);
+assert.match(app, /qualificationBackend === "llamacpp"[^]*return policy\.LLAMACPP_PLE_QUALIFICATION_SUITE/);
+assert.match(app, /suite === policy\.LLAMACPP_PLE_QUALIFICATION_SUITE \? "agentic" : suite/);
 assert.match(app, /fixed 8K under the exact 44 GiB ceiling/);
 assert.match(app, /Reasoning is runtime-controlled and stays on/);
 assert.match(app, /Last completed turn · \$\{liveTps\.toFixed\(1\)\} tok\/s/);
-assert.match(app, /Peak memory · \$\{esc\(peak\)\}/);
+assert.match(app, /Peak memory · \$\{formatting\.esc\(peak\)\}/);
 assert.match(app, /Reasoning \+ final answer/);
 assert.match(app, /Correctness check/);
 assert.match(app, /Jinja tool check/);
 assert.match(app, /Clean unload/);
-assert.match(app, /Slowest turn · \$\{esc\(minimumTps\)\} · target ≥\$\{LLAMACPP_PLE_QUALIFICATION_MINIMUM_TPS\}/);
+assert.match(app, /Slowest turn · \$\{formatting\.esc\(minimumTps\)\} · target ≥\$\{policy\.LLAMACPP_PLE_QUALIFICATION_MINIMUM_TPS\}/);
 assert.match(app, /Apply qualified route/);
 assert.match(app, /memoryBlocker\.estimate\?\.requiredMetalWiredLimitBytes[^]*memoryBlocker\.estimate\?\.memoryCeilingBytes/);
 assert.match(app, /measurementAction = "Recheck limit"/);

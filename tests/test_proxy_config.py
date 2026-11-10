@@ -172,7 +172,7 @@ class ProxyConfigLifetimeTests(unittest.TestCase):
                 with (
                     mock.patch.object(module.Path, "home", return_value=self.home),
                     mock.patch.object(module.sys, "argv", [filename, str(path)]),
-                    mock.patch.object(module, "ThreadingHTTPServer", FakeServer),
+                    mock.patch.object(module, "RelayHTTPServer" if module is session_proxy else "ThreadingHTTPServer", FakeServer),
                 ):
                     module.main()
                 self.assertFalse(path.exists())

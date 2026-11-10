@@ -21,6 +21,7 @@
   }
 
   function createTimelineView({document, core:PiTimelineCore, formatTimestamp:formatChatTimestamp}) {
+    let protocol = "pi-rpc";
     let previewsVisible = true;
 
     function releaseBrowserPreviewResources(parent) {
@@ -174,7 +175,7 @@
         summary.className = "agent-pi-prompt-summary";
         summary.dataset.timelineKey = item.key;
         summary.setAttribute("role", "listitem");
-        summary.title = "Pi-reported usage across the model replies and tool steps in this prompt. Input includes cached tokens and repeated conversation context; output includes thinking. Elapsed time includes tools and retries. These totals are not context-window usage.";
+        summary.title = `${PiTimelineCore.agentLabel(protocol)}-reported usage across the model replies and tool steps in this prompt. Input includes cached tokens and repeated conversation context; output includes thinking. Elapsed time includes tools and retries. These totals are not context-window usage.`;
         const label = document.createElement("strong");
         label.textContent = item.title || "Complete";
         summary.append(label);
@@ -205,7 +206,7 @@
       article.dataset.timelineKey = item.key;
       article.setAttribute("role", "listitem");
       const label = {
-        user:"You", answer:"Pi", notice:"Notice", error:"Needs attention", queue:"Queue",
+        user:"You", answer:PiTimelineCore.agentLabel(protocol), notice:"Notice", error:"Needs attention", queue:"Queue",
       }[item.kind] || "Update";
       appendPiTimelineHeading(article, label, item.title, item.createdAt);
       article.append(piTimelineBody(item.text));
@@ -277,13 +278,15 @@
       return replacement;
     }
 
-    function render(timeline, items, {viewport, surfaceId, preserveScroll = true, followTail = true}) {
+    function render(timeline, items, {viewport, surfaceId, preserveScroll = true, followTail = true, protocol:nextProtocol = "pi-rpc"}) {
+      protocol = nextProtocol;
       const previousTop = viewport.scrollTop;
       const anchor = preserveScroll && !followTail
         ? agentPiTimelineScrollAnchor(viewport, timeline) : null;
-      const existing = new Map(timeline.dataset.consoleSurface === surfaceId
+      const existing = new Map(timeline.dataset.consoleSurface === surfaceId && timeline.dataset.agentProtocol === protocol
         ? [...timeline.children].map(node => [node.dataset.timelineKey, node]) : []);
       timeline.dataset.consoleSurface = surfaceId;
+      timeline.dataset.agentProtocol = protocol;
       let cursor = timeline.firstElementChild;
       for (const item of items) {
         // Queue updates remain in the journal, but an empty queue needs no card.

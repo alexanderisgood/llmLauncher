@@ -1,0 +1,341 @@
+{
+  "provenance": "Frozen from the full pre-extraction launcher.py at /private/tmp/llm-launcher-console-rpc-baseline.py; not regenerated from extracted domain.",
+  "events": [
+    {
+      "type": "agent_start"
+    },
+    {
+      "type": "message_start",
+      "message": {
+        "role": "user",
+        "id": "u1",
+        "content": [
+          {
+            "type": "text",
+            "text": "Read <script>literal</script>\nKeep the Unicode 雪."
+          }
+        ]
+      }
+    },
+    {
+      "type": "message_start",
+      "message": {
+        "role": "assistant",
+        "id": "a1",
+        "content": []
+      }
+    },
+    {
+      "type": "message_update",
+      "assistantMessageEvent": {
+        "type": "thinking_delta",
+        "contentIndex": 0,
+        "delta": "Check the original. 雪\u001b[31m"
+      }
+    },
+    {
+      "type": "tool_execution_start",
+      "toolName": "read",
+      "toolCallId": "t1",
+      "args": {
+        "path": "fixture.txt"
+      }
+    },
+    {
+      "type": "tool_execution_update",
+      "toolName": "read",
+      "toolCallId": "t1",
+      "partialResult": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Reading fixture…"
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_execution_end",
+      "toolName": "read",
+      "toolCallId": "t1",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Original content 🙂"
+          }
+        ]
+      },
+      "isError": false
+    },
+    {
+      "type": "message_update",
+      "assistantMessageEvent": {
+        "type": "text_delta",
+        "contentIndex": 1,
+        "delta": "Verified 🙂\n"
+      }
+    },
+    {
+      "type": "message_end",
+      "message": {
+        "role": "assistant",
+        "id": "a1",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "Check the original. 雪\u001b[31m"
+          },
+          {
+            "type": "text",
+            "text": "Verified 🙂\n"
+          }
+        ],
+        "usage": {
+          "input": 5,
+          "output": 2,
+          "totalTokens": 7
+        },
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "agent_end",
+      "messages": []
+    },
+    {
+      "type": "agent_settled"
+    },
+    {
+      "type": "extension_ui_request",
+      "id": "dialog-1",
+      "method": "select",
+      "title": "Choose <literal>",
+      "options": [
+        "Keep original",
+        "Use 雪"
+      ]
+    }
+  ],
+  "expected": {
+    "public": {
+      "version": 3,
+      "conversationId": "",
+      "conversationRevision": 0,
+      "id": "fixture-surface",
+      "surfaceId": "fixture-surface",
+      "ownerRunId": "fixture-owner",
+      "client": "pi",
+      "surface": "Pi",
+      "model": "Fixture model",
+      "backend": "mtplx",
+      "project": "/fixture/project",
+      "state": "running",
+      "detail": "Agent is running in Hub Console.",
+      "pid": 17,
+      "startedAt": "2026-10-06T12:00:00+00:00",
+      "endedAt": null,
+      "exitCode": null,
+      "cols": 100,
+      "rows": 30,
+      "bufferBytes": 342,
+      "droppedBytes": 0,
+      "bufferBaseOffset": 0,
+      "bufferEnd": 342,
+      "nextOffset": 342,
+      "outputRevision": 342,
+      "lastOutputAt": "2026-10-06T12:00:00+00:00",
+      "hasOutput": true,
+      "protocol": "pi-rpc",
+      "streaming": false,
+      "pendingMessages": 0,
+      "queuePaused": false,
+      "queuedMessages": [],
+      "queueEditingAvailable": true,
+      "queueSaveError": "",
+      "interactions": [
+        {
+          "id": "dialog-1",
+          "method": "select",
+          "title": "Choose <literal>",
+          "options": [
+            "Keep original",
+            "Use 雪"
+          ]
+        }
+      ],
+      "persistent": false,
+      "commands": [],
+      "canInput": true,
+      "canStop": true,
+      "canRestart": false,
+      "supportsQueue": true,
+      "supportsSteering": true,
+      "supportsDirectKeys": false,
+      "timelineVersion": 1,
+      "timelineBaseRevision": 1,
+      "timelineRevision": 11
+    },
+    "output": {
+      "version": 3,
+      "ownerRunId": "fixture-owner",
+      "surfaceId": "fixture-surface",
+      "startedAt": "2026-10-06T12:00:00+00:00",
+      "baseOffset": 0,
+      "bufferBaseOffset": 0,
+      "nextOffset": 342,
+      "bufferEnd": 342,
+      "outputRevision": 342,
+      "reset": false,
+      "data": "",
+      "terminalOmitted": true,
+      "state": "running",
+      "exitCode": null,
+      "lastOutputAt": "2026-10-06T12:00:00+00:00",
+      "detail": "Agent is running in Hub Console.",
+      "protocol": "pi-rpc",
+      "canInput": true,
+      "conversationId": "",
+      "conversationRevision": 0,
+      "streaming": false,
+      "pendingMessages": 0,
+      "queuePaused": false,
+      "queuedMessages": [],
+      "queueEditingAvailable": true,
+      "queueSaveError": "",
+      "interactions": [
+        {
+          "id": "dialog-1",
+          "method": "select",
+          "title": "Choose <literal>",
+          "options": [
+            "Keep original",
+            "Use 雪"
+          ]
+        }
+      ],
+      "extensionStatuses": {},
+      "commands": [],
+      "compacting": false,
+      "timelineVersion": 1,
+      "timelineBaseRevision": 1,
+      "timelineRevision": 11,
+      "nextTimelineRevision": 11,
+      "timelineReset": false,
+      "timelineEvents": [
+        {
+          "revision": 1,
+          "kind": "user",
+          "text": "Read <script>literal</script>\nKeep the Unicode 雪.",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "title": "You",
+          "itemId": "message:bb82030dbc2bcaba32a90bf2:user:0",
+          "operation": "replace"
+        },
+        {
+          "revision": 2,
+          "kind": "thinking",
+          "text": "Check the original. 雪␛[31m",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "title": "Thinking",
+          "itemId": "message:f55ff16f66f43360266b95db:thinking:0",
+          "operation": "replace"
+        },
+        {
+          "revision": 3,
+          "kind": "toolCall",
+          "text": "Running",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "title": "Running · read",
+          "itemId": "live:1:tool:1",
+          "operation": "replace"
+        },
+        {
+          "revision": 4,
+          "kind": "toolResult",
+          "text": "Reading fixture…",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "title": "Running · read",
+          "itemId": "live:1:tool:1:result",
+          "operation": "replace"
+        },
+        {
+          "revision": 5,
+          "kind": "toolCall",
+          "text": "Completed",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "title": "Completed · read",
+          "itemId": "live:1:tool:1",
+          "operation": "replace"
+        },
+        {
+          "revision": 6,
+          "kind": "toolResult",
+          "text": "Original content 🙂",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "title": "Result · read",
+          "itemId": "live:1:tool:1:result",
+          "operation": "replace"
+        },
+        {
+          "revision": 7,
+          "kind": "answer",
+          "text": "Verified 🙂\n",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "itemId": "message:f55ff16f66f43360266b95db:answer:1",
+          "operation": "replace"
+        },
+        {
+          "revision": 8,
+          "kind": "thinking",
+          "text": "Check the original. 雪␛[31m",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "title": "Thinking",
+          "itemId": "message:f55ff16f66f43360266b95db:thinking:0",
+          "operation": "replace"
+        },
+        {
+          "revision": 9,
+          "kind": "answer",
+          "text": "Verified 🙂\n",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "itemId": "message:f55ff16f66f43360266b95db:answer:1",
+          "operation": "replace"
+        },
+        {
+          "revision": 10,
+          "kind": "summary",
+          "text": "0s · 7 total tokens · 5 input · 2 output",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "title": "Complete",
+          "itemId": "live:1:summary",
+          "operation": "replace"
+        },
+        {
+          "revision": 11,
+          "kind": "notice",
+          "text": "Choose <literal>",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "title": "Pi needs input",
+          "itemId": "interaction:11516849a06b48ba642c",
+          "operation": "replace"
+        }
+      ]
+    },
+    "rendered": [
+      "",
+      "\r\n\u001b[1;38;5;75mYOU\u001b[0m\r\nRead <script>literal</script>\r\nKeep the Unicode 雪.",
+      "",
+      "\r\n\u001b[1;38;5;141mTHINKING\u001b[0m\r\n\u001b[2;38;5;183mCheck the original. 雪␛[31m\u001b[0m",
+      "\r\n\u001b[1;38;5;214mRUNNING · read\u001b[0m\r\n",
+      "",
+      "\r\n\u001b[1;38;5;109mTOOL RESULT · read\u001b[0m\r\nOriginal content 🙂",
+      "\r\n\u001b[1;38;5;84mRESPONSE\u001b[0m\r\nVerified 🙂\r\n",
+      "",
+      "",
+      "",
+      "\r\n\u001b[1;38;5;214mPI NEEDS INPUT\u001b[0m\r\nChoose <literal>"
+    ]
+  },
+  "sourceSha256": "76dd8bfa056b0ac24d367427280dffbd60fa6c12125ac76c07c9e34da9782b36"
+}

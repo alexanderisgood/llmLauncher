@@ -6,7 +6,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const app = fs.readFileSync(path.join(root, "agent_console_workspace.js"), "utf8");
 const index = fs.readFileSync(path.join(root, "index.html"), "utf8");
 const AgentConsoleInputCore = require("../agent_console_input.js");
 const AgentConsoleTabsCore = require("../agent_console_tabs.js");
@@ -306,14 +306,14 @@ async function testPiResponseStopSkipsSupersededGeneration() {
   assert.equal(scheduledReads, 1, "a stale abort completion must still request fresh output");
 }
 
-function testProductionComposerValidation() {
+function testProductionComposerValidation(protocol = "pi-rpc") {
   const production = sourceBetween(
     "function queueAgentConsoleInput(value)",
     "\nfunction agentConsoleKeyData",
   );
-  const calls = {focus:0, queued:[], reports:0, retries:0};
+  const calls = {focus:0, queued:[], reports:0, retries:0, savedDrafts:0};
   const view = {
-    meta:{protocol:"pi-rpc"}, timelineLoaded:true,
+    meta:{protocol, commands:[{name:"help"}, {name:"stats"}]}, timelineLoaded:true,
     inputQueue:[], inputError:"", inputRetryPending:false,
   };
   const input = {
@@ -331,9 +331,9 @@ function testProductionComposerValidation() {
     agentConsoleOwnerRunId:"owner", agentConsoleSurfaceId:"surface",
   };
   const context = {
-    saveAgentConsoleDraft:() => {},
+    saveAgentConsoleDraft:() => { calls.savedDrafts += 1; },
     AgentConsoleInputCore,
-    PiTimelineCore:{shouldUseTimeline:(protocol, loaded) => protocol === "pi-rpc" && loaded === true},
+    PiTimelineCore,
     state,
     console,
     currentAgentConsoleView:() => view,
@@ -359,12 +359,81 @@ function testProductionComposerValidation() {
   );
   assert.equal(input.value, "", "validated text clears only after it is safely queued");
 
+  const retained = {command:"prompt", message:"earlier failed user prompt"};
+  view.inputQueue = [retained];
+  view.inputRetryPending = true;
+  const queuedBefore = calls.queued.length;
+  const draftsBefore = calls.savedDrafts;
+  input.value = "  /resume synthetic-session  ";
+  assert.equal(context.submitAgentConsoleInput(), false);
+  assert.equal(input.value, "  /resume synthetic-session  ", "an unavailable command remains editable in the composer");
+  assert.equal(input.disabled, false);
+  assert.equal(calls.queued.length, queuedBefore, "an unsupported slash command never enters the local FIFO");
+  assert.deepEqual(view.inputQueue, [retained], "prevalidation must not drop an earlier failed user prompt");
+  assert.equal(view.inputRetryPending, true, "prevalidation leaves the existing retry queue intact");
+  assert.equal(calls.savedDrafts, draftsBefore, "rejecting a command must not erase its saved draft");
+  assert.match(input.validity, /\/resume is not available/);
+  assert.match(input.validity, protocol === "omp-rpc" ? /oh-my-pi/ : /Pi/);
+  input.value = "/";
+  assert.equal(context.submitAgentConsoleInput(), false);
+  assert.match(input.validity, /Choose a command/);
+  for (const message of ["/help", " /stats with synthetic arguments ", "/tmp/synthetic-file.txt"]) {
+    input.value = message;
+    assert.equal(context.submitAgentConsoleInput(), true, "known commands and ordinary absolute paths remain accepted");
+    assert.equal(calls.queued.at(-1).message, message);
+    assert.equal(input.value, "");
+  }
+
   view.inputQueue = [{command:"prompt", message:"retry me"}];
   view.inputRetryPending = true;
   view.inputError = "temporary failure";
+  view.meta.queuePaused = true;
+  view.meta.pendingMessages = 1;
+  const commandsBeforeRetry = calls.queued.length;
   assert.equal(context.submitAgentConsoleInput(), true);
   assert.equal(calls.retries, 1, "empty composer submit provides an explicit retry path");
+  assert.equal(calls.queued.length, commandsBeforeRetry, "local Retry send takes priority over resuming the server queue");
   assert.deepEqual(view.inputQueue, [{command:"prompt", message:"retry me"}]);
+}
+
+function testProductionPausedQueueResume(protocol) {
+  const production = sourceBetween(
+    "function queueAgentConsoleInput(value)",
+    "\nfunction agentConsoleKeyData",
+  );
+  const saved = {id:"server:0", message:"synthetic saved follow-up", editable:true};
+  const view = {meta:{protocol, queuePaused:true, pendingMessages:1, queuedMessages:[saved]},
+    inputQueue:[], inputInFlightItems:[], inputSending:false, inputRetryPending:false, inputError:""};
+  const input = {value:"", disabled:false, setCustomValidity() {}};
+  let flushes = 0, drafts = 0;
+  const context = vm.createContext({AgentConsoleInputCore, AgentConsoleTabsCore, PiTimelineCore,
+    state:{agentConsoleOwnerRunId:"owner", agentConsoleSurfaceId:"surface"},
+    currentAgentConsoleView:()=>view, renderAgentConsole() {},
+    saveAgentConsoleDraft:()=>{ drafts += 1; },
+    $:id=>id === "agentConsoleInput" ? input : {focus() {}},
+  });
+  vm.runInContext(production, context);
+  context.flushAgentConsoleInput = ()=>{ flushes += 1; };
+  assert.equal(context.submitAgentConsoleInput(), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(view.inputQueue)), [{command:"resume_queue"}],
+    "empty Send resumes the server queue without copying or duplicating its saved message");
+  assert.equal(flushes, 1);
+  assert.equal(context.submitAgentConsoleInput(), false, "a second click cannot duplicate a queued resume action");
+  assert.equal(flushes, 1);
+  view.inputInFlightItems = view.inputQueue.splice(0);
+  assert.equal(context.submitAgentConsoleInput(), false, "a resume already in flight is not sent twice");
+  assert.deepEqual(view.meta.queuedMessages, [saved]);
+  assert.equal(input.value, "");
+  assert.equal(drafts, 0);
+  view.inputInFlightItems = [];
+  view.meta.queuePaused = false;
+  assert.equal(context.submitAgentConsoleInput(), false, "an ordinary empty Send never resumes an active queue");
+  view.meta.queuePaused = true;
+  view.meta.pendingMessages = 0;
+  assert.equal(context.submitAgentConsoleInput(), false, "an empty server queue remains idle");
+  view.meta.pendingMessages = 1;
+  view.meta.protocol = "terminal";
+  assert.equal(context.submitAgentConsoleInput(), false, "terminal input keeps its existing empty-send behavior");
 }
 
 function agentConsoleReadRaceHarness({control = "", currentStartedAt = "2026-09-04T10:00:00Z"} = {}) {
@@ -374,7 +443,7 @@ function agentConsoleReadRaceHarness({control = "", currentStartedAt = "2026-09-
   );
   const controlProduction = sourceBetween(
     "async function stopAgentConsoleSurface(attachment = null)",
-    "\nfunction renderFocusedRunStatus",
+    '\nlisten($("hubFanMode"),',
   );
   const target = {
     id:"surface", surfaceId:"surface", ownerRunId:"owner", agentHost:"console",
@@ -444,7 +513,8 @@ function agentConsoleReadRaceHarness({control = "", currentStartedAt = "2026-09-
     TextDecoder,
     Uint8Array,
     atob,
-    document:{hidden:false},
+    document:{hidden:false}, disposed:false,
+    navigation:{refreshSessions:async()=>{}}, onHubStatus:()=>null,
     clearTimeout:id => cancelledTimers.push(id),
     setTimeout:(callback,delay) => { timers.push({callback,delay}); timerCalls += 1; return timerCalls; },
     state,
@@ -667,13 +737,16 @@ const consoleRenderSource = sourceBetween(
 );
 assert.match(consoleRenderSource, /abortBusy\s+\? "Stopping…"/);
 assert.match(consoleRenderSource, /!activelyResponding \|\| abortBusy/);
-assert.match(app, /agentConsoleInterruptButton"\)\.addEventListener\("click", \(\) => \{\s+void stopAgentConsoleResponse\(\)/);
+assert.match(app, /listen\(\$\("agentConsoleInterruptButton"\), "click", \(\) => \{\s+void stopAgentConsoleResponse\(\)/);
 
 Promise.resolve()
   .then(testProductionFailureOrdering)
   .then(testPiResponseStopBypassesDeferredPromptQueue)
   .then(testPiResponseStopSkipsSupersededGeneration)
   .then(testProductionComposerValidation)
+  .then(() => testProductionComposerValidation("omp-rpc"))
+  .then(() => testProductionPausedQueueResume("pi-rpc"))
+  .then(() => testProductionPausedQueueResume("omp-rpc"))
   .then(() => testControlInvalidatesPendingRead("stop"))
   .then(() => testControlInvalidatesPendingRead("restart"))
   .then(testOlderServerGenerationIsDiscardedBeforeRendering)

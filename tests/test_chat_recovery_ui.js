@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const app = fs.readFileSync(path.resolve(__dirname, "..", "app.js"), "utf8");
+const app = fs.readFileSync(path.resolve(__dirname, "..", "chat_workspace.js"), "utf8");
 
 assert.match(app, /ChatStreamCore\.messageContextCharacters\(message\)/);
 assert.match(app, /ChatStreamCore\.pausedQueueRecoveryAction\(action, message, isMessageTail\)/);

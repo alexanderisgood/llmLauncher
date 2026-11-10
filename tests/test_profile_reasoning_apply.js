@@ -1,9 +1,10 @@
 "use strict";
+const launchSources=require("./helpers/launch_sources.js");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const app = fs.readFileSync(path.join(__dirname, "../app.js"), "utf8");
+const app = launchSources.controllerSource;
 const html = fs.readFileSync(path.join(__dirname, "../index.html"), "utf8");
 function between(start, end) {
   const from = app.indexOf(start), to = app.indexOf(end, from + start.length);
@@ -80,9 +81,9 @@ const ctx = vm.createContext({
     return true;
   },
 });
-vm.runInContext(
+launchSources.runInContext(
   between("function reasoningChoices(", "function adapterDescriptor(")
-  + between("function refreshLaunchability()", '  document.querySelectorAll("[data-backend]")') + "}\n"
+  + between("function refreshLaunchability()", '  collections.backendButtons.forEach') + "}\n"
   + between("function setProfileSelect(", "async function applySavedProfile("), ctx,
 );
 const profile = {

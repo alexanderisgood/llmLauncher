@@ -1,0 +1,119 @@
+{
+  "functions": [
+    "_llamacpp_route_qualification_capability",
+    "route_qualification_spec",
+    "route_qualification_reasoning_contract",
+    "qwen_ple_route_qualification_reasoning_contract",
+    "route_qualification_sample_tokens",
+    "uzu_qualification_output_policy",
+    "uzu_qualification_request_tokens",
+    "apply_route_qualification_budget",
+    "uzu_qualification_prompt_exercise_policy",
+    "validate_uzu_qualification_sample",
+    "build_route_qualification_contract",
+    "route_qualification_metrics",
+    "verified_route_qualification",
+    "public_route_qualification_result"
+  ],
+  "pureFunctions": [
+    "qwen_ple_route_qualification_reasoning_contract",
+    "route_qualification_reasoning_contract"
+  ],
+  "constants": [
+    "BACKEND_LABELS",
+    "BENCHMARK_SUITES",
+    "LLAMACPP_ATOMIC_REPO",
+    "LLAMACPP_ATOMIC_REVISION",
+    "LLAMACPP_ATOMIC_SHARDS",
+    "LLAMACPP_ATOMIC_TOTAL_BYTES",
+    "LLAMACPP_ATOMIC_VARIANT",
+    "LLAMACPP_ATOMIC_VARIANT_ID",
+    "LLAMACPP_PLE_CONTEXT",
+    "LLAMACPP_PLE_MEMORY_CEILING_BYTES",
+    "LLAMACPP_PLE_MINIMUM_DECODE_TPS",
+    "LLAMACPP_QUALIFICATION_CORRECTNESS_EXPECTED",
+    "LLAMACPP_QUALIFICATION_CORRECTNESS_ID",
+    "LLAMACPP_QUALIFICATION_REASONING_BOUNDARY_ID",
+    "LLAMACPP_QWEN_REASONING_BUDGET_MESSAGE",
+    "ROUTE_QUALIFICATION_8K_SUITE",
+    "ROUTE_QUALIFICATION_ANSWER_RESERVE_TOKENS",
+    "ROUTE_QUALIFICATION_MAX_TOKENS",
+    "ROUTE_QUALIFICATION_MINIMUM_COMPLETION_TOKENS",
+    "ROUTE_QUALIFICATION_SCENARIOS",
+    "ROUTE_QUALIFICATION_THINKING_TOKENS",
+    "ROUTE_QUALIFICATION_UZU_SUITES_BY_CONTEXT",
+    "ROUTE_QUALIFICATION_VERSION",
+    "SESSION_OS_RESERVE_FRACTION",
+    "SESSION_OS_RESERVE_MIN_BYTES",
+    "UZU_MODEL_COMMIT",
+    "UZU_MODEL_REGISTRY_ID",
+    "UZU_MODEL_TOOLCHAIN_VERSION",
+    "UZU_NATIVE_BOUNDARY_CONTRACT_ID",
+    "UZU_PROCESS_MEMORY_CEILING_BYTES",
+    "UZU_QUALIFICATION_CONTRACT_VERSION",
+    "UZU_QUALIFICATION_CORRECTNESS_EXPECTED",
+    "UZU_QUALIFICATION_CORRECTNESS_ID",
+    "UZU_QUALIFICATION_MINIMUM_DECODE_TPS",
+    "UZU_QUALIFICATION_NEAR_TIER_FRACTION",
+    "UZU_QUALIFICATION_NEAR_TIER_MINIMUM_CONTEXT",
+    "UZU_QUALIFICATION_NEAR_TIER_POLICY_ID",
+    "UZU_QUALIFICATION_NEAR_TIER_SCENARIOS",
+    "UZU_QUALIFICATION_OUTPUT_POLICY_ID",
+    "UZU_QUALIFICATION_PROMPT_RESERVE_TOKENS",
+    "UZU_QUALIFICATION_PROMPT_TOLERANCE_FRACTION",
+    "UZU_QUALIFICATION_PROMPT_TOLERANCE_MIN_TOKENS",
+    "UZU_QUALIFICATION_SAMPLE_MAX_TOKENS",
+    "UZU_QUALIFICATION_SAMPLE_MIN_TOKENS",
+    "UZU_RUNTIME_RELEASE_BINARY_SHA256",
+    "UZU_RUNTIME_RELEASE_BINARY_SIZE",
+    "UZU_RUNTIME_SOURCE_PATCH_SHA256",
+    "UZU_RUNTIME_UPSTREAM_COMMIT",
+    "UZU_SAFE_CONTEXT_WINDOWS",
+    "UZU_SANDBOX_PROFILE_SHA256"
+  ],
+  "callbacks": {
+    "_benchmark_history_value": [
+      "evidence",
+      "benchmark_history_value"
+    ],
+    "_local_benchmark_record_verified": [
+      "evidence",
+      "local_benchmark_record_verified"
+    ],
+    "benchmark_engine_settings_label": [
+      "evidence",
+      "benchmark_engine_settings_label"
+    ],
+    "cross_engine_benchmark_measurement": [
+      "evidence",
+      "cross_engine_benchmark_measurement"
+    ],
+    "is_qwen4_exp_record": [
+      "artifacts",
+      "is_qwen4_exp_record"
+    ],
+    "physical_memory_bytes": [
+      "resources",
+      "physical_memory_bytes"
+    ],
+    "route_qualification_record_is_fresh": [
+      "evidence",
+      "route_qualification_record_is_fresh"
+    ],
+    "uzu_conversation_target": [
+      "qualification",
+      "uzu_conversation_target"
+    ],
+    "uzu_listener_protection_ready": [
+      "qualification",
+      "uzu_listener_protection_ready"
+    ],
+    "uzu_qualification_memory_ceiling_supported": [
+      "qualification",
+      "uzu_qualification_memory_ceiling_supported"
+    ]
+  },
+  "fixtureSha256": "814875d8d7d685956ea2a796767ef446349c0e95ad3a568d4c7f2777e6ebae9e",
+  "sourceSha256": "814e8d6083a05cb520a400058a9bb5008a6f6aa1459235c04dedadca9c68bb83",
+  "dynamicAttributes": {}
+}

@@ -1,0 +1,341 @@
+[
+  {
+    "method": "renderBenchmarkHistory",
+    "patches": [
+      {
+        "start": 5,
+        "end": 5,
+        "before": [],
+        "after": [
+          "  $(\"benchmarkHistoryRetry\").classList.toggle(\"hidden\", !state.benchmarkHistoryError);",
+          "  $(\"benchmarkHistoryRetry\").disabled=state.benchmarkHistoryLoading;"
+        ]
+      },
+      {
+        "start": 20,
+        "end": 20,
+        "before": [],
+        "after": [
+          "    setMarkup($(\"benchmarkHistoryTrend\"), \"\");",
+          "    setMarkup($(\"benchmarkHistoryRuns\"), \"\");",
+          "    setMarkup($(\"benchmarkHistoryOther\"), \"\");"
+        ]
+      },
+      {
+        "start": 27,
+        "end": 27,
+        "before": [],
+        "after": [
+          "  if(state.benchmarkHistoryError){",
+          "    badge.textContent=\"Refresh failed\";",
+          "    freshness.className=\"benchmark-history-freshness warning\";",
+          "    freshness.textContent=`${state.benchmarkHistoryError} Last loaded history is shown; retry to refresh it.`;",
+          "  }"
+        ]
+      },
+      {
+        "start": 50,
+        "end": 51,
+        "before": [
+          "  rerun.disabled = active || !history.canRerunShootout;"
+        ],
+        "after": [
+          "  rerun.disabled = active || Boolean(state.benchmarkHistoryError) || !history.canRerunShootout;"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "loadBenchmarkHistory",
+    "patches": [
+      {
+        "start": 1,
+        "end": 1,
+        "before": [],
+        "after": [
+          "  const generation = ++state.benchmarkHistoryGeneration;"
+        ]
+      },
+      {
+        "start": 12,
+        "end": 12,
+        "before": [],
+        "after": [
+          "    state.benchmarkHistoryLoading=false;"
+        ]
+      },
+      {
+        "start": 15,
+        "end": 16,
+        "before": [
+          "  const generation = ++state.benchmarkHistoryGeneration;"
+        ],
+        "after": []
+      },
+      {
+        "start": 43,
+        "end": 45,
+        "before": [
+          "    state.benchmarkHistory = null;",
+          "    state.benchmarkHistoryError = error.message;"
+        ],
+        "after": [
+          "    if(key !== state.benchmarkHistoryKey) state.benchmarkHistory = null;",
+          "    state.benchmarkHistoryError = String(error.message || \"History could not be refreshed.\").slice(0,2048);"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "reviewBenchmarkResult",
+    "patches": [
+      {
+        "start": 1,
+        "end": 1,
+        "before": [],
+        "after": [
+          "  const generation=++reviewGeneration;"
+        ]
+      },
+      {
+        "start": 9,
+        "end": 10,
+        "before": [
+          "    if (calibrationBenchmarkActive() || requestKey !== benchmarkHistoryRequestKey(benchmarkHistoryRequest())"
+        ],
+        "after": [
+          "    if (generation !== reviewGeneration || calibrationBenchmarkActive() || requestKey !== benchmarkHistoryRequestKey(benchmarkHistoryRequest())"
+        ]
+      },
+      {
+        "start": 16,
+        "end": 17,
+        "before": [
+          "  } catch (error) { effects.showNotice(error.message, true); }"
+        ],
+        "after": [
+          "  } catch (error) { if(generation===reviewGeneration) effects.showNotice(error.message, true); }"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "renderBenchmarkStatus",
+    "patches": [
+      {
+        "start": 14,
+        "end": 14,
+        "before": [],
+        "after": [
+          "  if(benchmarkError) $(\"benchmarkStatus\").textContent=benchmarkError;"
+        ]
+      },
+      {
+        "start": 32,
+        "end": 33,
+        "before": [
+          "  if ($(\"calibrationDialog\")?.open) renderCalibrationBenchmark(status);"
+        ],
+        "after": [
+          "  if ($(\"calibrationDialog\")?.open) {",
+          "    renderCalibrationBenchmark(status);",
+          "    if(calibrationError && !calibrationBenchmarkActive()) $(\"calibrationStatus\").textContent=calibrationError;",
+          "  }"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "startBenchmark",
+    "patches": [
+      {
+        "start": 1,
+        "end": 1,
+        "before": [],
+        "after": [
+          "  benchmarkError=\"\";"
+        ]
+      },
+      {
+        "start": 7,
+        "end": 7,
+        "before": [],
+        "after": [
+          "    statusEpoch+=1;"
+        ]
+      },
+      {
+        "start": 25,
+        "end": 26,
+        "before": [
+          "  } catch (error) { $(\"benchmarkStatus\").textContent = error.message; effects.showNotice(error.message, true); }"
+        ],
+        "after": [
+          "  } catch (error) { benchmarkError=String(error.message || \"The benchmark could not be started.\").slice(0,2048); $(\"benchmarkStatus\").textContent = benchmarkError; effects.showNotice(benchmarkError, true); }"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "stopBenchmark",
+    "patches": [
+      {
+        "start": 1,
+        "end": 1,
+        "before": [],
+        "after": [
+          "  benchmarkError=\"\";"
+        ]
+      },
+      {
+        "start": 3,
+        "end": 3,
+        "before": [],
+        "after": [
+          "    statusEpoch+=1;"
+        ]
+      },
+      {
+        "start": 4,
+        "end": 5,
+        "before": [
+          "  } catch (error) { $(\"benchmarkStatus\").textContent = error.message; }"
+        ],
+        "after": [
+          "  } catch (error) { benchmarkError=String(error.message || \"The benchmark could not be stopped.\").slice(0,2048); $(\"benchmarkStatus\").textContent = benchmarkError; }"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "renderCalibration",
+    "patches": [
+      {
+        "start": 9,
+        "end": 9,
+        "before": [],
+        "after": [
+          "  if(calibrationError && !calibrationBenchmarkActive()) $(\"calibrationStatus\").textContent=calibrationError;"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "loadCalibrationPlan",
+    "patches": [
+      {
+        "start": 1,
+        "end": 1,
+        "before": [],
+        "after": [
+          "  calibrationError=\"\";",
+          "  const generation = ++state.calibrationGeneration;"
+        ]
+      },
+      {
+        "start": 6,
+        "end": 7,
+        "before": [
+          "    $(\"calibrationStatus\").textContent = error.message;"
+        ],
+        "after": [
+          "    calibrationError=String(error.message || \"Calibration could not be checked.\").slice(0,2048);",
+          "    $(\"calibrationStatus\").textContent = calibrationError;"
+        ]
+      },
+      {
+        "start": 10,
+        "end": 11,
+        "before": [
+          "  const generation = ++state.calibrationGeneration;"
+        ],
+        "after": []
+      },
+      {
+        "start": 27,
+        "end": 28,
+        "before": [
+          "      $(\"calibrationStatus\").textContent = error.message;"
+        ],
+        "after": [
+          "      calibrationError=String(error.message || \"Calibration could not be checked.\").slice(0,2048);",
+          "      $(\"calibrationStatus\").textContent = calibrationError;"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "startCalibration",
+    "patches": [
+      {
+        "start": 11,
+        "end": 13,
+        "before": [
+          "    $(\"calibrationStatus\").textContent = error.message;",
+          "    effects.showNotice(error.message, true);"
+        ],
+        "after": [
+          "    calibrationError=String(error.message || \"Calibration could not be started.\").slice(0,2048);",
+          "    $(\"calibrationStatus\").textContent = calibrationError;",
+          "    effects.showNotice(calibrationError, true);"
+        ]
+      },
+      {
+        "start": 15,
+        "end": 15,
+        "before": [],
+        "after": [
+          "  calibrationError=\"\";"
+        ]
+      },
+      {
+        "start": 52,
+        "end": 52,
+        "before": [],
+        "after": [
+          "    statusEpoch+=1;",
+          "    benchmarkError=\"\";"
+        ]
+      },
+      {
+        "start": 66,
+        "end": 68,
+        "before": [
+          "    $(\"calibrationStatus\").textContent = error.message;",
+          "    effects.showNotice(error.message, true);"
+        ],
+        "after": [
+          "    calibrationError=String(error.message || \"Calibration could not be started.\").slice(0,2048);",
+          "    $(\"calibrationStatus\").textContent = calibrationError;",
+          "    effects.showNotice(calibrationError, true);"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "applyCalibrationResult",
+    "patches": [
+      {
+        "start": 31,
+        "end": 31,
+        "before": [],
+        "after": [
+          "  calibrationError=\"\";"
+        ]
+      },
+      {
+        "start": 108,
+        "end": 110,
+        "before": [
+          "    $(\"calibrationStatus\").textContent = error.message;",
+          "    effects.showNotice(error.message, true);"
+        ],
+        "after": [
+          "    calibrationError=String(error.message || \"The measured result could not be applied.\").slice(0,2048);",
+          "    $(\"calibrationStatus\").textContent = calibrationError;",
+          "    effects.showNotice(calibrationError, true);"
+        ]
+      }
+    ]
+  }
+]

@@ -114,6 +114,9 @@ class ConsoleBackpressureTests(unittest.TestCase):
             master_fd=master, cols=100, rows=30,
         )
         manager = launcher.RunManager()
+        # This fixture has a mocked process; EOF finalization must not signal
+        # a real process group through its synthetic pid.
+        manager._terminate_process = Mock()
         sent = threading.Event()
         errors = []
 

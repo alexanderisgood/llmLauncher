@@ -3,11 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync(require.resolve("../app.js"), "utf8");
-function source(start, end) {
-  const from = app.indexOf(start), to = app.indexOf(end, from);
-  assert.ok(from >= 0 && to > from);
-  return app.slice(from, to);
-}
+const source = require("./helpers/workspace_sources.js").between;
 const mutations = [];
 const previewVisibility = [];
 const elements = new Map();
@@ -28,7 +24,9 @@ function element(id) {
 const state = {agentConsoleVisible:false, agentConsoleSurfaceId:"pi", chatRunId:"",
   chatOwnerRunId:"", agentConsoleOwnerRunId:"owner", runStatus:{attachments:[]}};
 const run = {runId:"owner", client:"pi"};
-const context = vm.createContext({state, $:element,
+const context = vm.createContext({state, $:element, agentConsoleIsVisible:()=>state.agentConsoleVisible,
+  navigation:{setConsoleVisible:visible=>{if(visible)element("chatWorkspace").classList.add("hidden");return !element("chatWorkspace").classList.contains("hidden");},
+    updateChrome:()=>context.updateWorkspaceChrome(),setSubtitle:label=>{element("configSubtitle").textContent=label;},showSettings:()=>{}},
   agentPiTimelineView:{setVisible:(_timeline, visible)=>previewVisibility.push(visible)},
   sessionRouteActive:()=>true, syncAgentConsoleViews:()=>{},
   currentAgentConsoleView:()=>({meta:{surface:"Pi",client:"pi",model:"Qwen"}}),
@@ -37,6 +35,7 @@ const context = vm.createContext({state, $:element,
 });
 vm.runInContext([
   source("function updateWorkspaceChrome()", "\nfunction agentConsoleBaseOffset"),
+  source("function updateChatWorkspace(run, phase)", "\nasync function stopChatResponse"),
   source("function updateAgentWorkspace(run, phase)", "\nfunction scheduleAgentConsoleRead"),
 ].join("\n"),context);
 function refresh() {

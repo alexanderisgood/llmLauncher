@@ -15,20 +15,24 @@
     return utf8Encoder.encode(String(value ?? "")).byteLength;
   }
 
-  function validatePiPrompt(value) {
+  function agentLabel(protocol = "pi-rpc") { return protocol === "omp-rpc" ? "oh-my-pi" : "Pi"; }
+
+  function isStructuredProtocol(protocol) { return protocol === "pi-rpc" || protocol === "omp-rpc"; }
+
+  function validatePiPrompt(value, label = "Pi") {
     const text = typeof value === "string" ? value : "";
     // Account for JSON escaping before accepting text into the local queue.
     const bytes = utf8ByteLength(JSON.stringify(text)) - 2;
     if (!text.trim()) {
       return {
         ok:false, bytes, maximumBytes:PI_MESSAGE_MAX_BYTES,
-        error:"Enter a message for Pi.",
+        error:`Enter a message for ${label}.`,
       };
     }
     if (bytes > PI_MESSAGE_MAX_BYTES) {
       return {
         ok:false, bytes, maximumBytes:PI_MESSAGE_MAX_BYTES,
-        error:`This encoded Pi message uses ${bytes.toLocaleString()} bytes. Keep it at or below ${PI_MESSAGE_MAX_BYTES.toLocaleString()} bytes; your text has not been cleared.`,
+        error:`This encoded ${label} message uses ${bytes.toLocaleString()} bytes. Keep it at or below ${PI_MESSAGE_MAX_BYTES.toLocaleString()} bytes; your text has not been cleared.`,
       };
     }
     return {ok:true, bytes, maximumBytes:PI_MESSAGE_MAX_BYTES, error:""};
@@ -105,6 +109,7 @@
     TERMINAL_BATCH_CHARACTERS,
     utf8ByteLength,
     validatePiPrompt,
+    agentLabel, isStructuredProtocol,
     takeNextBatch,
     restoreFailedBatch,
     isPiPrompt,

@@ -8,19 +8,38 @@ export function reasoningRepetition(text) {
   // Exclude fences before selecting the tail: its opening fence may be
   // outside the window, in which case slicing first misclassifies code.
   const tail = text.replace(/```[\s\S]*?(?:```|$)/g, '').slice(-16000);
-  const paragraphs = tail.split(/\n\s*\n/).map(p => p.replace(/\s+/g, ' ').trim());
-  const counts = new Map();
-  for (const p of paragraphs) {
-    const words = p.match(/[a-z]+/gi) || [];
-    // Real Qwopus loops alternate a longer explanation with short prose
-    // paragraphs. Ignoring the short members made an almost entirely copied
-    // cycle score below the coverage threshold and reach the next prompt.
-    if (p.length < 80 || words.length < 14 || new Set(words.map(w => w.toLowerCase())).size < 10) continue;
-    counts.set(p, (counts.get(p) || 0) + 1);
-  }
-  let repeated = 0;
-  for (const [p, count] of counts) if (count >= (p.length < 180 ? 4 : 3)) repeated += p.length * count;
-  return repeated >= 2400 && repeated / Math.max(1, tail.length) >= 0.65;
+  const repeatedChars = (window, shortOnly = false) => {
+    const paragraphs = window.split(/\n\s*\n/).map(p => p.replace(/\s+/g, ' ').trim());
+    const counts = new Map();
+    for (const p of paragraphs) {
+      const words = p.match(/[a-z]+/gi) || [];
+      // Kolibri can repeat a single short question/answer paragraph. Require
+      // prose and sustained coverage, rather than excluding small loops.
+      if (p.length < 40 || (shortOnly && p.length >= 180) || words.length < 8
+          || new Set(words.map(w => w.toLowerCase())).size < 6) continue;
+      counts.set(p, (counts.get(p) || 0) + 1);
+    }
+    let repeated = 0;
+    for (const [p, count] of counts) if (count >= (p.length < 180 ? 4 : 3)) repeated += p.length * count;
+    return repeated;
+  };
+  const repeated = repeatedChars(tail);
+  if (repeated >= 2400 && repeated / Math.max(1, tail.length) >= 0.65) return true;
+  // A valid plan/code draft before a short loop must not dilute its coverage.
+  // Require the final 2K characters to be dominated by substantial repeated
+  // short prose; ordinary long reasoning and fenced code still stay intact.
+  const suffix = tail.slice(-2048);
+  const shortRepeated = repeatedChars(suffix, true);
+  return shortRepeated >= 1200 && shortRepeated / Math.max(1, suffix.length) >= 0.75;
+}
+
+// The observed Splash failure invented thousands of decimal places for a
+// fractal coordinate. This is not a prose cycle. Restrict detection to one
+// uninterrupted number in reasoning, excluding code fences and normal lists.
+export function reasoningDigitRun(text) {
+  if (typeof text !== 'string' || text.length < 4096) return false;
+  const prose = text.replace(/```[\s\S]*?(?:```|$)/g, '');
+  return /\d{4096}/.test(prose);
 }
 
 // Older launcher versions injected this as an assistant answer. Remove exact
@@ -31,17 +50,33 @@ export function isDamagedReasoningBlock(block) {
   const text = block.type === 'thinking' ? block.thinking || block.text || ''
     : block.type === 'text' ? block.text || '' : '';
   return text.trim() === LEGACY_REASONING_MARKER
-    || (block.type === 'thinking' && reasoningRepetition(text));
+    || (block.type === 'thinking' && (reasoningRepetition(text) || reasoningDigitRun(text)));
 }
 
 export function recoveredReasoningContext(messages, onChanged = () => {}) {
   return messages.flatMap(message => {
     if (message.role !== 'assistant' || !Array.isArray(message.content)) return [message];
+    // A length-ended thinking-only attempt produced no answer or action.
+    // Refeeding it encourages continuing the same unfinished derivation.
+    // Use the terminal reason, not guesses about semantic repetition; keep
+    // successful long reasoning, partial answers and real tool calls intact.
+    if (exhaustedThinkingOnly(message)) {
+      onChanged(message);
+      return [];
+    }
     const content = message.content.filter(block => !isDamagedReasoningBlock(block));
     if (content.length === message.content.length) return [message];
     onChanged(message);
     return content.length ? [{...message, content}] : [];
   });
+}
+
+export function exhaustedThinkingOnly(message) {
+  return message?.role === 'assistant' && message.stopReason === 'length'
+    && Array.isArray(message.content)
+    && message.content.some(block => block.type === 'thinking' && (block.thinking || block.text || '').trim())
+    && message.content.every(block => block.type === 'thinking'
+      || (block.type === 'text' && !(block.text || '').trim()));
 }
 
 export function cleanCompactionReasoning(preparation) {

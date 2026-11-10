@@ -1,0 +1,15 @@
+{
+  "runId": "6d47c836-4296-47f0-8577-b41bb6a0a7d3",
+  "kv": "q8",
+  "runtimeVersion": "0.2.17-q8.2",
+  "context": 131072,
+  "output": 100000,
+  "memoryGB": 41,
+  "depth": 2,
+  "conversationPreserved": true,
+  "consoleState": "running",
+  "streaming": false,
+  "nativeTargetGB": 38.2,
+  "expertPoolGB": 21.1,
+  "processResidentBytes": 25269260128
+}

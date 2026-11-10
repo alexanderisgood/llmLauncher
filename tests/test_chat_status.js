@@ -235,3 +235,35 @@ assert.equal(core.promptProcessingSummary(null,whallmComplete).value,'400.0 tok/
 assert.match(core.promptProcessingSummary(null,whallmComplete).title,/Whallm.*2,000 new prompt tokens; 8,000 cached tokens are excluded/);
 assert.equal(core.agentContextSummary({},16384,{liveTelemetry:{source:'whallm-native-stats',contextTokens:8192}}).usedTokens,8192);
 console.log('Whallm native prompt/decode attribution and fresh-prefill display passed');
+
+const slotstreamPrompt = {promptProcessing:{source:'slotstream-native-stats',tokensPerSecond:200,processedTokens:100,cachedTokens:3900}};
+assert.equal(core.promptProcessingSummary(slotstreamPrompt,null).value,'200.0 tok/s');
+assert.match(core.promptProcessingSummary(null,slotstreamPrompt).title,/Slotstream.*3,900 cached tokens are excluded/);
+assert.match(core.requestTps({runtimeStatsSource:'slotstream-native-stats',runtimeTokensPerSecond:16}).label,/Slotstream native decode/);
+assert.match(core.promptProcessingSummary(slotstreamPrompt,null).title,/excludes decode and cached tokens/);
+
+const omlxNative = {runtimeStatsSource:'omlx-native-stats',runtimeTokensPerSecond:2.6,
+  promptProcessing:{source:'omlx-native-stats',tokensPerSecond:1.4,processedTokens:28,cachedTokens:0}};
+assert.equal(core.requestTps(omlxNative).primary,2.6);
+assert.match(core.requestTps(omlxNative).label,/oMLX native decode/);
+
+const kolibriNative = {runtimeStatsSource:'kolibri-native-stats',runtimeTokensPerSecond:8.6,
+  decodeTokensPerSecond:24.08,promptProcessing:{source:'kolibri-native-stats',
+    tokensPerSecond:31.38,processedTokens:1121,cachedTokens:0}};
+assert.equal(core.requestTps(kolibriNative).primary,8.6,'native tool generation timing supersedes buffered relay timing');
+assert.match(core.requestTps(kolibriNative).label,/Kolibri native decode/);
+assert.match(core.promptProcessingSummary(null,kolibriNative).title,/Kolibri/);
+const splashNative={backend:'splash',runtimeStatsSource:'splash-native-stats',runtimeTokensPerSecond:78,
+  decodeTokensPerSecond:120,endToEndTokensPerSecond:40,promptProcessing:{source:'splash-native-stats',
+    tokensPerSecond:453,processedTokens:500,cachedTokens:0,basis:'request-start-to-first-native-token'}};
+assert.equal(core.requestTps(splashNative).primary,78);
+assert.match(core.requestTps(splashNative).label,/first native batch excluded/);
+assert.match(core.promptProcessingSummary(null,splashNative).title,/request preparation/);
+const firstBatchOnly={...splashNative,runtimeTokensPerSecond:null};
+assert.equal(core.requestTps(firstBatchOnly).primaryKind,'end-to-end');
+assert.equal(core.requestTps(firstBatchOnly).primary,40);
+const wait={value:'Waiting…',state:'unknown',title:'Awaiting native timing'};
+assert.deepEqual(core.agentGenerationSpeed({backend:'splash',state:'running'},null,
+  {value:'120 tok/s Pi live',state:'live'},wait),wait,'unproven Pi estimates cannot replace native-only decode');
+assert.equal(core.promptProcessingSummary(null,omlxNative).value,'1.4 tok/s · last');
+assert.match(core.promptProcessingSummary(null,omlxNative).title,/oMLX.*28 new prompt tokens/);

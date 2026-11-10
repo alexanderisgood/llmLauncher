@@ -1,4 +1,5 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -6,7 +7,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const app = benchmarkSources.controllerSource;
 const index = fs.readFileSync(path.join(root, "index.html"), "utf8");
 const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 const controllerSource = fs.readFileSync(path.join(root, "launcher.py"), "utf8");
@@ -48,7 +49,7 @@ assert.doesNotMatch(controlsMarkup, /<(?:select|input)\b/);
 assert.match(index, /id="modelLibraryEngineFilter"[^]*<option value="uzu">Uzu · Mirai<\/option>/);
 assert.match(index, /id="clientChoices"[^>]*aria-describedby="compatibilityLine"/);
 assert.match(app, /\["omlx", "lmstudio", "mtplx", "uzu", "freetoken"/);
-assert.match(app, /\["uzu", "whallm", "llamacpp"\]\.includes\(state\.backend\)[^]*acceleration:"off", depth:1, kv:"off"/);
+assert.match(app, /\["uzu", "whallm", "splash", "llamacpp"\]\.includes\(state\.backend\)[^]*acceleration:"off", depth:1, kv:"off"/);
 assert.match(app, /\["uzu", "freetoken", "swiftlm", "mference", "whallm", "llamacpp"\]\.includes\(state\.backend\)/);
 assert.match(app, /mirai:"Uzu · Mirai"/);
 assert.match(app, /route-qualification-uzu-16k/);
@@ -56,7 +57,7 @@ assert.match(app, /route-qualification-uzu-32k/);
 assert.match(app, /Chat only for initial qualification/);
 const piReceiptContext = {state:{backend:"uzu", client:"pi"}};
 vm.createContext(piReceiptContext);
-vm.runInContext(app.slice(app.indexOf("function performanceReceiptView("),
+benchmarkSources.runInContext(app.slice(app.indexOf("function performanceReceiptView("),
   app.indexOf("\nfunction renderEngineEvidenceChoices(")), piReceiptContext);
 const piReceipt = piReceiptContext.performanceReceiptView({state:"qualification-needed"});
 assert.equal(piReceipt.actionId, "review-capacity");
@@ -81,7 +82,7 @@ const nameEnd = app.indexOf("\nfunction routeCapabilityPresentation", descriptor
 assert.ok(descriptorStart >= 0 && nameEnd > descriptorStart);
 const nameContext = {state: {adapters: {engines: []}}};
 vm.createContext(nameContext);
-vm.runInContext(app.slice(descriptorStart, nameEnd), nameContext);
+benchmarkSources.runInContext(app.slice(descriptorStart, nameEnd), nameContext);
 assert.equal(nameContext.backendName("uzu"), "Uzu · Mirai");
 assert.equal(nameContext.backendMark("uzu"), "U");
 assert.equal(nameContext.backendBinaryKey("uzu"), "mirai");
@@ -99,7 +100,7 @@ const candidateContext = {
   llamaCppPleCapabilityQualified: () => false,
 };
 vm.createContext(candidateContext);
-vm.runInContext(app.slice(candidatesStart, candidatesEnd), candidateContext);
+benchmarkSources.runInContext(app.slice(candidatesStart, candidatesEnd), candidateContext);
 assert.deepEqual(
   JSON.parse(JSON.stringify(candidateContext.benchmarkCandidates({
     runnable: true, runtimeManagedAcceleration: "DFlash + Weaver",
@@ -115,7 +116,7 @@ const contextLabelContext = {
   UZU_QUALIFICATION_CONTEXTS: [16_384, 32_768, 65_536, 131_072],
 };
 vm.createContext(contextLabelContext);
-vm.runInContext(app.slice(contextLabelStart, contextLabelEnd), contextLabelContext);
+benchmarkSources.runInContext(app.slice(contextLabelStart, contextLabelEnd), contextLabelContext);
 assert.equal(
   contextLabelContext.modelContextLabel({
     modelType: "qwen3.6-uzu", nativeContext: 262_144,
@@ -145,7 +146,7 @@ const selectedBackendContext = {
   llamaCppPleQualified: () => false,
 };
 vm.createContext(selectedBackendContext);
-vm.runInContext(app.slice(selectedBackendStart, selectedBackendEnd), selectedBackendContext);
+benchmarkSources.runInContext(app.slice(selectedBackendStart, selectedBackendEnd), selectedBackendContext);
 assert.equal(selectedBackendContext.selectedRouteQualificationBackend(), "uzu");
 selectedBackendModel.backends.uzu.runnable = false;
 assert.equal(selectedBackendContext.selectedRouteQualificationBackend(), "");
@@ -173,7 +174,7 @@ const receiptSuiteContext = {
   CalibrationDecision: {receiptSuite: () => "standard"},
 };
 vm.createContext(receiptSuiteContext);
-vm.runInContext(app.slice(receiptSuiteStart, receiptSuiteEnd), receiptSuiteContext);
+benchmarkSources.runInContext(app.slice(receiptSuiteStart, receiptSuiteEnd), receiptSuiteContext);
 assert.equal(receiptSuiteContext.performanceReceiptSuite(), "route-qualification-uzu-16k");
 assert.equal(
   receiptSuiteContext.calibrationSuiteControlValue("route-qualification-uzu-16k"),
@@ -203,7 +204,7 @@ const qualificationProfileContext = {
   controllerRouteQualificationBackend: () => "uzu",
 };
 vm.createContext(qualificationProfileContext);
-vm.runInContext(app.slice(qualificationProfileStart, qualificationProfileEnd), qualificationProfileContext);
+benchmarkSources.runInContext(app.slice(qualificationProfileStart, qualificationProfileEnd), qualificationProfileContext);
 const qualificationProfile = qualificationProfileContext.calibrationQualificationProfile({});
 assert.equal(qualificationProfile.uzu, true);
 assert.equal(qualificationProfile.routeLabel, "Uzu DFlash + Weaver");
@@ -309,8 +310,8 @@ const contractStart = app.indexOf("function uzuQualificationContractExact");
 const contractEnd = app.indexOf("\nfunction routeQualificationContractExact", contractStart);
 assert.ok(contractStart >= 0 && contractEnd > contractStart);
 vm.createContext(contractContext);
-vm.runInContext(app.slice(promptPolicyStart, promptPolicyEnd), contractContext);
-vm.runInContext(app.slice(contractStart, contractEnd), contractContext);
+benchmarkSources.runInContext(app.slice(promptPolicyStart, promptPolicyEnd), contractContext);
+benchmarkSources.runInContext(app.slice(contractStart, contractEnd), contractContext);
 
 function exactUzuPlan(context) {
   const suite = uzuQualificationSuite(context);
@@ -459,7 +460,7 @@ const applyGuardContext = {
   llamaQualificationContractExact: () => false,
 };
 vm.createContext(applyGuardContext);
-vm.runInContext(app.slice(applyGuardStart, applyGuardEnd), applyGuardContext);
+benchmarkSources.runInContext(app.slice(applyGuardStart, applyGuardEnd), applyGuardContext);
 const qualifiedPlan = exactUzuPlan(16_384);
 qualifiedPlan.evidence = {
   qualified: true,
@@ -483,7 +484,7 @@ const resultMetricContext = {
   UZU_QUALIFICATION_MINIMUM_TPS: 15,
 };
 vm.createContext(resultMetricContext);
-vm.runInContext(app.slice(resultMetricStart, resultMetricEnd), resultMetricContext);
+benchmarkSources.runInContext(app.slice(resultMetricStart, resultMetricEnd), resultMetricContext);
 const resultMarkup = resultMetricContext.routeQualificationFactsMarkup({
   decodeTokensPerSecond: 25.4,
   minimumDecodeTokensPerSecond: 16.1,
@@ -524,19 +525,16 @@ const coolingHelpContext = {
   calibrationQualificationProfile: () => ({uzu: true, llama: false}),
 };
 vm.createContext(coolingHelpContext);
-vm.runInContext(app.slice(coolingHelpStart, coolingHelpEnd), coolingHelpContext);
+benchmarkSources.runInContext(app.slice(coolingHelpStart, coolingHelpEnd), coolingHelpContext);
 coolingHelpContext.updateCalibrationHelp();
 assert.match(coolingElements.calibrationCoolingHelp.textContent, /Uzu does not expose fan control/);
 assert.match(coolingElements.calibrationCoolingHelp.textContent, /macOS control/);
 assert.doesNotMatch(coolingElements.calibrationCoolingHelp.textContent, /Maximum fans/);
 assert.match(app, /const coolingLocked = plan\?\.calibrationCoolingLocked === true;/);
 
-const libraryModeStart = app.indexOf("function modelLibraryEngineModes");
-const libraryModeEnd = app.indexOf("\nfunction visibleModelLibraryOverview", libraryModeStart);
-assert.ok(libraryModeStart >= 0 && libraryModeEnd > libraryModeStart);
-const libraryModeContext = {isUzuModel: () => true};
-vm.createContext(libraryModeContext);
-vm.runInContext(app.slice(libraryModeStart, libraryModeEnd), libraryModeContext);
+const assets = require("../model_assets.js");
+const libraryModeContext = {modelLibraryEngineModes:(model,engine)=>assets.modelEngineModes(model,engine,()=>true),
+  modelLibraryChecks:model=>assets.modelChecks(model,()=>true)};
 assert.deepEqual(
   JSON.parse(JSON.stringify(libraryModeContext.modelLibraryEngineModes(uzuModel, {
     id: "uzu", runnable: true, modes: [{id: "ar", label: "AR", available: true}],

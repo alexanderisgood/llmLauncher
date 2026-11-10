@@ -1,4 +1,5 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -6,7 +7,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const app = benchmarkSources.controllerSource;
 
 function sourceBetween(startMarker, endMarker) {
   const start = app.indexOf(startMarker);
@@ -56,7 +57,7 @@ async function run() {
     clearTimeout:id => scheduled.delete(id),
   };
   vm.createContext(helperContext);
-  vm.runInContext(sourceBetween(
+  benchmarkSources.runInContext(sourceBetween(
     "const SESSION_ADMISSION_REFRESH_MS",
     "\nfunction clearWarmRoutePlan",
   ), helperContext);
@@ -87,6 +88,11 @@ async function run() {
     ),
     /Choose High memory in Runtime controls/,
   );
+  helperState.sessionDashboard.admission = {
+    launchable:false, decision:"pressure", label:"Free memory before loading Splash",
+    detail:"39.9 GiB needed. 29.8 GiB is available, including reclaimable cache.",
+  };
+  assert.match(helperContext.sessionAdmissionBlockerCopy(), /29.8 GiB is available, including reclaimable cache/);
 
   helperState.sessionDashboard = {admission:{
     launchable:true, requiresAcknowledgement:false,
@@ -205,7 +211,7 @@ async function run() {
     },
   };
   vm.createContext(staleContext);
-  vm.runInContext(sourceBetween(
+  benchmarkSources.runInContext(sourceBetween(
     "async function loadSessionDashboard(",
     "\nasync function openSessionDashboard",
   ), staleContext);

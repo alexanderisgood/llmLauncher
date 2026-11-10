@@ -16,6 +16,8 @@ import json
 import math
 import os
 import re
+import select
+import socket
 import sys
 import threading
 import time
@@ -38,11 +40,16 @@ from codex_proxy import (
     enforce_sampling_contract,
     transform_response_request,
     validate_omlx_context_is_self_contained,
+    validate_rapidmlx_stateless_request,
     validated_sampling_policy,
 )
 from responses_bridge import BridgeRequest, ChatStreamBridge, translate_responses_request
 from relay_transport import InterruptibleHTTPConnection
-from sse_framing import EventScanner, pop_event
+from response_metrics import ResponseMetrics as _ResponseMetrics
+from inference_requests import apply_rec_chat_contract
+from pi_protocol import PI_SUMMARIZATION_SYSTEM_PROMPT, is_pi_summary
+from splash_runtime import bound_thinking_budget, relax_tool_schemas
+from sse_framing import EventScanner, ResponseOutcome, pop_event
 
 
 VERSION = 2
@@ -50,15 +57,19 @@ MAX_BODY = 128 * 1024 * 1024
 MAX_CONTROL_BODY = 64 * 1024
 MAX_RECENT = 32
 MAX_QUEUE = 64
+MAX_INGRESS_BYTES = 128 * 1024 * 1024
+MAX_INGRESS_REQUESTS = 8
+MAX_HANDLER_THREADS = 32
+INPUT_DEADLINE_SECONDS = 30
 MAX_METRICS_BUFFER = 1024 * 1024
 MAX_LIMIT_GUARD_BUFFER = 256 * 1024
 MIN_TPS_COMPLETION_TOKENS = 16
 MIN_TPS_SECONDS = 0.25
-CLIENTS = {"chat", "pi", "opencode", "codex"}
-CLIENT_LABELS = {"chat": "Chat", "pi": "Pi", "opencode": "OpenCode", "codex": "Codex"}
+CLIENTS = {"chat", "pi", "omp", "opencode", "codex"}
+CLIENT_LABELS = {"chat": "Chat", "pi": "Pi", "omp": "oh-my-pi", "opencode": "OpenCode", "codex": "Codex"}
 SUPPORTED_BACKENDS = {
     "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
-    "llamacpp", "uzu", "slotstream",
+    "llamacpp", "uzu", "slotstream", "splash", "strata", "kolibri", "rec", "rapidmlx",
 }
 UZU_CONTEXT_WINDOWS = frozenset({16_384, 32_768, 65_536, 131_072})
 CHAT_REASONING_LEVELS = frozenset({
@@ -176,6 +187,10 @@ def load_config(path: Path) -> dict[str, Any]:
         fail("unexpected reasoning boundary message")
     if value.get("reasoning") not in CHAT_REASONING_LEVELS:
         fail("invalid reasoning effort")
+    if value.get("backend") == "rec" and value.get("reasoning") != "auto":
+        fail("Rec always enables Flint reasoning; select Model default")
+    if value.get("backend") == "rapidmlx" and value.get("reasoning") not in {"auto", "off"}:
+        fail("Rapid MLX reasoning must be auto or off")
     if value.get("backend") == "uzu":
         if value.get("reasoning") not in {"auto", "off"}:
             fail("Uzu Qwen3.6 reasoning must be auto or off")
@@ -253,10 +268,75 @@ class SurfaceRegistry:
             ]
 
 
+class IngressBudget:
+    """Bound retained wire bodies before reading or parsing (not a heap estimate)."""
+
+    def __init__(self, maximum_bytes=MAX_INGRESS_BYTES, maximum_requests=MAX_INGRESS_REQUESTS):
+        self.maximum_bytes = maximum_bytes
+        self.maximum_requests = maximum_requests
+        self.bytes = 0
+        self.requests = 0
+        self.lock = threading.Lock()
+
+    def acquire(self, length: int) -> bool:
+        with self.lock:
+            if self.requests >= self.maximum_requests or self.bytes + length > self.maximum_bytes:
+                return False
+            self.requests += 1
+            self.bytes += length
+            return True
+
+    def release(self, length: int) -> None:
+        with self.lock:
+            self.requests -= 1
+            self.bytes -= length
+
+    def snapshot(self) -> dict[str, int]:
+        with self.lock:
+            return {"reservedBodyBytes": self.bytes, "requests": self.requests,
+                    "maximumBodyBytes": self.maximum_bytes, "maximumRequests": self.maximum_requests}
+
+
+def downstream_closed(connection: socket.socket) -> bool:
+    """Observe EOF without consuming request bytes; reset sockets are closed too."""
+    try:
+        readable, _, _ = select.select([connection], [], [], 0)
+        return bool(readable and connection.recv(1, socket.MSG_PEEK) == b"")
+    except (OSError, ValueError):
+        return True
+
+
+class RelayHTTPServer(ThreadingHTTPServer):
+    """Bound handlers, including clients stalled before HTTP authentication."""
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.handler_slots = threading.BoundedSemaphore(MAX_HANDLER_THREADS)
+
+    def process_request(self, request, client_address):
+        if not self.handler_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            request.settimeout(INPUT_DEADLINE_SECONDS)
+            super().process_request(request, client_address)
+        except BaseException:
+            self.handler_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.handler_slots.release()
+
+
 class RequestScheduler:
     """Fair FCFS admission with bounded, text-free request metadata."""
 
     def __init__(self, lanes: int, max_queue: int = MAX_QUEUE) -> None:
+        self.ingress = IngressBudget()
         self.lanes = max(1, min(16, int(lanes)))
         self.max_queue = max(1, min(128, int(max_queue)))
         self.condition = threading.Condition(threading.RLock())
@@ -268,7 +348,7 @@ class RequestScheduler:
         self.last_activity_at = self.started_at
         self.last_activity_monotonic = time.monotonic()
 
-    def begin(self, surface: dict[str, str], protocol: str) -> str:
+    def begin(self, surface: dict[str, str], protocol: str, backend: str | None = None) -> str:
         with self.condition:
             if len(self.queue) >= self.max_queue:
                 raise OverflowError("The private session request queue is full.")
@@ -280,6 +360,7 @@ class RequestScheduler:
                 "client": surface["client"],
                 "surface": CLIENT_LABELS[surface["client"]],
                 "protocol": protocol,
+                "backend": backend if backend in SUPPORTED_BACKENDS else None,
                 "state": "queued",
                 "queuedAt": utc_now(),
                 "queuedMonotonic": now,
@@ -289,6 +370,7 @@ class RequestScheduler:
                 "firstByteMonotonic": None,
                 "firstOutputAt": None,
                 "firstOutputMonotonic": None,
+                "upstreamCompletedMonotonic": None,
                 "endedAt": None,
                 "endedMonotonic": None,
                 "statusCode": None,
@@ -311,11 +393,14 @@ class RequestScheduler:
             self.condition.notify_all()
             return request_id
 
-    def await_turn(self, request_id: str) -> bool:
+    def await_turn(self, request_id: str, disconnected=None) -> bool:
         with self.condition:
             while True:
                 record = self.records.get(request_id)
                 if record is None:
+                    return False
+                if disconnected is not None and disconnected():
+                    self._finish_locked(record, "client-disconnected")
                     return False
                 if record["cancel"].is_set():
                     self._finish_locked(record, "cancelled")
@@ -355,11 +440,32 @@ class RequestScheduler:
                 record["firstOutputAt"] = utc_now()
                 record["firstOutputMonotonic"] = time.monotonic()
 
+    def observe_chunk(self, request_id: str, count: int, emitted: bool = False) -> None:
+        """Record wire progress in one lock; clocks are sampled only once."""
+        with self.condition:
+            record = self.records.get(request_id)
+            if record is None:
+                return
+            record["bytesRelayed"] += max(0, count)
+            if record["firstByteMonotonic"] is None:
+                record["firstByteAt"] = utc_now()
+                record["firstByteMonotonic"] = time.monotonic()
+            if emitted and record["firstOutputMonotonic"] is None:
+                record["firstOutputAt"] = utc_now()
+                record["firstOutputMonotonic"] = time.monotonic()
+
+    def upstream_completed(self, request_id: str) -> None:
+        """Stop observation before terminal translation and downstream flushing."""
+        with self.condition:
+            record = self.records.get(request_id)
+            if record is not None and record["upstreamCompletedMonotonic"] is None:
+                record["upstreamCompletedMonotonic"] = time.monotonic()
+
     def set_usage(
         self, request_id: str, prompt_tokens: int | None, completion_tokens: int | None,
     ) -> None:
         def valid(value: int | None) -> int | None:
-            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+            return ResponseMetrics._integer(value)
 
         with self.condition:
             record = self.records.get(request_id)
@@ -376,10 +482,25 @@ class RequestScheduler:
             "totalDraftTokens": 2_000_000_000,
             "acceptedDraftTokens": 2_000_000_000,
             "speculativeAcceptancePercent": 100.0,
+            "runtimeDecodeTokenCount": 2_000_000_000,
+            "runtimeFirstBatchTokens": 2_000_000_000,
         }
         with self.condition:
             record = self.records.get(request_id)
             if record is None:
+                return
+            native_sources = {"kolibri-native-stats", "splash-native-stats"}
+            prior_source = record.get("runtimeStatsSource")
+            incoming_source = value.get("runtimeStatsSource")
+            if prior_source in native_sources or incoming_source in native_sources:
+                # The observer publishes its current complete proof. An
+                # invalid final frame must not retain an earlier valid rate.
+                for key in (*bounds, "runtimeStatsSource", "runtimeThroughputBasis"):
+                    record.pop(key, None)
+                if (record.get("promptProcessing") or {}).get("source") in native_sources:
+                    record.pop("promptProcessing", None)
+            expected_source = {"kolibri":"kolibri-native-stats", "splash":"splash-native-stats"}.get(record.get("backend"))
+            if expected_source and incoming_source != expected_source:
                 return
             tag = value.get("uzuRequestTag")
             if isinstance(tag, str) and re.fullmatch(r"[0-9a-f]{8}", tag):
@@ -387,15 +508,45 @@ class RequestScheduler:
             response_id = value.get("runtimeResponseId")
             if isinstance(response_id, str) and re.fullmatch(r"chatcmpl-[0-9a-f]{8,32}", response_id):
                 record["runtimeResponseId"] = response_id
+            source = value.get("runtimeStatsSource")
+            if source in {"slotstream-native-stats", "omlx-native-stats", "kolibri-native-stats", "splash-native-stats", "lmstudio-response-stats"}:
+                record["runtimeStatsSource"] = source
+            basis = value.get("runtimeThroughputBasis")
+            if (source, basis) in {
+                ("kolibri-native-stats", "request-native-generation"),
+                ("splash-native-stats", "request-lifecycle-excluding-first-native-batch"),
+            }:
+                record["runtimeThroughputBasis"] = basis
+            prompt = value.get("promptProcessing")
+            if isinstance(prompt, dict) and prompt.get("source") in {"slotstream-native-stats", "omlx-native-stats", "kolibri-native-stats", "splash-native-stats"}:
+                # Revalidate at the scheduler boundary; retain numeric fields only.
+                speed = ResponseMetrics._number(prompt.get("tokensPerSecond"), 10_000_000)
+                elapsed = ResponseMetrics._number(prompt.get("elapsedSeconds"), 604800, positive=True)
+                processed = ResponseMetrics._integer(prompt.get("processedTokens"))
+                cached = ResponseMetrics._integer(prompt.get("cachedTokens"))
+                if None not in (speed, elapsed, processed, cached):
+                    record["promptProcessing"] = {"source": prompt["source"],
+                        "tokensPerSecond": speed, "elapsedSeconds": elapsed,
+                        "processedTokens": processed, "cachedTokens": cached}
+                    if (prompt["source"] == "splash-native-stats"
+                            and prompt.get("basis") == "request-start-to-first-native-token"):
+                        record["promptProcessing"]["basis"] = prompt["basis"]
+            cache = value.get("expertCache")
+            if source == "slotstream-native-stats" and isinstance(cache, dict):
+                size = ResponseMetrics._integer(cache.get("allocatedBytes"), 1_000_000_000_000)
+                slots = ResponseMetrics._integer(cache.get("slots"), 24_576)
+                hit = ResponseMetrics._number(cache.get("hitRatePercent"), 100)
+                if None not in (size, slots, hit):
+                    record["expertCache"] = {"allocatedBytes": size, "slots": slots, "hitRatePercent": hit}
             for key, maximum in bounds.items():
                 candidate = value.get(key)
-                integer_field = key in {"totalDraftTokens", "acceptedDraftTokens"}
+                integer_field = key in {"totalDraftTokens", "acceptedDraftTokens", "runtimeDecodeTokenCount", "runtimeFirstBatchTokens"}
                 if (
                     isinstance(candidate, (int, float))
                     and not isinstance(candidate, bool)
                     and (not integer_field or isinstance(candidate, int))
+                    and 0 <= candidate <= maximum
                     and math.isfinite(float(candidate))
-                    and 0 <= float(candidate) <= maximum
                 ):
                     record[key] = candidate
 
@@ -470,16 +621,19 @@ class RequestScheduler:
         first = record.get("firstByteMonotonic")
         first_output = record.get("firstOutputMonotonic")
         position = self.queue.index(record["id"]) + 1 if record["id"] in self.queue else None
-        run_seconds = (now - started) if started is not None else None
+        upstream_completed = record.get("upstreamCompletedMonotonic")
+        measured_end = upstream_completed if upstream_completed is not None else now
+        run_seconds = (measured_end - started) if started is not None else None
         generation_seconds = (
-            now - first_output
-            if first_output is not None and now >= first_output else None
+            measured_end - first_output
+            if first_output is not None and measured_end >= first_output else None
         )
         prompt_tokens = record.get("promptTokens")
         completion_tokens = record.get("completionTokens")
         usage_reported = isinstance(prompt_tokens, int) and isinstance(completion_tokens, int)
         enough_output_for_tps = bool(
             usage_reported and completion_tokens >= MIN_TPS_COMPLETION_TOKENS
+            and record.get("result") in {None, "completed", "truncated"}
         )
         end_to_end_sample_qualified = bool(
             enough_output_for_tps and run_seconds is not None
@@ -495,22 +649,47 @@ class RequestScheduler:
         )
         decode_tps = (
             (completion_tokens - 1) / generation_seconds
-            if decode_sample_qualified else None
+            if decode_sample_qualified and record.get("backend") not in {"kolibri", "splash"}
+            and record.get("runtimeStatsSource") not in {"kolibri-native-stats", "splash-native-stats"} else None
         )
         runtime_fields = {
             key: record.get(key) for key in (
                 "runtimeTokensPerSecond", "runtimeTimeToFirstTokenSeconds",
                 "runtimeGenerationSeconds", "totalDraftTokens", "acceptedDraftTokens",
                 "speculativeAcceptancePercent",
+                "runtimeDecodeTokenCount", "runtimeFirstBatchTokens", "runtimeThroughputBasis",
             )
         }
-        runtime_stats_reported = any(value is not None for value in runtime_fields.values())
+        source = record.get("runtimeStatsSource")
+        if source in {"kolibri-native-stats", "splash-native-stats"}:
+            count = runtime_fields["runtimeDecodeTokenCount"]
+            seconds = runtime_fields["runtimeGenerationSeconds"]
+            native_rate = runtime_fields["runtimeTokensPerSecond"]
+            first_batch = runtime_fields["runtimeFirstBatchTokens"]
+            count_matches = bool(usage_reported and isinstance(count, int) and (
+                source == "kolibri-native-stats" and count == completion_tokens
+                and runtime_fields["runtimeThroughputBasis"] == "request-native-generation"
+                or source == "splash-native-stats" and isinstance(first_batch, int)
+                and first_batch > 0
+                and count + first_batch == completion_tokens
+                and runtime_fields["runtimeThroughputBasis"] == "request-lifecycle-excluding-first-native-batch"
+            ))
+            if not (count_matches and count > 0 and isinstance(seconds, (int, float)) and seconds > 0
+                    and isinstance(native_rate, (int, float)) and native_rate > 0
+                    and math.isclose(count / seconds, native_rate, rel_tol=1e-6, abs_tol=1e-6)):
+                runtime_fields["runtimeTokensPerSecond"] = None
+        runtime_stats_reported = source in {"kolibri-native-stats", "splash-native-stats"} or any(value is not None for value in runtime_fields.values())
+        prompt_stats = record.get("promptProcessing")
+        if (prompt_stats and usage_reported
+                and prompt_stats["processedTokens"] + prompt_stats["cachedTokens"] != prompt_tokens):
+            prompt_stats = None
         return {
             "id": record["id"],
             "surfaceId": record["surfaceId"],
             "client": record["client"],
             "surface": record["surface"],
             "protocol": record["protocol"],
+            "backend": record.get("backend"),
             "state": record["state"],
             "queuePosition": position,
             "queuedAt": record["queuedAt"],
@@ -531,7 +710,11 @@ class RequestScheduler:
             "tpsSampleMinimumTokens": MIN_TPS_COMPLETION_TOKENS,
             "endToEndTokensPerSecond": round(end_to_end_tps, 2) if end_to_end_tps is not None else None,
             "decodeTokensPerSecond": round(decode_tps, 2) if decode_tps is not None else None,
-            "runtimeStatsSource": "lmstudio-response-stats" if runtime_stats_reported else None,
+            "observedStatsSource": "engine-usage-and-relay-clock" if usage_reported else None,
+            "decodeIncludesStreamOverhead": decode_tps is not None,
+            "runtimeStatsSource": record.get("runtimeStatsSource", "lmstudio-response-stats") if runtime_stats_reported else None,
+            "promptProcessing": prompt_stats,
+            "expertCache": record.get("expertCache"),
             "uzuRequestTag": record.get("uzuRequestTag"),
             "runtimeResponseId": record.get("runtimeResponseId"),
             **runtime_fields,
@@ -556,6 +739,7 @@ class RequestScheduler:
                 "version": VERSION,
                 "state": "idle" if idle else "busy",
                 "lanes": self.lanes,
+                "ingress": self.ingress.snapshot(),
                 "activeCount": len(active),
                 "queuedCount": len(queued),
                 "active": active,
@@ -588,219 +772,11 @@ class RequestScheduler:
             }
 
 
-class ResponseMetrics:
-    """Extract only bounded timing and runtime usage metadata from a relayed response."""
+class ResponseMetrics(_ResponseMetrics):
+    """Preserve the relay's configurable inspection bound and public API."""
 
     def __init__(self, protocol: str, content_type: str, backend: str = "") -> None:
-        self.protocol = protocol
-        self.backend = backend
-        self.streaming = content_type.lower().startswith("text/event-stream")
-        self.buffer = bytearray()
-        self.complete = bytearray()
-        self.overflowed = False
-        self.discarding_line = False
-        self.output_seen = False
-        self.prompt_tokens: int | None = None
-        self.completion_tokens: int | None = None
-        self.runtime_stats: dict[str, int | float | str] = {}
-
-    @staticmethod
-    def _token(value: Any) -> int | None:
-        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
-
-    def _usage(self, value: Any) -> None:
-        if not isinstance(value, dict):
-            return
-        usage = value.get("usage")
-        response = value.get("response")
-        if not isinstance(usage, dict) and isinstance(response, dict):
-            usage = response.get("usage")
-        if not isinstance(usage, dict):
-            return
-        prompt = self._token(usage.get("prompt_tokens"))
-        if prompt is None:
-            prompt = self._token(usage.get("input_tokens"))
-        completion = self._token(usage.get("completion_tokens"))
-        if completion is None:
-            completion = self._token(usage.get("output_tokens"))
-        if prompt is not None and completion is not None:
-            self.prompt_tokens = prompt
-            self.completion_tokens = completion
-
-    @staticmethod
-    def _number(value: Any, maximum: float, *, positive: bool = False) -> float | None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        parsed = float(value)
-        if not math.isfinite(parsed) or parsed < 0 or parsed > maximum:
-            return None
-        if positive and parsed <= 0:
-            return None
-        return parsed
-
-    @staticmethod
-    def _integer(value: Any, maximum: int = 2_000_000_000) -> int | None:
-        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
-            return None
-        return value
-
-    def _performance(self, value: Any) -> None:
-        """Read documented LM Studio numeric stats without retaining response data."""
-        if self.backend != "lmstudio" or not isinstance(value, dict):
-            return
-        containers = [value]
-        for key in ("response", "result"):
-            nested = value.get(key)
-            if isinstance(nested, dict):
-                containers.append(nested)
-        stats = next(
-            (container.get("stats") for container in containers
-             if isinstance(container.get("stats"), dict)),
-            None,
-        )
-        if not isinstance(stats, dict):
-            return
-        tps = self._number(stats.get("tokens_per_second"), 1_000_000, positive=True)
-        ttft = self._number(
-            stats.get("time_to_first_token_seconds", stats.get("time_to_first_token")),
-            86_400,
-        )
-        generation = self._number(
-            stats.get("generation_time_seconds", stats.get("generation_time")),
-            86_400,
-        )
-        total_draft = self._integer(stats.get("total_draft_tokens_count"))
-        accepted_draft = self._integer(stats.get("accepted_draft_tokens_count"))
-        if tps is not None:
-            self.runtime_stats["runtimeTokensPerSecond"] = round(tps, 4)
-        if ttft is not None:
-            self.runtime_stats["runtimeTimeToFirstTokenSeconds"] = round(ttft, 6)
-        if generation is not None:
-            self.runtime_stats["runtimeGenerationSeconds"] = round(generation, 6)
-        if (
-            total_draft is not None and accepted_draft is not None
-            and total_draft > 0 and accepted_draft <= total_draft
-        ):
-            self.runtime_stats["totalDraftTokens"] = total_draft
-            self.runtime_stats["acceptedDraftTokens"] = accepted_draft
-            self.runtime_stats["speculativeAcceptancePercent"] = round(
-                accepted_draft / total_draft * 100, 1,
-            )
-
-    @staticmethod
-    def _nonempty(value: Any) -> bool:
-        if isinstance(value, str):
-            return bool(value)
-        if isinstance(value, list):
-            return bool(value)
-        if isinstance(value, dict):
-            return bool(value)
-        return value is not None
-
-    def _inspect(self, value: Any) -> bool:
-        if not isinstance(value, dict):
-            return False
-        if self.backend in {"omlx", "mtplx"}:
-            identifier = value.get("id")
-            if isinstance(identifier, str) and re.fullmatch(r"chatcmpl-[0-9a-f]{8,32}", identifier):
-                self.runtime_stats["runtimeResponseId"] = identifier
-        if self.backend == "uzu":
-            identifier = value.get("id")
-            if isinstance(identifier, str) and re.fullmatch(r"chatcmpl-[0-9a-f]{32}", identifier):
-                self.runtime_stats["uzuRequestTag"] = identifier[9:17]
-        self._usage(value)
-        self._performance(value)
-        emitted = False
-        if self.protocol == "chat-completions":
-            for choice in value.get("choices") or []:
-                if not isinstance(choice, dict):
-                    continue
-                delta = choice.get("delta")
-                message = choice.get("message")
-                for container in (delta, message, choice):
-                    if not isinstance(container, dict):
-                        continue
-                    if any(self._nonempty(container.get(key)) for key in (
-                        "content", "reasoning", "reasoning_content", "thinking", "tool_calls", "text",
-                    )):
-                        emitted = True
-                        break
-                if emitted:
-                    break
-        else:
-            event_type = str(value.get("type") or "")
-            emitted = bool(
-                event_type.endswith(".delta")
-                and any(self._nonempty(value.get(key)) for key in (
-                    "delta", "text", "arguments", "content",
-                ))
-            )
-        if emitted:
-            self.output_seen = True
-        return emitted
-
-    def _line(self, line: bytes) -> bool:
-        stripped = line.strip()
-        if not stripped.startswith(b"data:"):
-            return False
-        payload = stripped[5:].strip()
-        if not payload or payload == b"[DONE]" or len(payload) > MAX_METRICS_BUFFER:
-            return False
-        try:
-            return self._inspect(json.loads(payload))
-        except (ValueError, UnicodeError, TypeError):
-            return False
-
-    def feed(self, chunk: bytes) -> bool:
-        emitted = False
-        if self.streaming:
-            start = 0
-            while start < len(chunk):
-                newline = chunk.find(b"\n", start)
-                end = len(chunk) if newline < 0 else newline
-                if self.discarding_line:
-                    # An oversized line may span many reads. Its suffix is
-                    # still part of that line, never a new metrics event.
-                    self.discarding_line = newline < 0
-                elif len(self.buffer) + end - start > MAX_METRICS_BUFFER:
-                    self.buffer.clear()
-                    self.overflowed = True
-                    self.discarding_line = newline < 0
-                elif newline < 0:
-                    self.buffer.extend(chunk[start:end])
-                elif self.buffer:
-                    self.buffer.extend(chunk[start:end])
-                    emitted = self._line(self.buffer) or emitted
-                    self.buffer.clear()
-                else:
-                    emitted = self._line(chunk[start:end]) or emitted
-                start = end + 1
-        elif not self.overflowed:
-            if len(self.complete) + len(chunk) <= MAX_METRICS_BUFFER:
-                self.complete.extend(chunk)
-            else:
-                self.complete.clear()
-                self.overflowed = True
-        return emitted
-
-    def finish(self) -> bool:
-        emitted = False
-        if self.streaming and self.buffer:
-            emitted = self._line(bytes(self.buffer))
-            self.buffer.clear()
-        elif not self.streaming and not self.overflowed and self.complete:
-            try:
-                emitted = self._inspect(json.loads(self.complete))
-            except (ValueError, UnicodeError, TypeError):
-                pass
-            self.complete.clear()
-        return emitted
-
-    def public_usage(self) -> tuple[int | None, int | None]:
-        return self.prompt_tokens, self.completion_tokens
-
-    def public_runtime_stats(self) -> dict[str, int | float | str]:
-        return dict(self.runtime_stats)
+        super().__init__(protocol, content_type, backend, maximum=MAX_METRICS_BUFFER)
 
 
 class ChatCompletionLimitGuard:
@@ -995,14 +971,6 @@ class ChatCompletionLimitGuard:
         return tail
 
 
-PI_SUMMARIZATION_SYSTEM_PROMPT = (
-    "You are a context summarization assistant. Your task is to read a conversation "
-    "between a user and an AI assistant, then produce a structured summary following "
-    "the exact format specified.\n\nDo NOT continue the conversation. Do NOT respond "
-    "to any questions in the conversation. ONLY output the structured summary."
-)
-
-
 def transform_chat_request(
     body: bytes, config: dict[str, Any], surface: dict[str, Any] | None = None,
 ) -> bytes:
@@ -1014,6 +982,8 @@ def transform_chat_request(
     # same-artifact stable identity at the authenticated relay as well.
     value["model"] = config["servedModel"]
     backend = str(config.get("backend") or "")
+    if backend == "rapidmlx":
+        validate_rapidmlx_stateless_request(value)
     if backend == "omlx":
         validate_omlx_context_is_self_contained(value)
     sampling_source = surface if surface is not None else config
@@ -1028,6 +998,11 @@ def transform_chat_request(
         value = enforce_sampling_contract(
             value, contract_document, enforcement, "chat-completions",
         )
+        if (backend == "splash" and value.get("top_k") == 0
+                and "frequency_penalty" not in enforcement.get("representableFields", [])):
+            # The legacy frontend requires top_k >= 1. Modern Splash's
+            # wider sampling contract accepts zero as unrestricted top-k.
+            value["top_k"] = 1
     # Unit-level callers and older in-memory diagnostics predate the explicit
     # field; a real proxy configuration is still validated strictly at load.
     reasoning = config.get("reasoning", "auto")
@@ -1040,15 +1015,39 @@ def transform_chat_request(
     } if backend == "llamacpp" else {}
     for key in REASONING_OVERRIDE_FIELDS:
         value.pop(key, None)
-    if backend == "whallm" and reasoning != "auto":
+    if backend == "rec":
+        apply_rec_chat_contract(value, reasoning)
+    elif backend == "rapidmlx":
+        if reasoning not in {"auto", "off"}:
+            raise ValueError("Rapid MLX reasoning must be auto or off")
+        for field in ("think", "thinking", "reasoning_max_tokens"):
+            value.pop(field, None)
+        if reasoning == "off":
+            value["reasoning_effort"] = "none"
+    elif backend == "whallm" and reasoning != "auto":
         if reasoning == "off":
             value.update({"thinking_mode": "chat", "reasoning_effort": "none"})
         else:
             value.update({"thinking_mode": "thinking", "reasoning_effort": reasoning})
-    elif backend == "slotstream":
+    elif backend in {"slotstream", "kolibri", "strata"}:
         value.pop("think", None)
         if reasoning != "auto":
             value["reasoning_effort"] = "none" if reasoning == "off" else reasoning
+    elif backend == "splash":
+        value.pop("think", None)
+        if reasoning != "auto":
+            if reasoning not in {"off", "low", "medium", "xhigh"}:
+                raise ValueError("Splash supports reasoning off, low, medium or xhigh")
+            value["reasoning_effort"] = "none" if reasoning == "off" else reasoning
+        relaxed_tools, relaxed_keywords = relax_tool_schemas(value)
+        if relaxed_tools:
+            # The engine's grammar subset cannot express cross-field
+            # refinements, but each tool still validates its own arguments.
+            print(
+                "LLM Launcher session relay: relaxed the top-level schema of "
+                f"{relaxed_tools} Splash tool(s): {', '.join(relaxed_keywords)}",
+                file=sys.stderr,
+            )
     elif backend == "uzu":
         if reasoning not in {"auto", "off"}:
             raise ValueError("Uzu Qwen3.6 reasoning must be auto or off")
@@ -1117,17 +1116,17 @@ def transform_chat_request(
         # far below the selected context and prevents Pi's own compaction.
     # Native Pi summaries are housekeeping, not a new reasoning turn. Keep
     # them bounded so recovery cannot consume its own remaining KV headroom.
-    if backend in {"omlx", "mtplx"} and (surface or {}).get("client") == "pi":
-        messages = value.get("messages")
-        first = messages[0] if isinstance(messages, list) and messages else {}
-        if (
-            isinstance(first, dict) and first.get("role") == "system"
-            and first.get("content") == PI_SUMMARIZATION_SYSTEM_PROMPT
-        ):
+    if backend in {"omlx", "mtplx", "splash", "kolibri", "rapidmlx"} and (surface or {}).get("client") in {"pi", "omp"}:
+        if is_pi_summary(value.get("messages")):
             value["max_tokens"] = min(int(value.get("max_tokens") or 4096), 4096)
-            value["chat_template_kwargs"] = {"enable_thinking": False}
+            if backend in {"splash", "kolibri", "rapidmlx"}:
+                value["reasoning_effort"] = "none"
+            else:
+                value["chat_template_kwargs"] = {"enable_thinking": False}
             if backend == "mtplx":
                 value.update({"enable_thinking": False, "reasoning_effort": "none"})
+    if backend == "splash":
+        bound_thinking_budget(value)
     if value.get("stream") is True:
         stream_options = value.get("stream_options")
         if stream_options is None:
@@ -1220,6 +1219,9 @@ def normalize_mtplx_compactable_event(event: bytes) -> bytes:
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
+    # Tiny reasoning and tool deltas should reach Pi/OMP immediately rather
+    # than waiting for TCP's small-packet coalescing timer.
+    disable_nagle_algorithm = True
     protocol_version = "HTTP/1.0"
     server_version = "LLMLauncherSessionRelay/2"
 
@@ -1265,10 +1267,24 @@ class ProxyHandler(BaseHTTPRequestHandler):
             raise ValueError("invalid request length") from error
         if not 0 <= length <= maximum:
             raise ValueError("request is too large")
-        value = json.loads(self.rfile.read(length) or b"{}")
+        value = json.loads(self.read_body(length) or b"{}")
         if not isinstance(value, dict):
             raise ValueError("request body must be an object")
         return value
+
+    def read_body(self, length: int) -> bytes:
+        deadline = time.monotonic() + INPUT_DEADLINE_SECONDS
+        payload = bytearray()
+        while len(payload) < length:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Request body deadline exceeded")
+            self.connection.settimeout(remaining)
+            chunk = self.rfile.read1(min(64 * 1024, length - len(payload)))
+            if not chunk:
+                raise ValueError("Request body ended before Content-Length")
+            payload.extend(chunk)
+        return bytes(payload)
 
     def do_GET(self) -> None:
         if self.path == "/health":
@@ -1384,19 +1400,41 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if not 0 <= length <= MAX_BODY:
             self.send_json_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Request is too large")
             return
-        body = self.rfile.read(length) if length else b""
+        if not self.scheduler.ingress.acquire(length):
+            self.close_connection = True
+            self.send_json_error(HTTPStatus.TOO_MANY_REQUESTS, "The private relay request-body budget is full.")
+            return
+        try:
+            body = self.read_body(length)
+            self._forward_body(surface, body)
+        except (TimeoutError, ValueError) as error:
+            try:
+                self.send_json_error(
+                    HTTPStatus.REQUEST_TIMEOUT if isinstance(error, TimeoutError) else HTTPStatus.BAD_REQUEST,
+                    "Request body deadline exceeded" if isinstance(error, TimeoutError) else str(error),
+                )
+            except OSError:
+                pass  # No error response can be delivered to an abandoned upload.
+        except (OSError, http.client.HTTPException):
+            pass  # The peer may have disconnected while uploading.
+        finally:
+            self.scheduler.ingress.release(length)
+            self.close_connection = True
+
+    def _forward_body(self, surface: dict[str, Any], body: bytes) -> None:
         base_path = self.path.split("?", 1)[0]
         bridge_request: BridgeRequest | None = None
         request_output_limit: int | None = None
         upstream_path = self.path
         if (
-            self.config["backend"] == "mtplx"
+            self.config["backend"] in {"mtplx", "rapidmlx"}
             and base_path.startswith("/v1/responses")
             and base_path != "/v1/responses"
         ):
+            runtime = "Rapid MLX" if self.config["backend"] == "rapidmlx" else "MTPLX"
             self.send_json_error(
                 HTTPStatus.NOT_IMPLEMENTED,
-                "MTPLX does not expose Responses compaction or stored-response routes. Codex remote compaction is disabled for this session.",
+                f"{runtime} does not expose Responses compaction or stored-response routes. Codex remote compaction is disabled for this session.",
             )
             return
         generation = self.command == "POST" and base_path in {"/v1/chat/completions", "/v1/responses"}
@@ -1432,11 +1470,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         request_id: str | None = None
         if generation:
             try:
-                request_id = self.scheduler.begin(surface, protocol)
+                request_id = self.scheduler.begin(surface, protocol, self.config["backend"])
             except OverflowError as error:
                 self.send_json_error(HTTPStatus.TOO_MANY_REQUESTS, str(error))
                 return
-            if not self.scheduler.await_turn(request_id):
+            if not self.scheduler.await_turn(request_id, lambda: downstream_closed(self.connection)):
                 self.send_json_error(HTTPStatus.CONFLICT, "Request was cancelled while queued")
                 return
 
@@ -1466,6 +1504,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         result = "completed"
         metrics: ResponseMetrics | None = None
         runtime_identity_sent = False
+        runtime_prefill_sent = False
         try:
             if request_id and self.scheduler.cancelled(request_id):
                 raise ConnectionAbortedError("request cancelled")
@@ -1512,13 +1551,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 while len(payload) <= MAX_BODY:
                     chunk = upstream.read1(16 * 1024)
                     if not chunk:
+                        if request_id:
+                            self.scheduler.upstream_completed(request_id)
                         break
                     payload.extend(chunk)
                     if request_id:
-                        self.scheduler.first_byte(request_id)
-                        self.scheduler.add_bytes(request_id, len(chunk))
-                        if metrics is not None and metrics.feed(chunk):
-                            self.scheduler.first_output(request_id)
+                        emitted = metrics.feed(chunk) if metrics is not None else False
+                        self.scheduler.observe_chunk(request_id, len(chunk), emitted)
                 if len(payload) > MAX_BODY:
                     result = "upstream-error"
                     status_code = int(HTTPStatus.BAD_GATEWAY)
@@ -1548,24 +1587,26 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     while True:
                         chunk = upstream.read1(16 * 1024)
                         if not chunk:
+                            if request_id:
+                                self.scheduler.upstream_completed(request_id)
                             break
                         if request_id:
-                            self.scheduler.first_byte(request_id)
-                            self.scheduler.add_bytes(request_id, len(chunk))
-                            if metrics is not None and metrics.feed(chunk):
-                                self.scheduler.first_output(request_id)
+                            emitted = metrics.feed(chunk) if metrics is not None else False
+                            self.scheduler.observe_chunk(request_id, len(chunk), emitted)
                         translated = bridge.feed(chunk)
                         if translated:
                             self.wfile.write(translated)
                             self.wfile.flush()
-                    translated = bridge.finish()
+                    semantic = metrics.outcome.finish() if metrics is not None else "incomplete-stream"
+                    translated = (bridge.finish() if semantic in {"completed", "truncated"}
+                                  else bridge.failure("The model stream ended without a valid completion"))
                 else:
                     payload = upstream.read(MAX_BODY + 1)
                     if request_id:
-                        self.scheduler.first_byte(request_id)
-                        self.scheduler.add_bytes(request_id, len(payload))
-                        if metrics is not None and metrics.feed(payload):
-                            self.scheduler.first_output(request_id)
+                        self.scheduler.upstream_completed(request_id)
+                    if request_id:
+                        emitted = metrics.feed(payload) if metrics is not None else False
+                        self.scheduler.observe_chunk(request_id, len(payload), emitted)
                     if len(payload) > MAX_BODY:
                         translated = bridge.failure("MTPLX returned an oversized completion")
                     else:
@@ -1576,6 +1617,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if translated:
                     self.wfile.write(translated)
                     self.wfile.flush()
+                if bridge.failed:
+                    result = "upstream-error"
                 return
             response_started = True
             self.send_response(upstream.status, upstream.reason)
@@ -1597,12 +1640,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 while True:
                     chunk = upstream.read1(16 * 1024)
                     if not chunk:
+                        if request_id:
+                            self.scheduler.upstream_completed(request_id)
                         break
                     if request_id:
-                        self.scheduler.first_byte(request_id)
-                        self.scheduler.add_bytes(request_id, len(chunk))
-                        if metrics is not None and metrics.feed(chunk):
-                            self.scheduler.first_output(request_id)
+                        emitted = metrics.feed(chunk) if metrics is not None else False
+                        self.scheduler.observe_chunk(request_id, len(chunk), emitted)
                     relayed = limit_guard.feed(chunk) if limit_guard is not None else chunk
                     if isinstance(limit_guard, ChatCompletionLimitGuard) and limit_guard.memory_refused:
                         result = "upstream-error"
@@ -1615,6 +1658,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         if response_id:
                             self.scheduler.set_runtime_stats(request_id, {"runtimeResponseId": response_id})
                             runtime_identity_sent = True
+                    if request_id and metrics is not None and metrics.backend == "slotstream":
+                        prompt_stats = metrics.runtime_stats.get("promptProcessing")
+                        if prompt_stats and not runtime_prefill_sent:
+                            self.scheduler.set_runtime_stats(request_id, {"promptProcessing": prompt_stats})
+                            runtime_prefill_sent = True
                     if relayed:
                         self.wfile.write(relayed)
                         self.wfile.flush()
@@ -1647,6 +1695,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if metrics is not None:
                     if metrics.finish():
                         self.scheduler.first_output(request_id)
+                    if result == "completed":
+                        result = metrics.outcome.result
+                    if (result == "completed" and request_output_limit is not None
+                            and metrics.completion_tokens is not None
+                            and metrics.completion_tokens >= request_output_limit):
+                        result = "truncated"
                     self.scheduler.set_usage(request_id, *metrics.public_usage())
                     self.scheduler.set_runtime_stats(request_id, metrics.public_runtime_stats())
                 self.scheduler.finish(request_id, result, status_code)
@@ -1657,7 +1711,7 @@ def main() -> None:
     if len(sys.argv) != 2:
         fail("expected one private configuration file")
     config = load_config(Path(sys.argv[1]))
-    server = ThreadingHTTPServer(("127.0.0.1", config["listenPort"]), ProxyHandler)
+    server = RelayHTTPServer(("127.0.0.1", config["listenPort"]), ProxyHandler)
     server.daemon_threads = True
     server.config = config  # type: ignore[attr-defined]
     server.registry = SurfaceRegistry(config["surfaces"])  # type: ignore[attr-defined]

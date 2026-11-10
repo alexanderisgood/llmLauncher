@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "patchId": "bf16-embedding-rows-r1",
+  "baseVersion": "1.5.0",
+  "upstreamTag": "1.5.0",
+  "upstreamSourceUrl": "https://codeload.github.com/incoai/splash/tar.gz/refs/tags/1.5.0",
+  "sourceArchiveSha256": "a069b57176ce9a2f3597bb67766b43691f7677df0949d450171aa4ddac633c24",
+  "patchSha256": "56dc72af854da8410b37b81ffea0c6b6e2476d5184de0d36183acd7b08d47dfd",
+  "engineBinarySha256": "bebba98543e33f40505fa3b12377f95e249435223a5875546a57b1210f8a52ec",
+  "baseEngineBinarySha256": "bf5c552bae97f9875199d5b6e9143e7d7cd5d4be0a0f0e7fe489c939c54bd2b7",
+  "metallibSha256": "0279664b0a60a571878d25e9595815b31b64aaaca0da80cf85aa7715d8d02c76",
+  "hostStepMetallibSha256": "dc7d6916fbae274bdcff3f3dcf16838a777ae6772f2457c926d839f13833967d",
+  "nativeSources": {
+    "runtime/metal/abi/Gguf.h": "d1ac65be2151366d97c31e79f64ddf730442e6b96517753610f05b297b2171cd",
+    "runtime/model/GgufImage.cpp": "674155670ec1ee7a97fd4dddf84fe97e7847771330b26c4202bd1f314aa0e284",
+    "runtime/model/WeightStore.cpp": "8d1d4ddea0e70b561accfd8552d42beace39cc63648fbfd87aaf67bfb98130a1",
+    "runtime/ops/Embedding.cpp": "841284ddb7360064fcfeeb86b50c5afff726620c543ce83b985d43bf434d10c6"
+  },
+  "build": {
+    "sdkVersion": "27.0",
+    "compiler": "Apple clang 21.0.0 (clang-2100.3.34.2)",
+    "minimumMacOS": "26.4",
+    "reusedOfficialMetallibs": true,
+    "gpuKernelsChanged": false
+  },
+  "checks": {
+    "cpu160ColumnBf16Rows": true,
+    "rowBytes": 320,
+    "rawBf16PayloadChanged": false,
+    "q4ProjectionLayoutChanged": false,
+    "modelStartupVerified": false
+  }
+}

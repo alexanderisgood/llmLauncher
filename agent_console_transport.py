@@ -8,6 +8,7 @@ from collections import deque
 import os
 import select
 import threading
+import time
 
 
 class ConsoleTransport:
@@ -39,12 +40,15 @@ class ConsoleTransport:
             if coalesce_key is not None:
                 self._keys.add(coalesce_key)
 
-    def read(self, size: int = 32 * 1024) -> bytes:
+    def read(self, size: int = 32 * 1024, *, idle_timeout: float | None = None) -> bytes | None:
         """Read output while advancing input, preserving partial-write order.
 
         Only the console reader calls this method. Readiness waits hold no lock;
         the short timeout notices new input/close without another worker thread.
+        An optional idle deadline returns None, distinct from EOF, so the
+        controller can observe a dead leader whose child still holds the PTY.
         """
+        deadline = time.monotonic() + max(0, idle_timeout) if idle_timeout is not None else None
         while True:
             with self._lock:
                 fd = self._fd
@@ -83,6 +87,8 @@ class ConsoleTransport:
                         return os.read(fd, size)
                     except BlockingIOError:
                         pass
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
 
     def close(self) -> None:
         with self._lock:

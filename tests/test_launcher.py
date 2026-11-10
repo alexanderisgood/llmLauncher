@@ -1,6 +1,8 @@
 from __future__ import annotations
+from tests.memory_fixtures import physical_snapshot, physical_telemetry
 
 import copy
+import dataclasses
 import base64
 import ctypes
 import hashlib
@@ -17,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import urllib.request
 import uuid
@@ -231,6 +234,15 @@ GLOBAL_CONFIGS = [
     Path.home() / "Library" / "Application Support" / "MTPLX" / "settings.json",
     Path.home() / ".lmstudio" / "settings.json",
 ]
+
+
+class _BenchmarkFixtureClock(datetime):
+    """Keep fixed benchmark fixtures current while preserving real age checks."""
+
+    @classmethod
+    def now(cls, tz=None):
+        value = datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc)
+        return value.astimezone(tz) if tz is not None else value.replace(tzinfo=None)
 
 
 class LinkParser(HTMLParser):
@@ -831,7 +843,7 @@ class LauncherTests(unittest.TestCase):
         original_request = copy.deepcopy(request)
         original_models = copy.deepcopy(models)
         total = 48 * 1024**3
-        snapshot = {
+        snapshot = physical_snapshot({
             "memoryAvailable": True,
             "totalBytes": total,
             "freePercent": 90.0,
@@ -839,7 +851,7 @@ class LauncherTests(unittest.TestCase):
             "thermalState": 0,
             "lowPowerMode": False,
             "metalWiredLimitBytes": 0,
-        }
+        })
         ready_admission = {
             "decision": "ready",
             "label": "Fits current headroom",
@@ -903,7 +915,7 @@ class LauncherTests(unittest.TestCase):
     def test_flash_next_dflash_alternative_fails_closed_for_stale_pair_or_admission(self) -> None:
         selected, alternative, request = self.flash_next_dflash_alternative_fixture()
         total = 48 * 1024**3
-        snapshot = {
+        snapshot = physical_snapshot({
             "memoryAvailable": True,
             "totalBytes": total,
             "freePercent": 90.0,
@@ -911,7 +923,7 @@ class LauncherTests(unittest.TestCase):
             "thermalState": None,
             "lowPowerMode": False,
             "metalWiredLimitBytes": 0,
-        }
+        })
         ready_admission = {
             "decision": "ready",
             "launchable": True,
@@ -984,12 +996,15 @@ class LauncherTests(unittest.TestCase):
         admission.assert_not_called()
 
     def test_calibration_ui_renders_model_alternatives_without_silent_model_selection(self) -> None:
-        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        script = (ROOT / "benchmark_workspace.js").read_text(encoding="utf-8")
+        app = (ROOT / "app.js").read_text(encoding="utf-8")
 
         self.assertIn("plan?.modelAlternatives", script)
         self.assertIn("requiresExplicitSelection", script)
         self.assertIn("data-calibration-model", script)
         self.assertNotIn("optimized-speed/i.test(model.name)", script)
+        self.assertNotIn("optimized-speed/i.test(model.name)", app)
+        self.assertIn("return benchmarkWorkspace.selectCalibrationAlternative(...args);", app)
 
     def test_whallm_live_qwen_route_is_shared_single_engine_and_never_cross_compared(self) -> None:
         live = {
@@ -998,7 +1013,7 @@ class LauncherTests(unittest.TestCase):
             "model": launcher.WHALLM_MODEL_ID,
             "server": "Whallm test",
         }
-        with mock.patch.object(launcher, "model_roots", return_value=[]), mock.patch.object(
+        with mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[]), mock.patch.object(
             launcher, "probe_whallm_endpoint", return_value=live,
         ), mock.patch.object(
             launcher, "load_freetoken_connection", return_value={},
@@ -1484,7 +1499,7 @@ class LauncherTests(unittest.TestCase):
         (partial / "model-00001.safetensors.part").write_bytes(b"partial")
         alias_root = Path(self.temp.name) / "alias"
         alias_root.symlink_to(root, target_is_directory=True)
-        with mock.patch.object(launcher, "model_roots", return_value=[("A", root), ("B", alias_root)]):
+        with mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[("A", root), ("B", alias_root)]):
             scanned = launcher.scan_models()
         gguf_record = next(item for item in scanned if item["name"] == "with-config")
         partial_record = next(item for item in scanned if item["name"] == "partial")
@@ -1533,11 +1548,11 @@ class LauncherTests(unittest.TestCase):
 
         def scan(roots: list[tuple[str, Path]]) -> list[dict]:
             with (
-                mock.patch.object(launcher, "model_roots", return_value=roots),
+                mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=roots),
                 mock.patch.object(
                     launcher, "model_acquisition_roots", return_value=acquisition_roots,
                 ),
-                mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+                mock.patch.object(launcher.model_catalog.ModelCatalog, "lmstudio_model_load_key_index", return_value={}),
                 mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
                 mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
                 mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
@@ -1547,7 +1562,8 @@ class LauncherTests(unittest.TestCase):
                     launcher, "llamacpp_runtime_contract",
                     return_value={"ready": False, "version": "Not installed"},
                 ),
-                mock.patch.object(launcher, "_uzu_model_cache_contract", return_value=None),
+                mock.patch.object(launcher.model_catalog.ModelCatalog, "_uzu_model_cache_contract", return_value=None),
+                mock.patch.object(launcher.splash_runtime, "inspect_install", return_value=None),
             ):
                 return launcher.scan_models()
 
@@ -1939,7 +1955,7 @@ class LauncherTests(unittest.TestCase):
         packs = [{"name": "mlx-metal-1.11.0", "kind": "MLX", "version": "1.11.0"}]
 
         with mock.patch.object(
-            launcher, "model_roots",
+            launcher.model_catalog.ModelCatalog, "model_roots",
             return_value=[("LM Studio", fake_home / ".lmstudio" / "models")],
         ), mock.patch.object(
             launcher.Path, "home", return_value=fake_home,
@@ -1950,7 +1966,7 @@ class LauncherTests(unittest.TestCase):
         ), mock.patch.object(
             launcher, "plist_version", return_value="0.4.test",
         ), mock.patch.object(
-            launcher, "verified_mtplx_runtime", return_value=True,
+            launcher.model_catalog.ModelCatalog, "verified_mtplx_runtime", return_value=True,
         ), mock.patch.object(
             launcher, "lmstudio_mtp_load_supported", return_value=False,
         ):
@@ -1965,7 +1981,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("complete load-time Draft MTP", blocked_cap["mtpReason"])
 
         with mock.patch.object(
-            launcher, "model_roots",
+            launcher.model_catalog.ModelCatalog, "model_roots",
             return_value=[("LM Studio", fake_home / ".lmstudio" / "models")],
         ), mock.patch.object(
             launcher.Path, "home", return_value=fake_home,
@@ -1976,7 +1992,7 @@ class LauncherTests(unittest.TestCase):
         ), mock.patch.object(
             launcher, "plist_version", return_value="0.4.test",
         ), mock.patch.object(
-            launcher, "verified_mtplx_runtime", return_value=True,
+            launcher.model_catalog.ModelCatalog, "verified_mtplx_runtime", return_value=True,
         ), mock.patch.object(
             launcher, "lmstudio_mtp_load_supported", return_value=True,
         ):
@@ -2831,9 +2847,10 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(json.loads(store.read_text())["apiKey"], "server-secret-key")
 
         with (
-            mock.patch.object(launcher, "model_roots", return_value=[]),
+            mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[]),
             mock.patch.object(launcher, "omlx_qwen_kernel_status", return_value={"ready": False}),
-            mock.patch.object(launcher, "_uzu_model_cache_contract", return_value=None),
+            mock.patch.object(launcher.model_catalog.ModelCatalog, "_uzu_model_cache_contract", return_value=None),
+            mock.patch.object(launcher.splash_runtime, "inspect_install", return_value=None),
         ):
             models = launcher.scan_models()
         self.assertEqual({model["name"] for model in models}, set(probe["models"]))
@@ -2911,9 +2928,9 @@ class LauncherTests(unittest.TestCase):
             mock.patch.dict(launcher.BINARIES, {
                 "freetoken_native": str(ft), "freetoken": str(ft),
             }),
-            mock.patch.object(launcher, "model_roots", return_value=[("Test", root)]),
+            mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[("Test", root)]),
             mock.patch.object(
-                launcher, "inspect_native_freetoken_model",
+                launcher.model_catalog.ModelCatalog, "inspect_native_freetoken_model",
                 return_value=inspection,
             ) as inspect,
             mock.patch.object(
@@ -3353,6 +3370,7 @@ class LauncherTests(unittest.TestCase):
             {
                 "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm",
                 "mference", "whallm", "llamacpp", "uzu", "slotstream",
+                "splash", "kolibri",
             },
         )
         for engine in (engines[item] for item in {"omlx", "lmstudio", "mtplx"}):
@@ -5912,8 +5930,8 @@ for line in sys.stdin:
         )
 
         with (
-            mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENTS", 10),
-            mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_TEXT_BYTES", 12),
+            mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_events=10)),
+            mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_text_bytes=12)),
         ):
             console.append_timeline("answer", "first!")
             console.append_timeline("thinking", "second")
@@ -5968,7 +5986,7 @@ for line in sys.stdin:
             owner_run_id=plan.run_id, plan=plan, process=process,
             master_fd=1, cols=100, rows=30, protocol="pi-rpc",
         )
-        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENTS", 2):
+        with mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_events=2)):
             console.append_timeline("user", "one")
             console.append_timeline("answer", "two")
             console.append_timeline("notice", "three")
@@ -6026,7 +6044,7 @@ for line in sys.stdin:
         }, self.models)
         console = launcher.AgentConsole(owner_run_id=plan.run_id, plan=plan, process=process,
             master_fd=1, cols=100, rows=30, protocol="pi-rpc")
-        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENTS", 8):
+        with mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_events=8)):
             console.append_timeline("user", "Fix the cache", item_id="user:1", operation="replace")
             console.append_timeline("toolResult", "8 tests passed", item_id="test:1", operation="replace")
             console.append_timeline("thinking", "", item_id="thinking:1", operation="replace")
@@ -6069,9 +6087,7 @@ for line in sys.stdin:
         }, self.models)
         console = launcher.AgentConsole(owner_run_id=plan.run_id, plan=plan, process=process,
             master_fd=1, cols=100, rows=30, protocol="pi-rpc")
-        with mock.patch.multiple(launcher, PI_RPC_TIMELINE_MAX_EVENTS=2,
-            PI_RPC_TIMELINE_MAX_REPLAY_ITEMS=3, PI_RPC_TIMELINE_MAX_TEXT_BYTES=120,
-            PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES=12):
+        with mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_events=2, max_replay_items=3, max_text_bytes=120, max_event_text_bytes=12)):
             for index in range(8):
                 console.append_timeline("answer", "🙂" * 3, item_id=f"a:{index}", operation="replace")
             for _ in range(50):
@@ -6221,7 +6237,7 @@ for line in sys.stdin:
             "message": {"role": "assistant", "content": []},
         })
         fragments = [f"{index:02d}," for index in range(25)]
-        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENTS", 8):
+        with mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_events=8)):
             for fragment in fragments:
                 launcher.pi_rpc_event_output(console, {
                     "type": "message_update",
@@ -6264,7 +6280,7 @@ for line in sys.stdin:
             "message": {"role": "assistant", "content": []},
         })
         final_text = "".join(f"{index:02d}," for index in range(25))
-        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENTS", 8):
+        with mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_events=8)):
             for fragment in (final_text[index:index + 3] for index in range(0, len(final_text), 3)):
                 launcher.pi_rpc_event_output(console, {
                     "type": "message_update",
@@ -6312,7 +6328,7 @@ for line in sys.stdin:
             "type": "message_start",
             "message": {"role": "assistant", "content": []},
         })
-        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES", 12):
+        with mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_event_text_bytes=12)):
             for _index in range(20):
                 launcher.pi_rpc_event_output(console, {
                     "type": "message_update",
@@ -6332,7 +6348,7 @@ for line in sys.stdin:
         self.assertEqual(len(item_text.encode("utf-8")), 12)
         self.assertTrue(item_text.endswith("more"))
         self.assertIn("Earlier text omitted", console.rpc_timeline_events[-1]["title"])
-        with mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES", 12):
+        with mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_event_text_bytes=12)):
             for delta in ["🙂" * 4, "x", "y"]:
                 launcher.pi_rpc_append_timeline_delta(
                     console, "answer", delta, title="", item_id="unicode-overflow",
@@ -6567,9 +6583,9 @@ for line in sys.stdin:
             "message": {"role": "assistant", "content": []},
         })
         with (
-            mock.patch.object(launcher, "AGENT_CONSOLE_MAX_BUFFER", 128),
-            mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_TEXT_BYTES", 96),
-            mock.patch.object(launcher, "PI_RPC_TIMELINE_MAX_EVENT_TEXT_BYTES", 32),
+            mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_buffer=128)),
+            mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_text_bytes=96)),
+            mock.patch.object(console, "policy", dataclasses.replace(console.policy, max_event_text_bytes=32)),
         ):
             for index in range(100):
                 launcher.pi_rpc_event_output(console, {
@@ -6633,7 +6649,8 @@ for line in sys.stdin:
             manager.agent_consoles[plan.run_id] = console
             os.write(write_fd, payload)
             os.close(write_fd)
-            with mock.patch.object(launcher, "PI_RPC_MAX_JSON_LINE_BYTES", 128):
+            with mock.patch.object(launcher, "PI_RPC_MAX_JSON_LINE_BYTES", 128), \
+                    mock.patch.object(manager, "_terminate_process"):
                 manager._read_agent_console(console)
             return console
 
@@ -6699,7 +6716,8 @@ for line in sys.stdin:
         }
         os.write(write_fd, json.dumps(event).encode("utf-8"))
         os.close(write_fd)
-        manager._read_agent_console(console)
+        with mock.patch.object(manager, "_terminate_process"):
+            manager._read_agent_console(console)
         transcript = bytes(console.output).decode("utf-8", errors="replace")
         self.assertIn("RESPONSE", transcript)
         self.assertIn("final answer", transcript)
@@ -6957,7 +6975,8 @@ for line in sys.stdin:
         os.write(write_fd, b"\n".join(json.dumps(event).encode("utf-8") for event in events))
         os.close(write_fd)
 
-        with mock.patch.object(manager, "_write_pi_rpc_command") as write_rpc:
+        with mock.patch.object(manager, "_write_pi_rpc_command") as write_rpc, \
+                mock.patch.object(manager, "_terminate_process"):
             manager._read_agent_console(console)
 
         write_rpc.assert_not_called()
@@ -6998,7 +7017,8 @@ for line in sys.stdin:
             owner_run_id=plan.run_id, plan=plan, primary=True,
         )
 
-        manager._read_agent_console(console)
+        with mock.patch.object(manager, "_terminate_process"):
+            manager._read_agent_console(console)
 
         self.assertEqual(console.rpc_follow_up_queue, ["Must survive pre-ack EOF"])
         self.assertEqual(console.rpc_pending_messages, 1)
@@ -7588,6 +7608,8 @@ for line in sys.stdin:
         self.assertEqual(result["backend"], "omlx")
 
         script = (ROOT / "app.js").read_text(encoding="utf-8")
+        launch_ui = (ROOT / "launch_workspace.js").read_text(encoding="utf-8")
+        script += "\n" + launch_ui
         self.assertIn("function resolvedClientSupport(backend = state.backend", script)
         self.assertIn("resolvedClientSupport(state.backend, button.dataset.client, selected)", script)
         self.assertIn("resolvedClientSupport(backend, option.value, runModel)", script)
@@ -7761,6 +7783,9 @@ for line in sys.stdin:
                 ordinary_plan, "synthetic", 512, {}, threading.Event(),
             )
         self.assertEqual(ordinary_json["completionTokens"], 256)
+        self.assertIsNone(ordinary_json["ttftSeconds"])
+        self.assertIsNone(ordinary_json["decodeTokensPerSecond"])
+        self.assertFalse(ordinary_json["decodeTimingValid"])
 
         boundary_clean = Response([
             b'data: {"choices":[{"delta":{"content":"RQ-8K-742"},"finish_reason":"stop"}]}\n',
@@ -7879,6 +7904,7 @@ for line in sys.stdin:
         completed_sample = copy.deepcopy(truncated)
         completed_sample.update({
             "completionTokens": 511,
+            "decodeTokensPerSecond": 20.0, "decodeTimingValid": True,
             "finishReason": "stop", "terminalState": "complete",
             "terminalComplete": True, "responseLimitReached": False,
         })
@@ -7904,11 +7930,11 @@ for line in sys.stdin:
     def test_route_check_plan_is_read_only_bounded_and_protocol_specific(self) -> None:
         model = self.model_for("mtplx")
         payload = self.payload("mtplx", "pi", model)
-        snapshot = {
+        snapshot = physical_snapshot({
             "memoryAvailable": True, "totalBytes": 64 * 1024**3, "freePercent": 90.0,
             "thermalAvailable": True, "thermalState": 0, "thermalLabel": "nominal",
             "lowPowerMode": False, "capturedAt": 1.0,
-        }
+        })
         self.assertFalse(self.state.exists())
         report = launcher.route_check_plan(payload, self.models, snapshot)
         self.assertTrue(report["ready"])
@@ -8400,6 +8426,10 @@ for line in sys.stdin:
         self.assertEqual(incomplete_responses["terminalState"], "incomplete")
 
     def test_route_check_manager_passes_or_fails_closed_and_always_stops(self) -> None:
+        from tests.helpers.operation_jobs_harness import GeneratedTemporaryOwnerAdapter
+        owner_port = mock.patch.object(launcher, "_TemporaryOperationOwner", GeneratedTemporaryOwnerAdapter)
+        owner_port.start()
+        self.addCleanup(owner_port.stop)
         live_admission = mock.patch.object(
             launcher, "require_live_model_load_admission",
             return_value={
@@ -8647,16 +8677,16 @@ for line in sys.stdin:
     def test_benchmark_resource_sampler_reports_memory_headroom_and_public_thermal_state(self) -> None:
         total = 50 * 1024**3
         snapshots = [
-            {
+            physical_snapshot({
                 "memoryAvailable": True, "totalBytes": total, "freePercent": 80.0,
                 "thermalAvailable": True, "thermalState": 0, "thermalLabel": "nominal",
                 "lowPowerMode": False, "capturedAt": 1.0,
-            },
-            {
+            }),
+            physical_snapshot({
                 "memoryAvailable": True, "totalBytes": total, "freePercent": 70.0,
                 "thermalAvailable": True, "thermalState": 2, "thermalLabel": "serious",
                 "lowPowerMode": True, "capturedAt": 2.0,
-            },
+            }),
         ]
         with mock.patch.object(launcher, "apple_resource_snapshot", side_effect=snapshots):
             sampler = launcher.BenchmarkTelemetrySampler(interval=60)
@@ -8694,12 +8724,12 @@ for line in sys.stdin:
         total = 50 * 1024**3
 
         def snapshot(free: float, thermal: int = 0, low_power: bool = False) -> dict:
-            return {
+            return physical_snapshot({
                 "memoryAvailable": True, "totalBytes": total, "freePercent": free,
                 "thermalAvailable": True, "thermalState": thermal,
                 "thermalLabel": launcher.THERMAL_STATE_LABELS[thermal],
                 "lowPowerMode": low_power, "capturedAt": time.monotonic(),
-            }
+            })
 
         manager = launcher.BenchmarkManager(launcher.RunManager())
         manager.state.update({
@@ -9108,7 +9138,7 @@ for line in sys.stdin:
             target, target_config, draft, draft_config,
         ))
 
-        with mock.patch.object(launcher, "model_roots", return_value=[("Test", root)]), mock.patch.object(
+        with mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[("Test", root)]), mock.patch.object(
             launcher, "command_version", return_value="omlx 0.6.2",
         ):
             stable_scan = launcher.scan_models()
@@ -9120,7 +9150,7 @@ for line in sys.stdin:
         self.assertTrue(stable_readiness["draftInstalled"])
         self.assertNotIn(draft.name, {item["name"] for item in stable_scan})
 
-        with mock.patch.object(launcher, "model_roots", return_value=[("Test", root)]), mock.patch.object(
+        with mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[("Test", root)]), mock.patch.object(
             launcher, "command_version", return_value="omlx 0.6.4",
         ):
             preview_scan = launcher.scan_models()
@@ -9594,7 +9624,7 @@ for line in sys.stdin:
         download_root = Path(self.temp.name) / "downloads;single-argument"
         destination = download_root / "z-lab" / "Qwen3.8-27B-DFlash2"
         free_bytes = 30 * 1024**3
-        with mock.patch.object(launcher, "disk_free_for", return_value=free_bytes):
+        with mock.patch.object(launcher.acquisition_planning, "disk_free_for", return_value=free_bytes):
             plan = launcher.build_dflash2_setup_plan(model, download_root)
 
         self.assertFalse(destination.exists(), "reviewing a setup plan must not create directories")
@@ -9615,15 +9645,15 @@ for line in sys.stdin:
         benchmark_manager = launcher.BenchmarkManager(run_manager)
         setup_manager = launcher.SetupManager(run_manager, benchmark_manager)
         with (
-            mock.patch.object(launcher, "default_dflash2_download_root", return_value=download_root),
-            mock.patch.object(launcher, "disk_free_for", return_value=free_bytes),
+            mock.patch.object(launcher.acquisition_planning, "default_dflash2_download_root", return_value=download_root),
+            mock.patch.object(launcher.acquisition_planning, "disk_free_for", return_value=free_bytes),
             self.assertRaisesRegex(ValueError, "Confirm the pinned DFlash 2 download"),
         ):
             setup_manager.start({"modelId": model["id"]}, [model])
         self.assertFalse(destination.exists(), "missing consent must not create the destination")
         self.assertEqual(setup_manager.snapshot()["phase"], "idle")
 
-        with mock.patch.object(launcher, "disk_free_for", return_value=0):
+        with mock.patch.object(launcher.acquisition_planning, "disk_free_for", return_value=0):
             blocked = launcher.build_dflash2_setup_plan(model, download_root)
         self.assertFalse(blocked["draft"]["diskReady"])
         self.assertFalse(blocked["draft"]["canDownload"])
@@ -9635,7 +9665,7 @@ for line in sys.stdin:
             "tags": ["mlx", "safetensors", "4-bit", "license:apache-2.0"],
             "downloads": 123, "likes": 7, "last_modified": "2026-08-20T00:00:00Z",
         }]
-        with mock.patch.object(launcher, "run_hf_json", return_value=raw) as query:
+        with mock.patch.object(launcher.acquisition_planning.AcquisitionPlanning, "run_hf_json", return_value=raw) as query:
             result = launcher.model_acquisition_search("  tiny   mlx  ")
         self.assertTrue(result["publicAnonymous"])
         self.assertEqual(result["query"], "tiny mlx")
@@ -9667,8 +9697,8 @@ for line in sys.stdin:
         }
         roots = [{"id": "lmstudio", "label": "Test catalog", "path": str(root)}]
         with (
-            mock.patch.object(launcher, "model_acquisition_roots", return_value=roots),
-            mock.patch.object(launcher, "disk_free_for", return_value=20 * 1024**3),
+            mock.patch.object(launcher.acquisition_planning, "model_acquisition_roots", return_value=roots),
+            mock.patch.object(launcher.acquisition_planning, "disk_free_for", return_value=20 * 1024**3),
             mock.patch.object(launcher, "physical_memory_bytes", return_value=32 * 1024**3),
         ):
             plan = launcher.build_model_acquisition_plan(snapshot, "lmstudio")
@@ -9721,8 +9751,8 @@ for line in sys.stdin:
         }
         roots = [{"id": "omlx", "label": "oMLX models", "path": str(root)}]
         with (
-            mock.patch.object(launcher, "model_acquisition_roots", return_value=roots),
-            mock.patch.object(launcher, "disk_free_for", return_value=20 * 1024**3),
+            mock.patch.object(launcher.acquisition_planning, "model_acquisition_roots", return_value=roots),
+            mock.patch.object(launcher.acquisition_planning, "disk_free_for", return_value=20 * 1024**3),
             mock.patch.object(launcher, "physical_memory_bytes", return_value=32 * 1024**3),
         ):
             plan = launcher.build_model_acquisition_plan(snapshot, "omlx")
@@ -9915,7 +9945,7 @@ for line in sys.stdin:
     def test_qwen4_launch_rejects_changed_index_inventory_after_scan(self) -> None:
         root, model_path = self.qwen4_ple_fixture()
         with (
-            mock.patch.object(launcher, "model_roots", return_value=[("oMLX test", root)]),
+            mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[("oMLX test", root)]),
             mock.patch.object(launcher, "command_version", return_value="omlx 0.6.4"),
             mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
             mock.patch.object(
@@ -9946,7 +9976,7 @@ for line in sys.stdin:
     def test_qwen4_flash_omlx_pins_ssd_ple_and_preserves_reasoning(self) -> None:
         root, model_path = self.qwen4_ple_fixture()
         with (
-            mock.patch.object(launcher, "model_roots", return_value=[("oMLX test", root)]),
+            mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[("oMLX test", root)]),
             mock.patch.object(launcher, "command_version", return_value="omlx 0.6.4"),
             mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
             mock.patch.object(
@@ -10133,11 +10163,11 @@ for line in sys.stdin:
             launcher.require_live_model_load_admission(
                 preparation["request"], capacity_models,
                 purpose="runtime-promotion",
-                resource_snapshot={
+                resource_snapshot=physical_snapshot({
                     "memoryAvailable": True, "totalBytes": 48 * 1024**3,
                     "freePercent": 93.75,
                     "metalWiredLimitBytes": 45 * 1024**3,
-                },
+                }),
                 hub=idle_hub, operation=idle_operation,
             )
         canonical_high_profile = launcher.validated_launch_profile_request(
@@ -10343,6 +10373,8 @@ for line in sys.stdin:
         self.assertNotIn("ssdStreamedBytes", estimate)
         index = (ROOT / "index.html").read_text(encoding="utf-8")
         script = (ROOT / "app.js").read_text(encoding="utf-8")
+        launch_ui = (ROOT / "launch_workspace.js").read_text(encoding="utf-8")
+        script += "\n" + launch_ui
         self.assertIn("High memory · 45 GiB process guard", index)
         self.assertIn(
             '"burst", "anePrefill", "memoryGuard"', script,
@@ -10355,7 +10387,7 @@ for line in sys.stdin:
             'if (!state.applyingOptimal) {\n    cancelOptimization("Memory mode changed; reapply to refresh the benchmark match.")',
             script,
         )
-        self.assertIn('["Required Metal limit", formatGiB(estimate.requiredMetalWiredLimitBytes)]', script)
+        self.assertIn('["Required Metal limit", formattingPort.formatGiB(estimate.requiredMetalWiredLimitBytes)]', script)
 
     def test_live_model_load_admission_is_strict_for_automation_but_keeps_session_review(self) -> None:
         request = self.payload("omlx", "chat", self.models[0])
@@ -10371,7 +10403,8 @@ for line in sys.stdin:
             "operation": {"active": False},
         }
         with mock.patch.object(
-            launcher, "session_memory_admission", return_value=reviewed,
+            launcher.resource_admission.ResourceAdmission,
+            "session_memory_admission", return_value=reviewed,
         ):
             for purpose in (
                 "benchmark", "runtime-promotion", "route-check", "ane-tune",
@@ -10390,7 +10423,8 @@ for line in sys.stdin:
         self.assertEqual(accepted["contractId"], "review-contract")
 
         with mock.patch.object(
-            launcher, "route_qualification_memory_admission",
+            launcher.resource_admission.ResourceAdmission,
+            "route_qualification_memory_admission",
             return_value=reviewed,
         ) as specialized, self.assertRaisesRegex(
             RuntimeError, "route qualification model load",
@@ -10437,8 +10471,8 @@ for line in sys.stdin:
         }
         roots = [{"id": "lmstudio", "label": "Test catalog", "path": str(root)}]
         with (
-            mock.patch.object(launcher, "model_acquisition_roots", return_value=roots),
-            mock.patch.object(launcher, "disk_free_for", return_value=20 * 1024**3),
+            mock.patch.object(launcher.acquisition_planning, "model_acquisition_roots", return_value=roots),
+            mock.patch.object(launcher.acquisition_planning, "disk_free_for", return_value=20 * 1024**3),
             mock.patch.object(launcher, "physical_memory_bytes", return_value=32 * 1024**3),
         ):
             choose = launcher.build_model_acquisition_plan(snapshot, "lmstudio")
@@ -10517,8 +10551,8 @@ for line in sys.stdin:
         destination = Path(self.temp.name) / "acquisition-root"
         roots = [{"id": "documents", "label": "Test", "path": str(destination)}]
         with (
-            mock.patch.object(launcher, "model_acquisition_roots", return_value=roots),
-            mock.patch.object(launcher, "disk_free_for", return_value=100 * 1024**3),
+            mock.patch.object(launcher.acquisition_planning, "model_acquisition_roots", return_value=roots),
+            mock.patch.object(launcher.acquisition_planning, "disk_free_for", return_value=100 * 1024**3),
             mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
             mock.patch.dict(launcher.BINARIES, {"llamacpp": "/usr/bin/true"}),
         ):
@@ -10666,7 +10700,7 @@ for line in sys.stdin:
             }
             with (
                 mock.patch.object(
-                    launcher, "_start_atomic_background_verification",
+                    launcher.model_catalog.ModelCatalog, "_start_atomic_background_verification",
                     return_value=pending,
                 ) as start,
                 mock.patch.object(
@@ -10695,7 +10729,7 @@ for line in sys.stdin:
             mock.patch.object(launcher, "LLAMACPP_ATOMIC_FILE_MANIFEST", manifest),
             mock.patch.object(launcher, "LLAMACPP_ATOMIC_TOTAL_BYTES", total),
             mock.patch.object(
-                launcher, "_start_atomic_background_verification", return_value=pending,
+                launcher.model_catalog.ModelCatalog, "_start_atomic_background_verification", return_value=pending,
             ) as start,
             mock.patch.object(
                 launcher, "_stream_file_sha256", wraps=launcher._stream_file_sha256,
@@ -10756,7 +10790,7 @@ for line in sys.stdin:
             mock.patch.object(launcher, "LLAMACPP_ATOMIC_FILE_MANIFEST", manifest),
             mock.patch.object(launcher, "LLAMACPP_ATOMIC_TOTAL_BYTES", total),
             mock.patch.object(
-                launcher, "llamacpp_atomic_artifact_contract",
+                launcher.model_catalog.ModelCatalog, "llamacpp_atomic_artifact_contract",
                 side_effect=blocked_contract,
             ) as verify,
         ):
@@ -10794,8 +10828,8 @@ for line in sys.stdin:
                 "totalShards": launcher.LLAMACPP_ATOMIC_SHARDS,
             }
             with (
-                mock.patch.object(launcher, "model_roots", return_value=[("Test", library)]),
-                mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+                mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[("Test", library)]),
+                mock.patch.object(launcher.model_catalog.ModelCatalog, "lmstudio_model_load_key_index", return_value={}),
                 mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
                 mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
                 mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
@@ -10803,7 +10837,7 @@ for line in sys.stdin:
                 mock.patch.object(launcher, "physical_memory_bytes", return_value=48 * 1024**3),
                 mock.patch.object(launcher, "llamacpp_runtime_contract", return_value=runtime),
                 mock.patch.object(
-                    launcher, "_start_atomic_background_verification",
+                    launcher.model_catalog.ModelCatalog, "_start_atomic_background_verification",
                     return_value=pending,
                 ),
                 mock.patch.dict(launcher.BINARIES, {"llamacpp": "/usr/bin/true"}),
@@ -10848,8 +10882,8 @@ for line in sys.stdin:
             "reason": "runtime ready",
         }
         with (
-            mock.patch.object(launcher, "model_roots", return_value=[("Test", library)]),
-            mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+            mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[("Test", library)]),
+            mock.patch.object(launcher.model_catalog.ModelCatalog, "lmstudio_model_load_key_index", return_value={}),
             mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
             mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
             mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
@@ -10882,8 +10916,8 @@ for line in sys.stdin:
 
         (model_path.parent / launcher.MODEL_ACQUISITION_MARKER).unlink()
         with (
-            mock.patch.object(launcher, "model_roots", return_value=[("Test", library)]),
-            mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+            mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[("Test", library)]),
+            mock.patch.object(launcher.model_catalog.ModelCatalog, "lmstudio_model_load_key_index", return_value={}),
             mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
             mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
             mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
@@ -10914,11 +10948,11 @@ for line in sys.stdin:
 
         def scan(roots: list[tuple[str, Path]]) -> dict:
             with (
-                mock.patch.object(launcher, "model_roots", return_value=roots),
+                mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=roots),
                 mock.patch.object(
                     launcher, "model_acquisition_roots", return_value=acquisition_roots,
                 ),
-                mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+                mock.patch.object(launcher.model_catalog.ModelCatalog, "lmstudio_model_load_key_index", return_value={}),
                 mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
                 mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
                 mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
@@ -10986,8 +11020,8 @@ for line in sys.stdin:
             "reason": "runtime ready",
         }
         with (
-            mock.patch.object(launcher, "model_roots", return_value=[("Test", library)]),
-            mock.patch.object(launcher, "lmstudio_model_load_key_index", return_value={}),
+            mock.patch.object(launcher.model_catalog.ModelCatalog, "model_roots", return_value=[("Test", library)]),
+            mock.patch.object(launcher.model_catalog.ModelCatalog, "lmstudio_model_load_key_index", return_value={}),
             mock.patch.object(launcher, "load_benchmark_records", return_value=[]),
             mock.patch.object(launcher, "load_ane_tuning_records", return_value=[]),
             mock.patch.object(launcher, "load_freetoken_connection", return_value=None),
@@ -11564,7 +11598,8 @@ for line in sys.stdin:
             mock.patch.object(benchmark, "_mode_payload", return_value={}),
             mock.patch.object(launcher, "normalized_request", return_value=rejected),
             mock.patch.object(
-                launcher, "route_qualification_memory_admission", return_value=blocked,
+                launcher.resource_admission.ResourceAdmission,
+                "route_qualification_memory_admission", return_value=blocked,
             ),
             self.assertRaisesRegex(RuntimeError, "Capacity changed"),
         ):
@@ -11582,7 +11617,8 @@ for line in sys.stdin:
             mock.patch.object(benchmark, "_mode_payload", return_value={}),
             mock.patch.object(launcher, "normalized_request", return_value=raced),
             mock.patch.object(
-                launcher, "route_qualification_memory_admission", return_value=ready,
+                launcher.resource_admission.ResourceAdmission,
+                "route_qualification_memory_admission", return_value=ready,
             ),
             mock.patch.object(
                 launcher, "BenchmarkTelemetrySampler", return_value=telemetry,
@@ -11671,7 +11707,7 @@ for line in sys.stdin:
                     launcher, "validate_llamacpp_launch_boundary", side_effect=validate,
                 ),
                 mock.patch.object(
-                    launcher, "_llamacpp_launch_file_identities",
+                    launcher.engine_planning.EnginePlanner, "_llamacpp_launch_file_identities",
                     return_value=(("stable",),),
                 ),
                 mock.patch.object(launcher.subprocess, "Popen") as popen,
@@ -11707,7 +11743,7 @@ for line in sys.stdin:
                 return_value=(("stable",), key_identity),
             ),
             mock.patch.object(
-                launcher, "_llamacpp_launch_file_identities",
+                launcher.engine_planning.EnginePlanner, "_llamacpp_launch_file_identities",
                 return_value=(("stable",),),
             ),
             mock.patch.object(launcher, "probe_whallm_runtime_status", return_value={
@@ -11976,9 +12012,9 @@ for line in sys.stdin:
         benchmark_manager = launcher.BenchmarkManager(run_manager)
         acquisition = launcher.ModelAcquisitionManager(run_manager, benchmark_manager)
         with (
-            mock.patch.object(launcher, "model_acquisition_roots", return_value=roots),
+            mock.patch.object(launcher.acquisition_planning, "model_acquisition_roots", return_value=roots),
             mock.patch.object(launcher, "fetch_model_acquisition_snapshot", return_value=snapshot),
-            mock.patch.object(launcher, "disk_free_for", return_value=20 * 1024**3),
+            mock.patch.object(launcher.acquisition_planning, "disk_free_for", return_value=20 * 1024**3),
             mock.patch.object(launcher, "physical_memory_bytes", return_value=32 * 1024**3),
         ):
             plan = acquisition.inspect({"repoId": snapshot["repoId"], "revision": "main", "destination": "lmstudio"})
@@ -12493,7 +12529,76 @@ for line in sys.stdin:
         ), self.assertRaisesRegex(ValueError, "all-FP16"):
             launcher.normalized_request(payload, [model])
 
+    def test_ane_request_logs_in_when_admin_session_is_required(self) -> None:
+        """oMLX 0.7.x gates /admin/api/* behind an admin session cookie.
+
+        The tuner sends the private engine's bearer key, so a 401 must trigger
+        one login (POST /admin/api/login) and a retry carrying the cookie; the
+        cookie is then reused for later calls on the same port.
+        """
+
+        class _Headers:
+            def __init__(self, cookies):
+                self._cookies = list(cookies)
+
+            def get_all(self, name):
+                return list(self._cookies) if name == "Set-Cookie" else None
+
+        class FakeResponse:
+            def __init__(self, body, cookies=()):
+                self._body = body
+                self.headers = _Headers(cookies)
+
+            def read(self, _limit=-1):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        plan = types.SimpleNamespace(port=18999, secrets={"apiKey": "k"})
+        launcher.ANETunerManager._ADMIN_COOKIES.clear()
+        unauthorized = urllib.error.HTTPError(
+            "http://127.0.0.1:18999/admin/api/bench/ane-tune/start", 401,
+            "Unauthorized", None,
+            io.BytesIO(json.dumps({"detail": "Admin authentication required"}).encode()),
+        )
+        calls = []
+
+        def fake_urlopen(request, timeout=None):
+            calls.append(request)
+            if len(calls) == 1:
+                raise unauthorized
+            if request.full_url.endswith("/admin/api/login"):
+                return FakeResponse(b'{"success": true}',
+                                    ["omlx_admin_session=abc123; Path=/; HttpOnly"])
+            return FakeResponse(b'{"tuning_id": "t"}')
+
+        with mock.patch.object(launcher.urllib.request, "urlopen", fake_urlopen):
+            value = launcher.ANETunerManager._request_json(
+                plan, "/admin/api/bench/ane-tune/start", "POST", {"model_id": "m"},
+            )
+            self.assertEqual(value, {"tuning_id": "t"})
+            value = launcher.ANETunerManager._request_json(
+                plan, "/admin/api/bench/ane-tune/t/results",
+            )
+        self.assertEqual(value, {"tuning_id": "t"})
+        self.assertEqual(
+            [call.full_url.rsplit("/", 1)[-1] for call in calls],
+            ["start", "login", "start", "results"],
+        )
+        self.assertIsNone(calls[0].get_header("Cookie"))
+        self.assertEqual(calls[2].get_header("Cookie"), "omlx_admin_session=abc123")
+        self.assertEqual(calls[3].get_header("Cookie"), "omlx_admin_session=abc123")
+        launcher.ANETunerManager._ADMIN_COOKIES.clear()
+
     def test_ane_manager_accepts_only_traced_upstream_completion(self) -> None:
+        from tests.helpers.operation_jobs_harness import GeneratedTemporaryOwnerAdapter
+        owner_port = mock.patch.object(launcher, "_TemporaryOperationOwner", GeneratedTemporaryOwnerAdapter)
+        owner_port.start()
+        self.addCleanup(owner_port.stop)
         live_admission = mock.patch.object(
             launcher, "require_live_model_load_admission",
             return_value={
@@ -12658,6 +12763,7 @@ for line in sys.stdin:
         dispose.assert_called_once_with(plan)
         self.assertEqual(admission.call_args.kwargs["purpose"], "ane-tune")
 
+    @mock.patch.object(launcher, "datetime", _BenchmarkFixtureClock)
     def test_best_engine_requires_complete_comparable_matrix_and_clears_noise_floor(self) -> None:
         model = json.loads(json.dumps(self.models[0]))
         payload = self.payload("omlx", "pi", model)
@@ -12717,7 +12823,7 @@ for line in sys.stdin:
                     "mtp": {
                         "samples": samples,
                         "medianDecodeTokensPerSecond": generation_tps[backend],
-                        "resourceTelemetry": {
+                        "resourceTelemetry": physical_telemetry({
                             "version": 1, "memoryAvailable": True,
                             "totalMemoryBytes": 50 * 1024**3,
                             "baselineHeadroomPercent": 45.0,
@@ -12729,7 +12835,7 @@ for line in sys.stdin:
                             "thermalWorstValue": thermal_state[backend],
                             "thermalWorst": launcher.THERMAL_STATE_LABELS[thermal_state[backend]],
                             "lowPowerMode": False,
-                        },
+                        }),
                     },
                 },
                 "comparisonContractVersion": launcher.BENCHMARK_COMPARISON_CONTRACT_VERSION,
@@ -13009,6 +13115,9 @@ for line in sys.stdin:
         self.assertEqual(history["receipt"]["state"], "trusted-engine")
         self.assertEqual(history["receipt"]["backend"], "mtplx")
         self.assertEqual(history["receipt"]["mode"], "mtp")
+        self.assertEqual(history["receipt"]["decodeTokensPerSecond"],
+                         next(row["decodeTokensPerSecond"] for row in history["runs"][0]["engines"]
+                              if row["backend"] == "mtplx"))
         self.assertEqual(history["receipt"]["suite"], "quick")
         self.assertTrue(history["receipt"]["fresh"])
         self.assertGreater(history["receipt"]["firstTokenSeconds"], 0)
@@ -13083,6 +13192,8 @@ for line in sys.stdin:
             )
         self.assertEqual(route_history["receipt"]["state"], "trusted-route")
         self.assertEqual(route_history["receipt"]["backend"], "omlx")
+        self.assertEqual(route_history["receipt"]["decodeTokensPerSecond"],
+                         route_history["currentRouteRuns"][0]["decodeTokensPerSecond"])
         self.assertTrue(route_history["receipt"]["fresh"])
         self.assertNotIn("kind", route_history["receipt"])
         self.assertNotIn("routeQualification", route_history["receipt"])
@@ -13185,6 +13296,7 @@ for line in sys.stdin:
             incomplete["engineNextAction"]["missingEngines"], incomplete["missingEngines"],
         )
 
+    @mock.patch.object(launcher, "datetime", _BenchmarkFixtureClock)
     def test_ssd_shootout_reuses_cross_format_result_and_never_requests_normal_engines(self) -> None:
         model = json.loads(json.dumps(self.models[0]))
         identity = "d" * 64
@@ -13405,7 +13517,7 @@ for line in sys.stdin:
                 "medianDecodeTokensPerSecond": 128 / seconds,
                 "medianEndToEndTokensPerSecond": 128 / seconds,
                 "samples": samples,
-                "resourceTelemetry": {
+                "resourceTelemetry": physical_telemetry({
                     "version": 1, "sampleCount": 3, "memoryAvailable": True,
                     "totalMemoryBytes": 50 * 1024**3,
                     "baselineHeadroomPercent": baseline_headroom[job["backend"]],
@@ -13417,7 +13529,7 @@ for line in sys.stdin:
                     "thermalWorstValue": thermal_state[job["backend"]],
                     "thermalWorst": launcher.THERMAL_STATE_LABELS[thermal_state[job["backend"]]],
                     "lowPowerMode": False,
-                },
+                }),
                 "resourceCooldown": {
                     key: value for key, value in gate.items() if key != "_initialSnapshot"
                 },
@@ -13692,6 +13804,7 @@ for line in sys.stdin:
                 "reference-ready" if index == 0 else "condition-improved"
             )
             winning_mode["resourceTelemetry"]["baselineHeadroomPercent"] = 80.0 + index * 5
+            winning_mode["resourceTelemetry"] = physical_telemetry(winning_mode["resourceTelemetry"])
         improved_entries = []
         for record in improved_conditions:
             measurement = launcher.cross_engine_benchmark_measurement(record)
@@ -13877,10 +13990,10 @@ for line in sys.stdin:
             launcher.RUNTIME_UPDATE_CATALOG["stable"]["directSources"][-1]["commit"],
             "c55324c86540c369f6818a0f47eae544d405475b",
         )
-        self.assertEqual(launcher.RUNTIME_UPDATE_CATALOG["preview"]["version"], "0.6.3rc3")
+        self.assertEqual(launcher.RUNTIME_UPDATE_CATALOG["preview"]["version"], "0.7.0.dev2")
         self.assertEqual(
             launcher.RUNTIME_UPDATE_CATALOG["preview"]["sha256"],
-            "53578cc8e8a1bba3600363bc3273ace3f36c56f3b6516a7862665c66b301175f",
+            "fd0104efc037b4a9f84ecd9f9a7489f30c51f3ea041f95552a2249e0966bb178",
         )
         self.assertEqual(
             launcher.RUNTIME_UPDATE_CATALOG["preview"]["directSources"][-1]["commit"],
@@ -14049,7 +14162,7 @@ for line in sys.stdin:
             "ready": True, "path": "/opt/homebrew/bin/python3.11", "version": "3.11.15",
         }
         with mock.patch.object(launcher, "MANAGED_RUNTIMES_DIR", managed_root), mock.patch.object(
-            launcher, "runtime_update_python", return_value=python,
+            launcher.runtime_catalog.RuntimeCatalog, "runtime_update_python", return_value=python,
         ), mock.patch.object(
             launcher, "disk_free_for", return_value=20 * 1024**3,
         ), mock.patch.object(
@@ -14066,10 +14179,10 @@ for line in sys.stdin:
         self.assertEqual(plan["destination"]["path"], str(managed_root / "omlx-0.6.4"))
         self.assertFalse(plan["rollback"]["automaticSelection"])
         self.assertFalse(plan["review"]["replacesExisting"])
-        self.assertEqual(plan["review"]["catalogAuditedAt"], launcher.RUNTIME_RELEASE_CATALOG_AUDITED_AT)
+        self.assertEqual(plan["review"]["catalogAuditedAt"], launcher.RUNTIME_UPDATE_CATALOG_AUDITED_AT)
         self.assertEqual(
             launcher.runtime_update_overview()["catalogAuditedAt"],
-            launcher.RUNTIME_RELEASE_CATALOG_AUDITED_AT,
+            launcher.RUNTIME_UPDATE_CATALOG_AUDITED_AT,
         )
         self.assertFalse(managed_root.exists(), "planning must not create the runtime root")
 
@@ -14196,11 +14309,40 @@ for line in sys.stdin:
         self.assertNotIn(str(staging), (target / "bin" / "omlx").read_text(encoding="utf-8"))
         self.assertIn(str(target), (target / "bin" / "omlx").read_text(encoding="utf-8"))
 
+    def test_omlx_preview_versions_keep_exact_identity_and_order(self) -> None:
+        versions = ["0.6.4", "0.7.0.dev1", "0.7.0.dev2", "0.7.0rc1", "0.7.0"]
+        keys = [launcher.semantic_version_key(v) for v in versions]
+        self.assertEqual(keys, sorted(set(keys)))
+        self.assertTrue(launcher._exact_omlx_version("oMLX 0.7.0.dev1", versions[1]))
+        for value in ("0.7.0", "0.7.0.dev2", "0.7.0.dev", "0.7.0.dev1evil"):
+            self.assertFalse(launcher._exact_omlx_version(value, versions[1]))
+        release = launcher._runtime_update_release("preview")
+        self.assertEqual(launcher._runtime_update_target(release).name, "omlx-0.7.0.dev2")
+        audited = launcher.audited_runtime_release("omlx", "oMLX 0.7.0.dev2")
+        self.assertEqual(audited["state"], "current")
+        self.assertEqual(audited["channel"], "preview")
+        self.assertEqual(audited["auditedAt"], "2026-09-15")
+        self.assertEqual(launcher.audited_runtime_release("omlx", "0.7.0.dev3")["state"], "newer-unreviewed")
+
+    def test_omlx_previous_preview_keeps_rollback_provenance(self) -> None:
+        root = Path(self.temp.name) / "runtimes"
+        target = root / "omlx-0.6.3rc3"
+        binary = target / "bin" / "omlx"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        launcher.atomic_json(target / launcher.RUNTIME_UPDATE_MANIFEST, {
+            "artifactSha256": launcher.RUNTIME_UPDATE_ARCHIVE["0.6.3rc3"]["sha256"],
+        })
+        with mock.patch.object(launcher, "MANAGED_RUNTIMES_DIR", root), mock.patch.object(
+            launcher, "command_version", return_value="oMLX 0.6.3rc3",
+        ):
+            self.assertTrue(launcher.managed_runtime_verification(str(binary))["verified"])
+
     def test_runtime_update_adopts_only_matching_official_wheel_provenance(self) -> None:
         managed_root = Path(self.temp.name) / "runtimes"
-        target = managed_root / "omlx-0.6.3rc3"
+        target = managed_root / "omlx-0.7.0.dev2"
         binary = target / "bin" / "omlx"
-        direct = target / "lib" / "python3.11" / "site-packages" / "omlx-0.6.3rc3.dist-info" / "direct_url.json"
+        direct = target / "lib" / "python3.11" / "site-packages" / "omlx-0.7.0.dev2.dist-info" / "direct_url.json"
         binary.parent.mkdir(parents=True)
         direct.parent.mkdir(parents=True)
         binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -14212,9 +14354,9 @@ for line in sys.stdin:
         }), encoding="utf-8")
         python = {"ready": True, "path": "/python3.11", "version": "3.11.15"}
         with mock.patch.object(launcher, "MANAGED_RUNTIMES_DIR", managed_root), mock.patch.object(
-            launcher, "command_version", return_value="oMLX 0.6.3rc3",
+            launcher, "command_version", return_value="oMLX 0.7.0.dev2",
         ), mock.patch.object(
-            launcher, "runtime_update_python", return_value=python,
+            launcher.runtime_catalog.RuntimeCatalog, "runtime_update_python", return_value=python,
         ), mock.patch.object(
             launcher, "disk_free_for", return_value=20 * 1024**3,
         ), mock.patch.object(
@@ -14267,7 +14409,7 @@ for line in sys.stdin:
     def test_runtime_verification_writes_manifest_without_switching_selection(self) -> None:
         managed_root = Path(self.temp.name) / "runtimes"
         update_root = Path(self.temp.name) / "runtime-updates"
-        target = managed_root / "omlx-0.6.3rc3"
+        target = managed_root / "omlx-0.7.0.dev2"
         target.mkdir(parents=True)
         selected = "/rollback/omlx"
         release = copy.deepcopy(launcher.RUNTIME_UPDATE_CATALOG["preview"])
@@ -14280,7 +14422,7 @@ for line in sys.stdin:
             },
         }
         smoke = {
-            "version": "oMLX 0.6.3rc3", "packageVersion": "0.6.3rc3",
+            "version": "oMLX 0.7.0.dev2", "packageVersion": "0.7.0.dev2",
             "nativeKernel": {"ready": True}, "serverStarted": False, "modelLoaded": False,
         }
         manager = launcher.RuntimeUpdateManager(launcher.RunManager(), launcher.BenchmarkManager(launcher.RunManager()))
@@ -14293,7 +14435,7 @@ for line in sys.stdin:
         ), mock.patch.object(
             manager, "_smoke_runtime", return_value=smoke,
         ), mock.patch.object(
-            manager, "_dependency_inventory", return_value=[{"name": "omlx", "version": "0.6.3rc3"}],
+            manager, "_dependency_inventory", return_value=[{"name": "omlx", "version": "0.7.0.dev2"}],
         ), mock.patch.object(
             launcher, "runtime_candidates", return_value=[candidate],
         ), mock.patch.dict(launcher.BINARIES, {"omlx": selected}, clear=False):
@@ -14342,7 +14484,7 @@ for line in sys.stdin:
             **self.payload("omlx", "chat", model),
             "candidateId": "candidate-copy", "suite": "quick",
         }
-        with mock.patch.object(launcher, "runtime_candidate_details", return_value=details), mock.patch.object(
+        with mock.patch.object(launcher.runtime_catalog.RuntimeCatalog, "runtime_candidate_details", return_value=details), mock.patch.object(
             launcher, "hardware_fingerprint", return_value="promotion-mac",
         ):
             plan = launcher.build_runtime_promotion_plan(
@@ -14351,12 +14493,12 @@ for line in sys.stdin:
             )
             blocked_plan = launcher.build_runtime_promotion_plan(
                 payload, [model],
-                resource_snapshot={
+                resource_snapshot=physical_snapshot({
                     "memoryAvailable": True,
                     "totalBytes": 48 * 1024**3,
                     "freePercent": 1.0,
                     "metalWiredLimitBytes": 0,
-                },
+                }),
             )
         self.assertTrue(plan["canStart"])
         self.assertEqual(plan["memoryAdmission"]["decision"], "ready")
@@ -14388,7 +14530,7 @@ for line in sys.stdin:
             }, [model])
 
         details[1]["managedVerification"] = {"verified": False}
-        with mock.patch.object(launcher, "runtime_candidate_details", return_value=details), self.assertRaisesRegex(
+        with mock.patch.object(launcher.runtime_catalog.RuntimeCatalog, "runtime_candidate_details", return_value=details), self.assertRaisesRegex(
             ValueError, "official wheel checksum",
         ):
             launcher.build_runtime_promotion_plan(payload, [model])
@@ -14424,12 +14566,12 @@ for line in sys.stdin:
 
     @staticmethod
     def _runtime_promotion_ready_resource() -> dict:
-        return {
+        return physical_snapshot({
             "memoryAvailable": True,
             "totalBytes": 128 * 1024**3,
             "freePercent": 95.0,
             "metalWiredLimitBytes": 0,
-        }
+        })
 
     @staticmethod
     def _runtime_promotion_fixture_result(speed: float, cooldown: str, quality: str = "a") -> dict:
@@ -14454,7 +14596,7 @@ for line in sys.stdin:
             "medianEndToEndTokensPerSecond": speed,
             "samples": samples,
             "resourceCooldown": {"status": cooldown},
-            "resourceTelemetry": {
+            "resourceTelemetry": physical_telemetry({
                 "version": 1, "memoryAvailable": True,
                 "peakPressureDeltaBytes": 256 * 1024**2,
                 "baselineHeadroomPercent": 60.0,
@@ -14462,7 +14604,7 @@ for line in sys.stdin:
                 "totalMemoryBytes": total_memory,
                 "thermalAvailable": True, "thermalStartValue": 0,
                 "thermalWorstValue": 0, "lowPowerMode": False,
-            },
+            }),
         }
 
     def test_runtime_promotion_result_requires_quality_speed_and_resource_guards(self) -> None:
@@ -14483,7 +14625,7 @@ for line in sys.stdin:
             {"id": "target", "path": str(candidate_binary), "resolvedPath": str(candidate_binary.resolve()), "channelLabel": "Target", "version": "omlx 0.6.3rc2", "selected": False, "managedVerification": {"verified": True, "artifactSha256": "2" * 64}},
         ]
         payload = {**self.payload("omlx", "chat", model), "candidateId": "target", "suite": "quick"}
-        with mock.patch.object(launcher, "runtime_candidate_details", return_value=details), mock.patch.object(
+        with mock.patch.object(launcher.runtime_catalog.RuntimeCatalog, "runtime_candidate_details", return_value=details), mock.patch.object(
             launcher, "hardware_fingerprint", return_value="promotion-mac",
         ):
             plan = launcher.build_runtime_promotion_plan(
@@ -14507,6 +14649,7 @@ for line in sys.stdin:
 
         memory_regression = self._runtime_promotion_fixture_result(110, "ready")
         memory_regression["resourceTelemetry"]["peakPressureDeltaBytes"] = 2 * 1024**3
+        memory_regression["resourceTelemetry"] = physical_telemetry(memory_regression["resourceTelemetry"])
         with mock.patch.object(launcher, "hardware_fingerprint", return_value="promotion-mac"):
             guarded = launcher.build_runtime_promotion_result(plan, {
                 "selected": self._runtime_promotion_fixture_result(100, "reference-ready"),
@@ -14533,7 +14676,7 @@ for line in sys.stdin:
             {"id": "worker-target", "path": str(candidate_binary), "resolvedPath": str(candidate_binary.resolve()), "channelLabel": "Target", "version": "omlx 0.6.3rc2", "selected": False, "managedVerification": {"verified": True, "artifactSha256": "2" * 64}},
         ]
         payload = {**self.payload("omlx", "chat", model), "candidateId": "worker-target", "suite": "quick"}
-        with mock.patch.object(launcher, "runtime_candidate_details", return_value=details), mock.patch.object(
+        with mock.patch.object(launcher.runtime_catalog.RuntimeCatalog, "runtime_candidate_details", return_value=details), mock.patch.object(
             launcher, "hardware_fingerprint", return_value="promotion-worker-mac",
         ):
             plan = launcher.build_runtime_promotion_plan(
@@ -14593,7 +14736,7 @@ for line in sys.stdin:
             {"id": "failed-target", "path": str(candidate_binary), "resolvedPath": str(candidate_binary.resolve()), "channelLabel": "Target", "version": "omlx 0.6.3rc2", "selected": False, "managedVerification": {"verified": True, "artifactSha256": "2" * 64}},
         ]
         payload = {**self.payload("omlx", "chat", model), "candidateId": "failed-target", "suite": "quick"}
-        with mock.patch.object(launcher, "runtime_candidate_details", return_value=details), mock.patch.object(
+        with mock.patch.object(launcher.runtime_catalog.RuntimeCatalog, "runtime_candidate_details", return_value=details), mock.patch.object(
             launcher, "hardware_fingerprint", return_value="promotion-failure-mac",
         ):
             plan = launcher.build_runtime_promotion_plan(
@@ -14664,7 +14807,7 @@ for line in sys.stdin:
             {"id": "apply-target", "path": str(candidate_binary), "resolvedPath": str(candidate_binary.resolve()), "version": "omlx 0.6.3rc2", "selected": False, "managedVerification": {"verified": True}},
         ]
         manager = launcher.RuntimePromotionManager(launcher.RunManager())
-        with mock.patch.object(launcher, "runtime_candidate_details", return_value=details), mock.patch.object(
+        with mock.patch.object(launcher.runtime_catalog.RuntimeCatalog, "runtime_candidate_details", return_value=details), mock.patch.object(
             launcher, "managed_runtime_verification", return_value={"verified": True},
         ), mock.patch.object(
             launcher, "hardware_fingerprint", return_value="promotion-apply-mac",
@@ -15107,7 +15250,7 @@ for line in sys.stdin:
         self.assertEqual(final["openedSurfaceCount"], 1)
         restart.assert_called_once_with({
             "ownerRunId": owner.run_id, "surfaceId": owner.run_id,
-        })
+        }, expected_plan=owner, expected_cancel_event=manager.cancel_event)
         attach.assert_not_called()
 
     def test_single_surface_session_set_waits_for_its_new_primary_route(self) -> None:
@@ -15202,7 +15345,7 @@ for line in sys.stdin:
             "memoryAcknowledgement": "reviewed-live-contract",
         }
         with mock.patch.object(
-            launcher, "build_session_set_open_plan", return_value=opening,
+            runner.planner, "build_session_set_open_plan", return_value=opening,
         ), mock.patch.object(
             launcher, "normalized_request", return_value=launch_plan,
         ), mock.patch.object(
@@ -15657,7 +15800,7 @@ for line in sys.stdin:
             "medianEndToEndTokensPerSecond": 16.5,
             "samples": samples,
             "agenticMetrics": launcher.summarize_agentic_samples(samples),
-            "resourceTelemetry": {
+            "resourceTelemetry": physical_telemetry({
                 "version": 1, "sampleCount": 4,
                 "memoryAvailable": True, "totalMemoryBytes": 48 * 1024**3,
                 "baselineHeadroomPercent": 20.0,
@@ -15667,7 +15810,7 @@ for line in sys.stdin:
                 "thermalStartValue": 0, "thermalStart": "nominal",
                 "thermalWorstValue": 1, "thermalWorst": "fair",
                 "lowPowerMode": False,
-            },
+            }),
             "resourceCooldown": {"version": 1, "status": "reference-ready"},
         }
         manager = launcher.BenchmarkManager(launcher.RunManager())
@@ -15851,12 +15994,12 @@ for line in sys.stdin:
             "enginePreference": "throughput", "calibrationCooling": "default",
         })
         payload["options"] = {"acceleration": "off", "depth": 1, "kv": "off"}
-        admission_snapshot = {
+        admission_snapshot = physical_snapshot({
             "memoryAvailable": True, "totalBytes": 48 * 1024**3,
             "freePercent": 50.0, "thermalAvailable": True,
             "thermalState": 0, "lowPowerMode": False,
             "metalWiredLimitBytes": launcher.LLAMACPP_PLE_MEMORY_CEILING_BYTES,
-        }
+        })
         cap_missing_snapshot = copy.deepcopy(admission_snapshot)
         cap_missing_snapshot["metalWiredLimitBytes"] = 0
         with mock.patch.object(
@@ -15998,7 +16141,7 @@ for line in sys.stdin:
             "medianTTFT": 1.15, "medianDecodeTokensPerSecond": 17.0,
             "medianEndToEndTokensPerSecond": 16.0, "samples": samples,
             "agenticMetrics": launcher.summarize_agentic_samples(samples),
-            "resourceTelemetry": {
+            "resourceTelemetry": physical_telemetry({
                 "version": 1, "sampleCount": 8, "memoryAvailable": True,
                 "samplingComplete": True,
                 "totalMemoryBytes": 48 * 1024**3,
@@ -16020,7 +16163,7 @@ for line in sys.stdin:
                 "thermalAvailable": True, "thermalStartValue": 0,
                 "thermalStart": "nominal", "thermalWorstValue": 1,
                 "thermalWorst": "fair", "lowPowerMode": False,
-            },
+            }),
             "resourceCooldown": {"version": 1, "status": "reference-ready"},
             "correctnessContract": {
                 "id": launcher.LLAMACPP_QUALIFICATION_CORRECTNESS_ID,
@@ -16382,6 +16525,17 @@ for line in sys.stdin:
         # Its safety reason must still win classification over that error.
         guarded_failure = launcher.BenchmarkManager(launcher.RunManager())
         guarded_failure.run_manager.llamacpp_safety_violation = safety_reason
+        # A post-unload guard belongs to an accepted plan/cancellation epoch.
+        # A bare safety flag without that receipt could belong to another run.
+        guarded_plan = mock.Mock(spec=launcher.LaunchPlan)
+        guarded_plan.port = 19001
+        guarded_plan.client_port = None
+        def accept_guarded_plan(plan):
+            guarded_failure.run_manager.plan = plan
+            guarded_failure.run_manager.cancel_event = threading.Event()
+        with mock.patch.object(guarded_failure.run_manager, "start", side_effect=accept_guarded_plan):
+            guarded_failure.owner.start(guarded_plan)
+        guarded_failure.run_manager.plan = None
         guarded_failure.state = copy.deepcopy(safety_failure.state)
         guarded_failure.state.update({
             "phase": "queued", "message": "queued", "result": None,
@@ -16657,9 +16811,14 @@ for line in sys.stdin:
             launcher, "build_engine_plan",
         ), mock.patch.object(
             launcher, "build_client_plan",
-        ):
+        ), mock.patch.object(
+            launcher, "_validated_llamacpp_route",
+            return_value=("/generated/llama", {}, {}, {}, ()),
+        ) as current_artifact:
             qualified_plan = launcher.normalized_request(payload, [model], purpose="session")
         self.assertEqual(qualified_plan.backend, "llamacpp")
+        current_artifact.assert_called_once()
+        self.assertEqual(current_artifact.call_args.args[0].model["id"], model["id"])
 
         for mutation in (
             lambda value: value["modes"]["ar"]["resourceTelemetry"].update({"peakProcessPhysicalFootprintBytes": 44 * 1024**3}),
@@ -16955,7 +17114,8 @@ for line in sys.stdin:
         with mock.patch.object(
             launcher, "normalized_request", return_value=plan,
         ), mock.patch.object(
-            launcher, "route_qualification_memory_admission", return_value=ready,
+            launcher.resource_admission.ResourceAdmission,
+            "route_qualification_memory_admission", return_value=ready,
         ), mock.patch.object(
             launcher, "BenchmarkTelemetrySampler", return_value=telemetry,
         ), mock.patch.object(
@@ -16990,7 +17150,8 @@ for line in sys.stdin:
         with mock.patch.object(
             launcher, "normalized_request", return_value=plan,
         ), mock.patch.object(
-            launcher, "route_qualification_memory_admission", return_value=ready,
+            launcher.resource_admission.ResourceAdmission,
+            "route_qualification_memory_admission", return_value=ready,
         ), mock.patch.object(
             launcher, "BenchmarkTelemetrySampler", return_value=violating,
         ), mock.patch.object(
@@ -17015,7 +17176,7 @@ for line in sys.stdin:
 
     def test_benchmark_telemetry_accepts_only_darwin_physical_footprint_proof(self) -> None:
         sampler = launcher.BenchmarkTelemetrySampler()
-        sampler.samples = [{
+        sampler.samples = [physical_snapshot({
             "memoryAvailable": True, "freePercent": 50.0,
             "totalBytes": 48 * 1024**3,
             "thermalAvailable": True, "thermalState": 0,
@@ -17029,7 +17190,7 @@ for line in sys.stdin:
             "processGroupMemberCount": 2,
             "processGroupPhysicalFootprintBytes": 41 * 1024**3,
             "processGroupLifetimePeakPhysicalFootprintBytes": 43 * 1024**3,
-        }]
+        })]
         with mock.patch.object(sampler, "_sample"):
             summary = sampler.stop()
         self.assertTrue(summary["processFootprintAvailable"])
@@ -19462,6 +19623,9 @@ for line in sys.stdin:
         theme = (ROOT / "theme.js").read_text(encoding="utf-8")
         styles = (ROOT / "styles.css").read_text(encoding="utf-8")
         script = (ROOT / "app.js").read_text(encoding="utf-8")
+        launch_ui = (ROOT / "launch_workspace.js").read_text(encoding="utf-8")
+        script += "\n" + launch_ui
+        chat_ui = (ROOT / "chat_workspace.js").read_text(encoding="utf-8")
         self.assertIn('const DEFAULT_DETAIL = "focused"', theme)
         self.assertIn('dataset.detail = detail', theme)
         self.assertIn("initialiseAppearance(document.documentElement, themeStorage)", theme)
@@ -19476,12 +19640,14 @@ for line in sys.stdin:
             self.assertIn(selector, styles)
         self.assertIn('ThemeCore.writeDetail(themeStorage(), detail)', script)
         self.assertIn('activeDetail() === "detailed" ? compatibilityDetail : selectedReason', script)
-        self.assertIn('$("chatTranscriptToolbar").dataset.empty = String(!messages)', script)
+        self.assertIn('$("chatTranscriptToolbar").dataset.empty = String(!messages)', chat_ui)
         self.assertIn('$("chatSettings").classList.toggle("sampling-defaults", !custom)', script)
         self.assertIn('Last completed Chat turn: ${chatSpeed.label}', script)
-        self.assertIn('panel.open = detail === "detailed"', script)
-        self.assertIn('function updateChatStatusSummaryLabel()', script)
-        self.assertIn('function updateAgentConsoleStatusSummaryLabel()', script)
+        self.assertIn('panel.open = detail === "detailed"', chat_ui)
+        self.assertIn('function updateChatStatusSummaryLabel()', chat_ui)
+        console_ui = (ROOT / "agent_console_workspace.js").read_text(encoding="utf-8")
+        self.assertIn('function updateAgentConsoleStatusSummaryLabel()', console_ui)
+        self.assertIn('LLMAgentConsoleWorkspace.createController', script)
         self.assertIn('runtimeAdvisory', script)
         self.assertIn('const warnings = [plan.runtimeAdvisory?.detail, ...(plan.warnings || [])]', script)
         self.assertIn('syncAgentConsoleStatusDetailMode(detail)', script)
@@ -19490,7 +19656,10 @@ for line in sys.stdin:
         self.assertIn('function syncRuntimeAdvancedDetailMode(detail = activeDetail())', script)
         self.assertIn('syncRuntimeAdvancedDetailMode(detail)', script)
         self.assertIn('.runtime-advanced-tools>summary{display:flex', styles)
-        self.assertIn('class="runtime-card-details"', script)
+        runtime_ui = (ROOT / "runtime_manager.js").read_text(encoding="utf-8")
+        self.assertIn('class="runtime-card-details"', runtime_ui)
+        self.assertIn('panel.open = detail === "detailed"', runtime_ui)
+        self.assertIn('LLMRuntimeManager.createController', script)
         self.assertIn('function syncRuntimeCardDetailMode(detail = activeDetail())', script)
         self.assertIn('syncRuntimeCardDetailMode(detail)', script)
         self.assertIn('.runtime-card-details>summary::-webkit-details-marker{display:none}', styles)
@@ -19512,9 +19681,11 @@ for line in sys.stdin:
         self.assertIn(':root[data-detail="focused"] .inspector{display:none}', styles)
         self.assertIn(':root[data-detail="focused"] #backendChoices{grid-template-columns:repeat(4,minmax(0,1fr))}', styles)
         self.assertIn(':root[data-detail="focused"] #backendChoices{grid-template-columns:repeat(2,minmax(0,1fr))}', styles)
-        self.assertIn('class="chat-history-more"', script)
-        self.assertIn('id="chatResumeContract" class="chat-resume-contract"', script)
-        self.assertIn('function syncChatResumeDetailMode(detail = activeDetail())', script)
+        self.assertIn('class="chat-history-more"', chat_ui)
+        resume_script = (ROOT / "chat_resume.js").read_text(encoding="utf-8")
+        self.assertIn('make("details", "chat-resume-contract")', resume_script)
+        self.assertIn('details.id = "chatResumeContract"', resume_script)
+        self.assertIn('function syncChatResumeDetailMode(detail = activeDetail())', chat_ui)
         self.assertIn(':root[data-detail="focused"] .chat-history-dialog .session-safety span', styles)
         self.assertNotIn(':root[data-detail="focused"] .agent-console-route>div:nth-child(n+3)', styles)
         self.assertNotIn(':root[data-detail="focused"] .chat-cache-inline', styles)
@@ -19534,7 +19705,7 @@ for line in sys.stdin:
         )
 
     def test_chat_stream_phases_and_reader_intent_stay_distinct(self) -> None:
-        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        script = (ROOT / "chat_workspace.js").read_text(encoding="utf-8")
         styles = (ROOT / "styles.css").read_text(encoding="utf-8")
         self.assertIn('thinkingLive ? "Thinking live" : "Model thinking"', script)
         self.assertIn('message.pending ? "Answering live" : "Final answer"', script)
@@ -19548,7 +19719,7 @@ for line in sys.stdin:
 
     def test_hub_console_preserves_output_and_can_answer_pi_requests(self) -> None:
         index = (ROOT / "index.html").read_text(encoding="utf-8")
-        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        script = (ROOT / "agent_console_workspace.js").read_text(encoding="utf-8")
         styles = (ROOT / "styles.css").read_text(encoding="utf-8")
         for element_id in (
             "agentConsoleInteraction", "agentConsoleInteractionTitle",
@@ -19563,7 +19734,7 @@ for line in sys.stdin:
         self.assertIn(".agent-terminal-shell{position:relative;min-width:0;min-height:220px;overflow:hidden;background:#000}", styles)
 
     def test_chat_queue_uses_progressive_disclosure_and_opens_for_review(self) -> None:
-        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        script = (ROOT / "chat_workspace.js").read_text(encoding="utf-8")
         styles = (ROOT / "styles.css").read_text(encoding="utf-8")
         self.assertIn('const wasOpen = Boolean(box.querySelector(".chat-queue-disclosure")?.open)', script)
         self.assertIn('wasOpen || state.chatQueuePaused || state.chatQueueEditingId', script)
@@ -19574,7 +19745,7 @@ for line in sys.stdin:
         self.assertIn(".chat-queue-panel{padding:7px}", styles)
 
     def test_chat_message_actions_are_progressive_and_copy_stays_read_only(self) -> None:
-        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        script = (ROOT / "chat_workspace.js").read_text(encoding="utf-8")
         styles = (ROOT / "styles.css").read_text(encoding="utf-8")
         self.assertIn('more.className = "chat-message-more"', script)
         self.assertIn('const addMoreAction = (action, text, title = text)', script)
@@ -19594,20 +19765,25 @@ for line in sys.stdin:
         ):
             self.assertIn(f'id="{element_id}"', index)
         self.assertIn("function quickStartEntries()", script)
-        self.assertIn("state.profiles.find(profileUiReady)", script)
-        self.assertIn("state.sessionSets.find(item => item.ready)", script)
+        saved_launches = (ROOT / "saved_launches.js").read_text(encoding="utf-8")
+        self.assertIn("profilesManager.shortcutEntries()", script)
+        self.assertIn("store.profiles.find(isReady)", saved_launches)
+        self.assertIn("sessionSetsManager.readySet()", script)
+        session_sets = (ROOT / "session_sets.js").read_text(encoding="utf-8")
+        self.assertIn("store.sets.find(item => item.ready)", session_sets)
         self.assertIn('api("/api/profiles")', script)
         self.assertIn('api("/api/session-sets")', script)
-        self.assertIn("Promise.allSettled", script)
-        self.assertIn("applySavedProfile(profile.dataset.quickProfileLaunch, true)", script)
-        self.assertIn("reviewQuickSessionSet(sessionSet.dataset.quickSessionReview)", script)
+        self.assertIn("Promise.allSettled", saved_launches)
+        self.assertIn("void apply(profile,true)", saved_launches)
+        self.assertIn("reviewSessionSet:reviewQuickSessionSet", script)
+        self.assertIn("void reviewSessionSet(session)", saved_launches)
         self.assertIn("await openSessionSetManager()", script)
         self.assertIn("await planSessionSet(setId)", script)
         self.assertIn("requestUsesExperimentalFreeToken", script)
-        self.assertIn("state.quickStartRoutesOpen", script)
+        self.assertIn("store.shortcutsOpen", saved_launches)
         self.assertIn("function toggleQuickStartRoutes()", script)
-        self.assertIn('$("quickStartCards").classList.toggle("hidden", !state.quickStartRoutesOpen)', script)
-        self.assertIn('$("customLaunchEditor").removeAttribute("inert")', script)
+        self.assertIn('node("quickStartCards").classList.toggle("hidden", !store.shortcutsOpen)', saved_launches)
+        self.assertIn('node("customLaunchEditor").removeAttribute("inert")', saved_launches)
         self.assertNotIn('.custom-launch-editor.quick-start-collapsed,.launch-dock.quick-start-collapsed{display:none}', styles)
         self.assertIn("/* Saved routes stay optional: they never replace the normal launch editor. */", styles)
         self.assertIn(':root[data-detail="focused"] .quick-start:not(.hidden){display:block', styles)
@@ -19624,6 +19800,9 @@ for line in sys.stdin:
         index = (ROOT / "index.html").read_text(encoding="utf-8")
         styles = (ROOT / "styles.css").read_text(encoding="utf-8")
         script = (ROOT / "app.js").read_text(encoding="utf-8")
+        launch_ui = (ROOT / "launch_workspace.js").read_text(encoding="utf-8")
+        script += "\n" + launch_ui
+        benchmark_ui = (ROOT / "benchmark_workspace.js").read_text(encoding="utf-8")
         self.assertIn('const UI_FEATURES = Object.freeze({freetoken:false})', script)
         self.assertIn('function uiEngineVisible(backend)', script)
         self.assertIn('function applyUiFeatureVisibility()', script)
@@ -19642,19 +19821,27 @@ for line in sys.stdin:
             index,
         )
         for marker in (
-            '.filter(uiEngineVisible)',
+            '.filter(registryPort.uiEngineVisible)',
             'visibleEngineAdapters()',
-            'data.profiles.filter(uiProfileVisible)',
-            'data.sets.filter(uiSessionSetVisible)',
-            'if (!uiRequestVisible(request))',
-            'if (!uiEngineVisible(backend))',
+            'if (!registryPort.uiRequestVisible(request))',
+            'if (!registryPort.uiEngineVisible(backend))',
             'filter(([name]) => (',
-            '.filter(engine => uiEngineVisible(engine.backend || engine.id))',
-            'if (!uiFeatureEnabled("freetoken")) return;',
+            'if (!registryPort.uiFeatureEnabled("freetoken")) return;',
         ):
             self.assertIn(marker, script)
         self.assertIn(
-            'item.resumeAvailable && uiEngineVisible(item.backend)', script,
+            '.filter(engine => capabilities.uiEngineVisible(engine.backend || engine.id))',
+            benchmark_ui,
+        )
+        self.assertIn('uiEngineVisible:(...args)=>uiEngineVisible(...args)', script)
+        session_sets = (ROOT / "session_sets.js").read_text(encoding="utf-8")
+        saved_launches = (ROOT / "saved_launches.js").read_text(encoding="utf-8")
+        self.assertIn("visible:uiProfileVisible", script)
+        self.assertIn("data.profiles.filter(visible)", saved_launches)
+        self.assertIn("visible:uiSessionSetVisible", script)
+        self.assertIn("data.sets.filter(visible)", session_sets)
+        self.assertIn(
+            'chat.resumeAvailable && uiEngineVisible(chat.backend)', script,
         )
         self.assertIn(
             'model.remote === true && model.modelType === "freetoken-remote"', script,
@@ -19664,6 +19851,9 @@ for line in sys.stdin:
         index = (ROOT / "index.html").read_text(encoding="utf-8")
         styles = (ROOT / "styles.css").read_text(encoding="utf-8")
         script = (ROOT / "app.js").read_text(encoding="utf-8")
+        launch_ui = (ROOT / "launch_workspace.js").read_text(encoding="utf-8")
+        script += "\n" + launch_ui
+        benchmark_ui = (ROOT / "benchmark_workspace.js").read_text(encoding="utf-8")
         decision_script = (ROOT / "calibration_decision.js").read_text(encoding="utf-8")
         for element_id in (
             "performanceReceipt", "performanceReceiptIcon",
@@ -19675,12 +19865,12 @@ for line in sys.stdin:
         self.assertIn('options:request.options || {}, sampling', script)
         self.assertIn("function renderPerformanceReceipt", script)
         self.assertIn("function renderEngineEvidenceChoices", script)
-        self.assertIn('request.reasoningPolicy = "all-engines-model-default"', script)
+        self.assertIn('request.reasoningPolicy = "all-engines-model-default"', benchmark_ui)
         self.assertIn('actionId:"review-normalized"', script)
         self.assertIn('title:focused ? `Apply leading engine · ${recommendedName}`', script)
         self.assertIn('action:"Apply", actionId:"apply-engine"', script)
-        self.assertIn('&& promoteCompletedCalibrationResult()', script)
-        self.assertIn('$("calibrationCoolingSelect").value = visibleCooling', script)
+        self.assertIn('&& promoteCompletedCalibrationResult()', benchmark_ui)
+        self.assertIn('$("calibrationCoolingSelect").value = visibleCooling', benchmark_ui)
         self.assertIn('receipt?.state === "trusted-engine" && receipt?.fresh', script)
         self.assertIn('button.classList.toggle("measured-best", best)', script)
         self.assertIn('title:focused ? "Compare compatible engines" : "No exact engine result"', script)
@@ -19703,8 +19893,9 @@ for line in sys.stdin:
     def test_running_chat_controls_drawer_is_on_demand_and_next_request_scoped(self) -> None:
         index = (ROOT / "index.html").read_text(encoding="utf-8")
         styles = (ROOT / "styles.css").read_text(encoding="utf-8")
-        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        script = (ROOT / "chat_workspace.js").read_text(encoding="utf-8")
         backend = (ROOT / "launcher.py").read_text(encoding="utf-8")
+        lifecycle = (ROOT / "run_lifecycle.py").read_text(encoding="utf-8")
         for element_id in (
             "chatRunSettingsButton", "chatRunSettingsScrim", "chatRunSettingsPanel",
             "chatRunSettingsForm", "chatRunSettingsFields", "chatRunSystemPrompt",
@@ -19729,8 +19920,9 @@ for line in sys.stdin:
         self.assertIn(".chat-run-settings-scrim[hidden],.chat-run-settings-panel[hidden]{display:none}", styles)
         self.assertIn('elif self.path == "/api/chat/settings/get":', backend)
         self.assertIn('elif self.path == "/api/chat/settings/update":', backend)
-        self.assertIn('"appliesTo": "next-request"', backend)
-        self.assertIn('"reloadsModel": False', backend)
+        self.assertIn("class RunManager(run_lifecycle.RunManager):", backend)
+        self.assertIn('"appliesTo": "next-request"', lifecycle)
+        self.assertIn('"reloadsModel": False', lifecycle)
 
     def test_html_assets_and_manual_sections_exist(self) -> None:
         for filename in ("index.html", "manual.html"):
@@ -19744,8 +19936,14 @@ for line in sys.stdin:
                     self.assertTrue((ROOT / target).is_file(), f"missing {target}")
         manual = (ROOT / "manual.html").read_text(encoding="utf-8")
         index = (ROOT / "index.html").read_text(encoding="utf-8")
-        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        script = (ROOT / "app.js").read_text(encoding="utf-8") + "\n" + (ROOT / "launch_workspace.js").read_text(encoding="utf-8")
+        launch_ui = (ROOT / "launch_workspace.js").read_text(encoding="utf-8")
+        script += "\n" + launch_ui
+        benchmark_ui = (ROOT / "benchmark_workspace.js").read_text(encoding="utf-8")
+        chat_ui = (ROOT / "chat_workspace.js").read_text(encoding="utf-8")
         styles = (ROOT / "styles.css").read_text(encoding="utf-8")
+        self.assertIn('<script src="benchmark_workspace.js" defer></script>', index)
+        self.assertIn('id="benchmarkHistoryRetry"', index)
         for section in ("chat", "benchmark", "calibration", "sessions", "session-sets", "route-check", "model-library", "acquisition", "runtime-manager", "profiles", "setup", "ane", "omlx", "lmstudio", "mtplx", "freetoken", "truncation", "sources"):
             self.assertIn(f'id="{section}"', manual)
         self.assertIn('data-client="codex"', index)
@@ -19810,9 +20008,11 @@ for line in sys.stdin:
         self.assertIn("document.createElement", timeline_renderer)
         self.assertIn("textContent", timeline_renderer)
         self.assertNotIn("innerHTML", timeline_renderer)
-        self.assertIn("if (timelineNeedsRender) renderAgentPiTimeline();", script)
-        self.assertIn("function agentConsoleShowsPiTimeline", script)
-        self.assertIn("PiTimelineCore.shouldUseTimeline", script)
+        console_ui = (ROOT / "agent_console_workspace.js").read_text(encoding="utf-8")
+        self.assertIn('src="agent_console_workspace.js"', index)
+        self.assertIn("if (timelineNeedsRender) renderAgentPiTimeline();", console_ui)
+        self.assertIn("function agentConsoleShowsPiTimeline", console_ui)
+        self.assertIn("PiTimelineCore.shouldUseTimeline", console_ui)
         self.assertIn("developers.openai.com/codex/config-reference", manual)
         self.assertIn("github.com/jundot/omlx/releases/tag/v0.6.4", manual)
         self.assertIn("github.com/youssofal/MTPLX/releases/tag/v2.11.2", manual)
@@ -19909,24 +20109,24 @@ for line in sys.stdin:
             "calibrationOriginTitle", "calibrationOriginDetail",
         ):
             self.assertIn(f'id="{element_id}"', index)
-        self.assertIn("Measuring…", script)
-        self.assertIn("Last completed turn ·", script)
-        self.assertIn("decodeTokensPerSecond", script)
-        self.assertIn("promoteCompletedCalibrationResult", script)
-        self.assertIn("function calibrationRoutePreview", script)
-        self.assertIn("function calibrationAlternativeMarkup", script)
-        self.assertIn("function selectCalibrationAlternative", script)
-        self.assertIn("data-calibration-model", script)
-        self.assertIn("Saved locally; no second test is needed.", script)
+        self.assertIn("Measuring…", benchmark_ui)
+        self.assertIn("Last completed turn ·", benchmark_ui)
+        self.assertIn("decodeTokensPerSecond", benchmark_ui)
+        self.assertIn("promoteCompletedCalibrationResult", benchmark_ui)
+        self.assertIn("function calibrationRoutePreview", benchmark_ui)
+        self.assertIn("function calibrationAlternativeMarkup", benchmark_ui)
+        self.assertIn("function selectCalibrationAlternative", benchmark_ui)
+        self.assertIn("data-calibration-model", benchmark_ui)
+        self.assertIn("Saved locally; no second test is needed.", benchmark_ui)
         self.assertIn("calibration-engine-settings", styles)
         self.assertIn("calibration-result-settings", styles)
-        self.assertIn("engine.settingsSearch", script)
-        self.assertIn("rejectedFasterCandidateCount", script)
-        self.assertIn("engine.routeSettingsLabel", script)
-        self.assertIn('Setups: ${routePreview}.', script)
-        self.assertIn("Use saved result", script)
-        self.assertIn("no verified accelerator in this artifact", script)
-        self.assertNotIn("Saving result…", script)
+        self.assertIn("engine.settingsSearch", benchmark_ui)
+        self.assertIn("rejectedFasterCandidateCount", benchmark_ui)
+        self.assertIn("engine.routeSettingsLabel", benchmark_ui)
+        self.assertIn('Setups: ${routePreview}.', benchmark_ui)
+        self.assertIn("Use saved result", benchmark_ui)
+        self.assertIn("no verified accelerator in this artifact", benchmark_ui)
+        self.assertNotIn("Saving result…", benchmark_ui)
         for element_id in (
             "openSessionDashboard", "sessionDialog", "sessionResourceFacts",
             "sessionActiveRoute", "sessionComponents", "sessionEstimateFacts",
@@ -19960,7 +20160,7 @@ for line in sys.stdin:
         self.assertIn("receipt?.toolContractVerified === true", script)
         self.assertIn(
             "plan.requiresExperimentalApproval || plan.admission?.requiresAcknowledgement",
-            script,
+            (ROOT / "session_sets.js").read_text(encoding="utf-8"),
         )
         for element_id in (
             "chatHistoryButton", "openChatHistoryTop", "chatStopButton", "chatQueue", "chatHistoryDialog",
@@ -19999,7 +20199,8 @@ for line in sys.stdin:
         self.assertNotIn("launcher-overrides.css", index)
         self.assertNotIn('class="hero"', index)
         self.assertNotIn("ONE MODEL · ANY CODING AGENT", index)
-        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        script = (ROOT / "app.js").read_text(encoding="utf-8") + "\n" + (ROOT / "launch_workspace.js").read_text(encoding="utf-8")
+        benchmark_ui = (ROOT / "benchmark_workspace.js").read_text(encoding="utf-8")
         self.assertIn("engineNextAction", script)
         self.assertIn('source:"optimizer-result"', script)
         self.assertIn("Test or review engines", index)
@@ -20014,7 +20215,8 @@ for line in sys.stdin:
         self.assertIn('<output id="mtpMinTokensValue"', index)
         self.assertIn('<output id="mtpMinContinueProbabilityValue"', index)
         styles = (ROOT / "styles.css").read_text(encoding="utf-8")
-        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        script = (ROOT / "app.js").read_text(encoding="utf-8") + "\n" + (ROOT / "launch_workspace.js").read_text(encoding="utf-8")
+        benchmark_ui = (ROOT / "benchmark_workspace.js").read_text(encoding="utf-8")
         self.assertIn("prefers-reduced-motion:reduce", styles.replace(" ", ""))
         self.assertIn(".benchmark-engine-strip", styles)
         self.assertIn(".chat-context-pack", styles)
@@ -20044,14 +20246,14 @@ for line in sys.stdin:
         self.assertIn("experimentalQualificationConsent", script)
         self.assertIn("function openFreeTokenModelReview", script)
         self.assertIn('dataset.action === "models"', script)
-        self.assertIn('route.routeKind === "native"', script)
+        self.assertIn('route.routeKind === "native"', (ROOT / "chat_workspace.js").read_text(encoding="utf-8"))
         self.assertIn(".freetoken-connection-banner.native", styles)
         self.assertIn(".freetoken-qualification", styles)
         self.assertIn(".model-library-engine.experimental", styles)
         self.assertIn("/api/runtime/status", script)
         self.assertIn("/api/runtime/select", script)
         self.assertIn("/api/runtime/open", script)
-        self.assertIn("data-runtime-open", script)
+        self.assertIn("data-runtime-open", (ROOT / "runtime_manager.js").read_text(encoding="utf-8"))
         for endpoint in (
             "/api/runtime/promotion/status", "/api/runtime/promotion/plan",
             "/api/runtime/promotion/start", "/api/runtime/promotion/stop",
@@ -20076,20 +20278,20 @@ for line in sys.stdin:
         self.assertIn("prepareVerifiedQuickLaunch", script)
         self.assertIn("launchCheckedRoute", script)
         self.assertIn("routeVerification", script)
-        self.assertIn("CHAT_QUEUE_STORAGE_KEY", script)
-        self.assertIn("chatQueuePaused", script)
-        self.assertIn("chatSidebarMenuId", script)
+        self.assertIn("CHAT_QUEUE_STORAGE_KEY", chat_ui)
+        self.assertIn("chatQueuePaused", chat_ui)
+        self.assertIn("chatSidebarMenuId", chat_ui)
         for marker in (
             "data-chat-sidebar-menu-toggle", "data-chat-sidebar-pin",
             "data-chat-sidebar-rename", "data-chat-sidebar-export",
             "data-chat-sidebar-delete", "data-chat-sidebar-rename-form",
         ):
-            self.assertIn(marker, script)
+            self.assertIn(marker, chat_ui)
         self.assertIn("resumeChatQueue", script)
         self.assertIn("processChatQueue", script)
         self.assertIn("ThemeCore.writeTheme", script)
         self.assertIn("renderThemeMenu", script)
-        self.assertIn("CHAT_TURN_CHECKPOINT_INTERVAL_MS", script)
+        self.assertIn("CHAT_TURN_CHECKPOINT_INTERVAL_MS", chat_ui)
         self.assertIn("recoverInterruptedChatTurn", script)
         self.assertIn("/api/chat/turn/checkpoint", script)
         self.assertIn("/api/chat/turn/recover", script)
@@ -20125,34 +20327,34 @@ for line in sys.stdin:
         self.assertIn("/api/session/request/cancel", script)
         self.assertIn("/api/session/idle-policy", script)
         self.assertIn("/api/chat", script)
-        self.assertIn("ChatStreamCore.responseLimitReason", script)
-        self.assertIn("Response limit reached", script)
-        self.assertIn("Continue answer", script)
+        self.assertIn("ChatStreamCore.responseLimitReason", chat_ui)
+        self.assertIn("Response limit reached", chat_ui)
+        self.assertIn("Continue answer", chat_ui)
         self.assertIn(".chat-message-limit", styles)
-        self.assertIn("calibrationDetailsOpen", script)
+        self.assertIn("calibrationDetailsOpen", benchmark_ui)
         self.assertIn('.calibration-dialog:not(.show-calibration-details) .calibration-plan-facts', styles)
         self.assertIn('.calibration-dialog:not(.show-calibration-details) .calibration-engine.eligible p', styles)
         self.assertIn("/api/chat/history/save", script)
         self.assertIn("/api/chat/history/get", script)
         self.assertIn("/api/chat/history/delete", script)
-        self.assertIn("reasoning_content", script)
-        self.assertIn("<think>", script)
-        self.assertIn("CHAT_QUEUE_MAX_MESSAGES = 32", script)
-        self.assertIn("Stop ends only this response", script)
+        self.assertIn("reasoning_content", chat_ui)
+        self.assertIn("<think>", chat_ui)
+        self.assertIn("CHAT_QUEUE_MAX_MESSAGES = 32", chat_ui)
+        self.assertIn("Stop ends only this response", chat_ui)
         self.assertIn("editAndRetryChatMessage", script)
         self.assertIn("regenerateChatMessage", script)
         self.assertIn("continueChatMessage", script)
         self.assertIn("trimChatToRecent", script)
-        self.assertIn("data-chat-queue-move", script)
-        self.assertIn("CHAT_CONTEXT_MAX_FILES = 24", script)
-        self.assertIn("CHAT_WORKSPACE_INDEX_MAX_FILES = 500", script)
-        self.assertIn("CHAT_WORKSPACE_REQUEST_MAX_FILES = 12", script)
-        self.assertIn("CHAT_DRAFT_STORAGE_KEY", script)
+        self.assertIn("data-chat-queue-move", chat_ui)
+        self.assertIn("CHAT_CONTEXT_MAX_FILES = 24", chat_ui)
+        self.assertIn("CHAT_WORKSPACE_INDEX_MAX_FILES = 500", chat_ui)
+        self.assertIn("CHAT_WORKSPACE_REQUEST_MAX_FILES = 12", chat_ui)
+        self.assertIn("CHAT_DRAFT_STORAGE_KEY", chat_ui)
         self.assertIn("sessionStorage", script)
         self.assertIn("renderChatSidebar", script)
         self.assertIn("openUnsavedChatDraft", script)
         self.assertIn("restorePendingChatDraftConversation", script)
-        self.assertIn("contextFiles", script)
+        self.assertIn("contextFiles", chat_ui)
         self.assertIn("addChatContextFiles", script)
         self.assertIn("addChatWorkspaceFolder", script)
         self.assertIn("chatWorkspaceFileScore", script)
@@ -20160,15 +20362,15 @@ for line in sys.stdin:
         self.assertIn("/api/benchmark/start", script)
         self.assertIn("/api/benchmark/status", script)
         self.assertIn("/api/benchmark/history", script)
-        self.assertIn('request.scope = "engines"', script)
+        self.assertIn('request.scope = "engines"', benchmark_ui)
         self.assertIn("request.enginePreference = enginePreference", script)
-        self.assertIn('["measure", "apply-existing"].includes(plan.action)', script)
-        self.assertIn('? "Retest engines + settings"', script)
-        self.assertIn('? "Replace this saved measurement"', script)
-        self.assertIn('const applyScope = plan.routeQualification ? "current" : "engine"', script)
-        self.assertIn('applyScope, plan.preference, false, evidenceBinding', script)
-        self.assertIn("Measured engine results", script)
-        self.assertNotIn('$("calibrationCoolingSelect").value = "smart";', script)
+        self.assertIn('["measure", "apply-existing"].includes(plan.action)', benchmark_ui)
+        self.assertIn('? "Retest engines + settings"', benchmark_ui)
+        self.assertIn('? "Replace this saved measurement"', benchmark_ui)
+        self.assertIn('const applyScope = plan.routeQualification ? "current" : "engine"', benchmark_ui)
+        self.assertIn('applyScope, plan.preference, false, evidenceBinding', benchmark_ui)
+        self.assertIn("Measured engine results", benchmark_ui)
+        self.assertNotIn('$("calibrationCoolingSelect").value = "smart";', benchmark_ui)
         self.assertIn('data-engine-preference="throughput"', index)
         self.assertIn('request.enginePreference = "throughput"', script)
         self.assertIn('preference:"throughput"', script)

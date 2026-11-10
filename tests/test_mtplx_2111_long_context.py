@@ -202,6 +202,28 @@ class MTPLX2111LongContextContractTests(unittest.TestCase):
         self.assertNotIn(GROWTH_RESERVE, plan.engine_env)
         self.assertEqual(self.context_operator_environment(plan), {})
 
+    def test_compiled_verify_fence_covers_the_selected_window(self) -> None:
+        """The turbo profile pins compiled verify at 32,768 tokens; long
+        windows must lift the fence or every verify round runs eager (measured
+        4.56 -> 10.05 decode tok/s at a 112,881-token prompt on 17 Sep 2026)."""
+        model = self.dense_27b_model()
+        short = self.launch_plan(
+            model,
+            context=launcher.MTPLX_COMPILED_VERIFY_PROFILE_FENCE,
+            acceleration="auto",
+            run_name="short",
+        )
+        self.build(short)
+        self.assertNotIn("MTPLX_COMPILED_VERIFY_MAX_CONTEXT", short.engine_env)
+
+        long = self.launch_plan(
+            model, context=131_072, acceleration="auto", run_name="long",
+        )
+        self.build(long)
+        self.assertEqual(
+            long.engine_env["MTPLX_COMPILED_VERIFY_MAX_CONTEXT"], "131072",
+        )
+
     def test_child_environment_cannot_inherit_swap_or_growth_reserve_overrides(self) -> None:
         """The effective Popen environment, not just LaunchPlan, owns this safety rule."""
         model = self.dense_27b_model()

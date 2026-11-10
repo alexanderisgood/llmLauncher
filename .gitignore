@@ -40,6 +40,11 @@ build/
 dist/
 coverage/
 
+# Local benchmark installations, generated packs and private run state
+bench/runtimes/
+bench/derived/
+bench/runs/
+
 # Model artifacts must never enter source control
 *.safetensors
 *.gguf

@@ -1,0 +1,22 @@
+{
+  "version": "0.2.17-q8.1",
+  "upstreamCommit": "d25dffff1f3f56e70ddb9f11b82e7dc1b843f041",
+  "qualified": true,
+  "runtimeHashes": {
+    "slotstream": "a4a7935be0716aeca8e4b8cc162a822ed963fa50ed505d8178ebc63f8157c927",
+    "mlx.metallib": "198488eb61359e953580a9c4530400feee1a06dd2f28a930a6ffa58aec66a597"
+  },
+  "patchSHA256": "9d600c29fd38a6f9953ae0a3d33d6ba784b5554cb48b05f0a23cfa6a4b7b6123",
+  "qualification": {
+    "date": "2026-09-14",
+    "hardware": "Apple M5 Pro, 48 GiB unified memory",
+    "nativeChecks": 54,
+    "prefixForkAssertions": 3827,
+    "mtpDraftDepth": 2,
+    "configuredContextTested": 131072,
+    "longPromptTokens": 6541,
+    "tensorCacheLengthTested": 131072,
+    "fullWindowModelQualified": false,
+    "wholeModelSpeedupEstablished": false
+  }
+}

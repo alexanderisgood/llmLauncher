@@ -37,7 +37,7 @@ OMLX_PROMPT_FIXED_RESERVE_TOKENS = 1_024
 OMLX_PROMPT_ITEM_RESERVE_TOKENS = 32
 SUPPORTED_BACKENDS = {
     "omlx", "lmstudio", "mtplx", "freetoken", "swiftlm", "mference", "whallm",
-    "llamacpp", "uzu", "slotstream",
+    "llamacpp", "uzu", "slotstream", "splash", "kolibri", "rapidmlx",
 }
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -323,6 +323,8 @@ def load_config(path: Path) -> dict[str, Any]:
         fail("unexpected context limit")
     if value.get("reasoning") not in EFFORT_ORDER:
         fail("invalid reasoning effort")
+    if value.get("backend") == "rapidmlx" and value.get("reasoning") not in {"auto", "off"}:
+        fail("Rapid MLX reasoning must be auto or off")
     if not all(isinstance(value.get(key), str) and value[key] for key in ("clientKey", "upstreamKey", "servedModel")):
         fail("invalid API key")
     try:
@@ -391,6 +393,28 @@ def bound_omlx_request_to_context(
         if bounded_output == value[output_field]:
             return encoded
         value[output_field] = bounded_output
+
+
+def validate_rapidmlx_stateless_request(value: dict[str, Any]) -> None:
+    """Require inline history; Rapid's native Responses API has no response store."""
+    for field in ("previous_response_id", "conversation", "prompt"):
+        if value.get(field) is not None:
+            raise ValueError(
+                f"Rapid MLX does not support {field}; send the complete conversation "
+                "as inline input instead."
+            )
+    for field in ("store", "background"):
+        if value.get(field) is not None and value[field] is not False:
+            raise ValueError(f"Rapid MLX does not support {field}=true on its stateless API.")
+    pending = [value.get("input"), value.get("messages")]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, list):
+            pending.extend(item)
+        elif isinstance(item, dict):
+            if str(item.get("type") or "").casefold() == "item_reference":
+                raise ValueError("Rapid MLX requires referenced conversation items inline; item_reference is unsupported.")
+            pending.extend(item.values())
 
 
 def validate_omlx_context_is_self_contained(value: dict[str, Any]) -> None:
@@ -474,6 +498,10 @@ def transform_response_request(
         raise ValueError("Responses request must be a JSON object")
     if value.get("model") != config.get("servedModel"):
         raise ValueError("Responses request targets a different model")
+    if config.get("backend") == "rapidmlx":
+        validate_rapidmlx_stateless_request(value)
+        if config.get("reasoning") not in {"auto", "off"}:
+            raise ValueError("Rapid MLX reasoning must be auto or off")
     if config.get("backend") == "omlx":
         validate_omlx_context_is_self_contained(value)
     sampling_policy = _sampling_policy_source(config, "responses", surface)
@@ -481,6 +509,17 @@ def transform_response_request(
         value = enforce_sampling_contract(
             value, sampling_policy[0], sampling_policy[1], "responses",
         )
+    if config.get("backend") == "rapidmlx":
+        unsupported = {"presence_penalty", "frequency_penalty", "repetition_penalty"}.intersection(value)
+        if unsupported:
+            raise ValueError(
+                "Rapid MLX native Responses cannot enforce " + ", ".join(sorted(unsupported))
+                + "; use a Chat Completions work surface for this sampling contract."
+            )
+        value.pop("reasoning_max_tokens", None)
+        value.pop("think", None)
+        value.pop("thinking", None)
+        value["store"] = False
     output_limit = int(config["outputLimit"])
     requested_limit = value.get("max_output_tokens")
     if requested_limit is None:
@@ -721,6 +760,9 @@ class ResponsesLimitGuard:
         value = self._event_value(event)
         if value is None and len(event) > MAX_RESPONSE_GUARD_BUFFER:
             self.output_inspection_incomplete = True
+        self._observe_value(value)
+
+    def _observe_value(self, value: dict[str, Any] | None) -> None:
         reasoning, final_output = response_output_signals(value)
         self.saw_reasoning = self.saw_reasoning or reasoning
         self.saw_final_output = self.saw_final_output or final_output
@@ -796,8 +838,15 @@ class ResponsesLimitGuard:
                 released.extend(event)
                 self.passthrough_event = False
                 continue
-            self._observe_event(event)
-            if self._is_completed_event(event):
+            value = self._event_value(event)
+            if value is None and len(event) > MAX_RESPONSE_GUARD_BUFFER:
+                self.output_inspection_incomplete = True
+            self._observe_value(value)
+            response = _response_record(value) if value is not None else None
+            if value is not None and (
+                value.get("type") == "response.completed"
+                or (response is not None and response.get("status") == "completed")
+            ):
                 self.terminal_started = True
                 self.terminal.extend(event)
                 self.terminal.extend(self.pending)
@@ -850,6 +899,7 @@ class ResponsesLimitGuard:
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
+    disable_nagle_algorithm = True
     protocol_version = "HTTP/1.0"
     server_version = "LLMLauncherCodexGuard/1"
 
@@ -919,10 +969,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         bridge_request: BridgeRequest | None = None
         request_output_limit: int | None = None
         upstream_path = self.path
-        if config["backend"] == "mtplx" and base_path.startswith("/v1/responses") and base_path != "/v1/responses":
+        if config["backend"] in {"mtplx", "rapidmlx"} and base_path.startswith("/v1/responses") and base_path != "/v1/responses":
+            runtime = "Rapid MLX" if config["backend"] == "rapidmlx" else "MTPLX"
             self.send_json_error(
                 HTTPStatus.NOT_IMPLEMENTED,
-                "MTPLX does not expose Responses compaction or stored-response routes. Codex remote compaction is disabled for this session.",
+                f"{runtime} does not expose Responses compaction or stored-response routes. Codex remote compaction is disabled for this session.",
             )
             return
         if self.command == "POST" and base_path == "/v1/responses":

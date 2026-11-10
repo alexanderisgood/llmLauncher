@@ -1,9 +1,10 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const source = fs.readFileSync(path.join(__dirname, "../app.js"), "utf8");
+const source = benchmarkSources.controllerSource;
 const html = fs.readFileSync(path.join(__dirname, "../index.html"), "utf8");
 const start = source.indexOf("function renderBenchmarkLiveTps(");
 const end = source.indexOf("function renderBenchmarkStatus(", start);
@@ -14,7 +15,7 @@ const field = {textContent:"", title:"", hidden:true,
   classList:{toggle(_name, hidden) {field.hidden = hidden;}}};
 const context = vm.createContext({$:() => field,
   finiteMetric:value => typeof value === "number" && Number.isFinite(value) ? value : null});
-vm.runInContext(source.slice(start, end), context);
+benchmarkSources.runInContext(source.slice(start, end), context);
 const liveMetric = {decodeTokensPerSecond:24.25, backendLabel:"MTPLX", modeLabel:"Default MTP", stageLabel:"Cold turn"};
 for (const phase of ["queued", "cooldown", "starting", "running", "stopping"]) {
   context.renderBenchmarkLiveTps({phase, liveMetric});

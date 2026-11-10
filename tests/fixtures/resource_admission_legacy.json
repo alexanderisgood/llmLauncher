@@ -1,0 +1,162 @@
+{
+  "functions": [
+    "qwen4_qsa_allocation_high_water_tokens",
+    "public_session_resource",
+    "dflash_quantized_fallback",
+    "effective_kv_precision",
+    "launch_memory_estimate",
+    "_llamacpp_qualified_session_capacity",
+    "uzu_estimate_within_process_ceiling",
+    "_uzu_qualified_session_record",
+    "uzu_qualification_memory_ceiling_supported",
+    "uzu_128k_staged_qualification_proof",
+    "session_memory_admission",
+    "route_qualification_memory_admission",
+    "strict_model_load_admission_ready",
+    "route_qualification_admission_ready",
+    "require_live_model_load_admission",
+    "require_session_launch_admission"
+  ],
+  "pureFunctions": [
+    "dflash_quantized_fallback",
+    "effective_kv_precision",
+    "qwen4_qsa_allocation_high_water_tokens",
+    "require_session_launch_admission",
+    "route_qualification_admission_ready",
+    "strict_model_load_admission_ready",
+    "uzu_estimate_within_process_ceiling",
+    "uzu_qualification_memory_ceiling_supported"
+  ],
+  "constants": [
+    "ANE_TUNER_RESERVE_BYTES",
+    "AUTOMATED_MODEL_LOAD_PURPOSES",
+    "BACKEND_LABELS",
+    "FREETOKEN_NATIVE_MAX_BATCH_SIZE",
+    "LLAMACPP_PLE_CONTEXT",
+    "LLAMACPP_PLE_MEMORY_CEILING_BYTES",
+    "LLAMACPP_WHALLM_CONFLICT_LABEL",
+    "MODEL_LOAD_OWNER_KINDS",
+    "MODEL_LOAD_PURPOSE_LABELS",
+    "OMLX_QWEN4_HIGH_MEMORY_CEILING_BYTES",
+    "OMLX_QWEN4_HIGH_MEMORY_HARD_BYTES",
+    "OMLX_QWEN4_HIGH_MEMORY_HARD_THRESHOLD",
+    "OMLX_QWEN4_METAL_FLOOR_BYTES",
+    "OMLX_QWEN4_METAL_PREFILL_SAFE_RATIO",
+    "OMLX_QWEN4_METAL_WORKSPACE_BYTES",
+    "OMLX_QWEN4_QSA_ALLOCATION_STEP_TOKENS",
+    "SESSION_MEMORY_ESTIMATE_VERSION",
+    "SESSION_OS_RESERVE_FRACTION",
+    "SESSION_OS_RESERVE_MIN_BYTES",
+    "SESSION_RUNTIME_BASE_RESERVE_BYTES",
+    "SSD_STREAMING_BACKENDS",
+    "UZU_DRAFT_FULL_ATTENTION_BYTES_PER_TOKEN",
+    "UZU_DRAFT_SLIDING_CACHE_BYTES",
+    "UZU_LONG_CONTEXT_PREFILL_RESERVE_STEP_BYTES",
+    "UZU_LONG_CONTEXT_PREFILL_RESERVE_STEP_TOKENS",
+    "UZU_MODEL_FILE_MANIFEST",
+    "UZU_PROCESS_CEILING_ADMISSION_MARGIN_BYTES",
+    "UZU_PROCESS_MEMORY_CEILING_BYTES",
+    "WHALLM_MEASURED_PEAK_BYTES"
+  ],
+  "callbacks": {
+    "benchmark_resource_condition": [
+      "live",
+      "resource_condition"
+    ],
+    "active_launcher_operation": [
+      "live",
+      "active_operation"
+    ],
+    "apple_resource_snapshot": [
+      "live",
+      "resource_snapshot"
+    ],
+    "whallm_qualification_conflict": [
+      "live",
+      "whallm_conflict"
+    ],
+    "_profile_integer": [
+      "validation",
+      "profile_integer"
+    ],
+    "bounded_integer": [
+      "validation",
+      "bounded_integer"
+    ],
+    "validated_launch_profile_request": [
+      "validation",
+      "launch_request"
+    ],
+    "validated_sampling_contract": [
+      "validation",
+      "sampling_contract"
+    ],
+    "omlx_expert_offload_options": [
+      "native",
+      "omlx_offload_options"
+    ],
+    "optimizer_evidence": [
+      "evidence",
+      "optimizer_evidence"
+    ],
+    "add_benchmark_engine_evidence": [
+      "evidence",
+      "add_engine_evidence"
+    ],
+    "verified_route_qualification": [
+      "evidence",
+      "verified_qualification"
+    ],
+    "route_qualification_metrics": [
+      "evidence",
+      "qualification_metrics"
+    ],
+    "route_qualification_spec": [
+      "evidence",
+      "qualification_spec"
+    ],
+    "route_qualification_sample_tokens": [
+      "evidence",
+      "sample_tokens"
+    ],
+    "uzu_pi_transport_supported": [
+      "evidence",
+      "uzu_pi_supported"
+    ]
+  },
+  "attributes": {
+    "darwin_memory.MEMORY_SEMANTICS_VERSION": [
+      "policy",
+      "memory_semantics_version"
+    ],
+    "slotstream_runtime.DEFAULT_MEMORY_GB": [
+      "policy",
+      "slotstream_default_memory_gb"
+    ],
+    "whallm_runtime.WORKING_SET_BYTES": [
+      "policy",
+      "whallm_working_set_bytes"
+    ],
+    "whallm_runtime.SLOTS": [
+      "policy",
+      "whallm_slots"
+    ],
+    "whallm_runtime.MEMORY_BYTES": [
+      "policy",
+      "whallm_memory_bytes"
+    ],
+    "kolibri_runtime.memory_plan": [
+      "services.native",
+      "kolibri_memory_plan"
+    ],
+    "splash_runtime.memory_estimate": [
+      "services.native",
+      "splash_memory_estimate"
+    ],
+    "MANAGER.hub_snapshot": [
+      "services.live",
+      "hub_snapshot"
+    ]
+  },
+  "fixtureSha256": "0bba8d228bffe566d47ee0da203eb45f919aadf53baf482251475e7e229750d9"
+}

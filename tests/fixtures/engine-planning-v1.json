@@ -1,0 +1,2083 @@
+{
+  "preExtractionDefinitionsSha256": "3ffe41a6027bad2aecc4a1df7ebd1d93c1295f9a05265e2363827a0d15c0a5fb",
+  "cases": [
+    {
+      "case": "omlx",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "omlx",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "backends": {
+            "omlx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "Generated-exact-model-937a36be"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        },
+        "warnings": [],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "ROOT/runtime/omlx",
+          "serve",
+          "--base-path",
+          "ROOT/run/omlx",
+          "--model-dir",
+          "ROOT/run/omlx/models",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--max-concurrent-requests",
+          "1"
+        ],
+        "engine_env": {
+          "OMLX_BASE_PATH": "ROOT/run/omlx",
+          "OMLX_API_KEY": "fixed-test-key"
+        },
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "omlx": {
+            "directory": true
+          },
+          "omlx/model_settings.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": 1,\n  \"models\": {\n    \"Generated-exact-model-937a36be\": {\n      \"max_context_window\": 8192,\n      \"max_tokens\": 1024,\n      \"temperature\": 0.7,\n      \"top_p\": 0.9,\n      \"top_k\": 40,\n      \"seed\": 17,\n      \"force_sampling\": false,\n      \"chat_template_kwargs\": {\n        \"enable_thinking\": false\n      },\n      \"forced_ct_kwargs\": [\n        \"enable_thinking\"\n      ],\n      \"preserve_thinking\": false,\n      \"thinking_budget_enabled\": false,\n      \"thinking_budget_tokens\": null,\n      \"qwen4_ple_ssd_offload\": false,\n      \"moe_expert_offload_enabled\": false,\n      \"moe_expert_offload_resident_fraction\": 0.25,\n      \"vlm_mtp_enabled\": false,\n      \"turboquant_kv_enabled\": false,\n      \"turboquant_kv_bits\": 4,\n      \"turboquant_skip_last\": true,\n      \"mtp_enabled\": false,\n      \"mtp_num_draft_tokens\": null,\n      \"dflash_enabled\": false,\n      \"trust_remote_code\": false,\n      \"is_default\": true\n    }\n  }\n}\n"
+          },
+          "omlx/models": {
+            "directory": true
+          },
+          "omlx/models/Generated-exact-model-937a36be": {
+            "symlink": "ROOT/model"
+          },
+          "omlx/settings.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": \"1.0\",\n  \"server\": {\n    \"host\": \"127.0.0.1\",\n    \"port\": 18765,\n    \"log_level\": \"info\",\n    \"cors_origins\": [],\n    \"server_aliases\": [\n      \"localhost\",\n      \"127.0.0.1\"\n    ],\n    \"sse_keepalive_mode\": \"chunk\",\n    \"auto_start_on_launch\": false,\n    \"burst_decode_mode\": \"balanced\",\n    \"preserve_mid_system_cache\": false\n  },\n  \"model\": {\n    \"model_dirs\": [\n      \"ROOT/run/omlx/models\"\n    ],\n    \"model_dir\": \"ROOT/run/omlx/models\",\n    \"model_fallback\": false,\n    \"hide_helper_models\": false\n  },\n  \"memory\": {\n    \"prefill_memory_guard\": true,\n    \"memory_guard_tier\": \"balanced\",\n    \"memory_guard_custom_ceiling_gb\": 0.0,\n    \"soft_threshold\": 0.85,\n    \"hard_threshold\": 0.95,\n    \"prefill_safe_zone_ratio\": 0.8,\n    \"prefill_min_chunk_tokens\": 32\n  },\n  \"scheduler\": {\n    \"max_concurrent_requests\": 1,\n    \"embedding_batch_size\": 8,\n    \"chunked_prefill\": false,\n    \"prefill_step_size\": 2048,\n    \"prefill_priority\": \"context\"\n  },\n  \"cache\": {\n    \"enabled\": false,\n    \"hot_cache_only\": false,\n    \"ssd_cache_dir\": \"ROOT/state/cache/omlx\",\n    \"ssd_cache_max_size\": \"40GB\",\n    \"hot_cache_max_size\": \"0\",\n    \"initial_cache_blocks\": 256\n  },\n  \"auth\": {\n    \"api_key\": \"fixed-test-key\",\n    \"secret_key\": \"fixed-test-hex\",\n    \"skip_api_key_verification\": false,\n    \"sub_keys\": []\n  },\n  \"sampling\": {\n    \"max_context_window\": 8192,\n    \"max_context_window_policy\": 8192,\n    \"max_tokens\": 1024\n  },\n  \"logging\": {\n    \"log_dir\": \"ROOT/run/logs\",\n    \"retention_days\": 7\n  }\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "omlx-mtp",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "omlx",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "backends": {
+            "omlx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "Generated-exact-model-937a36be"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "mtp",
+          "depth": 2,
+          "kv": "off"
+        },
+        "warnings": [],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "ROOT/runtime/omlx",
+          "serve",
+          "--base-path",
+          "ROOT/run/omlx",
+          "--model-dir",
+          "ROOT/run/omlx/models",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--max-concurrent-requests",
+          "1"
+        ],
+        "engine_env": {
+          "OMLX_BASE_PATH": "ROOT/run/omlx",
+          "OMLX_API_KEY": "fixed-test-key"
+        },
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "omlx": {
+            "directory": true
+          },
+          "omlx/model_settings.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": 1,\n  \"models\": {\n    \"Generated-exact-model-937a36be\": {\n      \"max_context_window\": 8192,\n      \"max_tokens\": 1024,\n      \"temperature\": 0.7,\n      \"top_p\": 0.9,\n      \"top_k\": 40,\n      \"seed\": 17,\n      \"force_sampling\": false,\n      \"chat_template_kwargs\": {\n        \"enable_thinking\": false\n      },\n      \"forced_ct_kwargs\": [\n        \"enable_thinking\"\n      ],\n      \"preserve_thinking\": false,\n      \"thinking_budget_enabled\": false,\n      \"thinking_budget_tokens\": null,\n      \"qwen4_ple_ssd_offload\": false,\n      \"moe_expert_offload_enabled\": false,\n      \"moe_expert_offload_resident_fraction\": 0.25,\n      \"vlm_mtp_enabled\": true,\n      \"turboquant_kv_enabled\": false,\n      \"turboquant_kv_bits\": 4,\n      \"turboquant_skip_last\": true,\n      \"mtp_enabled\": true,\n      \"mtp_num_draft_tokens\": 2,\n      \"dflash_enabled\": false,\n      \"trust_remote_code\": false,\n      \"is_default\": true\n    }\n  }\n}\n"
+          },
+          "omlx/models": {
+            "directory": true
+          },
+          "omlx/models/Generated-exact-model-937a36be": {
+            "symlink": "ROOT/model"
+          },
+          "omlx/settings.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": \"1.0\",\n  \"server\": {\n    \"host\": \"127.0.0.1\",\n    \"port\": 18765,\n    \"log_level\": \"info\",\n    \"cors_origins\": [],\n    \"server_aliases\": [\n      \"localhost\",\n      \"127.0.0.1\"\n    ],\n    \"sse_keepalive_mode\": \"chunk\",\n    \"auto_start_on_launch\": false,\n    \"burst_decode_mode\": \"balanced\",\n    \"preserve_mid_system_cache\": false\n  },\n  \"model\": {\n    \"model_dirs\": [\n      \"ROOT/run/omlx/models\"\n    ],\n    \"model_dir\": \"ROOT/run/omlx/models\",\n    \"model_fallback\": false,\n    \"hide_helper_models\": false\n  },\n  \"memory\": {\n    \"prefill_memory_guard\": true,\n    \"memory_guard_tier\": \"balanced\",\n    \"memory_guard_custom_ceiling_gb\": 0.0,\n    \"soft_threshold\": 0.85,\n    \"hard_threshold\": 0.95,\n    \"prefill_safe_zone_ratio\": 0.8,\n    \"prefill_min_chunk_tokens\": 32\n  },\n  \"scheduler\": {\n    \"max_concurrent_requests\": 1,\n    \"embedding_batch_size\": 8,\n    \"chunked_prefill\": false,\n    \"prefill_step_size\": 2048,\n    \"prefill_priority\": \"context\"\n  },\n  \"cache\": {\n    \"enabled\": false,\n    \"hot_cache_only\": false,\n    \"ssd_cache_dir\": \"ROOT/state/cache/omlx\",\n    \"ssd_cache_max_size\": \"40GB\",\n    \"hot_cache_max_size\": \"0\",\n    \"initial_cache_blocks\": 256\n  },\n  \"auth\": {\n    \"api_key\": \"fixed-test-key\",\n    \"secret_key\": \"fixed-test-hex\",\n    \"skip_api_key_verification\": false,\n    \"sub_keys\": []\n  },\n  \"sampling\": {\n    \"max_context_window\": 8192,\n    \"max_context_window_policy\": 8192,\n    \"max_tokens\": 1024\n  },\n  \"logging\": {\n    \"log_dir\": \"ROOT/run/logs\",\n    \"retention_days\": 7\n  }\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "omlx-dflash",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "omlx",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "backends": {
+            "omlx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "Generated-exact-model-937a36be"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "medium",
+        "options": {
+          "acceleration": "dflash",
+          "depth": 4,
+          "kv": "off",
+          "dflashDraftQuant": "q4",
+          "dflashVerify": "dflash"
+        },
+        "warnings": [
+          "The selected response ceiling is too small for the full reasoning budget; half is reserved for the answer/tool call.",
+          "Draft quantisation saves memory but can change DFlash acceptance and speed; target verification still owns the output."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "ROOT/runtime/omlx",
+          "serve",
+          "--base-path",
+          "ROOT/run/omlx",
+          "--model-dir",
+          "ROOT/run/omlx/models",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--max-concurrent-requests",
+          "1"
+        ],
+        "engine_env": {
+          "OMLX_BASE_PATH": "ROOT/run/omlx",
+          "OMLX_API_KEY": "fixed-test-key"
+        },
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "omlx": {
+            "directory": true
+          },
+          "omlx/model_settings.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": 1,\n  \"models\": {\n    \"Generated-exact-model-937a36be\": {\n      \"max_context_window\": 8192,\n      \"max_tokens\": 1024,\n      \"temperature\": 0.7,\n      \"top_p\": 0.9,\n      \"top_k\": 40,\n      \"seed\": 17,\n      \"force_sampling\": false,\n      \"chat_template_kwargs\": {\n        \"enable_thinking\": true,\n        \"reasoning_effort\": \"medium\"\n      },\n      \"forced_ct_kwargs\": [\n        \"enable_thinking\",\n        \"reasoning_effort\"\n      ],\n      \"preserve_thinking\": true,\n      \"thinking_budget_enabled\": true,\n      \"thinking_budget_tokens\": 512,\n      \"qwen4_ple_ssd_offload\": false,\n      \"moe_expert_offload_enabled\": false,\n      \"moe_expert_offload_resident_fraction\": 0.25,\n      \"vlm_mtp_enabled\": false,\n      \"turboquant_kv_enabled\": false,\n      \"turboquant_kv_bits\": 4,\n      \"turboquant_skip_last\": true,\n      \"mtp_enabled\": false,\n      \"mtp_num_draft_tokens\": null,\n      \"dflash_enabled\": true,\n      \"trust_remote_code\": false,\n      \"is_default\": true,\n      \"dflash_draft_model\": \"ROOT/draft\",\n      \"dflash_draft_quant_enabled\": true,\n      \"dflash_draft_quant_weight_bits\": 4,\n      \"dflash_draft_quant_activation_bits\": 16,\n      \"dflash_draft_quant_group_size\": 64,\n      \"dflash_draft_sink_size\": 0,\n      \"dflash_block_size\": 4,\n      \"dflash_verify_mode\": \"dflash\"\n    }\n  }\n}\n"
+          },
+          "omlx/models": {
+            "directory": true
+          },
+          "omlx/models/Generated-exact-model-937a36be": {
+            "symlink": "ROOT/model"
+          },
+          "omlx/settings.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": \"1.0\",\n  \"server\": {\n    \"host\": \"127.0.0.1\",\n    \"port\": 18765,\n    \"log_level\": \"info\",\n    \"cors_origins\": [],\n    \"server_aliases\": [\n      \"localhost\",\n      \"127.0.0.1\"\n    ],\n    \"sse_keepalive_mode\": \"chunk\",\n    \"auto_start_on_launch\": false,\n    \"burst_decode_mode\": \"balanced\",\n    \"preserve_mid_system_cache\": false\n  },\n  \"model\": {\n    \"model_dirs\": [\n      \"ROOT/run/omlx/models\"\n    ],\n    \"model_dir\": \"ROOT/run/omlx/models\",\n    \"model_fallback\": false,\n    \"hide_helper_models\": false\n  },\n  \"memory\": {\n    \"prefill_memory_guard\": true,\n    \"memory_guard_tier\": \"balanced\",\n    \"memory_guard_custom_ceiling_gb\": 0.0,\n    \"soft_threshold\": 0.85,\n    \"hard_threshold\": 0.95,\n    \"prefill_safe_zone_ratio\": 0.8,\n    \"prefill_min_chunk_tokens\": 32\n  },\n  \"scheduler\": {\n    \"max_concurrent_requests\": 1,\n    \"embedding_batch_size\": 8,\n    \"chunked_prefill\": false,\n    \"prefill_step_size\": 2048,\n    \"prefill_priority\": \"context\"\n  },\n  \"cache\": {\n    \"enabled\": false,\n    \"hot_cache_only\": false,\n    \"ssd_cache_dir\": \"ROOT/state/cache/omlx\",\n    \"ssd_cache_max_size\": \"40GB\",\n    \"hot_cache_max_size\": \"0\",\n    \"initial_cache_blocks\": 256\n  },\n  \"auth\": {\n    \"api_key\": \"fixed-test-key\",\n    \"secret_key\": \"fixed-test-hex\",\n    \"skip_api_key_verification\": false,\n    \"sub_keys\": []\n  },\n  \"sampling\": {\n    \"max_context_window\": 8192,\n    \"max_context_window_policy\": 8192,\n    \"max_tokens\": 1024\n  },\n  \"logging\": {\n    \"log_dir\": \"ROOT/run/logs\",\n    \"retention_days\": 7\n  }\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "omlx-dflash-q8",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "omlx",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "backends": {
+            "omlx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "Generated-exact-model-937a36be"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "medium",
+        "options": {
+          "acceleration": "dflash",
+          "depth": 4,
+          "kv": "q8",
+          "dflashDraftQuant": "q4",
+          "dflashVerify": "dflash"
+        },
+        "warnings": [
+          "DFlash target KV uses Q8 affine quantization with reusable prefixes. Quantization can change numerical output; ordinary oMLX fallback uses TurboQuant.",
+          "The selected response ceiling is too small for the full reasoning budget; half is reserved for the answer/tool call.",
+          "Draft quantisation saves memory but can change DFlash acceptance and speed; target verification still owns the output."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "/fixture/python",
+          "APP_DIR/omlx_hub_runtime.py",
+          "serve",
+          "--base-path",
+          "ROOT/run/omlx",
+          "--model-dir",
+          "ROOT/run/omlx/models",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--max-concurrent-requests",
+          "1"
+        ],
+        "engine_env": {
+          "OMLX_BASE_PATH": "ROOT/run/omlx",
+          "OMLX_API_KEY": "fixed-test-key",
+          "LLM_LAUNCHER_OMLX_CONTEXT": "8192",
+          "LLM_LAUNCHER_OMLX_PREVIEW": "ROOT/run/tool-preview.json",
+          "LLM_LAUNCHER_DFLASH_KV": "q8"
+        },
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key",
+          "omlxNativeContextGuard": true
+        },
+        "files": {
+          "omlx": {
+            "directory": true
+          },
+          "omlx/model_settings.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": 1,\n  \"models\": {\n    \"Generated-exact-model-937a36be\": {\n      \"max_context_window\": 8192,\n      \"max_tokens\": 1024,\n      \"temperature\": 0.7,\n      \"top_p\": 0.9,\n      \"top_k\": 40,\n      \"seed\": 17,\n      \"force_sampling\": false,\n      \"chat_template_kwargs\": {\n        \"enable_thinking\": true,\n        \"reasoning_effort\": \"medium\"\n      },\n      \"forced_ct_kwargs\": [\n        \"enable_thinking\",\n        \"reasoning_effort\"\n      ],\n      \"preserve_thinking\": true,\n      \"thinking_budget_enabled\": true,\n      \"thinking_budget_tokens\": 512,\n      \"qwen4_ple_ssd_offload\": false,\n      \"moe_expert_offload_enabled\": false,\n      \"moe_expert_offload_resident_fraction\": 0.25,\n      \"vlm_mtp_enabled\": false,\n      \"turboquant_kv_enabled\": true,\n      \"turboquant_kv_bits\": 8,\n      \"turboquant_skip_last\": true,\n      \"mtp_enabled\": false,\n      \"mtp_num_draft_tokens\": null,\n      \"dflash_enabled\": true,\n      \"trust_remote_code\": false,\n      \"is_default\": true,\n      \"dflash_draft_model\": \"ROOT/draft\",\n      \"dflash_draft_quant_enabled\": true,\n      \"dflash_draft_quant_weight_bits\": 4,\n      \"dflash_draft_quant_activation_bits\": 16,\n      \"dflash_draft_quant_group_size\": 64,\n      \"dflash_draft_sink_size\": 0,\n      \"dflash_block_size\": 4,\n      \"dflash_verify_mode\": \"dflash\"\n    }\n  }\n}\n"
+          },
+          "omlx/models": {
+            "directory": true
+          },
+          "omlx/models/Generated-exact-model-937a36be": {
+            "symlink": "ROOT/model"
+          },
+          "omlx/settings.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": \"1.0\",\n  \"server\": {\n    \"host\": \"127.0.0.1\",\n    \"port\": 18765,\n    \"log_level\": \"info\",\n    \"cors_origins\": [],\n    \"server_aliases\": [\n      \"localhost\",\n      \"127.0.0.1\"\n    ],\n    \"sse_keepalive_mode\": \"chunk\",\n    \"auto_start_on_launch\": false,\n    \"burst_decode_mode\": \"balanced\",\n    \"preserve_mid_system_cache\": false\n  },\n  \"model\": {\n    \"model_dirs\": [\n      \"ROOT/run/omlx/models\"\n    ],\n    \"model_dir\": \"ROOT/run/omlx/models\",\n    \"model_fallback\": false,\n    \"hide_helper_models\": false\n  },\n  \"memory\": {\n    \"prefill_memory_guard\": true,\n    \"memory_guard_tier\": \"balanced\",\n    \"memory_guard_custom_ceiling_gb\": 0.0,\n    \"soft_threshold\": 0.85,\n    \"hard_threshold\": 0.95,\n    \"prefill_safe_zone_ratio\": 0.8,\n    \"prefill_min_chunk_tokens\": 32\n  },\n  \"scheduler\": {\n    \"max_concurrent_requests\": 1,\n    \"embedding_batch_size\": 8,\n    \"chunked_prefill\": false,\n    \"prefill_step_size\": 2048,\n    \"prefill_priority\": \"context\"\n  },\n  \"cache\": {\n    \"enabled\": false,\n    \"hot_cache_only\": false,\n    \"ssd_cache_dir\": \"ROOT/state/cache/omlx\",\n    \"ssd_cache_max_size\": \"40GB\",\n    \"hot_cache_max_size\": \"0\",\n    \"initial_cache_blocks\": 256\n  },\n  \"auth\": {\n    \"api_key\": \"fixed-test-key\",\n    \"secret_key\": \"fixed-test-hex\",\n    \"skip_api_key_verification\": false,\n    \"sub_keys\": []\n  },\n  \"sampling\": {\n    \"max_context_window\": 8192,\n    \"max_context_window_policy\": 8192,\n    \"max_tokens\": 1024\n  },\n  \"logging\": {\n    \"log_dir\": \"ROOT/run/logs\",\n    \"retention_days\": 7\n  }\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "lmstudio",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "lmstudio",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "backends": {
+            "lmstudio": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "llm-launcher-012abcde"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        },
+        "warnings": [
+          "LM Studio is a shared service. Stop unloads only this launcher's model and leaves your LM Studio server running."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "ROOT/runtime/lms",
+          "load",
+          "owner/generated-model@6bit",
+          "-y",
+          "--identifier",
+          "llm-launcher-012abcde",
+          "--context-length",
+          "8192",
+          "--gpu",
+          "max",
+          "--parallel",
+          "1",
+          "--no-speculative-draft-mtp"
+        ],
+        "engine_env": {},
+        "client_env": {},
+        "secrets": {},
+        "files": {}
+      }
+    },
+    {
+      "case": "lmstudio-mtp",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "lmstudio",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "backends": {
+            "lmstudio": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "llm-launcher-012abcde"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "mtp",
+          "depth": 2,
+          "kv": "off",
+          "mtpMinTokens": 0,
+          "mtpMinContinueProbability": 0.0
+        },
+        "warnings": [
+          "LM Studio is a shared service. Stop unloads only this launcher's model and leaves your LM Studio server running."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "ROOT/runtime/lms",
+          "load",
+          "owner/generated-model@6bit",
+          "-y",
+          "--identifier",
+          "llm-launcher-012abcde",
+          "--context-length",
+          "8192",
+          "--gpu",
+          "max",
+          "--parallel",
+          "1",
+          "--speculative-draft-mtp",
+          "--speculative-draft-max-tokens",
+          "2",
+          "--speculative-draft-min-tokens",
+          "0",
+          "--speculative-draft-min-continue-probability",
+          "0.00"
+        ],
+        "engine_env": {},
+        "client_env": {},
+        "secrets": {},
+        "files": {}
+      }
+    },
+    {
+      "case": "mtplx",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "mtplx",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "backends": {
+            "mtplx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "llm-launcher-012abcde"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "medium",
+        "options": {
+          "acceleration": "mtp",
+          "depth": 2,
+          "kv": "off",
+          "profile": "sustained",
+          "fan": "smart",
+          "mtplxOperatorRoute": "default",
+          "reasoningHistory": "scoped"
+        },
+        "warnings": [
+          "The selected response ceiling is too small for the full reasoning budget; half is reserved for the answer/tool call."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "ROOT/runtime/mtplx",
+          "serve",
+          "--yes",
+          "--model",
+          "ROOT/model",
+          "--model-id",
+          "llm-launcher-012abcde",
+          "--profile",
+          "sustained",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--context-window",
+          "8192",
+          "--max-tokens",
+          "1024",
+          "--paged-kv-quantization",
+          "off",
+          "--scheduler-mode",
+          "serial",
+          "--batching-preset",
+          "latency",
+          "--ssd-session-cache",
+          "off",
+          "--fan-mode",
+          "smart",
+          "--reasoning",
+          "on",
+          "--reasoning-effort",
+          "medium",
+          "--preserve-thinking",
+          "auto",
+          "--api-key-file",
+          "ROOT/run/mtplx-api-key",
+          "--mtp",
+          "--load-mtp",
+          "--generation-mode",
+          "mtp",
+          "--depth",
+          "2",
+          "--chat-template-profile",
+          "tokenizer",
+          "--chat-template-path",
+          "ROOT/run/qwopus-preserved-thinking.jinja",
+          "--tool-prompt-mode",
+          "native"
+        ],
+        "engine_env": {
+          "MTPLX_TOOL_RESULT_COMPACT_THRESHOLD_CHARS": "32768",
+          "MTPLX_ACTIVE_TOOL_RESULT_COMPACT_THRESHOLD_CHARS": "32768",
+          "MTPLX_ACTIVE_READ_INSPECTION_COMPACT_THRESHOLD_CHARS": "32768",
+          "MTPLX_ACTIVE_READ_COMPACT_HEAD_LINES": "4096",
+          "MTPLX_ACTIVE_READ_COMPACT_TAIL_LINES": "0",
+          "MTPLX_ACTIVE_READ_COMPACT_MAX_LINES": "4096",
+          "MTPLX_PI_CONVERGENCE_AFTER_TOOLS": "0",
+          "MTPLX_READ_ONLY_INSPECTION_FORCE_ANSWER_AFTER_TOOLS": "0",
+          "MTPLX_ALLOW_SWAP": "0",
+          "MTPLX_ASYNC_AR": "0",
+          "MTPLX_FUSED_MOE_VERIFY": "0",
+          "MTPLX_THINKING_BUDGET": "512"
+        },
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "mtplx-api-key": {
+            "mode": 384,
+            "text": "fixed-test-key\n"
+          },
+          "qwopus-preserved-thinking.jinja": {
+            "mode": 420,
+            "text": "{{ content }}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "mtplx-mtp-q8",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "mtplx",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "backends": {
+            "mtplx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "llm-launcher-012abcde"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "medium",
+        "options": {
+          "acceleration": "mtp",
+          "depth": 2,
+          "kv": "q8",
+          "profile": "sustained",
+          "fan": "smart",
+          "mtplxOperatorRoute": "default",
+          "reasoningHistory": "scoped"
+        },
+        "warnings": [
+          "Paged KV quantisation can change numerical output and may disable fast paths; the optimiser preserves your selected value.",
+          "The selected response ceiling is too small for the full reasoning budget; half is reserved for the answer/tool call."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "ROOT/runtime/mtplx",
+          "serve",
+          "--yes",
+          "--model",
+          "ROOT/model",
+          "--model-id",
+          "llm-launcher-012abcde",
+          "--profile",
+          "sustained",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--context-window",
+          "8192",
+          "--max-tokens",
+          "1024",
+          "--paged-kv-quantization",
+          "q8",
+          "--scheduler-mode",
+          "serial",
+          "--batching-preset",
+          "latency",
+          "--ssd-session-cache",
+          "off",
+          "--fan-mode",
+          "smart",
+          "--reasoning",
+          "on",
+          "--reasoning-effort",
+          "medium",
+          "--preserve-thinking",
+          "auto",
+          "--api-key-file",
+          "ROOT/run/mtplx-api-key",
+          "--mtp",
+          "--load-mtp",
+          "--generation-mode",
+          "mtp",
+          "--depth",
+          "2",
+          "--chat-template-profile",
+          "tokenizer",
+          "--chat-template-path",
+          "ROOT/run/qwopus-preserved-thinking.jinja",
+          "--tool-prompt-mode",
+          "native"
+        ],
+        "engine_env": {
+          "MTPLX_TOOL_RESULT_COMPACT_THRESHOLD_CHARS": "32768",
+          "MTPLX_ACTIVE_TOOL_RESULT_COMPACT_THRESHOLD_CHARS": "32768",
+          "MTPLX_ACTIVE_READ_INSPECTION_COMPACT_THRESHOLD_CHARS": "32768",
+          "MTPLX_ACTIVE_READ_COMPACT_HEAD_LINES": "4096",
+          "MTPLX_ACTIVE_READ_COMPACT_TAIL_LINES": "0",
+          "MTPLX_ACTIVE_READ_COMPACT_MAX_LINES": "4096",
+          "MTPLX_PI_CONVERGENCE_AFTER_TOOLS": "0",
+          "MTPLX_READ_ONLY_INSPECTION_FORCE_ANSWER_AFTER_TOOLS": "0",
+          "MTPLX_ALLOW_SWAP": "0",
+          "MTPLX_ASYNC_AR": "0",
+          "MTPLX_FUSED_MOE_VERIFY": "0",
+          "MTPLX_THINKING_BUDGET": "512"
+        },
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "mtplx-api-key": {
+            "mode": 384,
+            "text": "fixed-test-key\n"
+          },
+          "qwopus-preserved-thinking.jinja": {
+            "mode": 420,
+            "text": "{{ content }}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "uzu",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "uzu",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "uzuNative": true,
+          "backends": {
+            "uzu": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4",
+              "runtimeIdentity": {
+                "ready": true,
+                "version": "generated-runtime",
+                "binaryIdentityPinned": true,
+                "nativeBearerAuthentication": true,
+                "oneUseApiKeyFile": true,
+                "nativeContextLimit": true,
+                "nativeOutputLimit": true,
+                "boundedContextReady": true,
+                "nativeBoundaryContractId": "uzu-native-auth-context-output-v1",
+                "networkSandbox": true,
+                "memorySafetyBlocked": false,
+                "upstreamCommit": "generated-commit",
+                "sourcePatchSha256": "generated-patch",
+                "binary": {
+                  "sha256": "generated-runtime-sha",
+                  "size": 19,
+                  "id": "generated-inode"
+                }
+              },
+              "modelRegistryId": "alibaba:qwen3.6:27b:mirai:mirai-m:4",
+              "modelCommit": "f5648cedf15def1c14b49e978d6d533a6ca9664a",
+              "modelToolchainVersion": "0.15.0",
+              "qualificationSystemContract": {
+                "rawListenerProtected": true,
+                "nativeBoundaryContractId": "uzu-native-auth-context-output-v1",
+                "nativeBearerAuthentication": true,
+                "oneUseApiKeyFile": true,
+                "nativeContextLimit": true,
+                "nativeOutputLimit": true
+              }
+            }
+          },
+          "servedId": "alibaba:qwen3.6:27b:mirai:mirai-m:4"
+        },
+        "project": "ROOT",
+        "context": 16384,
+        "output": 1024,
+        "reasoning": "auto",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        },
+        "warnings": [
+          "Uzu owns the bundled DFlash draft and Weaver verification tree; the launcher does not replace them with an AR label or expose unsafe speculative overrides.",
+          "The Uzu process is wrapped in a macOS sandbox that denies every outbound connection, including telemetry and automatic downloads; only loopback serving remains available.",
+          "The raw server requires a one-use bearer key and natively enforces this run's 16,384-token context and 1,024-token output ceilings; the relay adds defense in depth and the engine has a 38 GiB process-group safety ceiling."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "/usr/bin/sandbox-exec",
+          "-p",
+          "(version 1)(allow default)(deny network-outbound)",
+          "ROOT/runtime/mirai",
+          "server",
+          "--model",
+          "alibaba:qwen3.6:27b:mirai:mirai-m:4",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--api-key-file",
+          "ROOT/run/uzu-api-key",
+          "--context-limit",
+          "16384",
+          "--max-output-tokens",
+          "1024",
+          "--prefix-cache"
+        ],
+        "engine_env": {},
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "uzu-api-key": {
+            "mode": 384,
+            "text": "fixed-test-key\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "swiftlm",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "swiftlm",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "backends": {
+            "swiftlm": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "llm-launcher-Generated-exact-model-937a36be-012abcde"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "prefillSize": 512,
+          "nativeExpertTopK": 2,
+          "ssdCacheState": "natural-cold-to-warm"
+        },
+        "warnings": [
+          "SwiftLM will stream routed MoE experts from SSD. Cold turns include disk reads; warm turns can reuse the operating-system file cache.",
+          "The launcher keeps native expert routing and disables speculative decoding so the SSD comparison does not trade model fidelity for speed."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "ROOT/runtime/swiftlm",
+          "--model",
+          "ROOT/model",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--max-tokens",
+          "1024",
+          "--prefill-size",
+          "512",
+          "--stream-experts"
+        ],
+        "engine_env": {
+          "SWIFTLM_TOP_K": "2"
+        },
+        "client_env": {},
+        "secrets": {},
+        "files": {}
+      }
+    },
+    {
+      "case": "mference",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "mference",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model.gturbo",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "backends": {
+            "mference": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model.gturbo",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "llm-launcher-Generated-exact-model-937a36be-012abcde"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "promptCacheMode": "on",
+          "queueLimit": 4,
+          "ssdCacheState": "natural-cold-to-warm"
+        },
+        "warnings": [
+          "Mference will stream routed experts from this verified .gturbo bundle. Cold and warm SSD performance can differ materially.",
+          "The launcher keeps the bundle's pinned model-native routing and excludes speculative decoding from this calibration lane."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "ROOT/runtime/mference",
+          "--model",
+          "ROOT/model.gturbo",
+          "--model-id",
+          "llm-launcher-Generated-exact-model-937a36be-012abcde",
+          "--port",
+          "18765",
+          "--max-context",
+          "8192",
+          "--queue-limit",
+          "4"
+        ],
+        "engine_env": {},
+        "client_env": {},
+        "secrets": {},
+        "files": {}
+      }
+    },
+    {
+      "case": "slotstream",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "slotstream",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "slotstream": {
+            "ready": true,
+            "binary": "ROOT/runtime/slotstream",
+            "identity": "slotstream-fixture"
+          },
+          "slotstreamQ8": {
+            "ready": true,
+            "binary": "ROOT/runtime/slotstream-q8",
+            "identity": "slotstream-q8-fixture"
+          },
+          "backends": {
+            "slotstream": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "qwen3.8-flash-next:4bit"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "memoryGB": 36,
+          "memoryMode": "auto",
+          "ssdCacheState": "natural-cold-to-warm",
+          "_slotstreamMemoryPlan": {
+            "target_gb": 19.0
+          }
+        },
+        "warnings": [
+          "Automatic memory sizing keeps the selected 8,192-token context and MTP setting, using up to 36 GB. The current native plan targets 19.0 GB; it rechecks available memory before loading.",
+          "Slotstream verifies the pinned weights at startup and streams all experts and n-grams from SSD. Long first prompts can take several minutes; subsequent turns reuse the prefix cache."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "PYTHON",
+          "-I",
+          "-S",
+          "-B",
+          "APP_DIR/slotstream_runtime.py",
+          "ROOT/run/slotstream.json"
+        ],
+        "engine_env": {
+          "SLOTSTREAM_DRAFT_DEPTH": "1"
+        },
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "slotstream.json": {
+            "mode": 384,
+            "text": "{\n  \"install\": {\n    \"ready\": true,\n    \"binary\": \"ROOT/runtime/slotstream\",\n    \"identity\": \"slotstream-fixture\"\n  },\n  \"argv\": [\n    \"ROOT/runtime/slotstream\",\n    \"serve\",\n    \"--port\",\n    \"18765\",\n    \"--context\",\n    \"8192\",\n    \"--fixture-native-plan\"\n  ],\n  \"depth\": 1\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "slotstream-q8",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "slotstream",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "slotstream": {
+            "ready": true,
+            "binary": "ROOT/runtime/slotstream-q8",
+            "identity": "slotstream-q8-fixture"
+          },
+          "slotstreamQ8": {
+            "ready": true,
+            "binary": "ROOT/runtime/slotstream-q8",
+            "identity": "slotstream-q8-fixture"
+          },
+          "backends": {
+            "slotstream": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "qwen3.8-flash-next:4bit"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "q8",
+          "memoryGB": 36,
+          "memoryMode": "auto",
+          "ssdCacheState": "natural-cold-to-warm",
+          "_slotstreamMemoryPlan": {
+            "target_gb": 19.0
+          }
+        },
+        "warnings": [
+          "Automatic memory sizing keeps the selected 8,192-token context and MTP setting, using up to 36 GB. The current native plan targets 19.0 GB; it rechecks available memory before loading.",
+          "Slotstream verifies the pinned weights at startup and streams all experts and n-grams from SSD. Long first prompts can take several minutes; subsequent turns reuse the prefix cache."
+        ],
+        "runtime_binary": "ROOT/runtime/slotstream-q8",
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "PYTHON",
+          "-I",
+          "-S",
+          "-B",
+          "APP_DIR/slotstream_runtime.py",
+          "ROOT/run/slotstream.json"
+        ],
+        "engine_env": {
+          "SLOTSTREAM_DRAFT_DEPTH": "1",
+          "SLOTSTREAM_PREFILL_CHUNK": "4096",
+          "SLOTSTREAM_OPT_READ_SCOPE": "8192",
+          "SLOTSTREAM_OPT_LAYER_WORKSPACE": "1",
+          "SLOTSTREAM_OPT_COMPACT_STATE": "1",
+          "SLOTSTREAM_OPT_COMPACT_MTP": "1",
+          "SLOTSTREAM_OPT_INDEXER_TILES": "1",
+          "SLOTSTREAM_OPT_PLE_TILES": "1",
+          "SLOTSTREAM_OPT_RESIDENT_OVERLAP": "1",
+          "SLOTSTREAM_OPT_COMPILED_NORM": "1",
+          "SLOTSTREAM_OPT_GDN_RECORD": "1",
+          "SLOTSTREAM_OPT_SLOT_WORDS": "1",
+          "SLOTSTREAM_OPT_WORKSPACE_PIECES": "1",
+          "SLOTSTREAM_OPT_WORKSPACE_TILE": "4096"
+        },
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "slotstream.json": {
+            "mode": 384,
+            "text": "{\n  \"install\": {\n    \"ready\": true,\n    \"binary\": \"ROOT/runtime/slotstream-q8\",\n    \"identity\": \"slotstream-q8-fixture\"\n  },\n  \"argv\": [\n    \"ROOT/runtime/slotstream-q8\",\n    \"serve\",\n    \"--port\",\n    \"18765\",\n    \"--context\",\n    \"8192\",\n    \"--fixture-native-plan\"\n  ],\n  \"depth\": 1\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "kolibri",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "kolibri",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "kolibri": {
+            "identity": "kolibri-model"
+          },
+          "backends": {
+            "kolibri": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4",
+              "runtimeIdentity": {
+                "identity": "kolibri-runtime"
+              }
+            }
+          },
+          "servedId": "kolibri-1-q6-ssd"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "memoryGB": 40,
+          "memoryMode": "auto",
+          "prefillSize": 64,
+          "promptCacheGB": 1,
+          "_kolibriMemoryPlan": {
+            "ready": true,
+            "expertCacheBytes": 1073741824,
+            "residentExpertsPerLayer": 8
+          }
+        },
+        "warnings": [
+          "Kolibri keeps its full Q6 weights on SSD. Automatic sizing currently plans 1.0 GiB of expert cache (8/384 experts per layer), and rechecks available memory before loading."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "PYTHON",
+          "-I",
+          "-S",
+          "-B",
+          "APP_DIR/kolibri_runtime.py",
+          "ROOT/run/kolibri.json"
+        ],
+        "engine_env": {},
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "kolibri.json": {
+            "mode": 384,
+            "text": "{\n  \"runtime\": {\n    \"identity\": \"kolibri-runtime\"\n  },\n  \"model\": {\n    \"identity\": \"kolibri-model\"\n  },\n  \"options\": {\n    \"acceleration\": \"off\",\n    \"depth\": 1,\n    \"kv\": \"off\",\n    \"memoryGB\": 40,\n    \"memoryMode\": \"auto\",\n    \"prefillSize\": 64,\n    \"promptCacheGB\": 1\n  },\n  \"context\": 8192,\n  \"output\": 1024,\n  \"reasoning\": \"off\",\n  \"port\": 18765,\n  \"apiKey\": \"fixed-test-key\"\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "splash",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "splash",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "splash": {
+            "identity": "splash-model",
+            "id": "owner/model",
+            "draftCandidates": []
+          },
+          "backends": {
+            "splash": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4"
+            }
+          },
+          "servedId": "owner/model"
+        },
+        "project": "ROOT",
+        "context": 16384,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        },
+        "warnings": [
+          "Splash uses the selected quantization with a matching DFlash2 draft and 16,384 context tokens. Local weights are reused without conversion. The first launch downloads the draft if it is missing; later turns reuse the prefix cache."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "PYTHON",
+          "-I",
+          "-S",
+          "-B",
+          "APP_DIR/splash_runtime.py",
+          "ROOT/run/splash.json"
+        ],
+        "engine_env": {
+          "SPLASH_API_KEY": "fixed-test-key"
+        },
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "splash.json": {
+            "mode": 384,
+            "text": "{\n  \"install\": {\n    \"ready\": true\n  },\n  \"pack\": {\n    \"identity\": \"splash-model\",\n    \"id\": \"owner/model\",\n    \"draftCandidates\": []\n  },\n  \"drafts\": [],\n  \"modelsRoot\": \"ROOT/state/splash-models\",\n  \"context\": 16384,\n  \"output\": 1024,\n  \"port\": 18765,\n  \"servedId\": \"owner/model\"\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "whallm-native",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "whallm",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "nativeWhallm": {
+            "artifactIdentity": "artifact-proof",
+            "python": "/fixture/python",
+            "app": "/fixture/Whallm.app"
+          },
+          "backends": {
+            "whallm": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4",
+              "nativeWhallm": true
+            }
+          },
+          "servedId": "qwen3.8-flash-next-fp8"
+        },
+        "project": "ROOT",
+        "context": 16384,
+        "output": 1024,
+        "reasoning": "medium",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "ssdCacheState": "natural-cold-to-warm",
+          "_whallmConfig": {
+            "context": 16384,
+            "output": 1024,
+            "port": 18765
+          }
+        },
+        "warnings": [
+          "LLM Launcher owns this Whallm process and unloads it when the session ends.",
+          "Full 512-expert Qwen uses SSD streaming with a fixed 40 GiB memory ceiling and 16K working context.",
+          "This 48 GiB Mac remains below Whallm's published 64 GiB support floor; the full model is separate from a pruned REAP checkpoint."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "/fixture/python",
+          "-I",
+          "-S",
+          "-B",
+          "APP_DIR/whallm_runtime.py",
+          "ROOT/run/whallm-owned.json"
+        ],
+        "engine_env": {
+          "DEEPSEEK_API_KEY": "fixed-test-key",
+          "WHALLM_ANE_BRIDGE": "/fixture/Whallm.app/Contents/Frameworks/libWhallmANE.dylib"
+        },
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "whallm-owned.json": {
+            "mode": 384,
+            "text": "{\n  \"context\": 16384,\n  \"output\": 1024,\n  \"port\": 18765\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "whallm-shared",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "whallm",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "sharedServer": true,
+          "remoteModelId": "qwen3.8-flash-next-fp8",
+          "backends": {
+            "whallm": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4",
+              "sharedServer": true
+            }
+          },
+          "servedId": "qwen3.8-flash-next-fp8"
+        },
+        "project": "ROOT",
+        "context": 16384,
+        "output": 1024,
+        "reasoning": "medium",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "ssdCacheState": "natural-cold-to-warm"
+        },
+        "warnings": [
+          "Whallm owns the full 512-expert model and its SSD cache. Stop closes only this launcher's private route; use Whallm to unload the model.",
+          "Whallm publishes a 64 GiB support floor. Its current M5 Pro measurements reached 22.75 GiB of MLX active memory through 16K input, so this 48 GiB Mac is exposed as an experimental—not guaranteed—route.",
+          "The Whallm checkpoint is a separate MXFP4 install and is never compared as equivalent to a pruned REAP checkpoint."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "PYTHON",
+          "ROOT/freetoken_bridge.py",
+          "ROOT/run/whallm-bridge.json"
+        ],
+        "engine_env": {},
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "whallm-bridge.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": 1,\n  \"listenPort\": 18765,\n  \"clientKey\": \"fixed-test-key\",\n  \"endpoint\": \"http://127.0.0.1:11434\",\n  \"upstreamKey\": \"\",\n  \"upstreamLabel\": \"Whallm\",\n  \"servedModel\": \"qwen3.8-flash-next-fp8\"\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "freetoken-native",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "freetoken",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "nativeFreetoken": true,
+          "backends": {
+            "freetoken": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4",
+              "native": true,
+              "nativeBinary": "ROOT/runtime/freetoken_native",
+              "nativeContract": {
+                "supported": true,
+                "startup": {
+                  "default_allowed": true
+                },
+                "runtime": {
+                  "freetoken_version": "generated-runtime"
+                },
+                "qualification": {
+                  "launcher": {
+                    "readiness": "qualified-real-checkpoint"
+                  }
+                },
+                "support": {
+                  "continuous_batching": true,
+                  "prefix_cache": true,
+                  "expert_placement": true
+                }
+              },
+              "nativeMaxContext": 8192
+            }
+          },
+          "servedId": "llm-launcher-Generated-exact-model-937a36be-012abcde"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "maxBatchSize": 1,
+          "prefixCacheEntries": 2,
+          "expertCacheSize": 4,
+          "_freetokenRoute": "native"
+        },
+        "warnings": [
+          "FreeToken supplied runtime-owned end-to-end serve and token-generation evidence for this exact real checkpoint.",
+          "Native FreeToken runs locally through MLX/Metal and is owned by this launcher. Stop unloads this exact server; network model downloads, custom sampling, tools, and Responses remain disabled."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "ROOT/runtime/freetoken_native",
+          "macos-serve",
+          "--model",
+          "ROOT/model",
+          "--served-model-name",
+          "llm-launcher-Generated-exact-model-937a36be-012abcde",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--max-batch-size",
+          "1",
+          "--expert-cache-size",
+          "4",
+          "--prefix-cache-entries",
+          "2"
+        ],
+        "engine_env": {
+          "HF_HUB_OFFLINE": "1",
+          "TRANSFORMERS_OFFLINE": "1",
+          "HF_DATASETS_OFFLINE": "1"
+        },
+        "client_env": {},
+        "secrets": {},
+        "files": {}
+      }
+    },
+    {
+      "case": "freetoken-remote",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "freetoken",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "remote": true,
+          "remoteConnectionId": "connection-proof",
+          "remoteModelId": "remote-model",
+          "backends": {
+            "freetoken": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4",
+              "connectionId": "connection-proof"
+            }
+          },
+          "servedId": "remote-model"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "off",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "_remoteConnectionId": "connection-proof"
+        },
+        "warnings": [
+          "FreeToken stays loaded on its configured server. Stop closes only this launcher's private bridge; remote model ownership is unchanged. Transport to that server uses encrypted HTTPS."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "PYTHON",
+          "ROOT/freetoken_bridge.py",
+          "ROOT/run/freetoken-bridge.json"
+        ],
+        "engine_env": {},
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "freetoken-bridge.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": 1,\n  \"listenPort\": 18765,\n  \"clientKey\": \"fixed-test-key\",\n  \"endpoint\": \"https://fixture.invalid/v1\",\n  \"upstreamKey\": \"generated-upstream-key\",\n  \"servedModel\": \"remote-model\"\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "case": "llamacpp",
+      "expected": {
+        "run_id": "012abcde-1111-4111-8111-111111111111",
+        "backend": "llamacpp",
+        "client": "chat",
+        "model": {
+          "id": "fixture-model",
+          "name": "Generated exact model",
+          "path": "ROOT/model",
+          "lmKey": "owner/generated-model@6bit",
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "nativeContext": 131072,
+          "backends": {
+            "llamacpp": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "runtimeVersion": "generated-runtime",
+              "benchmarkModelFingerprint": "model-proof",
+              "modelPath": "ROOT/model",
+              "ssdStreaming": true,
+              "artifactFingerprint": "model-proof",
+              "nativeExpertTopK": 2,
+              "dflashVersion": "2",
+              "dflashDraftPath": "ROOT/draft",
+              "dflashBlockSize": 4,
+              "dflashMaxBlockSize": 8,
+              "dflashRuntimeVersion": "0.6.4",
+              "llamacppPle": true,
+              "currentProcessVerified": true,
+              "verificationGeneration": 1,
+              "receiptFingerprint": "generated-receipt",
+              "firstShard": "ROOT/model/model.gguf"
+            }
+          },
+          "servedId": "llm-launcher-atomic-ple-012abcde"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 1024,
+        "reasoning": "auto",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        },
+        "warnings": [
+          "This exact AD-3.84 quant keeps only its isolated PLE table in read-only SSD mmap; ordinary model weights are not SSD streamed.",
+          "The route is fixed to 8K context, full-precision KV, one request lane, no MTP, and an exact 44 GiB Metal ceiling for initial qualification.",
+          "The launcher relay caps automatic reasoning at the qualified 384-token budget while preserving final-answer space; a stricter smaller client budget is preserved.",
+          "AD-3.84 is an aggressive low-bit quality tradeoff. Do not treat the publisher's M5 Max speed as a measurement for this Mac."
+        ],
+        "runtime_binary": null,
+        "purpose": "benchmark",
+        "chat": {},
+        "port": 18765,
+        "engine_argv": [
+          "ROOT/runtime/llamacpp",
+          "--model",
+          "ROOT/model/model.gguf",
+          "-ngl",
+          "99",
+          "-c",
+          "8192",
+          "--parallel",
+          "1",
+          "--load-mode",
+          "mmap",
+          "--lazy-mode",
+          "on",
+          "-fit",
+          "off",
+          "--jinja",
+          "-fa",
+          "on",
+          "--reasoning",
+          "on",
+          "--reasoning-format",
+          "deepseek",
+          "--reasoning-preserve",
+          "--reasoning-budget-message",
+          "\n\n Considering the limited time by the user, I have to give the solution based on the thinking directly now.",
+          "--spec-type",
+          "none",
+          "--cache-type-k",
+          "f16",
+          "--cache-type-v",
+          "f16",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--alias",
+          "llm-launcher-atomic-ple-012abcde",
+          "--api-key-file",
+          "ROOT/run/llamacpp-api-key"
+        ],
+        "engine_env": {},
+        "client_env": {},
+        "secrets": {
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "llamacpp-api-key": {
+            "mode": 384,
+            "text": "fixed-test-key\n"
+          }
+        }
+      }
+    }
+  ],
+  "environmentParameters": {
+    "interpreter": "PYTHON",
+    "privateRoot": "ROOT",
+    "applicationRoot": "APP_DIR"
+  }
+}

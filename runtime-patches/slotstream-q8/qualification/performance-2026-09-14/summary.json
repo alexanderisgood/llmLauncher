@@ -1,0 +1,90 @@
+{
+  "budgetGB": 32,
+  "configuredContext": 131072,
+  "measuredOutputTokens": 384,
+  "warmupOutputTokens": 128,
+  "sampling": "greedy, seed 42, reasoning none",
+  "order": [
+    2,
+    3,
+    3,
+    2,
+    2,
+    3
+  ],
+  "samples": [
+    {
+      "round": 0,
+      "depth": 2,
+      "tokensPerSecond": 13.934402873143238,
+      "expertPoolBytes": 14888448000,
+      "expertHitPercent": 81.06692394065256,
+      "acceptedDraftPercent": 58.80681818181818,
+      "swapinsDelta": 0,
+      "swapoutsDelta": 0
+    },
+    {
+      "round": 0,
+      "depth": 3,
+      "tokensPerSecond": 12.782240124638356,
+      "expertPoolBytes": 14888448000,
+      "expertHitPercent": 80.3147722143366,
+      "acceptedDraftPercent": 55.32407407407407,
+      "swapinsDelta": 0,
+      "swapoutsDelta": 0
+    },
+    {
+      "round": 1,
+      "depth": 3,
+      "tokensPerSecond": 14.999573962296198,
+      "expertPoolBytes": 14888448000,
+      "expertHitPercent": 82.4936912135811,
+      "acceptedDraftPercent": 60.78431372549019,
+      "swapinsDelta": 0,
+      "swapoutsDelta": 0
+    },
+    {
+      "round": 1,
+      "depth": 2,
+      "tokensPerSecond": 15.405870749067287,
+      "expertPoolBytes": 14888448000,
+      "expertHitPercent": 83.97869790020455,
+      "acceptedDraftPercent": 70.0,
+      "swapinsDelta": 0,
+      "swapoutsDelta": 0
+    },
+    {
+      "round": 2,
+      "depth": 2,
+      "tokensPerSecond": 12.263452427010014,
+      "expertPoolBytes": 14888448000,
+      "expertHitPercent": 81.86306225975001,
+      "acceptedDraftPercent": 59.71428571428572,
+      "swapinsDelta": 127,
+      "swapoutsDelta": 0
+    },
+    {
+      "round": 2,
+      "depth": 3,
+      "tokensPerSecond": 11.565199212874903,
+      "expertPoolBytes": 14888448000,
+      "expertHitPercent": 82.01246150540715,
+      "acceptedDraftPercent": 46.16977225672878,
+      "swapinsDelta": 0,
+      "swapoutsDelta": 0
+    }
+  ],
+  "medianTPS": {
+    "2": 13.934402873143238,
+    "3": 12.782240124638356
+  },
+  "medianRatio": 1.0901377800190153,
+  "limitations": [
+    "Three short coding prompts; not a long-context workload or a general optimum.",
+    "Matched 32 GB process targets; separate follow-up checks use the user's 41 GB automatic ceiling."
+  ],
+  "benchmarkIdentity": {
+    "binarySHA256": "22cacce5befa959391fcdefb38c82b216481d567a490cdf909ab55a62b55e7c7",
+    "note": "Benchmark build before synchronizing the expert-pool telemetry snapshot. No inference arithmetic or cache policy changes."
+  }
+}

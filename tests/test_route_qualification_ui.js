@@ -1,4 +1,5 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -6,7 +7,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const app = benchmarkSources.controllerSource;
 const index = fs.readFileSync(path.join(root, "index.html"), "utf8");
 
 assert.match(app, /plan\.routeQualification\) request\.scope = "qualification"/);
@@ -16,10 +17,10 @@ assert.match(app, /"Route qualification result"/);
 assert.match(app, /local-route-qualification/);
 assert.match(app, /Authoritative usage, generation TPS, time to first output/);
 assert.match(app, /actionId:"measure-qualification"/);
-assert.match(app, /action === "measure-qualification"\) return openCalibrationAssistant/);
+assert.match(app, /action === "measure-qualification"\) return benchmarkPort\.openCalibrationAssistant/);
 assert.match(app, /function controllerRouteQualificationBackend\(plan = \{\}\)/);
 assert.match(app, /const routeQualification = Boolean\(qualificationBackend\)/);
-assert.match(app, /Boolean\(selectedRouteQualificationBackend\(\)\)/);
+assert.match(app, /Boolean\(registryPort\.selectedRouteQualificationBackend\(\)\)/);
 assert.match(app, /LLAMACPP_PLE_QUALIFICATION_SUITE = "route-qualification-8k"/);
 assert.match(app, /memoryGuard:\s*"memoryGuardSelect"/);
 assert.match(app, /memoryGuardSelect"\)\.addEventListener\("change", \(\) => \{\s*\/\/[^]*?if \(!state\.applyingOptimal\) \{\s*cancelOptimization\("Memory mode changed; reapply to refresh the benchmark match\."\);/);
@@ -32,7 +33,7 @@ assert.match(app, /preparation\.doesNotChangeMacOS !== true/);
 assert.match(app, /macOS was not changed/);
 assert.match(app, /dataset\.action === "prepare"/);
 assert.match(app, /function calibrationRouteEvidenceApplyReady/);
-assert.match(app, /if \(qualificationBackend === "llamacpp"\) \{\s*return LLAMACPP_PLE_QUALIFICATION_SUITE/);
+assert.match(app, /if \(qualificationBackend === "llamacpp"\) \{\s*return policy\.LLAMACPP_PLE_QUALIFICATION_SUITE/);
 assert.match(app, /CalibrationDecision\.receiptSuite\(\s*state\.client,\s*qualificationBackend === "omlx"/);
 assert.match(app, /actionId:routeQualification \? "measure-qualification" : "rerun-lab"/);
 assert.match(app, /actionId:routeQualification\s*\? "measure-qualification"/);
@@ -47,7 +48,7 @@ const applyGuardContext = {
   llamaQualificationContractExact: plan => plan.exactLlamaContract === true,
 };
 vm.createContext(applyGuardContext);
-vm.runInContext(app.slice(applyGuardStart, applyGuardEnd), applyGuardContext);
+benchmarkSources.runInContext(app.slice(applyGuardStart, applyGuardEnd), applyGuardContext);
 const routeBinding = {scope: "route", recordId: "qualified-route"};
 assert.equal(applyGuardContext.calibrationRouteEvidenceApplyReady({
   routeQualification: true,
@@ -90,7 +91,7 @@ const qualificationContext = {
   llamaCppPleQualified: () => true,
 };
 vm.createContext(qualificationContext);
-vm.runInContext(app.slice(qualificationHelperStart, qualificationHelperEnd), qualificationContext);
+benchmarkSources.runInContext(app.slice(qualificationHelperStart, qualificationHelperEnd), qualificationContext);
 assert.equal(qualificationContext.controllerRouteQualificationBackend({
   routeQualification: false,
   request: {backend: "llamacpp"},
@@ -125,7 +126,7 @@ qualificationContext.CalibrationDecision = {
     ? "agentic" : client === "chat" ? "standard" : "agentic",
 };
 qualificationContext.state.client = "chat";
-vm.runInContext(app.slice(suiteHelperStart, suiteHelperEnd), qualificationContext);
+benchmarkSources.runInContext(app.slice(suiteHelperStart, suiteHelperEnd), qualificationContext);
 assert.equal(qualificationContext.performanceReceiptSuite(), "route-qualification-8k");
 assert.equal(
   qualificationContext.calibrationSuiteControlValue("route-qualification-8k"),
@@ -149,7 +150,7 @@ const resultMetricContext = {
   LLAMACPP_PLE_QUALIFICATION_MINIMUM_TPS: 15,
 };
 vm.createContext(resultMetricContext);
-vm.runInContext(app.slice(resultMetricStart, resultMetricEnd), resultMetricContext);
+benchmarkSources.runInContext(app.slice(resultMetricStart, resultMetricEnd), resultMetricContext);
 const qualificationMarkup = resultMetricContext.routeQualificationFactsMarkup({
   decodeTokensPerSecond: 18.75,
   minimumDecodeTokensPerSecond: 15.25,
@@ -179,8 +180,8 @@ assert.ok(bindingHelperStart >= 0 && bindingHelperEnd > bindingHelperStart);
 const copyBindingStart = app.indexOf("function copiedEvidenceBinding");
 const copyBindingEnd = app.indexOf("\nfunction clearActiveEvidenceBinding", copyBindingStart);
 assert.ok(copyBindingStart >= 0 && copyBindingEnd > copyBindingStart);
-vm.runInContext(app.slice(copyBindingStart, copyBindingEnd), resultMetricContext);
-vm.runInContext(app.slice(bindingHelperStart, bindingHelperEnd), resultMetricContext);
+benchmarkSources.runInContext(app.slice(copyBindingStart, copyBindingEnd), resultMetricContext);
+benchmarkSources.runInContext(app.slice(bindingHelperStart, bindingHelperEnd), resultMetricContext);
 const immutableBinding = {scope: "route", suite: "route-qualification-8k", preference: "throughput", recordId: "route-record"};
 const copiedBinding = resultMetricContext.completedCalibrationEvidenceBinding({
   evidenceBinding: immutableBinding,
@@ -193,7 +194,7 @@ const routePresentationEnd = app.indexOf("\nfunction benchmarkCandidates", route
 assert.ok(routePresentationStart >= 0 && routePresentationEnd > routePresentationStart);
 const routeContext = {};
 vm.createContext(routeContext);
-vm.runInContext(app.slice(routePresentationStart, routePresentationEnd), routeContext);
+benchmarkSources.runInContext(app.slice(routePresentationStart, routePresentationEnd), routeContext);
 const scanOnlyFlashRoute = routeContext.routeCapabilityPresentation({
   runnable: true,
   hostSupport: {state: "supported", detail: "Supported by the installed runtime."},
@@ -217,7 +218,7 @@ const context = {
   LLAMACPP_PLE_QUALIFICATION_SUITE: "route-qualification-8k",
 };
 vm.createContext(context);
-vm.runInContext(app.slice(alternativeStart, alternativeEnd), context);
+benchmarkSources.runInContext(app.slice(alternativeStart, alternativeEnd), context);
 const baseAlternative = {
   differentModel: true,
   intelligenceContractChanged: true,
@@ -248,7 +249,7 @@ assert.match(upstreamMarkup, /It is not verified here or selected automatically/
 const parityStart = app.indexOf("function calibrationParityRejectionNote");
 const parityEnd = app.indexOf("\nfunction calibrationRoutePreview", parityStart);
 assert.ok(parityStart >= 0 && parityEnd > parityStart);
-vm.runInContext(app.slice(parityStart, parityEnd), context);
+benchmarkSources.runInContext(app.slice(parityStart, parityEnd), context);
 const parityNote = context.calibrationParityRejectionNote({
   backend: "omlx",
   settingsSearch: {rejectedFasterCandidateCount: 1},
@@ -266,7 +267,7 @@ assert.match(app, /const parityRejectionNote = calibrationParityRejectionNote\(e
 const receiptHelpersStart = app.indexOf("function performanceReceiptSuiteOrder");
 const receiptHelpersEnd = app.indexOf("\nfunction performanceReceiptRequest", receiptHelpersStart);
 assert.ok(receiptHelpersStart >= 0 && receiptHelpersEnd > receiptHelpersStart);
-vm.runInContext(app.slice(receiptHelpersStart, receiptHelpersEnd), context);
+benchmarkSources.runInContext(app.slice(receiptHelpersStart, receiptHelpersEnd), context);
 assert.deepEqual(
   Array.from(context.performanceReceiptSuiteOrder({client: "chat", suite: "standard"})),
   ["standard", "agentic", "thorough", "quick"],
@@ -303,7 +304,7 @@ context.selectedRouteQualificationBackend = () => "omlx";
 context.performanceReceiptQualificationBackend = receipt => (
   receipt?.kind === "route-qualification" ? String(receipt.qualifiedBackend || receipt.backend || "") : ""
 );
-vm.runInContext(app.slice(receiptViewStart, receiptViewEnd), context);
+benchmarkSources.runInContext(app.slice(receiptViewStart, receiptViewEnd), context);
 const alternateSuiteView = context.performanceReceiptView({
   state: "trusted-engine", fresh: true, suite: "agentic",
   suiteLabel: "Agentic Route Lab", backendLabel: "oMLX",
@@ -351,7 +352,7 @@ context.state = {
 context.renderPerformanceReceipt = () => {};
 context.selectedModel = () => null;
 context.selectedRouteQualificationBackend = () => "";
-vm.runInContext(app.slice(receiptLoaderStart, receiptLoaderEnd), context);
+benchmarkSources.runInContext(app.slice(receiptLoaderStart, receiptLoaderEnd), context);
 
 async function testReceiptFallback() {
   const requestedSuites = [];
@@ -480,7 +481,7 @@ async function testReceiptFallback() {
   const activateStart = app.indexOf("async function activatePerformanceReceipt");
   const activateEnd = app.indexOf("\nfunction benchmarkSuiteChanged", activateStart);
   assert.ok(activateStart >= 0 && activateEnd > activateStart);
-  vm.runInContext(app.slice(activateStart, activateEnd), context);
+  benchmarkSources.runInContext(app.slice(activateStart, activateEnd), context);
   const applyCalls = [];
   const binding = {
     scope: "engine", suite: "agentic", preference: "throughput",

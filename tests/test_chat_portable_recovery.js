@@ -11,13 +11,7 @@ const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
 const ChatDraftsCore = require("../chat_drafts.js");
 const ChatQueueCore = require("../chat_queue.js");
 
-function sourceBetween(startMarker, endMarker) {
-  const start = app.indexOf(startMarker);
-  const end = app.indexOf(endMarker, start + startMarker.length);
-  assert.ok(start >= 0, `missing production marker: ${startMarker}`);
-  assert.ok(end > start, `missing production end marker: ${endMarker}`);
-  return app.slice(start, end);
-}
+const sourceBetween = require("./helpers/workspace_sources.js").between;
 
 const production = [
   sourceBetween("function readChatDraftEnvelope()", "\nfunction persistChatQueue"),

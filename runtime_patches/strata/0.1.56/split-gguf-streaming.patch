@@ -1,0 +1,196 @@
+--- a/metal/src/gguf_lite.h
++++ b/metal/src/gguf_lite.h
+@@ -5,6 +5,7 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <map>
++#include <memory>
+ #include <string>
+ #include <vector>
+ 
+@@ -27,6 +28,12 @@
+     std::map<std::string, std::string> meta_str;
+     std::map<std::string, double> meta_num;
+     bool open(const std::string& path, std::string& err);
++    // Opt-in SSD streaming: virtual offsets identify bytes in the original shards.
++    // map/map_bytes still describe shard 1 only; split models must never be wrapped as one GPU buffer.
++    struct Segment { std::string path; uint64_t base, bytes; };
++    std::vector<Segment> segments;
++    std::vector<std::unique_ptr<File>> shards;
++    bool open_split(const std::string& path, std::string& err);
+     const Tensor* find(const std::string& name) const {
+         auto it = tensors.find(name);
+         return it == tensors.end() ? nullptr : &it->second;
+--- a/metal/src/gguf_lite.cpp
++++ b/metal/src/gguf_lite.cpp
+@@ -10,6 +10,8 @@
+ 
+ #include <cstdio>
+ #include <cstring>
++#include <limits>
++#include <regex>
+ 
+ namespace gguf {
+ 
+@@ -110,6 +112,59 @@
+     return true;
+ }
+ 
++bool File::open_split(const std::string& p, std::string& err) {
++    if (!open(p, err)) return false;
++    segments.push_back({p, 0, file_bytes});
++    for (const auto& [name, tensor] : tensors) {
++        if (tensor.offset > file_bytes || tensor.bytes > file_bytes - tensor.offset) {
++            err = "split GGUF: truncated tensor " + name; return false;
++        }
++    }
++    const auto count_it = meta_num.find("split.count");
++    if (count_it == meta_num.end() || count_it->second <= 1) return true;
++    const double count = count_it->second;
++    std::smatch match;
++    if (count < 2 || count > 1024 || count != (int) count || !meta_num.count("split.no") || meta_num["split.no"] != 0 ||
++        !std::regex_match(p, match, std::regex("(.*)-00001-of-([0-9]{5})\\.gguf")) ||
++        std::stoi(match[2].str()) != (int) count) {
++        err = "split GGUF: expected the first shard with matching split metadata"; return false;
++    }
++    const auto total_it = meta_num.find("split.tensors.count");
++    if (total_it == meta_num.end() || total_it->second <= 0) {
++        err = "split GGUF: missing total tensor count"; return false;
++    }
++    uint64_t base = map_bytes;
++    for (int i = 1; i < (int) count; ++i) {
++        char suffix[32]; std::snprintf(suffix, sizeof suffix, "-%05d-of-%05d.gguf", i + 1, (int) count);
++        auto shard = std::make_unique<File>();
++        if (!shard->open(match[1].str() + suffix, err)) return false;
++        if (shard->meta_num["split.no"] != i || shard->meta_num["split.count"] != count ||
++            shard->meta_num["split.tensors.count"] != total_it->second) {
++            err = "split GGUF: shard metadata mismatch"; return false;
++        }
++        if (base > std::numeric_limits<uint64_t>::max() - shard->map_bytes) {
++            err = "split GGUF: offset overflow"; return false;
++        }
++        for (const auto& [name, original] : shard->tensors) {
++            if (original.offset > shard->file_bytes || original.bytes > shard->file_bytes - original.offset) {
++                err = "split GGUF: truncated tensor " + name; return false;
++            }
++            Tensor tensor = original;
++            tensor.offset += base;
++            if (!tensors.emplace(name, std::move(tensor)).second) {
++                err = "split GGUF: duplicate tensor " + name; return false;
++            }
++        }
++        segments.push_back({shard->path, base, shard->file_bytes});
++        base += shard->map_bytes;
++        shards.push_back(std::move(shard));
++    }
++    if ((double) tensors.size() != total_it->second) {
++        err = "split GGUF: total tensor count mismatch"; return false;
++    }
++    return true;
++}
++
+ File::~File() {
+     if (map) munmap(map, map_bytes);
+ }
+--- a/metal/src/engine/stream.h
++++ b/metal/src/engine/stream.h
+@@ -92,6 +92,8 @@
+     uint8_t* standalone_region(uint64_t bytes);   // the prompt's buffers as their own allocation, when no region of the arena's slots takes them
+ 
+     int fd_ = -1;
++    struct Source { int fd; uint64_t base, bytes; };
++    std::vector<Source> sources_; // only populated for opt-in split GGUFs
+     // <gguf>.experts (metal/tools/stream_experts.py): each expert's gate, up and down rows together, read with one
+     // request (cfd_ >= 0); else the GGUF's three slices.  STRATA_METAL_CONTIG=0: the GGUF always.
+     int cfd_ = -1;
+--- a/metal/src/engine/stream.cpp
++++ b/metal/src/engine/stream.cpp
+@@ -34,6 +34,7 @@
+     const char* e = std::getenv("STRATA_METAL_STREAM");
+     if (e && std::string(e) == "1") return true;
+     if (e && std::string(e) == "0") return false;
++    if (f.segments.size() > 1) return true;
+     // auto: stream when the mapped weights (experts and dense) and ~12 GiB beside them (the prompt buffers, KV, the
+     // draft layer, macOS) do not fit the resident footprint cap: the GPU working set, or on a big Mac the RAM less the
+     // 30% macOS and its file cache keep (arena_budget.h: footprint_cap).  M5 Max (115.4 GB working set, 96.2 GB cap):
+@@ -54,6 +55,7 @@
+     }
+     cv_.notify_all();
+     for (auto& t : io_) t.join();
++    for (size_t i = 1; i < sources_.size(); ++i) ::close(sources_[i].fd);
+     if (fd_ >= 0) ::close(fd_);
+ }
+ 
+@@ -62,6 +64,17 @@
+     if (fd_ < 0) { err = "metal stream: cannot open " + f.path; return false; }
+     fcntl(fd_, F_NOCACHE, 1);
+     fcntl(fd_, F_RDAHEAD, 0);
++    if (f.segments.size() > 1) {
++        for (size_t i = 0; i < f.segments.size(); ++i) {
++            const auto& part = f.segments[i];
++            const int fd = i == 0 ? fd_ : ::open(part.path.c_str(), O_RDONLY);
++            if (fd < 0) { err = "metal stream: cannot open shard " + part.path; return false; }
++            fcntl(fd, F_NOCACHE, 1);
++            fcntl(fd, F_RDAHEAD, 0);
++            sources_.push_back({fd, part.base, part.bytes});
++        }
++        std::fprintf(stderr, "strata metal stream: reading %zu original GGUF shards without repacking\n", sources_.size());
++    }
+     lay_.resize(NL);
+     if (const gguf::Tensor* g0 = f.find("blk.0.ffn_gate_exps.weight"); g0 && g0->shape.size() >= 3 && g0->shape[2] > 0 && g0->shape[2] <= NE)
+         ne_ = (int) g0->shape[2];
+@@ -75,7 +88,7 @@
+     }
+     // the expert-contiguous copy beside the GGUF, when it is this GGUF's (sizes in its header) and its first and
+     // last experts match the GGUF's bytes
+-    if (env_int("STRATA_METAL_CONTIG", 1) != 0) {
++    if (sources_.empty() && env_int("STRATA_METAL_CONTIG", 1) != 0) {
+         const std::string cp = f.path + ".experts";
+         const int cfd = ::open(cp.c_str(), O_RDONLY);
+         bool ok = cfd >= 0;
+@@ -168,7 +181,18 @@
+ bool ExpertStream::read(void* dst, uint64_t len, uint64_t off) const {
+     uint8_t* p = (uint8_t*) dst;
+     while (len > 0) {
+-        const ssize_t r = ::pread(fd_, p, (size_t) std::min<uint64_t>(len, 64ull << 20), (off_t) off);
++        int fd = fd_;
++        uint64_t local = off, available = len;
++        if (!sources_.empty()) {
++            const Source* source = nullptr;
++            for (const auto& candidate : sources_)
++                if (off >= candidate.base && off - candidate.base < candidate.bytes) { source = &candidate; break; }
++            if (!source) return false;
++            fd = source->fd;
++            local = off - source->base;
++            available = std::min<uint64_t>(available, source->bytes - local);
++        }
++        const ssize_t r = ::pread(fd, p, (size_t) std::min<uint64_t>(available, 64ull << 20), (off_t) local);
+         if (r <= 0) return false;
+         p += r;
+         off += (uint64_t) r;
+--- a/metal/src/engine/window.cpp
++++ b/metal/src/engine/window.cpp
+@@ -650,9 +650,13 @@
+               "beside it (it froze a 128 GB Mac twice); wait for it to finish, or set STRATA_METAL_IGNORE_REPACK=1";
+         return false;
+     }
+-    if (!f_.open(shard1, err)) return false;
++    const char* split = std::getenv("STRATA_METAL_SPLIT_GGUF");
++    if (!(split && std::string(split) == "1" ? f_.open_split(shard1, err) : f_.open(shard1, err))) return false;
+     cx_ = std::make_unique<mtl::Context>();
+     stream_ = ExpertStream::wanted(f_, *cx_);
++    if (f_.segments.size() > 1 && !stream_) {
++        err = "split GGUF requires Metal SSD streaming"; return false;
++    }
+     if (stream_) {
+         // the model does not fit: the dense weights are read into memory below, the experts stream from the SSD
+         st_ = std::make_unique<ExpertStream>();
+@@ -821,7 +825,7 @@
+                     uint64_t ne = 1;
+                     for (uint64_t d : x.shape) ne *= d;
+                     tmp.resize(ne);
+-                    const uint8_t* src = (const uint8_t*) f_.map + x.offset;
++                    const uint8_t* src = stream_ ? nullptr : (const uint8_t*) f_.map + x.offset;
+                     if (stream_) {   // F_NOCACHE reads: the page cache is kept for the arena
+                         raw.resize(x.bytes);
+                         if (!st_->read(raw.data(), x.bytes, x.offset)) { std::fprintf(stderr, "strata metal: read failed\n"); std::exit(6); }

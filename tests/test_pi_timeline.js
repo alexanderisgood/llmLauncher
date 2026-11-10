@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const timeline = require("../pi_timeline.js");
 
-const app = fs.readFileSync(path.resolve(__dirname, "..", "app.js"), "utf8");
+const app = fs.readFileSync(path.resolve(__dirname, "..", "app.js"), "utf8") + "\n" + fs.readFileSync(require.resolve("../agent_console_workspace.js"), "utf8");
 const view = fs.readFileSync(path.resolve(__dirname, "..", "pi_timeline_view.js"), "utf8");
 
 const empty = timeline.emptyTimeline();

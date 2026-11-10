@@ -8,7 +8,7 @@ import launcher
 
 class PiContextPolicy(unittest.TestCase):
     def test_both_surfaces_share_policy_without_loading_hub_ui_in_terminal(self):
-        for backend, model in [('whallm', 'Qwen3.8 Flash'), ('omlx', 'Qwen3.8-27B'), ('mtplx', 'Qwopus')]:
+        for backend, model in [('whallm', 'Qwen3.8 Flash'), ('omlx', 'Qwen3.8-27B'), ('mtplx', 'Qwopus'), ('splash', 'Qwen3.8-27B · Splash')]:
             providers = []
             for surface in ('terminal', 'console'):
                 with self.subTest(backend=backend, surface=surface):
@@ -27,7 +27,7 @@ class PiContextPolicy(unittest.TestCase):
                     providers.append(json.loads(plan.client_env['LLM_LAUNCHER_PI_PROVIDER']))
             self.assertEqual(providers[0], providers[1])
             self.assertEqual(providers[0].get('memoryCompaction', False), backend in {'omlx', 'mtplx'})
-            self.assertEqual(providers[0].get('compactionRecovery', False), backend in {'omlx', 'mtplx'})
+            self.assertEqual(providers[0].get('compactionRecovery', False), backend in {'omlx', 'mtplx', 'splash'})
         self.assertIn(launcher.APP_DIR / 'pi-context-policy.js', launcher.CONTROLLER_SOURCE_PATHS)
 
 

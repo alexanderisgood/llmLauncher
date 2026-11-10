@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +32,18 @@ def main() -> None:
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         fail(f"cannot read plan: {error}")
+    from launcher_shutdown import register_terminal_agent, terminal_plan_cancelled
+
+    def check_quit() -> None:
+        try:
+            if terminal_plan_cancelled(state_root, info):
+                fail("this Terminal launch was cancelled by Quit")
+        except OSError:
+            fail("could not verify whether this Terminal launch was cancelled")
+
+    check_quit()
+    if not isinstance(plan, dict):
+        fail("invalid launch plan")
     argv = plan.get("argv")
     allowed = plan.get("allowedExecutable")
     client_name = plan.get("clientName")
@@ -38,7 +51,7 @@ def main() -> None:
     extra_env = plan.get("env", {})
     if not isinstance(argv, list) or not argv or not all(isinstance(v, str) and "\0" not in v for v in argv):
         fail("invalid arguments")
-    if client_name not in {"pi", "opencode", "codex"}:
+    if client_name not in {"pi", "omp", "opencode", "codex"}:
         fail("unexpected client name")
     if (
         argv[0] != allowed
@@ -54,7 +67,16 @@ def main() -> None:
         fail("invalid environment")
     env = os.environ.copy()
     env.update(extra_env)
+    try:
+        register_terminal_agent(plan_path.parent, client_name)
+    except (OSError, subprocess.SubprocessError):
+        # Exact executable/provider markers remain a fallback on systems where
+        # process inspection is unavailable; startup should remain usable.
+        pass
     os.chdir(cwd)
+    # Registration makes this PID visible to Quit. Recheck after registration
+    # so a Quit between the first check and receipt publication blocks exec.
+    check_quit()
     os.execve(argv[0], argv, env)
 
 

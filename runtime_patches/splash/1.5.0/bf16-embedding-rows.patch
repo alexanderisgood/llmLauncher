@@ -1,0 +1,69 @@
+--- a/runtime/metal/abi/Gguf.h
++++ b/runtime/metal/abi/Gguf.h
+@@ -114,6 +114,18 @@
+ // gguf_embed_f32_<name>): every format.
+ inline constexpr bool gguf_embedding_format(uint32_t format) { return format < GGUF_FMT_COUNT; }
+ 
++// Embedding kernels read BF16/F16 as raw scalar rows (GgufEmbedBF16/F16),
++// unlike projections, whose preparation packs 256-value native blocks.
++// In particular, Flash-Next's original BF16 PLE rows have only 160 values.
++inline constexpr uint32_t gguf_embedding_block_elements(uint32_t format) {
++  return format == GGUF_FMT_BF16 || format == GGUF_FMT_F16 ? 1 : kQuantFormats[format].block_elements;
++}
++inline constexpr uint64_t gguf_embedding_row_bytes(uint32_t format, uint64_t columns) {
++  return format == GGUF_FMT_BF16 || format == GGUF_FMT_F16
++             ? columns * 2
++             : columns / kQuantFormats[format].block_elements * kQuantFormats[format].block_bytes;
++}
++
+ // Prism ML's input rotation (kernels/shared/gguf_rotation.metal): weights
+ // stored for rotated inputs multiply H (D x), H the normalized Walsh-Hadamard
+ // transform of every block of GGUF_ROTATION_BLOCK inputs and D their int8
+--- a/runtime/model/GgufImage.cpp
++++ b/runtime/model/GgufImage.cpp
+@@ -380,7 +380,7 @@
+ 
+   // The bytes of a row of a tensor's native blocks.
+   static uint64_t nativeRowBytes(const GgufTensor &tensor) {
+-    return ggufRowBytes(kQuantFormats[imageFormat(tensor.type)], tensor.columns());
++    return gguf_embedding_row_bytes(imageFormat(tensor.type), tensor.columns());
+   }
+   // The bytes of a row of an F32 or BF16 tensor's values as stored, never
+   // BF16's native rows: a row need not be whole blocks of 256 values.
+@@ -879,7 +879,7 @@
+     throw GgufError("a table of type " + ggmlTypeName(tensor.type) + " does not stream: " + name);
+   if (tensor.columns() != columns || !tensor.rows()) throw GgufError("unexpected shape for " + name);
+   const uint32_t format = imageFormat(tensor.type);
+-  const uint64_t rowBytes = ggufRowBytes(kQuantFormats[format], tensor.columns());
++  const uint64_t rowBytes = gguf_embedding_row_bytes(format, tensor.columns());
+   if (!rowBytes || rowBytes > UINT32_MAX || tensor.rows() * rowBytes != tensor.bytes)
+     throw GgufError("unexpected size for " + name);
+   const WeightSource &source = file.source(tensor.file);
+--- a/runtime/model/WeightStore.cpp
++++ b/runtime/model/WeightStore.cpp
+@@ -181,10 +181,10 @@
+         throw WeightStoreError("GGUF embedding does not match the layout: " + std::string(label));
+     // Rows as stored, of whole native blocks.
+     const uint32_t format = gguf_format_of(d.type);
+-    if (format == GGUF_FMT_COUNT || d.inputSize % kQuantFormats[format].block_elements)
++    if (format == GGUF_FMT_COUNT || d.inputSize % gguf_embedding_block_elements(format))
+         throw WeightStoreError("GGUF embedding rows are not native GGUF blocks: " + std::string(label));
+     return {outputSize, inputSize,
+-            ops::NativeRows(readRows(file, d, ggufRowBytes(kQuantFormats[format], d.inputSize), label), format)};
++            ops::NativeRows(readRows(file, d, gguf_embedding_row_bytes(format, d.inputSize), label), format)};
+ }
+ 
+ std::string weightManifestFingerprint(
+--- a/runtime/ops/Embedding.cpp
++++ b/runtime/ops/Embedding.cpp
+@@ -27,8 +27,8 @@
+   const NativeRows &native = table.blocks();
+   const QuantFormat &format = native.format();
+   // Every token's row of native blocks (kernels/shared/embedding.metal).
+-  if (table.inputSize % format.block_elements) throw std::invalid_argument("native token rows take whole blocks");
+-  requireBytes(native.rows, uint64_t{table.outputSize} * (table.inputSize / format.block_elements) * format.block_bytes,
++  if (table.inputSize % gguf_embedding_block_elements(native.formatId)) throw std::invalid_argument("native token rows take whole blocks");
++  requireBytes(native.rows, uint64_t{table.outputSize} * gguf_embedding_row_bytes(native.formatId, table.inputSize),
+                "token table");
+   const GgufEmbedParams params{rows, table.outputSize, table.inputSize};
+   if (table.rotation) {

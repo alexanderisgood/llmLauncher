@@ -1,0 +1,45 @@
+{
+  "arithmeticPassed": true,
+  "streamEvents": 5,
+  "usage": {
+    "prompt_tokens": 53,
+    "completion_tokens": 4,
+    "total_tokens": 57,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "nativeAuthenticationPassed": true,
+  "contextTokens": 8192,
+  "outputTokens": 1024,
+  "reasoning": "off",
+  "memoryMode": "auto",
+  "memoryCeilingGB": 40,
+  "expertCacheBytes": 30191616000,
+  "residentExpertsPerLayer": 189,
+  "residentWeightCapacityBytes": 32367685120,
+  "plannedWorkingSetBytes": 36067143168,
+  "peakMlxMemoryBytes": 33027069844,
+  "activeMlxMemoryBytes": 32405696044,
+  "stopPassed": true,
+  "date": "2026-10-04",
+  "unitChecks": {
+    "kolibri": {
+      "passed": 16
+    },
+    "pythonSuite": {
+      "tests": 907,
+      "passed": 831,
+      "skipped": 74,
+      "preexistingFailures": 2
+    },
+    "javascriptSuite": {
+      "passed": 68
+    }
+  },
+  "preexistingFailures": [
+    "test_best_engine_requires_complete_comparable_matrix_and_clears_noise_floor",
+    "test_ssd_shootout_reuses_cross_format_result_and_never_requests_normal_engines"
+  ],
+  "baselineChecked": true
+}

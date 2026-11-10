@@ -115,7 +115,7 @@ export default async function contextPolicy(pi) {
   const { prepareCompaction } = await import(pathToFileURL(join(dist, "core/compaction/compaction.js")).href);
   const provider = JSON.parse(process.env.LLM_LAUNCHER_PI_PROVIDER || "{}");
   let compactionUI;
-  // The 4K housekeeping cap belongs to oMLX/MTPLX. Keep other supported
+  // The 4K housekeeping cap belongs to oMLX/MTPLX/Splash/Kolibri. Keep other supported
   // transports (including preserved Pi 0.84.2 for Uzu) on their native path.
   if (provider.compactionRecovery) {
     installCompactionRecovery(AgentSession, compact, compactionRecoveryStream, () => {

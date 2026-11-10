@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+import flash_vision
 
 
 def _vision_artifact(backend: str, runtime_version: str, model_path: str):
@@ -119,6 +120,8 @@ def prepare_mtplx_image_processor(backend: str, runtime_version: str, model_path
 
 
 def pi_model_inputs(backend: str, runtime_version: str, model_path: str) -> list[str]:
+    if backend in {'strata', 'splash', 'lmstudio'} and flash_vision.inspect_model(model_path):
+        return ['text', 'image']
     artifact = _vision_artifact(backend, runtime_version, model_path)
     if artifact is not None:
         root, vision = artifact

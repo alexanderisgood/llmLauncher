@@ -15,9 +15,12 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from sse_framing import EventScanner
+
 
 _NAME = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-_FRAME_END = re.compile(br"\r?\n\r?\n")
+MAX_BRIDGE_EVENT_BYTES = 8 * 1024 * 1024
+MAX_BRIDGE_OUTPUT_BYTES = 128 * 1024 * 1024
 _BENIGN_RESPONSE_FIELDS = {
     "client_metadata", "include", "metadata", "prompt_cache_key", "reasoning",
     "service_tier", "store", "truncation",
@@ -371,19 +374,42 @@ class ChatStreamBridge:
         self.request = request
         self.response_id = f"resp_llm_{uuid.uuid4().hex}"
         self.buffer = bytearray()
+        self._event_scanner = EventScanner()
         self.started = False
         self.finished = False
         self.failed = False
-        self.text = ""
-        self.reasoning = ""
+        self._text_parts: list[str] = []
+        self._reasoning_parts: list[str] = []
+        self._output_bytes = 0
         self.text_item_id = f"msg_llm_{uuid.uuid4().hex}"
         self.reasoning_item_id = f"rs_llm_{uuid.uuid4().hex}"
         self.text_index: int | None = None
         self.reasoning_index: int | None = None
         self.next_output_index = 0
-        self.tool_calls: dict[int, dict[str, str]] = {}
+        self.tool_calls: dict[int, dict[str, Any]] = {}
         self.finish_reason: str | None = None
         self.usage: dict[str, int] = {}
+
+    @property
+    def text(self) -> str:
+        return "".join(self._text_parts)
+
+    @property
+    def reasoning(self) -> str:
+        return "".join(self._reasoning_parts)
+
+    def _retain(self, parts: list[str], value: str) -> bool:
+        """Append fragments once; materialize terminal Responses items once."""
+        if not value:
+            return True
+        try:
+            self._output_bytes += len(value.encode("utf-8"))
+        except UnicodeError:
+            return False
+        if self._output_bytes > MAX_BRIDGE_OUTPUT_BYTES:
+            return False
+        parts.append(value)
+        return True
 
     @staticmethod
     def _event(kind: str, **payload: Any) -> bytes:
@@ -477,7 +503,8 @@ class ChatStreamBridge:
             )
             if reasoning_delta:
                 output.extend(self._ensure_reasoning())
-                self.reasoning += reasoning_delta
+                if not self._retain(self._reasoning_parts, reasoning_delta):
+                    return self._fail("Model output exceeded the bridge response bound")
                 output.extend(self._event(
                     "response.reasoning_summary_text.delta", item_id=self.reasoning_item_id,
                     output_index=self.reasoning_index, summary_index=0, delta=reasoning_delta,
@@ -485,7 +512,8 @@ class ChatStreamBridge:
             content = delta.get("content")
             if isinstance(content, str) and content:
                 output.extend(self._ensure_text())
-                self.text += content
+                if not self._retain(self._text_parts, content):
+                    return self._fail("Model output exceeded the bridge response bound")
                 output.extend(self._event(
                     "response.output_text.delta", item_id=self.text_item_id,
                     output_index=self.text_index, content_index=0, delta=content, logprobs=[],
@@ -498,15 +526,21 @@ class ChatStreamBridge:
                     index = tool_delta.get("index", 0)
                     if isinstance(index, bool) or not isinstance(index, int) or index < 0:
                         return self._fail("MTPLX returned an invalid tool-call index")
-                    current = self.tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                    current = self.tool_calls.get(index)
+                    if current is None:
+                        current = {"id": "", "name": "", "argument_parts": []}
+                        self.tool_calls[index] = current
                     if isinstance(tool_delta.get("id"), str):
                         current["id"] = str(tool_delta["id"])
                     function = tool_delta.get("function")
                     if isinstance(function, dict):
                         if isinstance(function.get("name"), str):
                             current["name"] += str(function["name"])
+                            if current["name"] and not _NAME.fullmatch(current["name"]):
+                                return self._fail("Model returned an invalid tool name")
                         if isinstance(function.get("arguments"), str):
-                            current["arguments"] += str(function["arguments"])
+                            if not self._retain(current["argument_parts"], function["arguments"]):
+                                return self._fail("Model output exceeded the bridge response bound")
             finish = choice.get("finish_reason")
             if isinstance(finish, str):
                 self.finish_reason = finish
@@ -532,14 +566,25 @@ class ChatStreamBridge:
         if self.finished or not chunk:
             return b""
         output = bytearray(self.start())
-        self.buffer.extend(chunk)
-        while True:
-            match = _FRAME_END.search(self.buffer)
-            if match is None:
-                break
-            frame = bytes(self.buffer[:match.start()])
-            del self.buffer[:match.end()]
-            output.extend(self._frame(frame))
+        # Keep even a caller's huge read bounded and scan only appended bytes.
+        for start in range(0, len(chunk), 16 * 1024):
+            self.buffer.extend(chunk[start:start + 16 * 1024])
+            while True:
+                frame = self._event_scanner.pop(self.buffer)
+                if frame is None:
+                    break
+                if len(frame) > MAX_BRIDGE_EVENT_BYTES:
+                    self.buffer.clear()
+                    output.extend(self._fail("Model returned an oversized streaming event"))
+                    return bytes(output)
+                output.extend(self._frame(frame))
+                if self.finished:
+                    self.buffer.clear()
+                    return bytes(output)
+            if len(self.buffer) > MAX_BRIDGE_EVENT_BYTES:
+                self.buffer.clear()
+                output.extend(self._fail("Model returned an oversized streaming event"))
+                return bytes(output)
         return bytes(output)
 
     def feed_completion(self, value: Any) -> bytes:
@@ -569,34 +614,37 @@ class ChatStreamBridge:
             return b""
         output = bytearray(self.start())
         if self.buffer:
-            output.extend(self._frame(bytes(self.buffer)))
             self.buffer.clear()
-            if self.finished:
-                return bytes(output)
+            return bytes(output) + self._fail("MTPLX ended with an incomplete streaming frame")
+        if self.finish_reason not in {"stop", "tool_calls", "function_call"} | _LIMIT_REASONS:
+            return bytes(output) + self._fail("MTPLX ended without a valid completion reason")
+
+        text = self.text
+        reasoning = self.reasoning
 
         if self.reasoning_index is not None:
             output.extend(self._event(
                 "response.reasoning_summary_text.done", item_id=self.reasoning_item_id,
-                output_index=self.reasoning_index, summary_index=0, text=self.reasoning,
+                output_index=self.reasoning_index, summary_index=0, text=reasoning,
             ))
             output.extend(self._event("response.output_item.done", output_index=self.reasoning_index, item={
                 "id": self.reasoning_item_id, "type": "reasoning", "status": "completed",
-                "summary": [{"type": "summary_text", "text": self.reasoning}],
+                "summary": [{"type": "summary_text", "text": reasoning}],
             }))
         if self.text_index is not None:
             output.extend(self._event(
                 "response.output_text.done", item_id=self.text_item_id,
-                output_index=self.text_index, content_index=0, text=self.text, logprobs=[],
+                output_index=self.text_index, content_index=0, text=text, logprobs=[],
             ))
             output.extend(self._event(
                 "response.content_part.done", item_id=self.text_item_id,
                 output_index=self.text_index, content_index=0,
-                part={"type": "output_text", "text": self.text, "annotations": []},
+                part={"type": "output_text", "text": text, "annotations": []},
             ))
             output.extend(self._event("response.output_item.done", output_index=self.text_index, item={
                 "id": self.text_item_id, "type": "message", "role": "assistant",
                 "status": "completed",
-                "content": [{"type": "output_text", "text": self.text, "annotations": []}],
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
             }))
         for index in sorted(self.tool_calls):
             call = self.tool_calls[index]
@@ -610,7 +658,7 @@ class ChatStreamBridge:
             item: dict[str, Any] = {
                 "id": f"fc_llm_{uuid.uuid4().hex}", "type": "function_call",
                 "status": "completed", "call_id": call_id, "name": target.name,
-                "arguments": call["arguments"],
+                "arguments": "".join(call["argument_parts"]),
             }
             if target.namespace:
                 item["namespace"] = target.namespace
@@ -634,7 +682,7 @@ class ChatStreamBridge:
                 "error": {"code": "content_filter", "message": "MTPLX stopped the response"},
             })
             output.extend(self._event("response.failed", response=response))
-        elif self.reasoning.strip() and not self.text.strip() and not self.tool_calls:
+        elif reasoning.strip() and not text.strip() and not self.tool_calls:
             response.update({
                 "status": "failed",
                 "error": {

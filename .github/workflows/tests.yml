@@ -31,13 +31,16 @@ jobs:
           node-version: '24'
 
       - name: Check JavaScript syntax
-        run: node --check app.js
+        run: |
+          for source in ./*.js ./*.mjs; do
+            node --check "$source"
+          done
 
       - name: Run Python tests
         run: python -m unittest discover -s tests -p 'test_*.py'
 
       - name: Run JavaScript tests
         run: |
-          for test in tests/test_*.js; do
+          for test in tests/test_*.js tests/test_*.mjs; do
             node "$test"
           done

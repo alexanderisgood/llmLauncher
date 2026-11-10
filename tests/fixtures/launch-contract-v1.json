@@ -1,0 +1,3638 @@
+{
+  "sourceSha256": "abf5e85f6bd56c400fe29cdcb4142ca473afeb2a22308e8cbb6375a707d9c4a0",
+  "dependencySources": {
+    "kolibri_runtime": "1c325e08bb47a8359e0fb3fe63776d08d5867406dc07c9eabbbdc05d13d54468",
+    "slotstream_runtime": "ce10de135b4ec71bb6ab0a668940ee635382f3be7d7e99a2cddf8478b6b1df3e",
+    "splash_runtime": "a8d6a743ae10289374c7bc3e19cde04750f3b4cfd9d1b98518c547e467f758e2"
+  },
+  "cases": [
+    {
+      "name": "validated_limits",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "context": 8192,
+          "output": 256
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": [
+          8192,
+          256
+        ]
+      }
+    },
+    {
+      "name": "validated_limits",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "context": "8192",
+          "output": "256"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": [
+          8192,
+          256
+        ]
+      }
+    },
+    {
+      "name": "validated_limits",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "context": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Context must be a whole number of tokens."
+      }
+    },
+    {
+      "name": "validated_limits",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "context": 8192.5
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Context must be a whole number of tokens."
+      }
+    },
+    {
+      "name": "validated_limits",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "output": 131072
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Max response must be smaller than the context window so the prompt has room."
+      }
+    },
+    {
+      "name": "validated_limits",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "output": null
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": [
+          131072,
+          16384
+        ]
+      }
+    },
+    {
+      "name": "validated_limits",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "backend": "kolibri"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": [
+          32768,
+          16384
+        ]
+      }
+    },
+    {
+      "name": "validated_chat_settings",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "chat": {
+            "sampling": "model",
+            "systemPrompt": "Σ 🙂"
+          }
+        },
+        "chat"
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "systemPrompt": "Σ 🙂",
+          "sampling": "model",
+          "modelDefaults": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          }
+        }
+      }
+    },
+    {
+      "name": "validated_chat_settings",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "chat": {
+            "sampling": "custom",
+            "temperature": 0.5,
+            "topP": 0.8,
+            "topK": 12,
+            "seed": 24
+          }
+        },
+        "chat"
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "systemPrompt": "",
+          "sampling": "custom",
+          "modelDefaults": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "temperature": 0.5,
+          "topP": 0.8,
+          "presencePenalty": 0.0,
+          "frequencyPenalty": 0.0,
+          "topK": 12,
+          "seed": 24
+        }
+      }
+    },
+    {
+      "name": "validated_chat_settings",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "chat": {
+            "sampling": "custom",
+            "temperature": true
+          }
+        },
+        "chat"
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Temperature must be a number between 0 and 2."
+      }
+    },
+    {
+      "name": "validated_chat_settings",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "chat": {
+            "sampling": "custom",
+            "topK": 1.5
+          }
+        },
+        "chat"
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Top K must be a whole number between 0 and 1,000,000."
+      }
+    },
+    {
+      "name": "validated_chat_settings",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "chat": {
+            "systemPrompt": "x\u0000"
+          }
+        },
+        "chat"
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "System prompt must be at most 32,000 characters."
+      }
+    },
+    {
+      "name": "validated_chat_settings",
+      "args": [
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "chat": {
+            "sampling": "unknown"
+          }
+        },
+        "chat"
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Chat sampling must use model defaults or custom values."
+      }
+    },
+    {
+      "name": "validated_chat_context_files",
+      "args": [
+        [
+          {
+            "name": "lib/readme.txt",
+            "content": "Quoted <script>🙂</script>"
+          }
+        ]
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": [
+          {
+            "name": "lib/readme.txt",
+            "content": "Quoted <script>🙂</script>",
+            "characters": 25,
+            "bytes": 28
+          }
+        ]
+      }
+    },
+    {
+      "name": "validated_chat_context_files",
+      "args": [
+        [
+          {
+            "name": "../escape",
+            "content": "data"
+          }
+        ]
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Context file names must be safe relative names, not filesystem paths."
+      }
+    },
+    {
+      "name": "validated_chat_context_files",
+      "args": [
+        [
+          {
+            "name": "A",
+            "content": "data"
+          },
+          {
+            "name": "a",
+            "content": "data"
+          }
+        ]
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "The context pack contains the same file name twice: a."
+      }
+    },
+    {
+      "name": "validated_chat_context_files",
+      "args": [
+        [
+          {
+            "name": "file",
+            "content": " "
+          }
+        ]
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "The context file file is empty."
+      }
+    },
+    {
+      "name": "validated_chat_context_files",
+      "args": [
+        []
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": []
+      }
+    },
+    {
+      "name": "validated_chat_messages",
+      "args": [
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "Question"
+            }
+          ]
+        },
+        "System"
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": [
+          {
+            "role": "system",
+            "content": "System"
+          },
+          {
+            "role": "user",
+            "content": "Question"
+          }
+        ]
+      }
+    },
+    {
+      "name": "validated_chat_messages",
+      "args": [
+        {
+          "operation": "continue",
+          "messages": [
+            {
+              "role": "assistant",
+              "content": "",
+              "reasoning_content": "Displayed reasoning"
+            }
+          ]
+        },
+        "System"
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": [
+          {
+            "role": "system",
+            "content": "System"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Displayed reasoning"
+          },
+          {
+            "role": "user",
+            "content": "Continue the previous answer exactly from where it ended. Do not repeat earlier text. Return only the continuation."
+          }
+        ]
+      }
+    },
+    {
+      "name": "validated_chat_messages",
+      "args": [
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "Question",
+              "reasoning": "not assistant"
+            }
+          ]
+        },
+        "System"
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Only assistant messages may carry displayed model reasoning."
+      }
+    },
+    {
+      "name": "validated_chat_messages",
+      "args": [
+        {
+          "messages": [
+            {
+              "role": "assistant",
+              "content": "Answer"
+            }
+          ]
+        },
+        "System"
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "The latest chat message must come from the user."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "omlx",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "auto",
+          "depth": 1,
+          "kv": "off",
+          "burst": "balanced",
+          "dflashVerify": "adaptive",
+          "dflashDraftQuant": "native",
+          "anePrefill": "off",
+          "memoryGuard": "balanced"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "omlx",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "burst": "balanced",
+          "dflashVerify": "adaptive",
+          "dflashDraftQuant": "native",
+          "anePrefill": "off",
+          "memoryGuard": "balanced"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "omlx",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "oMLX acceleration is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "omlx",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "auto",
+          "depth": 1,
+          "kv": "off",
+          "burst": "balanced",
+          "dflashVerify": "adaptive",
+          "dflashDraftQuant": "native",
+          "anePrefill": "off",
+          "memoryGuard": "balanced"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "omlx",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "oMLX KV precision is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "lmstudio",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "auto",
+          "depth": 1,
+          "mtpMinTokens": 0,
+          "mtpMinContinueProbability": 0.0,
+          "kv": "off",
+          "gpu": "max",
+          "parallel": 1
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "lmstudio",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "mtpMinTokens": 0,
+          "mtpMinContinueProbability": 0.0,
+          "kv": "off",
+          "gpu": "max",
+          "parallel": 1
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "lmstudio",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "LM Studio acceleration is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "lmstudio",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "auto",
+          "depth": 1,
+          "mtpMinTokens": 0,
+          "mtpMinContinueProbability": 0.0,
+          "kv": "off",
+          "gpu": "max",
+          "parallel": 1
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "lmstudio",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "LM Studio KV precision is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "mtplx",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "auto",
+          "depth": 1,
+          "kv": "off",
+          "profile": "sustained",
+          "mtplxOperatorRoute": "default",
+          "fan": "smart"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "mtplx",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "profile": "sustained",
+          "mtplxOperatorRoute": "default",
+          "fan": "smart"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "mtplx",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "MTPLX acceleration is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "mtplx",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "auto",
+          "depth": 1,
+          "kv": "off",
+          "profile": "sustained",
+          "mtplxOperatorRoute": "default",
+          "fan": "smart"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "mtplx",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "MTPLX KV precision is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "uzu",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "uzu",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "uzu",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Uzu acceleration is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "uzu",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Uzu draft depth must be a whole number between 1 and 1."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "uzu",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Uzu KV precision is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "freetoken",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "freetoken",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "freetoken",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "freetoken",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "freetoken",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "swiftlm",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "prefillSize": 512,
+          "nativeExpertTopK": 8,
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "swiftlm",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "prefillSize": 512,
+          "nativeExpertTopK": 8,
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "swiftlm",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "prefillSize": 512,
+          "nativeExpertTopK": 8,
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "swiftlm",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "prefillSize": 512,
+          "nativeExpertTopK": 8,
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "swiftlm",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "prefillSize": 512,
+          "nativeExpertTopK": 8,
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "mference",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "promptCacheMode": "on",
+          "queueLimit": 4,
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "mference",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "promptCacheMode": "on",
+          "queueLimit": 4,
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "mference",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "promptCacheMode": "on",
+          "queueLimit": 4,
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "mference",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "promptCacheMode": "on",
+          "queueLimit": 4,
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "mference",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "promptCacheMode": "on",
+          "queueLimit": 4,
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "slotstream",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "mtp",
+          "depth": 2,
+          "kv": "off",
+          "memoryGB": 36,
+          "memoryMode": "auto",
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "slotstream",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "memoryGB": 36,
+          "memoryMode": "auto",
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "slotstream",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Slotstream acceleration is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "slotstream",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "mtp",
+          "depth": 2,
+          "kv": "off",
+          "memoryGB": 36,
+          "memoryMode": "auto",
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "slotstream",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Slotstream KV precision is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "kolibri",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "memoryGB": 40,
+          "memoryMode": "auto",
+          "prefillSize": 64,
+          "promptCacheGB": 1
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "kolibri",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "memoryGB": 40,
+          "memoryMode": "auto",
+          "prefillSize": 64,
+          "promptCacheGB": 1
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "kolibri",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Kolibri acceleration is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "kolibri",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Kolibri draft depth must be a whole number between 1 and 1."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "kolibri",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Kolibri KV precision is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "splash",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "splash",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "splash",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Splash acceleration is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "splash",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Splash draft depth must be a whole number between 1 and 1."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "splash",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Splash KV precision is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "whallm",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "whallm",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "whallm",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "whallm",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "whallm",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off",
+          "ssdCacheState": "natural-cold-to-warm"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "llamacpp",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {}
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "llamacpp",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "off",
+          "kv": "off"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        }
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "llamacpp",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "acceleration": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "llama.cpp acceleration is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "llamacpp",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "depth": true
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "llama.cpp draft depth must be a whole number between 1 and 1."
+      }
+    },
+    {
+      "name": "validated_profile_options",
+      "args": [
+        "llamacpp",
+        {
+          "id": "fixture-model",
+          "name": "Fixture model",
+          "nativeContext": 131072,
+          "defaultOutput": 16384,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "seed": 17
+          },
+          "qwen4Ple": {
+            "supported": false
+          }
+        },
+        {
+          "mtp": true,
+          "dflash": true,
+          "kv": true,
+          "depth": 2,
+          "depthMax": 4,
+          "dflashBlockSize": 2,
+          "dflashMaxBlockSize": 4,
+          "aneTuningVerified": true,
+          "nativeExpertTopK": 8,
+          "queueLimit": 4,
+          "kvChoices": [
+            "off",
+            "q8",
+            "q4"
+          ]
+        },
+        {
+          "kv": "invalid"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "llama.cpp KV precision is not supported by this launcher."
+      }
+    },
+    {
+      "name": "validate_runtime_context",
+      "args": [
+        "mference",
+        4096
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": null
+      }
+    },
+    {
+      "name": "validate_runtime_context",
+      "args": [
+        "mference",
+        12000
+      ],
+      "kwargs": {},
+      "expected": {
+        "errorType": "ValueError",
+        "error": "Mference supports fixed context windows: 4,096, 8,192, 16,384, 32,768, 65,536, 128,000. Choose one of those exact values."
+      }
+    },
+    {
+      "name": "validate_runtime_context",
+      "args": [
+        "uzu",
+        16384
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": null
+      }
+    },
+    {
+      "name": "validate_runtime_context",
+      "args": [
+        "llamacpp",
+        8192
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": null
+      }
+    },
+    {
+      "name": "validate_runtime_context",
+      "args": [
+        "splash",
+        16384
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": null
+      }
+    },
+    {
+      "name": "validate_runtime_context",
+      "args": [
+        "kolibri",
+        131072
+      ],
+      "kwargs": {},
+      "expected": {
+        "value": null
+      }
+    }
+  ]
+}

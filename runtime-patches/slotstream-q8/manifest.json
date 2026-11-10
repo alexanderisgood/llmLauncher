@@ -1,0 +1,31 @@
+{
+  "version": "0.2.20-q8.1",
+  "upstreamCommit": "6e25b000ffa091c9afb210439bc707b5ad26860f",
+  "qualified": true,
+  "runtimeHashes": {
+    "slotstream": "3197a638ab7a14d6fb7c17f9bfc6b286e343f9ff0657f01627e8c960d53e8f44",
+    "mlx.metallib": "198488eb61359e953580a9c4530400feee1a06dd2f28a930a6ffa58aec66a597"
+  },
+  "patchSHA256": "deb68e0427c54daae5cb6c6e7bed77ed87fcbf110b45a3b98b6446f119e3d23b",
+  "kernelExperiment": {
+    "file": "q8-kernel-reduce-staged.patch",
+    "change": "Stage the Q8 reduce kernel's row maximum and per-part softmax weights in threadgroup memory instead of recomputing them in all 256 threads of the row (256x fewer exp calls per row).",
+    "evidence": "bench/results/20260918-065435-kernel-reduce-staged.json, bench/results/20260918-071045-kernel-q82-rep2.json",
+    "outcome": "NOT ADOPTED. Build and checks pass and the greedy output is byte-identical, but two runs of the staged kernel (12.14 and 11.71 decode tok/s, mean 11.93) are indistinguishable from the five runs of the shipped kernel (11.84-11.96, mean 11.90). The redundant exps are not on the critical path at this context, so the pinned runtime stays 0.2.20-q8.1."
+  },
+  "qualification": {
+    "date": "2026-09-18",
+    "hardware": "Apple M5 Pro, 48 GiB unified memory",
+    "baseCacheQualification": "qualification/q8.1-manifest.json",
+    "inferenceArithmeticChanged": false,
+    "q8TensorAssertions": 45,
+    "rebuildCommand": "git clone https://github.com/carloslfu/slotstream.git; git checkout 6e25b000ffa091c9afb210439bc707b5ad26860f; git apply q8-0.2.20.patch; make build SLOTSTREAM_BUILD_JOBS=2 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer TOOLCHAINS=Metal",
+    "nativeChecks": "slotstream-checks --tier t1 --filter q8-cache: 2 passed / 45 assertions",
+    "qualityProbes": "bench/quality.py greedy probes byte-identical with and without the read-path env set (20260917-225501 vs 20260917-225519)",
+    "configuredContextTested": 131072,
+    "fullWindowModelQualified": false,
+    "wholeModelSpeedupEstablished": true,
+    "scope": "Paired 112,881-token A/B on 17-18 Sep 2026: prefill 90.4 -> 124.7-127.6 tok/s, decode 8.62 -> 10.05-10.74 tok/s against the pinned 0.2.17-q8.2 route at the same prompt, with the corrected tap sidecar present in both arms. See bench/notes/flash-next.md and bench/results/.",
+    "sidecar": "lookahead/tap-correction-attention-rank128-v1.safetensors 37540708 bytes sha256 37b00d3a32d1e1889a1794bbb8e97905a157a77c0508db620c1a11f2a895f7f5 installed in the model directory"
+  }
+}

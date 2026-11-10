@@ -1,0 +1,5 @@
+{
+  "source": "launcher.py BenchmarkManager + RuntimePromotionManager before orchestration extraction",
+  "fixtureSha256": "53e9010cdc2d49872751a5fd4a27db42ff9c90c079b1b042b626d38d63dc203a",
+  "managerClassLines": 3607
+}

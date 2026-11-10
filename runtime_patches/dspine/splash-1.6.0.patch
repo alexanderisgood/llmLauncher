@@ -1,0 +1,1562 @@
+diff --git a/install/assembly.py b/install/assembly.py
+--- a/install/assembly.py
++++ b/install/assembly.py
+@@ -172,10 +172,12 @@
+ 
+ def _well_formed(record):
+     gguf_target = record.get("target_format") == "gguf"
++    external_draft = record.get("external_draft") == "dspine"
+     sources = record.get("sources")
+     files = record.get("files")
+     return (
+         set(record) == RECORD_KEYS | ({"metadata"} if gguf_target else set())
++        | ({"external_draft"} if external_draft else set())
+         and type(record["version"]) is int
+         and record["version"] == 1
+         and isinstance(record["model"], str)
+@@ -184,7 +186,7 @@
+         and record["vision_format"] in VISION_FORMATS
+         and (not gguf_target or models.is_hex_digest(record["metadata"], 64))
+         and isinstance(sources, dict)
+-        and set(sources) == {"target", "draft"}
++        and set(sources) == ({"target"} if external_draft else {"target", "draft"})
+         and all(
+             isinstance(source, dict)
+             and set(source) == {"repo", "revision"}
+@@ -196,6 +198,12 @@
+             for source in sources.values()
+         )
+         and isinstance(files, dict)
++        and (not external_draft or (
++            record["family"] == "Qwen3.8-27B"
++            and record["target_format"] == "mlx-affine"
++            and record["vision_format"] == "none"
++            and not any(name.startswith("draft/") for name in files)
++        ))
+         and all(
+             models.is_safe_path(name)
+             and isinstance(entry, dict)
+diff --git a/runtime/engine/Bootstrap.mm b/runtime/engine/Bootstrap.mm
+--- a/runtime/engine/Bootstrap.mm
++++ b/runtime/engine/Bootstrap.mm
+@@ -298,8 +298,8 @@
+         (budget.dynamicBudgetBytes -
+          kvRunwayPages(budget.kvExtentPages) * budget.kvPageBytes) /
+             budget.laneStateBytes));
+-    for (uint32_t width = 1;
+-         width <= model::ExecutionLimits::maximumBatchWidth; ++width) {
++    const uint32_t maximumWidth = budget.draftWeightsBytes ? model::ExecutionLimits::maximumBatchWidth : 1;
++    for (uint32_t width = 1; width <= maximumWidth; ++width) {
+       if (width > affordableWidth ||
+           (width > 1 && report.warmup.decodeBatches[width - 2] ==
+                             WarmupStepStatus::MemoryLimited)) {
+diff --git a/runtime/engine/Engine.cpp b/runtime/engine/Engine.cpp
+--- a/runtime/engine/Engine.cpp
++++ b/runtime/engine/Engine.cpp
+@@ -2,6 +2,7 @@
+ #include "AwakeClock.hpp"
+ #include "Supervision.hpp"
+ #include "engine/EngineAllocate.hpp"
++#include "model/DSpineBridge.hpp"
+ 
+ #include <algorithm>
+ #include <chrono>
+@@ -88,6 +89,17 @@
+ Engine::~Engine() { config_.governor->ledger().removeSource(victims_); }
+ 
+ void Engine::submit(EngineRequest value) {
++  const bool dspine = !model::dspineSocket().empty();
++  if (dspine) {
++    if (std::ranges::any_of(requests_, [](const auto &item) { return !item.second.finalized; }))
++      throw std::invalid_argument("Experimental DSpine allows one live request");
++    if (value.prompt.size() + value.maxNewTokens > model::kDSpineContext ||
++        value.prompt.empty() || !value.maxNewTokens || !value.images.empty() ||
++        !value.scoreTokens.empty() ||
++        value.sampling.temperature != 0 || value.sampling.presencePenalty != 0 ||
++        value.sampling.frequencyPenalty != 0 || value.sampling.repetitionPenalty != 1)
++      throw std::invalid_argument("Experimental DSpine requires greedy text generation with neutral penalties and at most 262144 total tokens");
++  }
+   const auto outOfVocabulary = [&](uint32_t token) {
+     return token >= config_.vocabularySize;
+   };
+@@ -632,9 +644,9 @@
+     if (active.skipCache)
+       return 0;
+     if (!active.admissionProbe)
+-      active.admissionProbe = cache_.probe(active.exactTokens, promptIdentity(active.request));
++      active.admissionProbe = cache_.probe(cacheLookupTokens(active), promptIdentity(active.request));
+     else if (refresh)
+-      cache_.refresh(*active.admissionProbe, active.exactTokens, promptIdentity(active.request));
++      cache_.refresh(*active.admissionProbe, cacheLookupTokens(active), promptIdentity(active.request));
+     return active.admissionProbe->cachedTokens();
+   };
+   // A request starts only in a free lane. While every lane is resident,
+@@ -801,7 +813,21 @@
+ 
+ uint32_t Engine::promptReplayBoundary(const Request &active) noexcept {
+   const uint32_t tail = std::max(active.request.generationPromptTokens, uint32_t{1});
+-  return (active.promptTokens - tail) / KvCache::pageTokens * KvCache::pageTokens;
++  uint32_t boundary = active.promptTokens - tail;
++  // Leave the sidecar's entire retained prompt history for target prefill.
++  if (!model::dspineSocket().empty())
++    boundary = std::min(boundary, model::dspinePromptStart(active.promptTokens));
++  return boundary / KvCache::pageTokens * KvCache::pageTokens;
++}
++
++std::span<const uint32_t> Engine::cacheLookupTokens(const Request &active) noexcept {
++  std::span<const uint32_t> tokens = active.exactTokens;
++  if (!model::dspineSocket().empty()) {
++    // Cache::extendMatch skips its last token. Include the first real token
++    // after the boundary so the page ending at it can match.
++    return tokens.first(promptReplayBoundary(active) + 1);
++  }
++  return tokens;
+ }
+ 
+ uint32_t Engine::sharedPrefillBoundary(const Request &left,
+@@ -898,10 +924,11 @@
+   const bool supersedes = scheduler_.yieldsTo(active.request.priority, {.passes = passCommand_.progress()});
+   ModelRequest modelRequest = active.request.modelView();
+   modelRequest.prompt = active.exactTokens;
++  const auto lookupTokens = cacheLookupTokens(active);
+   CacheLookup lookup =
+       active.skipCache
+           ? CacheLookup{}
+-          : cache_.lookup(modelRequest.prompt, promptIdentity(active.request),
++          : cache_.lookup(lookupTokens, promptIdentity(active.request),
+                           active.admissionProbe ? &*active.admissionProbe
+                                                 : nullptr);
+   // Only unstarted requests wait for a resident producer. Recheck planned
+@@ -990,7 +1017,7 @@
+   // Its projected growth is the lanes' now (laneDemandBytes).
+   ++ledgerChanges_;
+   if (droppedLease)
+-    lookup = cache_.lookup(modelRequest.prompt, promptIdentity(active.request));
++    lookup = cache_.lookup(lookupTokens, promptIdentity(active.request));
+   // The commitment covers the chain it restores too, once the lookup is
+   // final, beside the copies on it the quota counts once the start holds
+   // them. Writes a reclaim started may have taken the quota admitSpill
+@@ -1735,8 +1762,17 @@
+ 
+ Engine::Prepared Engine::yieldLane(Request &lane, uint64_t workEnd,
+                                    metal::AllocationFailure failure, double now) {
+-  if (!yieldsEndedLanes(lane))
++  if (yieldsEndedLanes(lane))
++    return Prepared::Yielded;
++  // A sidecar's history cannot be restored from a native cache snapshot.
++  // Host pressure can ask even a lone lane to yield.
++  if (!model::dspineSocket().empty()) {
++    settle(lane, {LaneOutcome::ResourceTimeout,
++                  "DSpine could not retain its context under memory pressure: " +
++                      std::string(metal::allocationFailureName(failure))});
++  } else {
+     suspendForGrowth(lane, workEnd, failure, now);
++  }
+   return Prepared::Yielded;
+ }
+ 
+diff --git a/runtime/engine/Engine.hpp b/runtime/engine/Engine.hpp
+--- a/runtime/engine/Engine.hpp
++++ b/runtime/engine/Engine.hpp
+@@ -707,6 +707,7 @@
+   // replayStateBoundary while the lane replays only its prompt.
+   [[nodiscard]] static uint32_t
+   promptReplayBoundary(const Request &request) noexcept;
++  [[nodiscard]] static std::span<const uint32_t> cacheLookupTokens(const Request &request) noexcept;
+   [[nodiscard]] static uint32_t sharedPrefillBoundary(const Request &left,
+                                                       const Request &right);
+   // An unstarted request waits while a resident producer has yet to publish
+diff --git a/runtime/engine/EngineMemory.cpp b/runtime/engine/EngineMemory.cpp
+--- a/runtime/engine/EngineMemory.cpp
++++ b/runtime/engine/EngineMemory.cpp
+@@ -994,10 +994,10 @@
+     if (active.lane || active.finalized || active.skipCache)
+       continue;
+     if (active.admissionProbe) {
+-      cache_.refresh(*active.admissionProbe, active.exactTokens, promptIdentity(active.request));
++      cache_.refresh(*active.admissionProbe, cacheLookupTokens(active), promptIdentity(active.request));
+       chains.push_back(active.admissionProbe->restoredChain());
+     } else {
+-      probes.push_back(cache_.probe(active.exactTokens, promptIdentity(active.request)));
++      probes.push_back(cache_.probe(cacheLookupTokens(active), promptIdentity(active.request)));
+     }
+   }
+   for (const CacheProbe &probe : probes)
+diff --git a/runtime/engine/MemoryAudit.cpp b/runtime/engine/MemoryAudit.cpp
+--- a/runtime/engine/MemoryAudit.cpp
++++ b/runtime/engine/MemoryAudit.cpp
+@@ -48,7 +48,7 @@
+   const EngineMemoryBreakdown &budget = plan.breakdown();
+   // Vision weights are absent without a vision tower. Loading already
+   // requires them for a model with vision.
+-  if (!actual.targetWeightsBytes || !actual.draftWeightsBytes ||
++  if (!actual.targetWeightsBytes || (budget.draftWeightsBytes && !actual.draftWeightsBytes) ||
+       !actual.stateAllocatedBytes || !actual.sharedPrefillBytes ||
+       !actual.sharedDecodeBytes || !actual.kvAllocatedBytes ||
+       !actual.backendAllocatedBytes || !actual.deviceCurrentAllocatedBytes ||
+diff --git a/runtime/engine/MemoryPlan.cpp b/runtime/engine/MemoryPlan.cpp
+--- a/runtime/engine/MemoryPlan.cpp
++++ b/runtime/engine/MemoryPlan.cpp
+@@ -227,7 +227,7 @@
+   if (spill.enabled && !targetKvLayout.spillable()) return "spill_plan_needs_a_spillable_layout";
+   if (!ops::validFormat(stateFormat)) return "invalid_state_format";
+   if (!footprint.targetWeightsBytes) return "target_weight_bytes_required";
+-  if (!footprint.draftWeightsBytes) return "draft_weight_bytes_required";
++  if (!footprint.externalDraft && !footprint.draftWeightsBytes) return "draft_weight_bytes_required";
+   if (!footprint.runtime.laneStatePlannedAllocatedBytes) {
+     return "lane_state_bytes_required";
+   }
+diff --git a/runtime/engine/MemoryPlan.hpp b/runtime/engine/MemoryPlan.hpp
+--- a/runtime/engine/MemoryPlan.hpp
++++ b/runtime/engine/MemoryPlan.hpp
+@@ -108,6 +108,7 @@
+   // at the start, but fixed in the plan, so that the context and the KV it
+   // holds rest on the engine's limit alone.
+   uint64_t hostHeldBackBytes = 0;
++  bool externalDraft = false;
+ };
+ 
+ // What a spill-capable target plans for long requests' K/V on the SSD cache
+diff --git a/runtime/engine/NativeArguments.cpp b/runtime/engine/NativeArguments.cpp
+--- a/runtime/engine/NativeArguments.cpp
++++ b/runtime/engine/NativeArguments.cpp
+@@ -1,4 +1,5 @@
+ #include "engine/NativeArguments.hpp"
++#include "model/DSpineBridge.hpp"
+ 
+ #include <charconv>
+ #include <cmath>
+@@ -93,11 +94,8 @@
+       std::filesystem::canonical(std::filesystem::path(argument), error);
+   if (error || !std::filesystem::is_directory(root, error))
+     throw ModelRootError("MODEL_DIRECTORY must name an existing directory");
+-  for (const char *role : {"target", "draft"}) {
+-    if (!std::filesystem::is_directory(root / role, error))
+-      throw ModelRootError(
+-          "MODEL_DIRECTORY must hold the model's target/ and draft/ directories");
+-  }
++  if (!std::filesystem::is_directory(root / "target", error))
++    throw ModelRootError("MODEL_DIRECTORY must hold the model's target/ directory");
+   return root;
+ }
+ 
+@@ -197,8 +195,12 @@
+     throw UsageError("--max-cache-disk-writes requires an SSD cache, which MAX_CACHE_DISK_BYTES 0 turns off");
+   if (!result.cacheRoot.empty() && !result.persistentCache)
+     throw UsageError("--cache-dir requires --persistent-cache on");
++  if (!model::dspineSocket().empty() && (result.maxCacheDisk.automatic || result.maxCacheDisk.bytes))
++    throw UsageError("Experimental DSpine requires --max-cache-disk 0");
+   result.modelRoot = requireModelRoot(argv[2]);
+   model::ModelDescriptor inspected = inspectModel(result.modelRoot);
++  if (inspected.externalDraft != !model::dspineSocket().empty())
++    throw UsageError("Experimental DSpine requires both a target-only assembly and its sidecar socket");
+   result.maxContext = parseMaxContext(argv[3]);
+   try {
+     result.model = model::servedFor(std::move(inspected), result.maxContext);
+diff --git a/runtime/engine/RuntimeResources.mm b/runtime/engine/RuntimeResources.mm
+--- a/runtime/engine/RuntimeResources.mm
++++ b/runtime/engine/RuntimeResources.mm
+@@ -487,7 +487,7 @@
+ 
+ void requireLoadedModel(const model::LoadedModel &loaded) {
+   if (!loaded.targetActualAllocatedBytes() ||
+-      !loaded.draft.actualAllocatedBytes ||
++      (!loaded.descriptor.externalDraft && !loaded.draft.actualAllocatedBytes) ||
+       (loaded.descriptor.hasVision() && !loaded.vision.actualAllocatedBytes) ||
+       loaded.manifestFingerprintSha256.empty() ||
+       loaded.targetManifestFingerprint().empty()) {
+@@ -974,6 +974,7 @@
+         aneFfnBytes,
+         loaded.streamedTable() ? loaded.streamedTable()->committedBytes() : 0,
+         hostHeldBackBytes,
++        loaded.descriptor.externalDraft,
+     };
+     // A lane's prefill command writes a group of chunks where the routed
+     // experts stream (model::RuntimeGeometry::prefillChunks).
+diff --git a/runtime/main.mm b/runtime/main.mm
+--- a/runtime/main.mm
++++ b/runtime/main.mm
+@@ -7,6 +7,7 @@
+ #include "engine/Json.hpp"
+ #include "engine/NativeArguments.hpp"
+ #include "model/ModelDescriptor.hpp"
++#include "model/ModelSizing.hpp"
+ 
+ #include <IOKit/pwr_mgt/IOPMLib.h>
+ #include <dispatch/dispatch.h>
+@@ -157,6 +158,7 @@
+       " [--kv-spill always] [--kv-window-trim on|off] [--verify-rows auto|all]");
+   writeStderrLine("       " + command + " model-check mlx-affine none|safetensors CONFIG [DRAFT_CONFIG]");
+   writeStderrLine("       " + command + " model-check gguf none|gguf CONFIG GGUF_HEADERS [DRAFT_CONFIG]");
++  writeStderrLine("       " + command + " dspine-model-size MODEL_DIRECTORY");
+   writeStderrLine("       " + command + " device-check");
+   writeStderrLine("       " + command + " families");
+ }
+@@ -474,6 +476,32 @@
+   return 0;
+ }
+ 
++// Metadata-only sizing of the external draft's Splash target.
++int dspineModelSize(int argc, char **argv) {
++  if (argc != 3)
++    throw engine::UsageError("dspine-model-size requires MODEL_DIRECTORY");
++  const std::filesystem::path root(argv[2]);
++  const model::ModelDescriptor descriptor = model::inspectModelRoot(root);
++  if (!descriptor.externalDraft)
++    throw std::invalid_argument("dspine-model-size requires a target-only DSpine assembly");
++  const model::StreamableWeights weights = model::streamableWeights(root, descriptor, {});
++  kv::Layout kv = descriptor.targetKvLayout;
++  kv.format = kv::Format::Int8;
++  json::Writer w;
++  w.object([&] {
++    w.field("target_weights_bytes", weights.loadedBytes)
++        .field("draft_weights_bytes", 0)
++        .field("int8_kv_bytes_per_page", kv.bytesPerModelPage())
++        .field("kv_page_tokens", kv::kPageTokens)
++        .field("int8_kv_minimum_extent_pages", kv.minimumExtentPages())
++        .field("lane_state_bytes", descriptor.stateLayout.laneBytes())
++        .field("cached_state_bytes", descriptor.stateLayout.cachedBytes())
++        .field("max_context_tokens", descriptor.capabilities.maximumContextTokens);
++  });
++  std::printf("%s\n", w.str().c_str());
++  return 0;
++}
++
+ // What each family's layout gives the options a start takes
+ // (model::familyFacts), as JSON by family, which the installer reports to the
+ // app (install/families.py).
+@@ -508,6 +536,8 @@
+         return splash::checkDevice(argc);
+       if (command == "model-check")
+         return splash::checkModel(argc, argv);
++      if (command == "dspine-model-size")
++        return splash::dspineModelSize(argc, argv);
+       if (command == "families")
+         return splash::printFamilies(argc);
+       if (command == "serve-native")
+diff --git a/runtime/model/DSpineBridge.hpp b/runtime/model/DSpineBridge.hpp
+new file mode 100644
+--- /dev/null
++++ b/runtime/model/DSpineBridge.hpp
+@@ -0,0 +1,172 @@
++#pragma once
++
++#include <algorithm>
++#include <array>
++#include <bit>
++#include <cerrno>
++#include <chrono>
++#include <cstddef>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <span>
++#include <stdexcept>
++#include <string>
++#include <type_traits>
++
++#include <fcntl.h>
++#include <poll.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++namespace splash::model {
++
++inline constexpr uint32_t kDSpineContext = 262144;
++inline constexpr uint32_t kDSpinePromptRows = 8191;
++
++inline constexpr uint32_t dspinePromptStart(uint32_t promptTokens) {
++  return promptTokens > kDSpinePromptRows ? promptTokens - kDSpinePromptRows : 0;
++}
++inline constexpr uint32_t kDSpineHiddenWidth = 25600;
++inline constexpr uint32_t kDSpineVocabulary = 248320;
++inline constexpr std::array<uint32_t, 5> kDSpineTaps{1, 16, 31, 46, 61};
++
++// An explicit experimental opt-in for an already running, owned local sidecar.
++inline const std::string &dspineSocket() {
++  static const std::string path = [] {
++    const char *value = std::getenv("SPLASH_EXPERIMENTAL_DSPINE_SOCKET");
++    return value ? std::string(value) : std::string{};
++  }();
++  return path;
++}
++
++class DSpineBridge final {
++public:
++  explicit DSpineBridge(uint32_t start) : position_(start) {
++    if (start >= kDSpineContext)
++      throw std::runtime_error("DSpine prompt starts beyond its context limit");
++    static_assert(std::endian::native == std::endian::little);
++    sockaddr_un address{};
++    const std::string &path = dspineSocket();
++    struct stat info{};
++    if (path.empty() || path.front() != '/' || path.size() >= sizeof(address.sun_path) ||
++        lstat(path.c_str(), &info) != 0 || !S_ISSOCK(info.st_mode) ||
++        info.st_uid != getuid() || (info.st_mode & 0077))
++      throw std::runtime_error("DSpine needs an absolute private Unix socket owned by this user");
++    address.sun_family = AF_UNIX;
++    std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
++    fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
++    if (fd_ < 0) fail("socket");
++    try {
++      const int yes = 1;
++      if (fcntl(fd_, F_SETFD, FD_CLOEXEC) < 0 || fcntl(fd_, F_SETFL, O_NONBLOCK) < 0 ||
++          setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes)) < 0)
++        fail("socket options");
++      if (connect(fd_, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) < 0) {
++        if (errno != EINPROGRESS && errno != EINTR) fail("connect");
++        wait(POLLOUT, Clock::now() + kTimeout);
++        int error = 0;
++        socklen_t size = sizeof(error);
++        if (getsockopt(fd_, SOL_SOCKET, SO_ERROR, &error, &size) < 0) fail("connect status");
++        if (error) {
++          errno = error;
++          fail("connect");
++        }
++      }
++      exchange({1, 0, 0, 0}, {}, {});
++    } catch (...) {
++      close(fd_);
++      throw;
++    }
++  }
++
++  ~DSpineBridge() { close(fd_); }
++  DSpineBridge(const DSpineBridge &) = delete;
++  DSpineBridge &operator=(const DSpineBridge &) = delete;
++
++  uint32_t position() const noexcept { return position_; }
++
++  void append(uint32_t position, uint32_t rows, std::span<const uint16_t> values) {
++    if (position != position_ || !rows || rows > kDSpineContext - position_ ||
++        values.size() != size_t{rows} * kDSpineHiddenWidth)
++      throw std::runtime_error("DSpine target captures do not form a contiguous BF16 history");
++    const auto bytes = std::as_bytes(values);
++    exchange({2, position, rows, static_cast<uint32_t>(bytes.size())}, bytes, {});
++    position_ += rows;
++  }
++
++  void propose(uint32_t position, uint32_t anchor, std::span<uint32_t> tokens) {
++    if (position != position_ || !position || anchor >= kDSpineVocabulary ||
++        tokens.size() > 7 || position + tokens.size() + 1 > kDSpineContext)
++      throw std::runtime_error("DSpine proposal does not match the retained target history");
++    exchange({3, anchor, static_cast<uint32_t>(tokens.size() + 1), 0}, {}, std::as_writable_bytes(tokens));
++    if (std::ranges::any_of(tokens, [](uint32_t token) { return token >= kDSpineVocabulary; }))
++      throw std::runtime_error("DSpine proposed an out-of-vocabulary token");
++  }
++
++private:
++  using Clock = std::chrono::steady_clock;
++  static constexpr auto kTimeout = std::chrono::seconds(60);
++  using Header = std::array<uint32_t, 4>;
++  int fd_ = -1;
++  uint32_t position_ = 0;
++
++  [[noreturn]] static void fail(const char *action) {
++    const int error = errno;
++    throw std::runtime_error(std::string("DSpine socket ") + action + ": " + std::strerror(error));
++  }
++
++  void wait(short events, Clock::time_point deadline) const {
++    for (;;) {
++      const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now());
++      if (remaining.count() <= 0) throw std::runtime_error("DSpine sidecar timed out");
++      pollfd descriptor{fd_, events, 0};
++      const int result = poll(&descriptor, 1, static_cast<int>(remaining.count()));
++      if (result < 0 && errno == EINTR) continue;
++      if (result < 0) fail("poll");
++      if (!result) throw std::runtime_error("DSpine sidecar timed out");
++      if (descriptor.revents & events) return;
++      throw std::runtime_error("DSpine sidecar disconnected");
++    }
++  }
++
++  template <class Byte>
++  void transfer(std::span<Byte> bytes, Clock::time_point deadline) const {
++    constexpr bool sending = std::is_const_v<Byte>;
++    while (!bytes.empty()) {
++      wait(sending ? POLLOUT : POLLIN, deadline);
++      ssize_t count;
++      if constexpr (sending)
++        count = send(fd_, bytes.data(), bytes.size(), 0);
++      else
++        count = recv(fd_, bytes.data(), bytes.size(), 0);
++      if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
++      if (count < 0) fail(sending ? "send" : "receive");
++      if (!count) throw std::runtime_error("DSpine sidecar disconnected");
++      bytes = bytes.subspan(static_cast<size_t>(count));
++    }
++  }
++
++  void exchange(const Header &request, std::span<const std::byte> payload,
++                std::span<std::byte> result) const {
++    const auto deadline = Clock::now() + kTimeout;
++    transfer(std::span<const std::byte>(std::as_bytes(std::span(request))), deadline);
++    transfer(payload, deadline);
++    Header reply{};
++    transfer(std::span<std::byte>(std::as_writable_bytes(std::span(reply))), deadline);
++    if (reply[1] || reply[2]) throw std::runtime_error("DSpine sidecar returned an invalid header");
++    if (reply[0]) {
++      std::array<std::byte, 2048> error{};
++      if (reply[3] > error.size()) throw std::runtime_error("DSpine sidecar returned an oversized error");
++      transfer(std::span(error).first(reply[3]), deadline);
++      throw std::runtime_error("DSpine sidecar: " +
++                               std::string(reinterpret_cast<const char *>(error.data()), reply[3]));
++    }
++    if (reply[3] != result.size()) throw std::runtime_error("DSpine sidecar returned an invalid payload size");
++    transfer(result, deadline);
++  }
++};
++
++} // namespace splash::model
+diff --git a/runtime/model/ModelDescriptor.hpp b/runtime/model/ModelDescriptor.hpp
+--- a/runtime/model/ModelDescriptor.hpp
++++ b/runtime/model/ModelDescriptor.hpp
+@@ -48,6 +48,7 @@
+   std::string name;
+   TargetLayout target;
+   DFlashDraftLayout draft;
++  bool externalDraft = false;
+   ops::VisionLayout vision;
+   ModelCapabilities capabilities;
+   kv::Layout targetKvLayout;
+diff --git a/runtime/model/ModelDescriptor.mm b/runtime/model/ModelDescriptor.mm
+--- a/runtime/model/ModelDescriptor.mm
++++ b/runtime/model/ModelDescriptor.mm
+@@ -1,4 +1,5 @@
+ #include "ModelDescriptor.hpp"
++#include "DSpineBridge.hpp"
+ #include "GgufImage.hpp"
+ #include "GgufTarget.hpp"
+ #include "SafetensorsImage.hpp"
+@@ -757,7 +758,7 @@
+ // states (ggufRoutedExperts).
+ ModelDescriptor describeSourceModel(std::string name, std::string_view targetFormat,
+                                     std::string_view visionFormat, NSDictionary *config,
+-                                    NSDictionary *draft) {
++                                    NSDictionary *draft, bool externalDraft = false) {
+   // A family whose config is flat (flatConfig) holds its text model's keys
+   // in the config itself, which then names its model type.
+   bool flat = false;
+@@ -803,10 +804,25 @@
+     if (draft && layout.draftChoosesMaskToken()) layout.maskToken = draftMaskToken(draft, layout);
+     if (draft) dflashLayout = readDraftLayout(draft, layout);
+   }, *target);
++  if (externalDraft) {
++    const auto *layout = std::get_if<Qwen3_8Layout>(&*target);
++    if (targetSource != TargetSource::Safetensors || visionSource != VisionSource::None ||
++        !layout || layout->layers != 64 || layout->hiddenSize != 5120 ||
++        layout->vocabularySize != kDSpineVocabulary || layout->maskToken != 248070)
++      throw std::invalid_argument("Experimental DSpine requires the text-only Qwen3.8-27B MLX target");
++    dflashLayout.hiddenSize = layout->hiddenSize;
++    dflashLayout.vocabularySize = layout->vocabularySize;
++    dflashLayout.targetLayerCount = kDSpineTaps.size();
++    std::ranges::copy(kDSpineTaps, dflashLayout.targetLayers.begin());
++  }
+   ModelDescriptor result = makeModelDescriptor(std::move(name), *target, dflashLayout,
+                                                {.outputHiddenSize = std::visit(
+                                                     [](const auto &layout) { return layout.hiddenSize; }, *target)},
+                                                targetSource, visionSource);
++  if (externalDraft) {
++    result.externalDraft = true;
++    result.stateLayout.draft = {};
++  }
+   if (result.hasVision())
+     validateVisionConfig(requireObject(config, @"vision_config", "vision config"), result.vision,
+                          result.targetSource);
+@@ -855,7 +871,7 @@
+       !capabilities.vocabularySize ||
+       !capabilities.maximumContextTokens ||
+       !targetKvLayout.valid() || !stateLayout.valid() ||
+-      stateLayout.draft != draft.stateLayout() ||
++      stateLayout.draft != (externalDraft ? DraftStateLayout{} : draft.stateLayout()) ||
+       vision.outputHiddenSize != draft.hiddenSize) {
+     return false;
+   }
+@@ -926,11 +942,12 @@
+     const std::string targetFormat = requireString(record, @"target_format", "target format");
+     const std::string visionFormat = requireString(record, @"vision_format", "vision format");
+     NSDictionary *config = readObject(root / "config.json", "upstream model config");
+-    // Every family decodes with its DFlash2 draft, in draft/.
+-    if (!std::filesystem::exists(root / "draft"))
+-      throw std::invalid_argument("the model's root holds no draft/ for its DFlash2 draft");
+-    NSDictionary *draft = readObject(root / "draft" / "config.json", "draft config");
+-    ModelDescriptor result = describeSourceModel(std::move(name), targetFormat, visionFormat, config, draft);
++    const bool externalDraft = record[@"external_draft"] != nil;
++    if (externalDraft && ![record[@"external_draft"] isEqual:@"dspine"])
++      throw std::invalid_argument("unknown external draft format");
++    NSDictionary *draft = externalDraft ? nil : readObject(root / "draft" / "config.json", "draft config");
++    ModelDescriptor result = describeSourceModel(std::move(name), targetFormat, visionFormat, config, draft,
++                                                  externalDraft);
+     result.sourceIdentity = std::move(sourceIdentity);
+     if (!result.valid()) throw std::invalid_argument("incompatible target and draft model");
+     return result;
+diff --git a/runtime/model/ModelFactory.cpp b/runtime/model/ModelFactory.cpp
+--- a/runtime/model/ModelFactory.cpp
++++ b/runtime/model/ModelFactory.cpp
+@@ -85,7 +85,9 @@
+   // Every source's metadata is checked before the first image is written:
+   // the vision tower's and the draft's here, the target's by its loader.
+   const auto vision = planVisionLoader(root, result.descriptor);
+-  DraftCheckpointLoader draft(backend, images, root / "draft", result.descriptor.draft);
++  std::optional<DraftCheckpointLoader> draft;
++  if (!result.descriptor.externalDraft)
++    draft.emplace(backend, images, root / "draft", result.descriptor.draft);
+   // The weights that stream from their files read on the engine's readers.
+   const ExpertStoreOptions experts{.memoryBytes = options.expertMemoryBytes,
+                                    .floorBytes = options.expertFloorBytes,
+@@ -113,7 +115,10 @@
+         throw std::invalid_argument("unknown target source");
+       },
+       result.descriptor.target);
+-  result.draft = loadDFlashDraftWeights(backend, draft, result.descriptor.draft);
++  if (draft)
++    result.draft = loadDFlashDraftWeights(backend, *draft, result.descriptor.draft);
++  else
++    result.draft.layout = result.descriptor.draft;
+   result.vision = loadVisionWeights(backend, images, vision.get());
+ 
+   std::vector<WeightFileRecord> records(result.targetFiles().begin(),
+diff --git a/runtime/model/ModelSizing.cpp b/runtime/model/ModelSizing.cpp
+--- a/runtime/model/ModelSizing.cpp
++++ b/runtime/model/ModelSizing.cpp
+@@ -97,7 +97,8 @@
+             streams);
+       },
+       descriptor.target);
+-  result.loadedBytes += draftImageBytes(root / "draft", descriptor.draft);
++  if (!descriptor.externalDraft)
++    result.loadedBytes += draftImageBytes(root / "draft", descriptor.draft);
+   if (descriptor.hasVision()) result.loadedBytes += visionImageBytes(descriptor.vision);
+   return result;
+ }
+diff --git a/runtime/model/QwenState.cpp b/runtime/model/QwenState.cpp
+--- a/runtime/model/QwenState.cpp
++++ b/runtime/model/QwenState.cpp
+@@ -145,7 +145,7 @@
+ QwenStateReservation::QwenStateReservation(std::shared_ptr<QwenBufferPool> pool,
+                                            QwenCachedBuffers buffers)
+     : pool_(std::move(pool)), buffers_(std::move(buffers)) {
+-  if (!pool_ || !buffers_.gdn || !buffers_.window)
++  if (!pool_ || !buffers_.gdn)
+     throw std::invalid_argument("state reservation buffers are empty");
+ }
+ 
+@@ -168,7 +168,7 @@
+                                        std::shared_ptr<StateStaging> staging)
+     : pool_(std::move(pool)), buffers_(std::move(buffers)), layout_(layout),
+       lengths_(lengths), file_(std::move(file)), staging_(std::move(staging)) {
+-  if (!pool_ || !buffers_.gdn || !buffers_.window) {
++  if (!pool_ || !buffers_.gdn || (layout_.draft.valid() && !buffers_.window)) {
+     throw std::invalid_argument("composite state buffers are empty");
+   }
+ }
+@@ -259,6 +259,8 @@
+   if (!layout_.valid())
+     throw std::invalid_argument("Qwen composite state layout is invalid");
+   if (file) {
++    if (!layout_.draft.valid())
++      throw std::invalid_argument("target-only state cannot use a disk tier");
+     file_ = std::move(file);
+     staging_ = std::make_shared<StateStaging>();
+     staging_->buffer = backend_.allocateBuffer(
+@@ -336,8 +338,8 @@
+     --parity;
+     pool_->giveCell(std::move(current.cells.gdn[parity]));
+   }
+-  pool_->rings.push_back(std::move(current.cells.draft));
+-  pool_->windows.push_back(std::move(current.cells.window));
++  if (current.cells.draft) pool_->rings.push_back(std::move(current.cells.draft));
++  if (current.cells.window) pool_->windows.push_back(std::move(current.cells.window));
+   current.metadata = {};
+ }
+ 
+@@ -352,6 +354,7 @@
+ void QwenStateStorage::clearDraftRings(uint32_t index) {
+   const Lane &target = lane(index);
+   requireAssigned(target);
++  if (!target.cells.draft) return;
+   for (const DFlashDraftRingLayer &layer : target.cells.draft->layers()) {
+     clear(layer.keys, "draft ring keys");
+     clear(layer.values, "draft ring values");
+@@ -401,10 +404,10 @@
+ 
+ std::optional<uint32_t> QwenStateStorage::statesToActivate() const noexcept {
+   const BufferCounts lacked = beyond(kLaneBuffers, idle());
+-  if (lacked.rings)
++  if (layout_.draft.valid() && lacked.rings)
+     return std::nullopt;
+   // A lane takes no cell when its cells have no bytes.
+-  return std::max(emptyCell_ ? 0 : lacked.cells, lacked.windows);
++  return std::max(emptyCell_ ? 0 : lacked.cells, layout_.draft.valid() ? lacked.windows : 0);
+ }
+ 
+ uint64_t QwenStateStorage::idleBytes(uint32_t evictedStates, bool afterStart, bool keepLane) const noexcept {
+@@ -475,7 +478,8 @@
+ }
+ 
+ void QwenStateStorage::copyWindow(uint32_t index, QwenStateReservation &reservation) const {
+-  copyExact(reservation.buffers().window->buffer(), window(index), "cached context window");
++  if (layout_.draft.valid())
++    copyExact(reservation.buffers().window->buffer(), window(index), "cached context window");
+ }
+ 
+ std::shared_ptr<const QwenCompositeState>
+@@ -507,7 +511,8 @@
+ QwenStateStorage::acquire(BufferCounts counts, std::string_view label, Buffers &buffers, uint64_t extraBytes,
+                           const std::function<void()> &allocateExtra) {
+   uint32_t cells = counts.cells;
+-  const bool rings = counts.rings != 0;
++  const bool nativeDraft = layout_.draft.valid();
++  const bool rings = nativeDraft && counts.rings != 0;
+   // Cells of no bytes are all the empty cell, which neither an admission nor
+   // the pool sees.
+   if (emptyCell_) {
+@@ -533,7 +538,7 @@
+             backend_, allocations_, layout_.draft,
+             std::string(label) + "-draft"));
+       }
+-      if (!pooledWindow) {
++      if (nativeDraft && !pooledWindow) {
+         fresh.window = std::shared_ptr<DFlashContextWindow>(new DFlashContextWindow(
+             backend_, allocations_, layout_.draft, std::string(label) + "-window"));
+       }
+@@ -557,7 +562,7 @@
+   };
+   if (rings)
+     buffers.draft = take(pool_->rings, fresh.draft, pooledRings);
+-  buffers.window = take(pool_->windows, fresh.window, pooledWindow);
++  if (nativeDraft) buffers.window = take(pool_->windows, fresh.window, pooledWindow);
+   return {};
+ }
+ 
+@@ -573,7 +578,7 @@
+ void QwenStateStorage::restoreLengths(uint32_t index, QwenLogicalLengths lengths,
+                                      bool restoreDraftState) {
+   Lane &destination = lane(index);
+-  if (!restoreDraftState) {
++  if (layout_.draft.valid() && !restoreDraftState) {
+     lengths.draftBase = lengths.targetTokens;
+     lengths.draftLength = 0;
+     lengths.windowEnd = lengths.targetTokens;
+@@ -641,6 +646,12 @@
+ 
+ void QwenStateStorage::validateLengths(const QwenLogicalLengths &lengths,
+                                        bool cacheSnapshot) const {
++  if (!layout_.draft.valid()) {
++    if (lengths.draftBase || lengths.draftLength || lengths.windowEnd ||
++        (cacheSnapshot && (!lengths.targetTokens || lengths.targetTokens % kv::kPageTokens)))
++      throw std::invalid_argument("invalid target-only state lengths");
++    return;
++  }
+   if (lengths.draftLength > ExecutionLimits::draftContextTokens ||
+       lengths.draftEnd() > lengths.targetTokens ||
+       lengths.windowEnd > lengths.draftEnd()) {
+diff --git a/runtime/model/QwenState.hpp b/runtime/model/QwenState.hpp
+--- a/runtime/model/QwenState.hpp
++++ b/runtime/model/QwenState.hpp
+@@ -122,7 +122,7 @@
+     if (!open)
+       return;
+     giveCell(std::move(buffers.gdn));
+-    windows.push_back(std::move(buffers.window));
++    if (buffers.window) windows.push_back(std::move(buffers.window));
+   }
+ };
+ 
+diff --git a/runtime/model/Runtime.cpp b/runtime/model/Runtime.cpp
+--- a/runtime/model/Runtime.cpp
++++ b/runtime/model/Runtime.cpp
+@@ -4,6 +4,7 @@
+ #include "model/RuntimeInstrumentation.hpp"
+ #endif
+ #include "AwakeClock.hpp"
++#include "model/DSpineBridge.hpp"
+ #include "model/ExpertStore.hpp"
+ #include "model/KvBlockCache.hpp"
+ #include "model/KvHistoryStream.hpp"
+@@ -54,6 +55,13 @@
+ using metal::CommandTiming;
+ using metal::MetalBackend;
+ using metal::MetalBuffer;
++
++RuntimeGeometry runtimeGeometry(RuntimeContext value) {
++  static_assert(kDecodeRows == 8 && kDraftProposalTokens == 7);
++  return RuntimeGeometry::from(
++      value.model, value.kvPages.layout().format, value.stateStorage.layout().target.format,
++      StreamedParts::loaded(value.model, value.blockCache != nullptr));
++}
+ 
+ // What a command's sample reports of its work (ModelBatchTicket::sample):
+ // the work it encodes, with the weights it read on demand as the store's
+@@ -335,6 +343,9 @@
+     // RequestFlag bits.
+     uint32_t flags = 0;
+     std::optional<uint32_t> pendingToken;
++    // Warmup enters through beginColdRequest without a sidecar connection.
++    bool useDSpine = false;
++    std::unique_ptr<DSpineBridge> dspine;
+     // While the request thinks under a budget (ModelRequest::thinkingBudget),
+     // that budget with the thinking tokens it may still select and, once
+     // they ran out, the tokens of its end it selected; none once thinking
+@@ -460,7 +471,7 @@
+   ModelTelemetry counters;
+   ops::Sampling sampling;
+   std::unique_ptr<QwenTarget> targetModel;
+-  DFlashDraft draftModel;
++  std::unique_ptr<DFlashDraft> draftModel;
+   // The acceptance model and cycle costs the decode cycles' verify rows
+   // follow where the budget chooses them (budgetsVerifyRows); none where
+   // the cycles verify every row.
+@@ -589,9 +600,7 @@
+   explicit Impl(RuntimeContext value)
+       : backend(value.backend),
+         model(value.model),
+-        geometry(RuntimeGeometry::from(value.model, value.kvPages.layout().format,
+-                                       value.stateStorage.layout().target.format,
+-                                       StreamedParts::loaded(value.model, value.blockCache != nullptr))),
++        geometry(runtimeGeometry(value)),
+         operators(value.operators),
+         kvPages(value.kvPages),
+         states(value.stateStorage),
+@@ -602,7 +611,7 @@
+                                                 geometry.prefillChunks);
+                         },
+                         value.model.target)),
+-        draftModel(value.model.draft, value.backend, operators),
++        draftModel(geometry.externalDraft ? nullptr : std::make_unique<DFlashDraft>(value.model.draft, backend, operators)),
+         aneFfn(value.aneFfn), blockCache(value.blockCache), historyStream(value.historyStream),
+         limits(splash::model::commandLimits(geometry, aneFfn ? aneFfn->minimumRows() : 0)) {
+     if (states.layout() != model.stateLayout(states.layout().target.format) ||
+@@ -614,7 +623,7 @@
+     decodeArena = std::make_unique<DecodeArena>(backend, geometry, operators);
+     penaltyTable =
+         decodeArena->batchSlice(DecodeTensor::PenaltyState, kLaneCount);
+-    if (budgetsVerifyRows(model, value.verifyRows))
++    if (draftModel && budgetsVerifyRows(model, value.verifyRows))
+       verifyBudget.emplace();
+     if (ExpertStore *store = model.expertStore())
+       pools.push_back(&expertPool.emplace(*store));
+@@ -1151,10 +1160,20 @@
+                      uint32_t draftRows, MetalBuffer targetCos,
+                      MetalBuffer targetSin, MetalBuffer draftCos,
+                      MetalBuffer draftSin) const {
++    const MetalBuffer targetInverse = prefillArena->get(PrefillTensor::TargetInverseFrequencies);
++    MetalBuffer draftInverse = prefillArena->get(PrefillTensor::DraftInverseFrequencies);
++    if (geometry.externalDraft) {
++      // Bind unused slots of the shared RoPE ABI. The kernel skips these
++      // aliases because no draft rows are requested.
++      draftRows = 0;
++      draftPositions = targetPositions;
++      draftInverse = targetInverse;
++      draftCos = targetCos;
++      draftSin = targetSin;
++    }
+     ops::RoPE::addTables(
+         graph, std::move(targetPositions), std::move(draftPositions),
+-        prefillArena->get(PrefillTensor::TargetInverseFrequencies),
+-        prefillArena->get(PrefillTensor::DraftInverseFrequencies),
++        targetInverse, std::move(draftInverse),
+         std::move(targetCos), std::move(targetSin), std::move(draftCos),
+         std::move(draftSin),
+         {.target_rows = targetRows,
+@@ -1550,6 +1569,11 @@
+   // lane's tables; the draft context rows they capture (from captureBegin on
+   // among the chunk's) and their states.
+   struct PrefillSequence final {
++    struct DSpineCapture final {
++      uint32_t begin;
++      uint32_t end;
++    };
++
+     Request *entry = nullptr;
+     ModelBatchItem part;
+     uint32_t lane = 0;
+@@ -1561,6 +1585,7 @@
+     ChunkedPrefillParams chunk;
+     LaneTables tables;
+     DispatchDraftCapturePlan captures;
++    std::optional<DSpineCapture> dspineCapture;
+     std::vector<PrefillStateCapture> stateCaptures;
+   };
+ 
+@@ -1725,11 +1750,19 @@
+         sequence.captureBegin = chunk.capturedRows;
+         sequence.chunk = chunkParams(part.logicalPosition, part.tokenCount, sequence.attentionStride, item.pageTable);
+         sequence.tables = tables;
+-        sequence.captures = activeDraftCaptures(entry, part);
++        if (draftModel) sequence.captures = activeDraftCaptures(entry, part);
+         sequence.stateCaptures = stateCaptures(part, sequence.captures, lengths);
+         for (PrefillStateCapture &capture : sequence.stateCaptures) capture.atEnd = capture.lengths.targetTokens == end;
+         chunk.rows += part.tokenCount;
+-        chunk.capturedRows += captureRows(sequence.captures);
++        const uint32_t dspineBegin = entry.useDSpine
++                                         ? std::max<uint32_t>(dspinePromptStart(entry.promptTokens), part.logicalPosition)
++                                         : static_cast<uint32_t>(partEnd);
++        if (dspineBegin < partEnd) {
++          sequence.dspineCapture = PrefillSequence::DSpineCapture{dspineBegin, static_cast<uint32_t>(partEnd)};
++          chunk.capturedRows += partEnd - dspineBegin;
++        } else {
++          chunk.capturedRows += captureRows(sequence.captures);
++        }
+         offset += part.tokenCount;
+         // A next part starts from the lengths a commit of this part's rows
+         // would leave; the completion folds the last part's (prefillAsync).
+@@ -1757,12 +1790,15 @@
+       if (queryOffset > prefillArena->get(PrefillTensor::FullQueries).sizeBytes() ||
+           kvOffset > prefillArena->get(PrefillTensor::ChunkKeys).sizeBytes())
+         throw std::logic_error("prefill scratch geometry overflowed");
+-      auto *draftPositions =
+-          contents<uint32_t>(prefillArena->get(PrefillTensor::DraftPositions, c), "draft RoPE positions");
+-      for (const PrefillSequence &sequence : chunk.sequences)
+-        for (const DispatchDraftCaptureSpan &capture : sequence.captures)
+-          for (uint32_t row = capture.absoluteBegin; row < capture.absoluteEnd; ++row)
+-            draftPositions[sequence.captureBegin + capture.compactDestinationRow + row - capture.absoluteBegin] = row;
++      if (draftModel) {
++        auto *draftPositions =
++            contents<uint32_t>(prefillArena->get(PrefillTensor::DraftPositions, c), "draft RoPE positions");
++        for (const PrefillSequence &sequence : chunk.sequences)
++          for (const DispatchDraftCaptureSpan &capture : sequence.captures) {
++            auto *first = draftPositions + sequence.captureBegin + capture.compactDestinationRow;
++            std::iota(first, first + capture.absoluteEnd - capture.absoluteBegin, capture.absoluteBegin);
++          }
++      }
+     }
+     return chunks;
+   }
+@@ -1774,7 +1810,7 @@
+     ops::RoPE::addDraftRangeTables(graph, p(PrefillTensor::DraftInverseFrequencies),
+                                    p(PrefillTensor::DraftRopeCos), p(PrefillTensor::DraftRopeSin),
+                                    rebuild.rows, rebuild.begin, kPrefillRows);
+-    draftModel.addContextRebuild(graph, draftPrefillBuffers(*prefillArena, 0), states.window(lane),
++    draftModel->addContextRebuild(graph, draftPrefillBuffers(*prefillArena, 0), states.window(lane),
+                                  states.draft(lane), rebuild.rows, rebuild.begin);
+   }
+ 
+@@ -1815,8 +1851,9 @@
+           }
+         }
+     }
+-    draftModel.addContextPrefill(graph, draftPrefillBuffers(*prefillArena, index), chunk.capturedRows,
+-                                 std::span(spans).first(spanCount), windowCaptures);
++    if (spanCount)
++      draftModel->addContextPrefill(graph, draftPrefillBuffers(*prefillArena, index), chunk.capturedRows,
++                                   std::span(spans).first(spanCount), windowCaptures);
+   }
+ 
+   // What a prefill command leaves its completion, by lane, indexed like
+@@ -1824,10 +1861,32 @@
+   // of the target's final hidden it computed, which no later work in the
+   // command writes.
+   struct PrefillOutputs final {
++    struct DSpineRows final {
++      MetalBuffer captured;
++      uint32_t compactRow;
++      uint32_t position;
++      uint32_t rows;
++    };
+     std::array<std::vector<DispatchDraftCaptureSpan>, kLaneCount> captures{};
+     std::array<std::vector<PrefillStateCapture>, kLaneCount> stateCaptures{};
+     std::array<MetalBuffer, kLaneCount> lastRows{};
++    std::array<std::vector<DSpineRows>, kLaneCount> dspineRows{};
+   };
++
++  static void appendDSpineRows(Request &entry, const PrefillOutputs::DSpineRows &capture) {
++    const size_t offset = size_t{capture.compactRow} * kDSpineHiddenWidth;
++    const size_t count = size_t{capture.rows} * kDSpineHiddenWidth;
++    if ((offset + count) * sizeof(uint16_t) > capture.captured.sizeBytes())
++      throw std::logic_error("DSpine capture exceeds its Shared Metal buffer");
++    const auto *values = contents<uint16_t>(capture.captured, "DSpine target hidden rows");
++    constexpr uint32_t transferRows = 256;
++    for (uint32_t row = 0; row < capture.rows; row += transferRows) {
++      const uint32_t rows = std::min(transferRows, capture.rows - row);
++      entry.dspine->append(capture.position + row, rows,
++                           {values + offset + size_t{row} * kDSpineHiddenWidth,
++                            size_t{rows} * kDSpineHiddenWidth});
++    }
++  }
+ 
+   // Whether every value of a BF16 row is finite.
+   static bool finiteRow(const MetalBuffer &row) {
+@@ -1960,20 +2019,28 @@
+         destination.auxiliaryOut = out.auxiliary;
+         // A state at the part's end is the cell it writes.
+         destination.stateCaptures = inside.emplace_back(insideStateCaptures(sequence.stateCaptures, part.tokenCount));
+-        // The rows the draft's context reads.
+-        destination.captureCount = static_cast<uint32_t>(sequence.captures.size());
+-        for (uint32_t index = 0; index < sequence.captures.size(); ++index) {
+-          const DispatchDraftCaptureSpan &capture = sequence.captures[index];
+-          destination.captures[index] = {
+-              sequence.rowBegin + static_cast<uint32_t>(capture.absoluteBegin - part.logicalPosition),
+-              sequence.captureBegin + capture.compactDestinationRow, capture.absoluteEnd - capture.absoluteBegin};
++        // The rows the native draft and optional sidecar read.
++        if (const auto &capture = sequence.dspineCapture) {
++          destination.captureCount = 1;
++          destination.captures[0] = {
++              sequence.rowBegin + static_cast<uint32_t>(capture->begin - part.logicalPosition),
++              sequence.captureBegin, capture->end - capture->begin};
++        } else {
++          destination.captureCount = static_cast<uint32_t>(sequence.captures.size());
++          for (uint32_t index = 0; index < sequence.captures.size(); ++index) {
++            const DispatchDraftCaptureSpan &capture = sequence.captures[index];
++            destination.captures[index] = {
++                sequence.rowBegin + static_cast<uint32_t>(capture.absoluteBegin - part.logicalPosition),
++                sequence.captureBegin + capture.compactDestinationRow, capture.absoluteEnd - capture.absoluteBegin};
++          }
+         }
+       }
+       model.sequences = sequences[c];
+     }
+     const std::vector<MetalBuffer> finalHidden =
+         targetModel->addPrefill(graph, modelChunks, kvPages, reads, layers, aneFfn);
+-    for (uint32_t c = 0; ends && c < chunks.size(); ++c) addDraftContext(graph, chunks, c);
++    if (draftModel)
++      for (uint32_t c = 0; ends && c < chunks.size(); ++c) addDraftContext(graph, chunks, c);
+ 
+     PrefillOutputs outputs;
+     std::array<InitialSelection, kLaneCount> selections{};
+@@ -1995,6 +2062,12 @@
+         outputs.captures[lane].insert(outputs.captures[lane].end(), part.captures.begin(), part.captures.end());
+         outputs.stateCaptures[lane].insert(outputs.stateCaptures[lane].end(), part.stateCaptures.begin(),
+                                            part.stateCaptures.end());
++        if (ends && part.dspineCapture) {
++          const auto &capture = *part.dspineCapture;
++          outputs.dspineRows[lane].push_back({prefillArena->get(PrefillTensor::Captured, partChunk),
++                                              part.captureBegin,
++                                              capture.begin, capture.end - capture.begin});
++        }
+       }
+     }
+     if (selectionCount) encodeInitialSelections(graph, std::span(selections).first(selectionCount), lanes);
+@@ -2013,7 +2086,7 @@
+     }
+     const QwenLaneMetadata &metadata = states.metadata(entry.stateLane);
+     if (metadata.lengths.targetTokens != item.logicalPosition ||
+-        !metadata.lengths.hasCompleteDraftWindow(kDraftCacheStride)) {
++        (draftModel && !metadata.lengths.hasCompleteDraftWindow(kDraftCacheStride))) {
+       throw std::logic_error("decode state length is not exact");
+     }
+     // The target reads the history before the pending token from the
+@@ -2023,25 +2096,24 @@
+       throw std::logic_error("decode token history is not exact");
+     static_cast<void>(synchronizedTables(entry, item));
+     auto *draftInput = contents<uint32_t>(
+-        decodeArena->get(lane, DecodeTensor::DraftInputTokens),
+-        "draft input tokens");
++        decodeArena->get(lane, DecodeTensor::DraftInputTokens), "verify anchor input");
+     draftInput[0] = *entry.pendingToken;
+-    std::fill(draftInput + 1, draftInput + kDecodeRows,
+-              geometry.target.maskToken);
++    if (draftModel)
++      std::fill(draftInput + 1, draftInput + kDecodeRows, geometry.target.maskToken);
+     targetModel->prepareVerifyLane(lane, item.logicalPosition, targetRequest(entry));
+ 
+     auto *positions =
+         contents<uint32_t>(decodeArena->get(lane, DecodeTensor::Positions),
+                            "decode RoPE positions");
+-    auto *draftPositions =
+-        contents<uint32_t>(decodeArena->get(lane, DecodeTensor::DraftPositions),
+-                           "decode draft RoPE positions");
++    auto *draftPositions = draftModel
++        ? contents<uint32_t>(decodeArena->get(lane, DecodeTensor::DraftPositions), "decode draft RoPE positions")
++        : nullptr;
+     for (uint32_t row = 0; row < kDecodeRows; ++row) {
+       const std::array<uint32_t, 3> rotary =
+           ropePosition(entry, item.logicalPosition + row);
+       std::copy(rotary.begin(), rotary.end(), positions + row * 3);
+       // The draft is a text model over logical positions.
+-      draftPositions[row] = static_cast<uint32_t>(item.logicalPosition + row);
++      if (draftPositions) draftPositions[row] = static_cast<uint32_t>(item.logicalPosition + row);
+     }
+   }
+ 
+@@ -2074,7 +2146,7 @@
+   // projections' and the target's, whose vocabulary head it shares.
+   uint32_t draftStorageLanes(uint32_t lanes) const {
+     return std::max(targetModel->decodeStorageLanes(lanes),
+-                    draftModel.decodeStorageLanes(lanes));
++                    draftModel->decodeStorageLanes(lanes));
+   }
+ 
+   // The draft's proposals for each lane and how many rows of its block it
+@@ -2122,7 +2194,7 @@
+     buffers.ropeSin = d(DecodeTensor::DraftRopeSin);
+     buffers.gateScratch = decodeArena->gateScratch();
+     bindDraftRings(entries, buffers.persistentKeys, buffers.persistentValues);
+-    draftModel.addDecode(graph, std::move(buffers),
++    draftModel->addDecode(graph, std::move(buffers),
+                          targetModel->vocabularyProjection(),
+                          std::span(cacheLengths).first(lanes));
+     std::array<uint32_t, kLaneCount> anchors{};
+@@ -2134,7 +2206,7 @@
+       anchors[lane] = *entry.pendingToken;
+       policies[lane] = samplingPolicy(entry);
+     }
+-    draftModel.addSelection(
++    draftModel->addSelection(
+         graph,
+         {d(DecodeTensor::Logits), d(DecodeTensor::TopPartialIds),
+          d(DecodeTensor::TopPartialValues), d(DecodeTensor::Candidates),
+@@ -2275,7 +2347,7 @@
+     buffers.ropeSin = d(DecodeTensor::DraftRopeSin);
+     buffers.retainedCounts = d(DecodeTensor::RetainedCount);
+     bindDraftRings(entries, buffers.persistentKeys, buffers.persistentValues);
+-    draftModel.addContextCommit(graph, std::move(buffers),
++    draftModel->addContextCommit(graph, std::move(buffers),
+                                 std::span(startPositions).first(lanes));
+   }
+ 
+@@ -2337,7 +2409,7 @@
+     encodeTargetVerifyBatchPolicy(graph, entries);
+     encodeBatchAcceptance(graph, entries, maximumRetained);
+     encodeTargetStateCommit(graph, entries);
+-    encodeDraftStateCommitBatch(graph, entries, items);
++    if (draftModel) encodeDraftStateCommitBatch(graph, entries, items);
+   }
+ 
+   void encodeBatchEmbedding(CommandGraph &graph, DecodeTensor tokens,
+@@ -2452,6 +2524,20 @@
+       const uint32_t *targetTokens =
+           contents<uint32_t>(decodeArena->get(lane, DecodeTensor::OutputTokens),
+                              "target output tokens");
++      if (entry.useDSpine) {
++        try {
++          // The captured verify input is anchor + proposals. The retained
++          // prefix belongs to this cycle; its newly selected anchor does not.
++          appendDSpineRows(entry, {decodeArena->get(lane, DecodeTensor::CapturedTargetHidden), 0,
++                                   static_cast<uint32_t>(items[lane].logicalPosition), laneResult.retained});
++        } catch (const std::exception &error) {
++          entry.resultInvalid = true;
++          entry.maskWords.clear();
++          entry.verifyMaskInFlight = false;
++          results.push_back({.requestId = entry.id, .failure = error.what()});
++          continue;
++        }
++      }
+       std::vector<uint32_t> output;
+       output.reserve(laneResult.retained);
+       output.push_back(laneResult.currentAnchor);
+@@ -2461,11 +2547,11 @@
+       states.swapDecodeParity(entry.stateLane, laneResult.retained);
+       const uint64_t nextLength =
+           items[lane].logicalPosition + laneResult.retained;
+-      states.updateLengths(
+-          entry.stateLane,
+-          advanceDraftContext(states.metadata(entry.stateLane).lengths,
+-                              nextLength, items[lane].logicalPosition,
+-                              nextLength, false, false));
++      const QwenLogicalLengths lengths = draftModel
++          ? advanceDraftContext(states.metadata(entry.stateLane).lengths, nextLength, items[lane].logicalPosition,
++                                nextLength, false, false)
++          : QwenLogicalLengths{.targetTokens = nextLength};
++      states.updateLengths(entry.stateLane, lengths);
+       entry.generatedTokens += laneResult.retained;
+       commitSelected(entry, {targetTokens, laneResult.retained});
+       entry.maskWords.clear();
+@@ -2725,15 +2811,22 @@
+ }
+ 
+ StateAdmission Runtime::begin(const ModelRequest &request) {
++  if (impl_->geometry.externalDraft &&
++      request.restoredTokens > dspinePromptStart(static_cast<uint32_t>(request.prompt.size())))
++    throw std::logic_error("DSpine prefix restore overlaps its required prompt captures");
+   Impl::VisionRollback rollback{*impl_, impl_->vision};
+   StateAdmission admission = admitIdleLane(
+       impl_->states, [&](uint32_t lane) { return beginAt(request, lane); });
+   rollback.committed = admission.granted();
++  if (admission.granted())
++    impl_->request(request.id).useDSpine = impl_->geometry.externalDraft;
+   return admission;
+ }
+ 
+ void Runtime::suspend(uint64_t requestId) {
+   Impl::Request &entry = impl_->request(requestId);
++  if (entry.useDSpine)
++    throw std::logic_error("Experimental DSpine cannot suspend a request");
+   if (!entry.resident || entry.verifyMaskInFlight) {
+     throw std::logic_error("Qwen request cannot be suspended");
+   }
+@@ -2817,8 +2910,11 @@
+     std::shared_ptr<const CompositeState> state, bool restoreDraft,
+     std::function<void()> completion) {
+   Impl::Request &entry = impl_->request(requestId);
++  if (entry.useDSpine && (entry.dspine || boundary > dspinePromptStart(entry.promptTokens)))
++    throw std::logic_error("DSpine prefix restore overlaps its required prompt captures");
+   if (!entry.resident || !state || boundary >= entry.promptTokens)
+     throw std::invalid_argument("invalid state restore");
++  restoreDraft = restoreDraft && !impl_->geometry.externalDraft;
+   return impl_->states.beginRestore(entry.stateLane, *state, restoreDraft,
+       std::move(completion), [this, requestId, boundary, restoreDraft] {
+         finishRestore(requestId, boundary, restoreDraft);
+@@ -3032,6 +3128,21 @@
+           results.push_back({.requestId = entry.id,
+                              .consumedPromptTokens = item.tokenCount,
+                              .failure = std::move(failure)});
++          continue;
++        }
++      }
++      if (entry.useDSpine && nextLength > dspinePromptStart(entry.promptTokens)) {
++        try {
++          if (!entry.dspine)
++            entry.dspine = std::make_unique<DSpineBridge>(dspinePromptStart(entry.promptTokens));
++          for (const auto &capture : outputs.dspineRows[lane])
++            Impl::appendDSpineRows(entry, capture);
++          if (entry.dspine->position() != nextLength)
++            throw std::runtime_error("DSpine did not receive every committed prompt capture");
++        } catch (const std::exception &error) {
++          entry.resultInvalid = true;
++          results.push_back({.requestId = entry.id, .consumedPromptTokens = item.tokenCount,
++                             .failure = error.what()});
+           continue;
+         }
+       }
+@@ -3231,6 +3342,32 @@
+   const std::span<Impl::Request *const> entries(requests.data(), width);
+   const uint32_t ropeRows = width * kDecodeRows;
+   CommandGraph commandGraph;
++  const bool useDSpine = entries[0]->useDSpine;
++  if (useDSpine) {
++    if (width != 1)
++      throw std::logic_error("Experimental DSpine received an unsupported decode batch");
++    auto &entry = *entries[0];
++    const uint32_t verifyRows = maximumRetained[0];
++    auto *proposals = contents<uint32_t>(impl_->decodeArena->get(0, DecodeTensor::ProposedTokens), "DSpine proposals");
++    try {
++      if (!entry.dspine) throw std::logic_error("DSpine has no committed prompt captures");
++      std::fill_n(proposals, kDraftProposalTokens, *entry.pendingToken);
++      entry.dspine->propose(static_cast<uint32_t>(logicalPositions[0]), *entry.pendingToken,
++                           {proposals, verifyRows - 1});
++      *contents<uint32_t>(impl_->decodeArena->get(0, DecodeTensor::VerifyRows), "DSpine verify rows") = verifyRows;
++      const std::array policies{Impl::samplingPolicy(entry)};
++      // Match the native draft path: replace proposals at the budget
++      // boundary before either grammar simulation or target verification.
++      impl_->sampling.addThinkingDrafts(commandGraph, policies,
++                                        impl_->decodeArena->batchSlice(DecodeTensor::ProposedTokens, width));
++    } catch (const std::exception &error) {
++      auto finish = [id = entry.id, failure = std::string(error.what())](CommandTiming &) {
++        return std::vector<ModelStepResult>{{.requestId = id, .failure = failure}};
++      };
++      auto ticket = impl_->backend.submitCommandAsync(commandGraph.command(), std::move(completion));
++      return std::make_unique<DeferredMetalTicket>(std::move(ticket), std::move(finish), WorkCount({}, nullptr));
++    }
++  }
+   impl_->addRopeTables(
+       commandGraph,
+       impl_->decodeArena->batchSlice(DecodeTensor::Positions, width), ropeRows,
+@@ -3239,13 +3376,24 @@
+       impl_->decodeArena->batchSlice(DecodeTensor::RopeSin, width),
+       impl_->decodeArena->batchSlice(DecodeTensor::DraftRopeCos, width),
+       impl_->decodeArena->batchSlice(DecodeTensor::DraftRopeSin, width));
+-  impl_->encodeBatchEmbedding(commandGraph, DecodeTensor::DraftInputTokens,
+-                              DecodeTensor::DraftHidden0, width);
+-  impl_->draftModel.addMaskRows(commandGraph, impl_->decodeArena->batchSlice(DecodeTensor::DraftHidden0, width),
+-                                width);
+-  impl_->encodeDraftBatchGraph(commandGraph, entries,
+-                               {logicalPositions.data(), width},
+-                               {maximumRetained.data(), width}, constrained);
++  if (impl_->draftModel) {
++    impl_->encodeBatchEmbedding(commandGraph, DecodeTensor::DraftInputTokens,
++                                DecodeTensor::DraftHidden0, width);
++    impl_->draftModel->addMaskRows(commandGraph, impl_->decodeArena->batchSlice(DecodeTensor::DraftHidden0, width),
++                                  width);
++    impl_->encodeDraftBatchGraph(commandGraph, entries,
++                                 {logicalPositions.data(), width},
++                                 {maximumRetained.data(), width}, constrained);
++  } else if (!useDSpine) {
++    // Native warmup exercises the full target verification graph without
++    // opening a sidecar connection or loading DFlash2.
++    for (uint32_t lane = 0; lane < width; ++lane) {
++      auto *proposals = contents<uint32_t>(impl_->decodeArena->get(lane, DecodeTensor::ProposedTokens), "warmup proposals");
++      std::fill_n(proposals, kDraftProposalTokens, lanes[lane].currentAnchor);
++      *contents<uint32_t>(impl_->decodeArena->get(lane, DecodeTensor::VerifyRows), "warmup verify rows") =
++          maximumRetained[lane];
++    }
++  }
+   std::shared_ptr<SpilledKvReads> reads = impl_->decodeReads(items);
+   // The weights it reads on demand and the spilled K/V its reads bring.
+   WorkCount count({}, impl_->model.expertStore(), reads);
+@@ -3502,7 +3650,7 @@
+     throw;
+   }
+   return {"real " + std::to_string(rows) +
+-              "-row KV target+draft prefill [M32]",
++              (impl_->draftModel ? "-row KV target+draft prefill [M32]" : "-row KV target prefill [M32]"),
+           wallSeconds, std::move(lanes)};
+ }
+ 
+@@ -3557,7 +3705,7 @@
+                            lengths.targetTokens ==
+                                1 + decoded[lane].outputTokens.size() -
+                                    decoded[lane].outputTokensWithoutKv &&
+-                           lengths.hasCompleteDraftWindow(kDraftCacheStride);
++                           (!impl_->draftModel || lengths.hasCompleteDraftWindow(kDraftCacheStride));
+     }
+     if (!committedEveryLane) {
+       throw std::runtime_error(
+@@ -3575,7 +3723,8 @@
+       end(firstId + lane);
+     throw;
+   }
+-  return {"real B" + std::to_string(width) + " draft/verify/commit decode",
++  return {"real B" + std::to_string(width) +
++              (impl_->draftModel ? " draft/verify/commit decode" : " target verify/commit decode"),
+           wallSeconds, std::move(lanes)};
+ }
+ 
+@@ -3609,12 +3758,12 @@
+       throw metal::MetalAllocationError("prefix warmup state allocation failed");
+     end(id);
+     beginColdRequest(request, 1);
+-    if (beginRestore(id, prefixTokens, cachedState, true, {}))
++    if (beginRestore(id, prefixTokens, cachedState, impl_->draftModel != nullptr, {}))
+       throw std::logic_error("a resident state restore returned a read");
+     setDraftContextPlan(id, planDraftContext(prefixTokens, promptTokens, {}));
+     const auto &restored = impl_->states.metadata(1).lengths;
+     if (restored.targetTokens != prefixTokens ||
+-        !restored.hasCompleteDraftWindow(kDraftCacheStride)) {
++        (impl_->draftModel && !restored.hasCompleteDraftWindow(kDraftCacheStride))) {
+       throw std::runtime_error("prefix restore length mismatch");
+     }
+ 
+@@ -3645,7 +3794,7 @@
+     wallSeconds += historicalDecodeWallSeconds;
+     const auto &continued = impl_->states.metadata(1).lengths;
+     if (decoded.size() != 1 || decoded[0].outputTokens.empty() ||
+-        !continued.hasCompleteDraftWindow(kDraftCacheStride) ||
++        (impl_->draftModel && !continued.hasCompleteDraftWindow(kDraftCacheStride)) ||
+         continued.targetTokens <= promptTokens ||
+         continued.targetTokens !=
+             promptTokens + decoded[0].outputTokens.size() -
+diff --git a/runtime/model/RuntimeArenas.cpp b/runtime/model/RuntimeArenas.cpp
+--- a/runtime/model/RuntimeArenas.cpp
++++ b/runtime/model/RuntimeArenas.cpp
+@@ -84,7 +84,7 @@
+   // Three rotary axes per row (Qwen3.5 M-RoPE); text rows repeat one value.
+   put(PrefillTensor::TargetPositions,
+       bytesFor<uint32_t>(uint64_t{kPrefillRows} * 3));
+-  put(PrefillTensor::DraftPositions, bytesFor<uint32_t>(kPrefillRows));
++  if (!geometry.externalDraft) put(PrefillTensor::DraftPositions, bytesFor<uint32_t>(kPrefillRows));
+   put(PrefillTensor::TargetInverseFrequencies,
+       bytesFor<float>(geometry.target.rotaryPairs));
+   put(PrefillTensor::DraftInverseFrequencies,
+@@ -93,10 +93,12 @@
+       bytesFor<float>(uint64_t{kPrefillRows} * geometry.target.rotaryPairs));
+   put(PrefillTensor::RopeSin,
+       bytesFor<float>(uint64_t{kPrefillRows} * geometry.target.rotaryPairs));
+-  put(PrefillTensor::ContextProjected,
+-      bytesFor<uint16_t>(uint64_t{kPrefillRows} * geometry.draft.hiddenSize));
+-  put(PrefillTensor::ContextHidden,
+-      bytesFor<uint16_t>(uint64_t{kPrefillRows} * geometry.draft.hiddenSize));
++  if (!geometry.externalDraft) {
++    put(PrefillTensor::ContextProjected,
++        bytesFor<uint16_t>(uint64_t{kPrefillRows} * geometry.draft.hiddenSize));
++    put(PrefillTensor::ContextHidden,
++        bytesFor<uint16_t>(uint64_t{kPrefillRows} * geometry.draft.hiddenSize));
++  }
+   put(PrefillTensor::ContextKv,
+       bytesFor<uint16_t>(uint64_t{kPrefillRows} *
+                          geometry.draft.contextKvSize()));
+@@ -118,8 +120,10 @@
+   // prefill plan, the draft's context projections' too.
+   const auto &draft = geometry.draft;
+   std::vector<ops::ProjectionShape> prefillProjections = geometry.target.prefillProjections;
+-  prefillProjections.push_back({draft.hiddenSize, draft.targetHiddenSize()});
+-  prefillProjections.push_back({draft.contextKvSize(), draft.hiddenSize});
++  if (!geometry.externalDraft) {
++    prefillProjections.push_back({draft.hiddenSize, draft.targetHiddenSize()});
++    prefillProjections.push_back({draft.contextKvSize(), draft.hiddenSize});
++  }
+   for (const auto &projection : prefillProjections) {
+     const ops::LinearScratchSize linear = operators.linear().prefillScratchSize(projection);
+     put(PrefillTensor::LinearPartials, linear.partials);
+@@ -178,8 +182,6 @@
+ decodeTensorBytes(const RuntimeGeometry &geometry,
+                   const ops::ExecutionPlans &operators) {
+   std::array<uint64_t, decodeTensorCount> result{};
+-  const auto draftWorkspace =
+-      operators.draftAttentionWorkspacePerLane(geometry.draft.attentionShape());
+   const auto samplingWorkspace = ops::Sampling::workspace(kDecodeRows);
+   const auto selectorWorkspace = ops::DraftSelector::workspace(kDraftProposalTokens);
+   auto put = [&](DecodeTensor tensor, uint64_t bytes) {
+@@ -222,21 +224,22 @@
+   put(DecodeTensor::AttentionOutput,
+       bytesFor<uint16_t>(r * geometry.target.hiddenSize));
+   put(DecodeTensor::Positions, bytesFor<uint32_t>(r * 3));
+-  put(DecodeTensor::DraftPositions, bytesFor<uint32_t>(r));
++  if (!geometry.externalDraft) put(DecodeTensor::DraftPositions, bytesFor<uint32_t>(r));
+   put(DecodeTensor::RopeCos,
+       bytesFor<float>(r * geometry.target.rotaryPairs));
+   put(DecodeTensor::RopeSin,
+       bytesFor<float>(r * geometry.target.rotaryPairs));
+-  put(DecodeTensor::ContextProjected,
+-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+-  put(DecodeTensor::ContextHidden,
+-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
++  if (!geometry.externalDraft) {
++    put(DecodeTensor::ContextProjected,
++        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
++    put(DecodeTensor::ContextHidden,
++        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
++  }
+   put(DecodeTensor::ContextKv,
+       bytesFor<uint16_t>(r * geometry.draft.contextKvSize()));
+   put(DecodeTensor::CapturedTargetHidden,
+       bytesFor<uint16_t>(r * geometry.draft.targetHiddenSize()));
+-  put(DecodeTensor::DraftQueryKeys, draftWorkspace.queryKeysBytes);
+-  put(DecodeTensor::DraftQueryValues, draftWorkspace.queryValuesBytes);
++
+   // Proposal attention and accepted target-hidden injection use the same
+   // eight absolute positions, so one RoPE table per lane is sufficient.
+   put(DecodeTensor::DraftRopeCos,
+@@ -263,34 +266,41 @@
+   put(DecodeTensor::RetainedCount, sizeof(uint32_t));
+   put(DecodeTensor::AcceptedCount, sizeof(uint32_t));
+   put(DecodeTensor::VerifyRows, sizeof(uint32_t));
+-  put(DecodeTensor::VerifyConfidence, bytesFor<float>(kDraftProposalTokens));
++  // Both proposers share the target verifier's anchor input slot.
+   put(DecodeTensor::DraftInputTokens, bytesFor<uint32_t>(r));
+-  for (uint32_t index = 0; index < 2; ++index) {
+-    put(static_cast<DecodeTensor>(
+-            static_cast<uint32_t>(DecodeTensor::DraftHidden0) + index),
+-        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+-  }
+-  put(DecodeTensor::DraftNormalized,
+-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+-  put(DecodeTensor::DraftDynamic,
+-      bytesFor<uint16_t>(r * geometry.draft.dynamicSize));
+-  put(DecodeTensor::DraftConvolved, draftWorkspace.convolutionBytes);
+-  put(DecodeTensor::DraftProposalQkv, draftWorkspace.qkvBytes);
+-  put(DecodeTensor::DraftAttention, draftWorkspace.groupedQueriesBytes);
+-  put(DecodeTensor::DraftProjected,
+-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+-  put(DecodeTensor::DraftResidual,
+-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+-  put(DecodeTensor::DraftIntermediate,
+-      bytesFor<uint16_t>(r * geometry.draft.intermediateSize));
+-  put(DecodeTensor::DraftFinalHidden,
+-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+-  put(DecodeTensor::SelectorHidden,
+-      bytesFor<uint16_t>(r * geometry.draft.selectorRank));
++  if (!geometry.externalDraft) {
++    const auto draftWorkspace = operators.draftAttentionWorkspacePerLane(geometry.draft.attentionShape());
++    put(DecodeTensor::DraftQueryKeys, draftWorkspace.queryKeysBytes);
++    put(DecodeTensor::DraftQueryValues, draftWorkspace.queryValuesBytes);
++    put(DecodeTensor::VerifyConfidence, bytesFor<float>(kDraftProposalTokens));
++    for (uint32_t index = 0; index < 2; ++index) {
++      put(static_cast<DecodeTensor>(
++              static_cast<uint32_t>(DecodeTensor::DraftHidden0) + index),
++          bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
++    }
++    put(DecodeTensor::DraftNormalized,
++        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
++    put(DecodeTensor::DraftDynamic,
++        bytesFor<uint16_t>(r * geometry.draft.dynamicSize));
++    put(DecodeTensor::DraftConvolved, draftWorkspace.convolutionBytes);
++    put(DecodeTensor::DraftProposalQkv, draftWorkspace.qkvBytes);
++    put(DecodeTensor::DraftAttention, draftWorkspace.groupedQueriesBytes);
++    put(DecodeTensor::DraftProjected,
++        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
++    put(DecodeTensor::DraftResidual,
++        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
++    put(DecodeTensor::DraftIntermediate,
++        bytesFor<uint16_t>(r * geometry.draft.intermediateSize));
++    put(DecodeTensor::DraftFinalHidden,
++        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
++    put(DecodeTensor::SelectorHidden,
++        bytesFor<uint16_t>(r * geometry.draft.selectorRank));
++    put(DecodeTensor::Unary, selectorWorkspace.unaryBytes);
++    put(DecodeTensor::TopPartialIds, selectorWorkspace.partialIdsBytes);
++    put(DecodeTensor::TopPartialValues, selectorWorkspace.partialValuesBytes);
++  }
++  // The stock acceptance ABI binds these even for greedy verification.
+   put(DecodeTensor::Candidates, selectorWorkspace.candidatesBytes);
+-  put(DecodeTensor::Unary, selectorWorkspace.unaryBytes);
+-  put(DecodeTensor::TopPartialIds, selectorWorkspace.partialIdsBytes);
+-  put(DecodeTensor::TopPartialValues, selectorWorkspace.partialValuesBytes);
+   put(DecodeTensor::ProposalProbs, selectorWorkspace.proposalProbabilitiesBytes);
+   put(DecodeTensor::ProposedTokens, bytesFor<uint32_t>(kDraftProposalTokens));
+   put(DecodeTensor::PageTable, bytesFor<SplashKvPage>(kMaximumPageTableEntries));
+@@ -337,6 +347,7 @@
+   ops::LinearScratchSize result;
+   // Includes the vocabulary head shared with the draft.
+   for (const auto &p : geometry.target.decodeProjections) result.include(operators.linear().decodeScratchSize(p));
++  if (geometry.externalDraft) return result;
+   for (const ops::ProjectionShape shape : {ops::ProjectionShape{d.dynamicSize, d.hiddenSize},
+        {d.qkvSize, d.hiddenSize}, {d.contextKvSize(), d.hiddenSize},
+        {d.hiddenSize, d.attentionSize},
+diff --git a/runtime/model/RuntimeArenas.hpp b/runtime/model/RuntimeArenas.hpp
+--- a/runtime/model/RuntimeArenas.hpp
++++ b/runtime/model/RuntimeArenas.hpp
+@@ -51,6 +51,7 @@
+ struct RuntimeGeometry final {
+   QwenTargetGeometry target;
+   DFlashDraftLayout draft;
++  bool externalDraft = false;
+   // The attention of a target whose K/V spills (ModelCapabilities::sparseKv),
+   // whose runtime reads it through the hot block cache and the history
+   // stream (RuntimeContext); none for K/V that stays in memory.
+@@ -76,6 +77,7 @@
+                                             ops::GdnStateFormat stateFormat, StreamedParts parts) {
+     RuntimeGeometry result;
+     result.draft = model.draft.layout;
++    result.externalDraft = model.descriptor.externalDraft;
+     result.target = std::visit(
+         [&](const auto &weights) { return qwenTargetGeometry(weights, result.draft.targetLayerIds()); },
+         model.target);
+@@ -85,7 +87,7 @@
+     if (parts.kv) result.spilledKv = model.descriptor.capabilities.sparseKv;
+     result.streamedExperts = parts.experts;
+     if (parts.experts || parts.kv) result.prefillChunks = kPrefillGroupChunks;
+-    if (!result.target.valid() || !result.draft.stateLayout().valid() ||
++    if (!result.target.valid() || (!result.externalDraft && !result.draft.stateLayout().valid()) ||
+         (parts.kv && !result.target.kvLayout.spillable()) ||
+         result.target.contextTokens() != model.descriptor.capabilities.maximumContextTokens ||
+         result.target.hiddenSize != result.draft.hiddenSize ||
+@@ -317,7 +319,7 @@
+         get(PrefillTensor::TargetInverseFrequencies).contents());
+     auto *draft = static_cast<float *>(
+         get(PrefillTensor::DraftInverseFrequencies).contents());
+-    if (!target || !draft)
++    if (!target || (!geometry.externalDraft && !draft))
+       throw std::logic_error("RoPE frequencies are not CPU-visible");
+     rotaryInverseFrequencies(geometry.target.rotaryTheta, geometry.target.rotaryPairs,
+                              geometry.target.ropeScaling,
+@@ -584,12 +586,11 @@
+     // One private gate buffer is reused serially by the target dense FFN (when
+     // present) and the always-dense DFlash draft. Sparse target FFNs use their
+     // own route-major arena tensors, but must not remove the draft's scratch.
+-    const uint64_t draft = operators.gateUpWorkspace(
++    uint64_t bytes = geometry.externalDraft ? 0 : operators.gateUpWorkspace(
+         {geometry.draft.intermediateSize, geometry.draft.hiddenSize});
+-    uint64_t target = 0;
+     for (const auto &p : geometry.target.gateUpProjections)
+-      target = std::max(target, operators.gateUpWorkspace(p));
+-    return std::max(target, draft);
++      bytes = std::max(bytes, operators.gateUpWorkspace(p));
++    return bytes;
+   }
+ 
+   // The offset in batchSlice(DecodeTensor::GdnTape, kLaneCount) of state
+diff --git a/runtime/model/StateLayout.hpp b/runtime/model/StateLayout.hpp
+--- a/runtime/model/StateLayout.hpp
++++ b/runtime/model/StateLayout.hpp
+@@ -94,7 +94,7 @@
+     return uint64_t{layers} * 2 * tensorBytes();
+   }
+   [[nodiscard]] constexpr uint64_t windowBytes() const noexcept {
+-    return draft_context_window_bytes(contextWidth);
++    return contextWidth ? draft_context_window_bytes(contextWidth) : 0;
+   }
+ 
+   bool operator==(const DraftStateLayout &) const = default;
+@@ -111,7 +111,7 @@
+   DraftStateLayout draft;
+ 
+   [[nodiscard]] constexpr bool valid() const noexcept {
+-    return target.valid() && draft.valid();
++    return target.valid() && (draft.valid() || (draft == DraftStateLayout{} && target.cellBytes()));
+   }
+   [[nodiscard]] constexpr uint64_t laneBytes() const noexcept {
+     return kLaneGdnCells * target.cellBytes() + draft.ringBytes() +

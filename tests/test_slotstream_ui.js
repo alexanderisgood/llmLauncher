@@ -1,13 +1,14 @@
 "use strict";
+const launchSources=require("./helpers/launch_sources.js");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const source = fs.readFileSync(require("node:path").join(__dirname,"../app.js"),"utf8");
+const source = launchSources.controllerSource;
 function section(start,end) { const a=source.indexOf(start),b=source.indexOf(end,a+start.length); assert.ok(a>=0&&b>a); return source.slice(a,b); }
-const elements={accelerationSelect:{value:"mtp"},depthInput:{value:"2"},slotstreamMemoryGB:{value:"34"}};
+const elements={accelerationSelect:{value:"mtp"},depthInput:{value:"2"},slotstreamMemoryGB:{value:"34"},slotstreamMemoryMode:{value:"auto"},slotstreamKv:{value:"off"}};
 const ctx=vm.createContext({state:{backend:"slotstream"},$:id=>elements[id]});
-vm.runInContext(section("function gatherOptions()", "function gatherGenerationSettings()")+section("function slotstreamDownloadMessage(","function renderModelOptions()"),ctx);
-assert.deepEqual(JSON.parse(JSON.stringify(ctx.gatherOptions())),{acceleration:"mtp",depth:2,kv:"off",memoryGB:34});
+launchSources.runInContext(section("function gatherOptions()", "function gatherGenerationSettings()")+section("function slotstreamDownloadMessage(","function renderModelOptions()"),ctx);
+assert.deepEqual(JSON.parse(JSON.stringify(ctx.gatherOptions())),{acceleration:"mtp",depth:2,kv:"off",memoryGB:34,memoryMode:"auto"});
 elements.accelerationSelect.value="off"; elements.slotstreamMemoryGB.value="28";
 assert.equal(ctx.gatherOptions().memoryGB,28);
 assert.equal(ctx.gatherOptions().acceleration,"off");
@@ -21,8 +22,38 @@ elements.accelerationSelect={value:"dflash",querySelector:selector=>options[sele
 elements.accelerationHelp={textContent:"DFlash available"};
 elements.contextInput={removeAttribute:()=>{}};elements.outputInput={removeAttribute:()=>{}};
 ctx.updateAccelerationState=()=>{};ctx.updateChatSamplingControls=()=>{};
-vm.runInContext(section("function clearUnavailableModelControls()", "function modelChanged()"),ctx);
+launchSources.runInContext(section("function clearUnavailableModelControls()", "function modelChanged()"),ctx);
 ctx.clearUnavailableModelControls();
 assert.equal(options.mtp.disabled,true);assert.equal(options.dflash.disabled,true);
-assert.equal(elements.accelerationSelect.value,"auto");
+assert.equal(elements.accelerationSelect.value,"dflash");
 assert.match(elements.accelerationHelp.textContent,/Finish the model download/);
+
+ctx.selectedModel=()=>({backends:{slotstream:{mtp:false}}});
+launchSources.runInContext(section("function accelerationSelectionError(", "function clearUnavailableModelControls()"),ctx);
+elements.accelerationSelect.value="mtp";
+assert.match(ctx.accelerationSelectionError(),/Selected MTP is unavailable/);
+assert.equal(ctx.accelerationSelectionError({mtp:true}),"");
+assert.equal(elements.accelerationSelect.value,"mtp");
+for (const backend of ["uzu", "freetoken", "swiftlm", "mference", "whallm", "splash", "llamacpp"]) {
+  ctx.state.backend = backend;
+  assert.equal(ctx.accelerationSelectionError({mtp:false,dflash:false}), "", backend);
+}
+ctx.state.backend = "slotstream";
+assert.match(ctx.accelerationSelectionError({mtp:false}), /Selected MTP is unavailable/);
+assert.doesNotMatch(section("function modelChanged()", "async function loadModels("),/acceleration.value = "auto"/);
+
+ctx.selectedModel=()=>({nativeContext:262144,backends:{slotstream:{contextWindows:[16384,32768,65536,131072,262144],outputMaximum:261120}}});
+ctx.formatNumber=n=>n.toLocaleString("en-US");
+elements.contextInput.value="131072"; elements.outputInput.value="100000";
+launchSources.runInContext(section("function limitError()", "function compactNativeContext("),ctx);
+assert.equal(ctx.limitError(),"");
+elements.contextInput.value="65536";
+assert.match(ctx.limitError(),/smaller than context/);
+
+const html=fs.readFileSync(require("node:path").join(__dirname,"../index.html"),"utf8");
+assert.doesNotMatch(html.match(/<input[^>]*id="slotstreamMemoryGB"[^>]*>/)[0], /\bmax=/);
+elements.slotstreamMemoryGB.value="48";
+assert.equal(ctx.gatherOptions().memoryGB,48);
+
+elements.slotstreamKv.value="q8";
+assert.equal(ctx.gatherOptions().kv,"q8");

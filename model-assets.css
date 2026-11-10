@@ -1,0 +1,5 @@
+/* Keep acquisition results/errors beside the action that produced them. */
+#acquisitionDialog .acquisition-actions{display:grid;grid-template-columns:auto auto minmax(0,1fr);gap:8px;background:var(--surface-card)}
+#acquisitionStatus{grid-column:1/-1;margin:0 0 4px;color:var(--muted);font-size:11px;line-height:1.5;overflow-wrap:anywhere}
+#acquisitionStatus[data-error="true"]{color:var(--red)}
+@media(max-width:720px){#acquisitionDialog .acquisition-actions{grid-template-columns:minmax(0,1fr)}#acquisitionStatus{grid-row:1}#acquisitionStartButton{grid-row:2}#acquisitionOpenLibrary{grid-row:3}#acquisitionStopButton{grid-row:4}}

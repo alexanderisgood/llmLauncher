@@ -9,13 +9,7 @@ const root = path.resolve(__dirname, "..");
 const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
 const ChatStreamCore = require("../chat_stream.js");
 
-function sourceBetween(startMarker, endMarker) {
-  const start = app.indexOf(startMarker);
-  const end = app.indexOf(endMarker, start + startMarker.length);
-  assert.ok(start >= 0, `missing production marker: ${startMarker}`);
-  assert.ok(end > start, `missing production end marker: ${endMarker}`);
-  return app.slice(start, end);
-}
+const sourceBetween = require("./helpers/workspace_sources.js").between;
 
 const production = [
   sourceBetween("function setChatBusy(busy)", "\nfunction queueChatMessage"),

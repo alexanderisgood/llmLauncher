@@ -1,9 +1,10 @@
 "use strict";
+const launchSources=require("./helpers/launch_sources.js");
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const source = fs.readFileSync(require.resolve("../app.js"), "utf8");
+const source = launchSources.controllerSource;
 const start = source.indexOf("function renderLaunchMemoryEstimate(");
 const end = source.indexOf("\nfunction updateLaunchHome(", start);
 const element = {dataset:{}};
@@ -16,7 +17,7 @@ const state = {
   }}},
 };
 const context = vm.createContext({state, $:()=>element});
-vm.runInContext(source.slice(start,end),context);
+launchSources.runInContext(source.slice(start,end),context);
 const render = admission => context.renderLaunchMemoryEstimate(admission);
 render({known:true,signature:"current",decision:"ready"});
 assert.equal(element.textContent,"Est. peak ~34.3 GiB");

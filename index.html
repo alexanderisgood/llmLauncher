@@ -7,8 +7,12 @@
   <script src="theme.js"></script>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="launcher-home.css">
+  <link rel="stylesheet" href="saved-launches.css">
+  <link rel="stylesheet" href="model-assets.css">
+  <link rel="stylesheet" href="runtime-manager.css">
 </head>
 <body class="simple-launcher">
+  <a class="skip-link" href="#configTitle">Skip to workspace</a>
   <div class="app-shell">
     <header class="app-bar">
       <div class="app-title">
@@ -19,6 +23,7 @@
         <span id="healthPill" class="status-pill neutral"><i></i>Local controller</span>
         <span class="toolbar-separator" aria-hidden="true"></span>
         <button id="openSessionDashboard" type="button" class="toolbar-button" aria-label="Open Sessions and Capacity">◉ <span>Sessions</span></button>
+        <button id="quitLauncherButton" type="button" class="toolbar-button quit-launcher-button" aria-label="Quit launcher and stop local model engines"><span aria-hidden="true">⏻</span> <span>Quit</span></button>
         <button id="openModelLibrary" type="button" class="toolbar-button" aria-label="Open Model Library and compatibility doctor">◈ <span>Models</span></button>
         <div class="hub-tools-control theme-control">
           <button id="hubToolsMenuButton" type="button" class="toolbar-button" aria-haspopup="menu" aria-expanded="false" aria-controls="hubToolsMenu" aria-label="Advanced launcher options">••• <span>Advanced</span></button>
@@ -52,7 +57,7 @@
     <main class="app-workspace">
       <section class="config-pane" aria-labelledby="configTitle">
         <header class="pane-heading">
-          <div><h1 id="configTitle">Your local AI</h1><p id="configSubtitle">Choose a model. We’ll handle getting it ready.</p></div>
+          <div><h1 id="configTitle" tabindex="-1">New session</h1><p id="configSubtitle" class="sr-only">Select a model, runtime and assistant.</p></div>
           <div class="pane-heading-actions">
             <div id="focusedRunStatus" class="focused-run-status" data-phase="idle" aria-label="Run status">
               <i aria-hidden="true"></i>
@@ -71,62 +76,61 @@
             <div><strong id="profileEditName"></strong><p id="profileEditStatus" role="status" aria-live="polite"></p></div>
             <div class="profile-edit-actions"><button id="profileEditSave" type="button" class="primary">Save changes</button><button id="profileEditCancel" type="button" class="secondary">Cancel</button></div>
           </section>
-          <section class="config-section model-section" aria-labelledby="modelTitle">
-            <div class="section-head"><h2 id="modelTitle">Choose your model</h2><label class="engine-picker" for="homeEngineSelect">Engine <select id="homeEngineSelect" aria-label="Engine"></select></label></div>
-            <label class="field"><span class="sr-only">Detected model</span><select id="modelSelect"><option>Scanning models…</option></select></label>
-            <small id="slotstreamDownloadStatus" class="hidden" role="status"></small>
-            <div class="home-engine-action">
-              <button id="homeFastestEngine" type="button" class="secondary" data-optimizer-scope="engine" data-engine-preference="throughput" aria-describedby="homeFastestEngineHelp"><span aria-hidden="true">ϟ</span><strong>Choose fastest engine</strong></button>
-              <p id="homeFastestEngineHelp">Uses saved calibration, or measures compatible engines.</p>
-            </div>
-          </section>
-
-
-            <section class="config-section" aria-labelledby="agentTitle">
+          <aside class="model-sidebar" aria-labelledby="modelTitle">
+            <header class="model-sidebar-heading"><h2 id="modelTitle">Models</h2><span id="homeModelSearchStatus" role="status">Scanning…</span></header>
+            <label class="home-model-search"><span aria-hidden="true">⌕</span><span class="sr-only">Search installed models</span><input id="homeModelSearch" type="search" maxlength="120" autocomplete="off" placeholder="Search models…" aria-describedby="homeModelSearchStatus"></label>
+            <div id="homeModelList" class="home-model-list" role="group" aria-label="Available models"></div>
+            <select id="modelSelect" aria-label="Selected runtime model" hidden><option value="">Scanning models…</option></select>
+          </aside>
+          <div class="launch-content">
+            <section id="launchOverview" class="launch-overview" aria-labelledby="homeRouteModel" data-ready="false">
+              <header class="selected-model">
+                <span class="selected-model-mark" aria-hidden="true">◇</span>
+                <div><h2 id="homeRouteModel">Choose a model</h2><p id="homeRouteMeta">Select a model from your library.</p></div>
+                <span id="homeRouteReadiness" class="overview-readiness" role="status">Checking capacity</span>
+              </header>
+              <label class="field engine-picker"><span>Runtime</span><select id="homeEngineSelect" aria-label="Runtime"></select></label>
+              <small id="slotstreamDownloadStatus" class="hidden" role="status"></small>
+            <section class="config-section assistant-settings" aria-labelledby="agentTitle">
               <div class="section-head"><h2 id="agentTitle">Assistant</h2></div>
-              <div class="segmented" id="clientChoices" role="group" aria-label="Work surface" aria-describedby="compatibilityLine">
-                <button type="button" class="selected" data-client="pi" aria-pressed="true"><b aria-hidden="true">π</b><span><strong>Pi</strong><small>Coding assistant</small></span></button>
-                <button type="button" data-client="opencode" aria-pressed="false"><b aria-hidden="true">◈</b><span><strong>OpenCode</strong><small>Coding assistant</small></span></button>
-                <button type="button" data-client="codex" aria-pressed="false"><b aria-hidden="true">⌁</b><span><strong>Codex</strong><small>Use your chosen model</small></span></button>
-                <button type="button" data-client="chat" aria-pressed="false"><b aria-hidden="true">●</b><span><strong>Chat</strong><small>Ask anything</small></span></button>
+              <div class="segmented" id="clientChoices" role="group" aria-label="Assistant" aria-describedby="compatibilityLine">
+                <button type="button" class="selected" data-client="pi" aria-pressed="true"><b aria-hidden="true">π</b><span><strong>Pi</strong></span></button>
+                <button type="button" data-client="omp" aria-pressed="false"><b aria-hidden="true">ω</b><span><strong>oh-my-pi</strong></span></button>
+                <button type="button" data-client="opencode" aria-pressed="false"><b aria-hidden="true">◈</b><span><strong>OpenCode</strong></span></button>
+                <button type="button" data-client="codex" aria-pressed="false"><b aria-hidden="true">⌁</b><span><strong>Codex</strong></span></button>
+                <button type="button" data-client="chat" aria-pressed="false"><b aria-hidden="true">●</b><span><strong>Chat</strong></span></button>
               </div>
               <p id="compatibilityLine" class="compatibility-line" role="status" aria-live="polite">Checking local compatibility…</p>
             </section>
 
+              <div class="session-location">
+                <label class="field project-field"><span id="projectLabel">Project folder</span><input id="projectPath" type="text" spellcheck="false" placeholder="Choose a working folder"></label>
+          <section id="agentHostSettings" class="config-section agent-host-settings" aria-label="Agent window">
+            <label class="field"><span>Open in</span><select id="agentHostSelect" aria-describedby="agentHostHelp"><option value="console" selected>Hub Console</option><option value="terminal">macOS Terminal</option></select><small id="agentHostHelp" class="sr-only">Hub Console is private, launcher-owned, stoppable, and keeps up to 2 MB of terminal output in memory only.</small></label>
+          </section>
+
+              </div>
+            </section>
           <section id="freeTokenConnectionBanner" class="freetoken-connection-banner hidden" data-ui-feature="freetoken" aria-live="polite" hidden>
             <span class="choice-icon freetoken" aria-hidden="true">FT</span>
             <div><strong id="freeTokenConnectionTitle">Connect a FreeToken server</strong><small id="freeTokenConnectionDetail">Discover its live models, then use them with Chat, Pi, OpenCode, or Codex.</small></div>
             <button id="openFreeTokenConnection" type="button" class="secondary">Configure</button>
           </section>
 
-          <section class="config-section" aria-labelledby="sessionTitle">
-            <div class="section-head"><h2 id="sessionTitle">Working folder</h2><span>Where your agent can work</span></div>
-            <label class="field project-field"><span id="projectLabel" class="sr-only">Project folder</span><input id="projectPath" type="text" spellcheck="false" placeholder="/Users/you/Documents/Code/project"></label>
-          </section>
-
-          <details id="launchSettings" class="launch-settings">
-            <summary><span><strong>Settings</strong><small id="homeSettingsSummary">Model defaults</small></span><span aria-hidden="true">⌄</span></summary>
+          <details id="launchSettings" class="launch-settings" open>
+            <summary><span><strong>Model settings</strong><small id="homeSettingsSummary">Model defaults</small></span><span aria-hidden="true">⌄</span></summary>
             <div class="launch-settings-body">
+            <p class="settings-scope">Saved in this browser for your next launch with this model and runtime.</p>
           <section class="config-section" aria-label="Context and response settings">
             <div class="fields-row limits-row">
               <label class="field" id="contextField" for="contextInput"><span>Context tokens</span><input id="contextInput" type="number" min="1024" step="1024" value="131072"><select id="contextSelect" class="hidden" aria-label="Context tokens" disabled></select></label>
-              <label class="field"><span>Max response</span><input id="outputInput" type="number" min="256" step="256" value="16384"></label>
+              <label class="field"><span>Max response tokens</span><input id="outputInput" type="number" min="256" step="256" value="16384"></label>
               <label class="field"><span>Reasoning</span><select id="reasoningSelect"><option value="auto">Model default</option><option value="off">off</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
             </div>
-            <p class="invariant"><span>✓</span>The optimiser never changes model, quantisation, context, response limit, reasoning, sampling or KV precision.</p>
           </section>
 
-          <section id="agentHostSettings" class="config-section agent-host-settings" aria-labelledby="agentHostTitle">
-            <div class="section-head"><h2 id="agentHostTitle">Agent window</h2><span>Where the coding agent opens</span></div>
-            <label class="field"><span>Open agent in</span><select id="agentHostSelect"><option value="console" selected>Hub Console · stays in launcher</option><option value="terminal">macOS Terminal · external handoff</option></select><small id="agentHostHelp">Hub Console is private, launcher-owned, stoppable, and keeps up to 2 MB of terminal output in memory only.</small></label>
-          </section>
-
-          <details id="advancedControls" class="advanced">
-            <summary><span><strong>Engine tuning &amp; diagnostics</strong><small id="advancedSummary">MTPLX controls</small></span><i aria-hidden="true">⌄</i></summary>
-            <div class="advanced-body">
-            <details class="model-information"><summary>About this model</summary><div id="modelCard" class="model-card loading"><div class="model-title"><span class="skeleton wide"></span></div><div class="model-meta"><span class="skeleton"></span><span class="skeleton"></span></div></div></details>
           <section id="chatSettings" class="config-section chat-settings generation-settings sampling-defaults" aria-labelledby="chatSettingsTitle">
-            <div class="section-head"><h2 id="chatSettingsTitle">Generation controls</h2><span>Model-owned unless customised</span></div>
+            <h3 id="chatSettingsTitle" class="sr-only">Sampling and prompt</h3>
             <label id="systemPromptField" class="field system-prompt-field" hidden><span>System prompt</span><textarea id="systemPrompt" rows="3" maxlength="32000" placeholder="Optional instructions for the model"></textarea><small>Prepended privately to every turn in this chat.</small></label>
             <div class="fields-row chat-sampling-row">
               <label class="field"><span>Sampling</span><select id="samplingMode"><option value="model" selected>Model defaults</option><option value="custom">Custom</option></select><small id="samplingHelp">Uses the model artifact's generation settings.</small></label>
@@ -145,6 +149,9 @@
             </details>
           </section>
 
+          <details id="advancedControls" class="advanced">
+            <summary><span><strong>Runtime settings</strong><small id="advancedSummary">MTPLX controls</small></span><i aria-hidden="true">⌄</i></summary>
+            <div class="advanced-body">
               <div id="sharedRuntimeControls" class="fields-row two">
                 <label class="field optimizable" data-opt-key="acceleration"><span>Acceleration</span><select id="accelerationSelect"><option value="auto">Auto</option><option value="mtp">MTP</option><option value="dflash">DFlash 2</option><option value="off">Off / AR</option></select><small id="accelerationHelp"></small></label>
                 <label class="field optimizable range-field" data-opt-key="depth">
@@ -171,6 +178,10 @@
                 </div>
                 <div id="qwenPleMemoryControls" class="fields-row hidden">
                   <label class="field amber optimizable"><span>48 GB memory mode ⚠</span><select id="memoryGuardSelect"><option value="balanced" selected>Protected · balanced guard</option><option value="high">High memory · 45 GiB process guard</option></select><small id="memoryGuardHelp">High memory is only for the verified Qwen PLE route. Sessions separately checks the selected context, current headroom, and temporary Metal limit.</small></label>
+                </div>
+                <div id="omlxExpertControls" class="fields-row hidden">
+                  <label class="field"><span>Experts kept in RAM</span><select id="omlxExpertResidentPercent"><option value="12.5">12.5%</option><option value="25" selected>25%</option><option value="37.5">37.5%</option><option value="50">50%</option><option value="62.5">62.5%</option><option value="75">75%</option></select><small>All experts remain available from SSD. A larger RAM cache may reduce reads. MTP is unavailable in this mode.</small></label>
+                  <label class="field"><span>Maximum process RAM (GB)</span><input id="omlxMemoryGB" type="number" min="12" step="1" value="41"><small>Includes expert cache, attention cache and runtime memory. Context and current memory availability are checked before loading.</small></label>
                 </div>
                 <div id="dflashReadiness" class="dflash-readiness" aria-label="DFlash 2 readiness checks">
                   <div id="dflashChecks" class="dflash-checks"></div>
@@ -248,8 +259,35 @@
                 </div>
               </div>
               <div id="slotstreamControls" class="backend-controls hidden">
+                <label class="field"><span>KV cache precision</span><select id="slotstreamKv"><option value="off">Full precision</option><option value="q8">Q8 · less cache memory</option></select><small>Q8 uses the separately verified custom engine for main attention and MTP. Saves cache memory; output and speed can change. Applies on next launch.</small></label>
                 <div class="ssd-control-intro"><span aria-hidden="true">SSD</span><div><strong>Full Qwen experts with native MTP</strong><small>Experts and n-grams stay on SSD. MTP verifies drafts with the full model; prefix caching speeds up follow-up turns. 64K is the starting context recommendation for this 48 GB Mac; larger windows must pass the memory planner.</small></div></div>
-                <label class="field optimizable" data-opt-key="memoryGB"><span>Process memory budget</span><input id="slotstreamMemoryGB" type="number" min="12" max="36" step="1" value="30"><small>GB for the whole model process, including MTP and context. Close other model sessions before loading. Auto acceleration selects MTP depth 2 when its head is installed; it never silently disables selected MTP to fit.</small></label>
+                <label class="field optimizable" data-opt-key="memoryMode"><span>Memory sizing</span><select id="slotstreamMemoryMode"><option value="auto">Automatic · fit available memory</option><option value="fixed">Fixed budget</option></select></label>
+                <label class="field optimizable" data-opt-key="memoryGB"><span>Maximum process memory (GB)</span><input id="slotstreamMemoryGB" type="number" min="12" step="1" value="30"><small>Automatic sizing adjusts the expert cache within this ceiling while keeping your context and MTP selection. Fixed budget requires the full amount to fit. Auto acceleration selects MTP depth 2 when its head is installed; it never silently disables selected MTP to fit.</small></label>
+              </div>
+              <div id="kolibriControls" class="backend-controls hidden">
+                <label class="field"><span>KV cache precision</span><select id="kolibriKv"><option value="off">Full precision</option><option value="q8">Q8 · smaller cache</option><option value="q6">Q6 · less memory</option><option value="q4">Q4 · smallest cache</option></select><small>Quantizes the 10 full-attention caches from the first token; the 40 small sliding caches stay at full precision. Q8 preserves the most detail. The model weights remain Q6. Applies on next launch.</small></label>
+                <div class="fields-row two">
+                  <label class="field"><span>Prefill chunk</span><select id="kolibriPrefillSelect"><option value="64" selected>64 · recommended for SSD offloading</option><option value="128">128</option><option value="256">256</option><option value="512">512</option><option value="1024">1,024</option><option value="2048">2,048</option></select><small>Smaller chunks leave more room for expert weights and reduce SSD reads. Larger chunks need more workspace, especially with quantized KV at long context.</small></label>
+                  <label class="field"><span>Retained prompt cache (GiB)</span><input id="kolibriPromptCacheGB" type="number" min="0" max="8" step="1" value="1"><small>Reuses conversation prefixes when they fit. Increase for long follow-up turns, or use 0 to disable retention.</small></label>
+                </div>
+                <label class="field"><span>Memory sizing</span><select id="kolibriMemoryMode"><option value="auto">Automatic · use available memory</option><option value="fixed">Fixed ceiling · requires enough free memory</option></select></label>
+                <label class="field"><span>Maximum process memory (GB)</span><input id="kolibriMemoryGB" type="number" min="8" max="512" step="1" value="40"><small>Keep as many Q6 expert weights in memory as fit within this ceiling. The remaining experts stream from your SSD. Automatic sizing leaves room for macOS, your apps and the conversation, and rechecks memory at launch.</small></label>
+              </div>
+              <div id="splashControls" class="backend-controls hidden">
+                <div class="ssd-control-intro"><span aria-hidden="true">SP</span><div><strong>Inco Splash 1.5 · Flash-Next, 27B and 35B + DFlash2</strong><small>Rescan to list compatible local models. Flash-Next requires GGUF; split GGUFs and Q2_0 are supported. GGUF quantizations, including Q6_K, are checked from their model headers and used directly. For 27B and 35B, MLX checkpoints must be affine 4-bit with group size 64. Splash streams experts and PLE from SSD when needed and checks the selected context within available memory. The matching DFlash2 draft downloads on first launch if it is missing.</small></div></div>
+                <label class="field"><span>Acceleration</span><select id="splashAccelerationSelect" aria-describedby="splashAccelerationHelp"><option value="off">DFlash 2</option><option value="dspine" disabled>DSpine · Experimental</option></select><small id="splashAccelerationHelp">Choose a compatible Qwen3.8-27B MLX model to check DSpine availability.</small></label>
+                <div class="freetoken-control-facts"><span><small>27B Q4 decode · M5 Pro · 128K</small><b>25.3–36.6 tok/s</b></span><span><small>27B Q4 cold 128K prefill</small><b>324–338 tok/s</b></span><span><small>27B Q4 cached first token</small><b>0.39 s</b></span></div>
+              </div>
+              <div id="rapidmlxControls" class="backend-controls hidden">
+                <div class="ssd-control-intro"><span aria-hidden="true">RM</span><div><strong>Rapid MLX · native MTP and standard decoding</strong><small>Auto follows the selected model's native MTP support. Choose Off for AR, or MTP with a supported draft depth. Defaults and limits come from this model and runtime; speed is shown only after measurement.</small></div></div>
+                <label class="field optimizable" data-opt-key="depth"><span>MTP draft depth</span><select id="rapidmlxDepthSelect"><option value="1">Choose a model</option></select><small id="rapidmlxMtpHelp">Select a compatible model to inspect its native MTP head and supported depths.</small></label>
+                <p class="control-help">Compatible engines can share the same original checkpoint. Rapid MLX uses MLX safetensors; GGUF files and engine-specific packs need a compatible MLX copy. Resident weights, conversation cache and workspace must fit in unified memory. SSD-streaming engines use their own memory plans. Selecting an engine starts nothing.</p>
+              </div>
+              <div id="strataControls" class="backend-controls hidden">
+                <div class="ssd-control-intro"><span aria-hidden="true">ST</span><div><strong>Strata 0.1.56 · Qwen3.8 Flash-Next</strong><small>Uses Q4 expert weights with the original BF16 lookup table. The launcher build reads your existing GGUF shards directly with SSD expert streaming. Its small support pack contains runtime metadata and converted auxiliary projections. The Q4 expert weights and BF16 table are reused in place.</small></div></div>
+              </div>
+              <div id="recControls" class="backend-controls hidden">
+                <div class="ssd-control-intro"><span aria-hidden="true">R</span><div><strong>Recursive Flint · native Rec engine</strong><small>Runs the official Flint INT4 weights in unified memory. Flint has 39.8B total parameters, about 2.5B active per token, and supports reasoning and function tools. Prompt and output share a context window of up to 262,144 tokens. Reasoning stays on. Rec supports one active generation at a time.</small></div></div>
               </div>
               <div id="whallmControls" class="backend-controls hidden">
                 <div class="ssd-control-intro"><span aria-hidden="true">SSD</span><div><strong>Full 512-expert Qwen route</strong><small>Whallm owns its pinned MXFP4 model and streams routed experts from SSD. This 48 GiB Mac is experimental because upstream publishes a 64 GiB support floor.</small></div></div>
@@ -258,14 +296,20 @@
               <div id="llamacppControls" class="backend-controls hidden">
                 <div class="ssd-control-intro ssd-ple-intro"><span aria-hidden="true">PLE</span><div><strong>Qualified Qwen3.8 Flash-Next route</strong><small>Its pinned llama.cpp build keeps PLE tensors on SSD under a fixed 8K contract. This is not a generic SSD-streaming mode.</small></div></div>
               </div>
-          <details id="launchTools" class="launch-tools"><summary>Performance &amp; diagnostics <span aria-hidden="true">⌄</span></summary>
-          <section id="quickStart" class="quick-start hidden" aria-labelledby="quickStartTitle">
-            <div class="quick-start-heading">
-              <div><h2 id="quickStartTitle">Saved routes</h2><p id="quickStartSummary">Optional shortcuts are available.</p></div>
-              <button id="quickStartCustom" type="button" class="text-button" aria-expanded="false" aria-controls="quickStartCards">Show saved routes</button>
+            <details class="model-information"><summary>About this model</summary><div id="modelCard" class="model-card loading"><div class="model-title"><span class="skeleton wide"></span></div><div class="model-meta"><span class="skeleton"></span><span class="skeleton"></span></div></div></details>
             </div>
-            <div id="quickStartCards" class="quick-start-cards hidden" aria-live="polite"></div>
-          </section>
+          </details>
+            </div>
+          </details>
+          <details id="launchTools" class="launch-tools"><summary>Performance &amp; diagnostics <span aria-hidden="true">⌄</span></summary>
+            <p id="homeEngineGuide" class="home-engine-guide"></p>
+            <dl class="overview-facts"><div><dt>Engine</dt><dd id="homeRouteEngine">—</dd></div><div><dt>Assistant</dt><dd id="homeRouteAgent">Pi</dd></div><div><dt>Context</dt><dd id="homeRouteContext">—</dd></div><div><dt>Max response</dt><dd id="homeRouteOutput">—</dd></div></dl>
+            <section id="homePerformance" class="home-performance" aria-label="Saved performance measurements" data-state="loading"><div><span>Measured decode</span><strong id="homeMeasuredSpeed">Checking…</strong></div><div><span>First output</span><strong id="homeMeasuredFirst">—</strong></div><p id="homeMeasurementDetail">Looking for measurements that match this setup.</p></section>
+            <div class="home-engine-action">
+              <button id="homeCompareEngines" type="button" class="secondary">Compare runtimes <span aria-hidden="true">↗</span></button>
+              <button id="homeFastestEngine" type="button" class="secondary" data-optimizer-scope="engine" data-engine-preference="throughput" aria-describedby="homeFastestEngineHelp">Choose fastest runtime</button>
+              <p id="homeFastestEngineHelp">Uses saved calibration, or measures compatible engines.</p>
+            </div>
 
           <div id="optimizationPanel" class="optimization-panel" aria-busy="false">
             <div id="optimizerAction" class="optimizer-action">
@@ -298,10 +342,16 @@
             <button id="previewButton" type="button" class="secondary">Preview</button>
           </div>
           </details>
+          <section id="quickStart" class="quick-start hidden" aria-labelledby="quickStartTitle">
+            <div class="quick-start-heading">
+              <div><h2 id="quickStartTitle">Saved routes</h2><p id="quickStartSummary">Optional shortcuts are available.</p></div>
+              <button id="quickStartCustom" type="button" class="text-button" aria-expanded="false" aria-controls="quickStartCards">Show saved routes</button>
             </div>
-          </details>
-            </div>
-          </details>
+            <div id="quickStartCards" class="quick-start-cards hidden" aria-live="polite"></div>
+            <p id="quickStartStatus" class="profile-manager-status error" role="status" hidden></p>
+          </section>
+
+          </div>
           <div class="legacy-runtime-controls" hidden>
             <section class="config-section" aria-labelledby="runtimeTitle">
               <div class="section-head"><h2 id="runtimeTitle">Runtime</h2><span>Inference engine</span></div>
@@ -309,6 +359,8 @@
                 <button type="button" class="choice selected" data-backend="mtplx" aria-pressed="true"><span class="choice-icon mtplx" aria-hidden="true">M</span><span><strong>MTPLX</strong><small>MTP specialist</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                 <button type="button" class="choice" data-backend="omlx" aria-pressed="false"><span class="choice-icon omlx" aria-hidden="true">O</span><span><strong>oMLX</strong><small>Flexible MLX</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                 <button type="button" class="choice" data-backend="lmstudio" aria-pressed="false"><span class="choice-icon lms" aria-hidden="true">LM</span><span><strong>LM Studio</strong><small>Desktop runtime</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                <button type="button" class="choice" data-backend="rapidmlx" aria-pressed="false"><span class="choice-icon" aria-hidden="true">RM</span><span><strong>Rapid MLX</strong><small>Local MLX · optional MTP</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                <button type="button" class="choice" data-backend="rec" aria-pressed="false"><span class="choice-icon" aria-hidden="true">R</span><span><strong>Rec</strong><small>Recursive Flint INT4</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                 <button type="button" class="choice" data-backend="uzu" aria-pressed="false"><span class="choice-icon uzu" aria-hidden="true">U</span><span><strong>Uzu · Mirai</strong><small>DFlash + Weaver · Chat first</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                 <button type="button" class="choice" data-backend="freetoken" data-ui-feature="freetoken" aria-pressed="false" hidden disabled><span class="choice-icon freetoken" aria-hidden="true">FT</span><span><strong>FreeToken</strong><small>Native or remote MoE</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
               </div>
@@ -321,6 +373,9 @@
                     <button type="button" class="choice" data-backend="mference" aria-pressed="false"><span class="choice-icon mference" aria-hidden="true">MF</span><span><strong>Mference</strong><small>Verified .gturbo models</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                     <button type="button" class="choice" data-backend="slotstream" aria-pressed="false"><span class="choice-icon" aria-hidden="true">SS</span><span><strong>Slotstream</strong><small>Qwen · SSD + MTP</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                     <button type="button" class="choice" data-backend="whallm" aria-pressed="false"><span class="choice-icon whallm" aria-hidden="true">W</span><span><strong>Whallm</strong><small>Full Qwen experts</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                    <button type="button" class="choice" data-backend="kolibri" aria-pressed="false"><span class="choice-icon" aria-hidden="true">K</span><span><strong>Kolibri SSD</strong><small>Full Q6 · RAM + SSD</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                    <button type="button" class="choice" data-backend="strata" aria-pressed="false"><span class="choice-icon" aria-hidden="true">ST</span><span><strong>Strata</strong><small>Flash-Next · Metal</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
+                    <button type="button" class="choice" data-backend="splash" aria-pressed="false"><span class="choice-icon" aria-hidden="true">SP</span><span><strong>Splash</strong><small>Flash-Next / 27B / 35B</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                     <button type="button" class="choice ssd-ple-choice" data-backend="llamacpp" aria-pressed="false" hidden disabled><span class="choice-icon llamacpp" aria-hidden="true">LC</span><span><strong>llama.cpp · SSD PLE</strong><small>Pinned Flash-Next · 8K</small></span><em class="choice-evidence" aria-hidden="true"></em><i aria-hidden="true"></i></button>
                   </div>
                   <small id="ssdRuntimeStatus">Only model-specific routes reported by the local controller are shown.</small>
@@ -331,7 +386,6 @@
 </div>
           </div>
 
-          <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
         </div>
 
         <section id="chatWorkspace" class="chat-workspace hidden" aria-labelledby="chatTitle">
@@ -435,7 +489,7 @@
           <header class="agent-console-header">
             <div class="agent-console-heading-inline"><h2 id="agentConsoleTitle">Waiting for Hub Console</h2><span id="agentConsoleHeadingDetail"></span><p id="agentConsoleMeta">Agent-supplied terminal colour and emphasis are preserved; output stays in bounded session memory and never enters Chat history.</p></div>
             <div class="agent-console-header-actions">
-              <label class="hub-fan-control" title="Live fan mode: System uses macOS cooling; Max runs fans at full speed."><span>Fans</span><select id="hubFanMode" aria-label="Live fan mode"><option value="unknown" disabled>Unverified</option><option value="default">System</option><option value="smart" hidden>Smart</option><option value="max">Max</option></select></label><span id="hubFanMessage" role="status" class="hub-fan-message"></span>
+              <div class="hub-fan-group"><label class="hub-fan-control" title="Live fan mode: System uses macOS cooling; Max runs fans at full speed."><span>Fans</span><select id="hubFanMode" aria-label="Live fan mode"><option value="unknown" disabled>Unverified</option><option value="default">System</option><option value="smart" hidden>Smart</option><option value="max">Max</option></select></label><span id="hubFanMessage" role="status" class="hub-fan-message"></span></div>
               <button id="agentConsoleBackButton" type="button" class="secondary compact" aria-label="Back to launcher settings">Home</button>
               <details id="agentConsoleActionsMenu" class="agent-console-actions-menu"><summary aria-label="Console actions">•••</summary><div>
                 <button id="agentConsoleSessionsButton" type="button" class="secondary compact">Sessions</button>
@@ -447,7 +501,7 @@
                 <button id="agentConsoleLogButton" type="button" class="secondary compact" aria-label="View log" disabled>Log</button>
                 <button id="agentConsoleRestartButton" type="button" class="secondary compact" disabled>Restart</button>
                 <button id="agentConsoleStopButton" type="button" class="danger" disabled>Stop agent</button>
-              </div></details>
+              <button id="agentConsoleQuitButton" type="button" class="danger">Quit launcher &amp; engines</button></div></details>
             </div>
           </header>
           <section class="agent-console-navigation" aria-label="Agent consoles">
@@ -485,6 +539,14 @@
             </div>
           </details>
           </div>
+          <section id="agentConsoleLivePhase" class="agent-console-live-phase" aria-label="Model and agent activity" hidden>
+            <div class="hub-activity-message">
+              <i aria-hidden="true"></i>
+              <strong id="agentConsoleLivePhaseText" role="status"></strong>
+              <span id="agentConsoleLiveDetail"></span>
+            </div>
+            <span id="agentConsoleLiveQueue" class="hub-activity-queue"></span>
+          </section>
           <div class="agent-terminal-shell">
             <div id="agentTerminalViewport" class="agent-terminal-viewport" role="application" tabindex="0" aria-label="Interactive agent terminal. Type to send keys; use the text field below for accessible input.">
               <pre id="agentTerminalOutput" aria-label="Agent terminal output">Hub Console will appear here when the agent starts.</pre>
@@ -496,7 +558,6 @@
             <button id="agentConsoleJumpLatest" type="button" class="agent-console-jump-latest" hidden>↓ Latest output</button>
             <button id="agentPiTimelineJumpLatest" type="button" class="agent-console-jump-latest agent-pi-timeline-jump-latest" hidden>↓ Latest</button>
           </div>
-          <div id="agentConsoleLivePhase" class="agent-console-live-phase" role="status" aria-live="polite" hidden><i aria-hidden="true"></i><span id="agentConsoleLivePhaseText"></span></div>
           <form id="agentConsoleForm" class="agent-console-composer">
             <details id="agentConsoleQueue" class="agent-console-queue" hidden>
               <summary id="agentConsoleQueueSummary">Queued messages</summary>
@@ -529,6 +590,7 @@
             <progress id="launchPreparationProgress" max="1" aria-label="Launch preparation"></progress>
             <button id="continueLaunchPreparation" type="button" class="secondary" hidden>Continue with this memory estimate</button>
           </section>
+          <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
           <div class="dock-actions">
             <div class="launch-reassurance"><strong id="homeLaunchHint">Ready when you are</strong><small id="homeLaunchDetail">Checks run automatically when you launch.</small></div>
             <button id="launchMemoryEstimate" type="button" class="launch-memory-estimate" title="View memory capacity details">Checking memory…</button>
@@ -567,12 +629,12 @@
 
   <dialog id="sessionDialog" class="session-dialog" aria-labelledby="sessionDialogTitle">
     <form method="dialog"><button class="close" aria-label="Close Sessions and Capacity">×</button></form>
-    <p class="dialog-kicker">Launcher-owned routes · live Mac capacity</p>
+    <p class="dialog-kicker">Memory and running sessions</p>
     <div class="session-heading"><div><h2 id="sessionDialogTitle">Sessions &amp; capacity</h2><p>See what this launcher owns and review the next model load before it starts.</p></div><span id="sessionBadge" class="setup-badge">Inspecting</span></div>
-    <div class="session-safety"><i aria-hidden="true">✓</i><p><strong>Opening this dashboard is read-only.</strong><span>It samples public macOS headroom and inspects only launcher-owned process references. It never stops an external process or loads a model.</span></p></div>
+    <div class="session-safety"><i aria-hidden="true">✓</i><p><strong>Opening this dashboard is read-only.</strong><span>Check available memory, running sessions and recent requests. Opening this view does not start or stop a model.</span></p></div>
     <div class="session-overview">
-      <section class="session-resource-card" aria-labelledby="sessionResourceTitle"><div class="session-card-head"><div><span>Mac capacity</span><h3 id="sessionResourceTitle">Unified memory</h3></div><em id="sessionResourceState">Checking</em></div><div class="session-memory-meter" role="meter" aria-label="Available unified-memory headroom" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="sessionMemoryBar"></i></div><div id="sessionResourceFacts" class="session-facts"></div><p id="sessionResourceDetail">Reading Apple’s public memory-pressure and thermal signals…</p></section>
-      <section class="session-active-card" aria-labelledby="sessionActiveTitle"><div class="session-card-head"><div><span>Launcher-owned route</span><h3 id="sessionActiveTitle">Active session</h3></div><em id="sessionActiveState">Checking</em></div><div id="sessionActiveRoute" class="session-active-route"></div><div id="sessionComponents" class="session-components"></div><p id="sessionOwnershipDetail">External engines and Terminal processes are not adopted or terminated.</p></section>
+      <section class="session-resource-card" aria-labelledby="sessionResourceTitle"><div class="session-card-head"><div><span>Mac capacity</span><h3 id="sessionResourceTitle">Unified memory</h3></div><em id="sessionResourceState">Checking</em></div><div class="session-memory-meter" role="meter" aria-label="Available memory for loading" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="sessionMemoryBar"></i></div><div id="sessionResourceFacts" class="session-facts"></div><p id="sessionResourceDetail">Reading macOS memory and temperature…</p></section>
+      <section class="session-active-card" aria-labelledby="sessionActiveTitle"><div class="session-card-head"><div><span>Active model</span><h3 id="sessionActiveTitle">Active session</h3></div><em id="sessionActiveState">Checking</em></div><div id="sessionActiveRoute" class="session-active-route"></div><div id="sessionComponents" class="session-components"></div><p id="sessionOwnershipDetail">External engines and Terminal processes are not adopted or terminated.</p></section>
     </div>
     <section id="sessionActivitySection" class="session-activity" data-state="idle" aria-labelledby="sessionActivityTitle">
       <div class="session-card-head"><div><span>Private relay evidence</span><h3 id="sessionActivityTitle">Live request scheduler</h3></div><em id="sessionActivityState">No resident model</em></div>
@@ -597,8 +659,8 @@
       <div id="sessionAttachmentList" class="session-attachment-list"></div>
       <div id="sessionAttachControls" class="session-attach-controls">
         <div class="session-attach-fields">
-          <label class="field"><span>New work surface</span><select id="sessionAttachClient"><option value="chat">Chat</option><option value="pi">Pi</option><option value="opencode">OpenCode</option><option value="codex">Codex</option></select><small>Compatibility is checked against the engine that is already running.</small></label>
-          <label id="sessionAttachHostField" class="field"><span>Agent window</span><select id="sessionAttachAgentHost"><option value="console" selected>Hub Console</option><option value="terminal">macOS Terminal</option></select><small>Hub Console stays private and launcher-owned.</small></label>
+          <label class="field"><span>New work surface</span><select id="sessionAttachClient"><option value="chat">Chat</option><option value="pi">Pi</option><option value="omp">oh-my-pi · Terminal</option><option value="opencode">OpenCode</option><option value="codex">Codex</option></select><small>Compatibility is checked against the engine that is already running.</small></label>
+          <label id="sessionAttachHostField" class="field"><span>Agent window</span><select id="sessionAttachAgentHost"><option value="console" selected>Hub Console</option><option value="terminal">macOS Terminal</option></select><small id="sessionAttachHostHelp">Hub Console stays private and launcher-owned.</small></label>
           <label id="sessionAttachProjectField" class="field"><span>Project folder</span><input id="sessionAttachProject" type="text" autocomplete="off"><small>Used only by the new agent; the model stays loaded.</small></label>
         </div>
         <div id="sessionAttachChatPanel" class="session-attach-chat session-attach-generation">
@@ -671,7 +733,7 @@
     <div class="model-library-filters" role="search" aria-label="Filter detected models">
       <label class="model-library-search"><span aria-hidden="true">⌕</span><span class="sr-only">Search models</span><input id="modelLibrarySearch" type="search" maxlength="160" autocomplete="off" placeholder="Search name, format, architecture, folder…"></label>
       <label><span>Engine</span><select id="modelLibraryEngineFilter"><option value="all">All engines</option><option value="omlx">oMLX</option><option value="lmstudio">LM Studio</option><option value="mtplx">MTPLX</option><option value="uzu">Uzu · Mirai</option><option value="swiftlm">SwiftLM · SSD</option><option value="mference">Mference · SSD</option><option value="whallm">Whallm · SSD</option><option value="freetoken" data-ui-feature="freetoken" hidden disabled>FreeToken</option></select></label>
-      <label><span>Work surface</span><select id="modelLibrarySurfaceFilter"><option value="all">All surfaces</option><option value="pi">Pi</option><option value="opencode">OpenCode</option><option value="codex">Codex</option><option value="chat">Chat</option></select></label>
+      <label><span>Work surface</span><select id="modelLibrarySurfaceFilter"><option value="all">All surfaces</option><option value="pi">Pi</option><option value="omp">oh-my-pi</option><option value="opencode">OpenCode</option><option value="codex">Codex</option><option value="chat">Chat</option></select></label>
       <label><span>Doctor state</span><select id="modelLibraryStateFilter"><option value="all">All states</option><option value="ready">Ready</option><option value="attention">Review</option><option value="blocked">Blocked</option></select></label>
     </div>
     <div id="modelLibrarySummary" class="model-library-summary" aria-live="polite"></div>
@@ -723,9 +785,8 @@
     <section class="acquisition-progress" aria-live="polite">
       <div class="benchmark-progress-head"><span id="acquisitionPhase">Ready to inspect</span><b id="acquisitionPercent">0%</b></div>
       <div class="benchmark-progress-track" role="progressbar" aria-label="Model acquisition progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="acquisitionProgressBar"></i></div>
-      <p id="acquisitionStatus" role="status">Nothing has been downloaded or changed.</p>
     </section>
-    <div class="acquisition-actions"><button id="acquisitionStopButton" type="button" class="danger" disabled>Stop and preserve files</button><button id="acquisitionOpenLibrary" type="button" class="secondary" disabled>Open Model Library</button><button id="acquisitionStartButton" type="button" class="primary" disabled><span aria-hidden="true">↓</span><span><strong id="acquisitionStartTitle">Download pinned files</strong><small id="acquisitionStartLabel">Waiting for a valid plan</small></span></button></div>
+    <div class="acquisition-actions"><p id="acquisitionStatus" role="status">Nothing has been downloaded or changed.</p><button id="acquisitionStopButton" type="button" class="danger" disabled>Stop and preserve files</button><button id="acquisitionOpenLibrary" type="button" class="secondary" disabled>Open Model Library</button><button id="acquisitionStartButton" type="button" class="primary" disabled><span aria-hidden="true">↓</span><span><strong id="acquisitionStartTitle">Download pinned files</strong><small id="acquisitionStartLabel">Waiting for a valid plan</small></span></button></div>
   </dialog>
   <dialog id="runtimeDialog" class="runtime-dialog" aria-labelledby="runtimeDialogTitle">
     <form method="dialog"><button class="close" aria-label="Close Runtime Manager">×</button></form>
@@ -780,7 +841,7 @@
       <div class="profile-save-fields">
         <label class="field"><span>Profile name</span><input id="profileName" type="text" maxlength="60" autocomplete="off" placeholder="Daily coding" aria-describedby="profileNameHint"><small id="profileNameHint">Enter a name to enable saving.</small></label>
         <label class="field"><span>Engine behaviour</span><select id="profilePolicySelect"><option value="fixed">Keep this engine</option><option value="measured">Auto-select from local measurements</option></select><small id="profilePolicyHelp">Reuses the selected engine and exact runtime controls.</small></label>
-        <label id="profileGoalField" class="field inactive"><span>Measured goal</span><select id="profileGoalSelect" disabled><option value="throughput">Highest generation TPS</option><option value="fastest">Fastest total workload</option><option value="responsive">Fastest first response</option><option value="memory">Lowest memory pressure</option><option value="thermal">Best thermal stability</option></select><small>Only switches after a complete matching local comparison clears the noise floor.</small></label>
+        <label id="profileGoalField" class="field inactive"><span>Measured goal</span><select id="profileGoalSelect" disabled><option value="throughput">Highest generation TPS</option><option value="fastest">Fastest total workload</option><option value="responsive">Fastest first response</option><option value="memory">Lowest memory use</option><option value="thermal">Best thermal stability</option></select><small>Only switches after a complete matching local comparison clears the noise floor.</small></label>
       </div>
       <div class="profile-save-actions"><button id="profileCancelEdit" type="button" class="text-button hidden">Cancel update</button><button id="profileSaveButton" type="submit" class="primary"><span aria-hidden="true">＋</span><span><strong>Save current settings</strong><small>Nothing starts</small></span></button></div>
     </form>
@@ -815,7 +876,7 @@
     <div id="calibrationOrigin" class="calibration-origin hidden" role="status" aria-live="polite"><i aria-hidden="true">→</i><p><strong id="calibrationOriginTitle"></strong><span id="calibrationOriginDetail"></span></p></div>
     <div class="calibration-controls">
       <label class="field"><span>Representative workload</span><select id="calibrationSuiteSelect"><option value="agentic">Coding agent · four related turns</option><option value="standard">Chat · 2K and 8K prompts</option><option value="quick">Quick signal · 512 and 2K prompts</option><option value="thorough">Long context · up to 32K prompts</option></select><small id="calibrationSuiteHelp">Measures cold prefill, prefix reuse, tool ingestion, and a warm follow-up.</small></label>
-      <label class="field"><span id="calibrationPreferenceLabel">Decision goal</span><select id="calibrationPreferenceSelect"><option value="throughput">Highest generation TPS</option><option value="fastest">Fastest total workload</option><option value="responsive">Fastest first response</option><option value="memory">Lowest memory pressure</option><option value="thermal">Best thermal stability</option></select><small id="calibrationPreferenceHelp">Ranks each engine's correctness-verified safe route by generation speed.</small></label>
+      <label class="field"><span id="calibrationPreferenceLabel">Decision goal</span><select id="calibrationPreferenceSelect"><option value="throughput">Highest generation TPS</option><option value="fastest">Fastest total workload</option><option value="responsive">Fastest first response</option><option value="memory">Lowest memory use</option><option value="thermal">Best thermal stability</option></select><small id="calibrationPreferenceHelp">Ranks each engine's correctness-verified safe route by generation speed.</small></label>
       <label class="field"><span>Cooling during measurement</span><select id="calibrationCoolingSelect"><option value="smart" selected>Automatic (recommended)</option><option value="default">System controlled</option><option value="max">Maximum fans (loud)</option></select><small id="calibrationCoolingHelp">Maximum fans runs only when you explicitly choose it here. macOS may still increase cooling under sustained load.</small></label>
     </div>
     <section class="calibration-step calibration-detail-only" aria-labelledby="calibrationContractTitle"><div class="calibration-step-number" aria-hidden="true">1</div><div><div class="calibration-step-head"><h3 id="calibrationContractTitle">Locked test settings</h3><em id="calibrationContractState">Checking</em></div><p id="calibrationContract">Choose a ready model and work surface.</p><div id="calibrationPlanFacts" class="calibration-plan-facts"></div></div></section>
@@ -849,7 +910,7 @@
     <h2 id="benchmarkTitle">Benchmark Lab</h2>
     <p id="benchmarkRoute" class="benchmark-route">Choose a runnable model and acceleration route.</p>
     <div class="benchmark-setup">
-      <div class="benchmark-field-stack"><label class="field"><span>Workload suite</span><select id="benchmarkSuiteSelect"><option value="agentic" selected>Agentic · prefix + tool turns</option><option value="quick">Quick · 512 + 2K prompts</option><option value="standard">Standard · 2K + 8K prompts</option><option value="thorough">Thorough · 4K + 16K + 32K prompts</option></select><small id="benchmarkSuiteHelp">Four staged coding-agent turns measure cold prefill, prefix reuse, tool ingestion, and a warm follow-up.</small></label><label class="field"><span>Engine decision goal</span><select id="benchmarkPreferenceSelect"><option value="throughput" selected>Highest generation TPS</option><option value="fastest">Fastest total workload</option><option value="responsive">Fastest first response</option><option value="memory">Lowest memory pressure</option><option value="thermal">Best thermal stability</option></select><small id="benchmarkPreferenceHelp">Ranks each engine's correctness-verified safe route by median decode TPS.</small></label></div>
+      <div class="benchmark-field-stack"><label class="field"><span>Workload suite</span><select id="benchmarkSuiteSelect"><option value="agentic" selected>Agentic · prefix + tool turns</option><option value="quick">Quick · 512 + 2K prompts</option><option value="standard">Standard · 2K + 8K prompts</option><option value="thorough">Thorough · 4K + 16K + 32K prompts</option></select><small id="benchmarkSuiteHelp">Four staged coding-agent turns measure cold prefill, prefix reuse, tool ingestion, and a warm follow-up.</small></label><label class="field"><span>Engine decision goal</span><select id="benchmarkPreferenceSelect"><option value="throughput" selected>Highest generation TPS</option><option value="fastest">Fastest total workload</option><option value="responsive">Fastest first response</option><option value="memory">Lowest memory use</option><option value="thermal">Best thermal stability</option></select><small id="benchmarkPreferenceHelp">Ranks each engine's correctness-verified safe route by median decode TPS.</small></label></div>
       <div><span class="benchmark-label">Compared routes</span><div id="benchmarkModes" class="benchmark-mode-chips"></div><small id="benchmarkContract">Uses the visible context, reasoning, sampling, KV, and acceleration tuning controls.</small></div>
     </div>
     <div id="benchmarkEngineStrip" class="benchmark-engine-strip" aria-label="Compatible engines"></div>
@@ -876,7 +937,7 @@
         <div id="benchmarkHistoryTrend" class="benchmark-history-trend"></div>
         <div id="benchmarkHistoryRuns" class="benchmark-history-runs"></div>
         <div id="benchmarkHistoryOther" class="benchmark-history-other"></div>
-        <div class="benchmark-history-actions"><button id="benchmarkHistoryRerun" type="button" class="text-button" disabled>Rerun this visible contract</button></div>
+        <div class="benchmark-history-actions"><button id="benchmarkHistoryRetry" type="button" class="text-button hidden">Retry history</button><button id="benchmarkHistoryRerun" type="button" class="text-button" disabled>Rerun this visible contract</button></div>
       </div>
     </details>
     <div id="benchmarkResults" class="benchmark-results"></div>
@@ -954,6 +1015,7 @@
     </section>
     <div class="ane-clone-actions"><button id="aneCloneStopButton" type="button" class="danger" disabled>Stop copy</button><button id="aneCloneUseButton" type="button" class="secondary" disabled>Use prepared copy</button><button id="aneCloneStartButton" type="button" class="primary" disabled><span aria-hidden="true">◇</span><span><strong>Create verified copy</strong><small id="aneCloneStartLabel">Source remains untouched</small></span></button></div>
   </dialog>
+  <dialog id="quitLauncherDialog" class="quit-launcher-dialog" aria-labelledby="quitLauncherTitle" aria-describedby="quitLauncherDetail"><span class="quit-mark" aria-hidden="true">⏻</span><h2 id="quitLauncherTitle">Closing your local AI</h2><p id="quitLauncherDetail">Stopping local model engines and closing the launcher…</p><progress id="quitLauncherProgress" aria-label="Shutdown in progress"></progress><div id="quitLauncherErrorActions" class="quit-error-actions" hidden><button id="quitLauncherDismissButton" type="button" class="secondary">Close</button><button id="quitLauncherRetryButton" type="button" class="primary">Try again</button></div></dialog>
   <script src="workspace_context.js" defer></script>
   <script src="route_preferences.js" defer></script>
   <script src="chat_drafts.js" defer></script>
@@ -961,6 +1023,11 @@
   <script src="chat_scroll.js" defer></script>
   <script src="chat_transcript.js" defer></script>
   <script src="chat_stream.js" defer></script>
+  <script src="chat_resume.js" defer></script>
+  <script src="session_sets.js" defer></script>
+  <script src="saved_launches.js" defer></script>
+  <script src="model_assets.js" defer></script>
+  <script src="runtime_manager.js" defer></script>
   <script src="chat_status.js" defer></script>
   <script src="safe_markdown.js" defer></script>
   <script src="terminal_core.js" defer></script>
@@ -968,10 +1035,17 @@
   <script src="agent_console_input.js" defer></script>
   <script src="pi_timeline.js" defer></script>
   <script src="pi_timeline_view.js" defer></script>
+  <script src="agent_console_workspace.js" defer></script>
+  <script src="ui_presenter.js" defer></script>
+  <script src="request_metrics.js" defer></script>
+  <script src="launcher_home.js" defer></script>
   <script src="polling.js" defer></script>
   <script src="calibration_decision.js" defer></script>
   <script src="launch_flow.js" defer></script>
   <script src="launcher_api.js" defer></script>
+  <script src="chat_workspace.js" defer></script>
+  <script src="benchmark_workspace.js" defer></script>
+  <script src="launch_workspace.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

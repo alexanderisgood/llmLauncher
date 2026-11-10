@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.memory_fixtures import physical_snapshot, physical_telemetry
 
 import copy
 import importlib.util
@@ -228,7 +229,12 @@ class MTPLX2111WorkerTests(unittest.TestCase):
         }
 
     def _manager(self) -> launcher.BenchmarkManager:
-        manager = launcher.BenchmarkManager(mock.Mock())
+        run = mock.Mock(plan=None, llamacpp_safety_violation=None,
+                        codex_proxy_port=None, session_proxy_port=None)
+        run.lock = threading.RLock()
+        run.lifecycle_lock = threading.Lock()
+        run.cancel_event = threading.Event()
+        manager = launcher.BenchmarkManager(run)
         manager.cancel_event = threading.Event()
         manager.state = {
             "phase": "queued",
@@ -251,24 +257,24 @@ class MTPLX2111WorkerTests(unittest.TestCase):
         return manager
 
     def test_live_system_reserve_checks_debounce_and_reject_unreadable_memory(self):
-        healthy = {"memoryAvailable": True, "totalBytes": 48 * 1024**3, "freePercent": 25.0}
-        low = {**healthy, "freePercent": 9.0}
+        healthy = physical_snapshot({"memoryAvailable": True, "totalBytes": 48 * 1024**3, "freePercent": 25.0})
+        low = physical_snapshot({**healthy, "freePercent": 9.0})
         counters = {}
         check = lambda sample: launcher.benchmark_system_memory_violation(sample, counters, "MTPLX test")
         self.assertIsNone(check(low))
         self.assertIsNone(check(healthy))
         self.assertIsNone(check(low))
         self.assertIn("protected macOS reserve", check(low))
-        for invalid in ({}, {**healthy, "freePercent": float("nan")},
-                        {**healthy, "freePercent": True}, {**healthy, "totalBytes": True}):
+        for invalid in ({}, physical_snapshot({**healthy, "freePercent": float("nan")}),
+                        physical_snapshot({**healthy, "freePercent": True}), {**healthy, "totalBytes": True}):
             counters.clear()
             self.assertIsNone(check(invalid))
             self.assertIsNone(check(invalid))
             self.assertIn("unreadable", check(invalid))
         counters.clear()
-        self.assertIsNone(check({**healthy, "freePercent": 10.0}))
-        self.assertIsNone(check({**healthy, "freePercent": 10.0}))
-        small = {**healthy, "totalBytes": 16 * 1024**3, "freePercent": 20.0}
+        self.assertIsNone(check(physical_snapshot({**healthy, "freePercent": 10.0})))
+        self.assertIsNone(check(physical_snapshot({**healthy, "freePercent": 10.0})))
+        small = physical_snapshot({**healthy, "totalBytes": 16 * 1024**3, "freePercent": 20.0})
         self.assertIsNone(check(small))
         self.assertIn("protected macOS reserve", check(small))
 
@@ -298,12 +304,15 @@ class MTPLX2111WorkerTests(unittest.TestCase):
                     if interrupted:
                         callback({"timingDiscontinuity": "The Mac slept during measurement."})
                         return
-                    low = {"memoryAvailable": True, "totalBytes": 48 * 1024**3, "freePercent": 8.0}
+                    low = physical_snapshot({"memoryAvailable": True, "totalBytes": 48 * 1024**3, "freePercent": 8.0})
                     callback(low)
                     callback(low)
 
                 plan = mock.Mock(port=1234, client_port=1235)
-                manager.run_manager.start.side_effect = lambda p: setattr(manager.run_manager, "plan", p)
+                def accept(p):
+                    manager.run_manager.plan = p
+                    manager.run_manager.cancel_event = threading.Event()
+                manager.run_manager.start.side_effect = accept
                 with (
                     mock.patch.object(manager, "_mode_payload", return_value={}),
                     mock.patch.object(launcher, "normalized_request", return_value=plan),
@@ -319,9 +328,10 @@ class MTPLX2111WorkerTests(unittest.TestCase):
                                                 "Mac slept" if interrupted else "protected macOS reserve"):
                         manager._measure_mode(job, [self.model], mode, 0, 18)
                 completion.assert_not_called()
-                stopping.assert_called_once_with(target=manager.run_manager.stop,
+                stopping.assert_called_once_with(target=manager.owner.stop,
                                                 kwargs={"expected_plan":plan}, daemon=True)
-                manager.run_manager.stop.assert_called_once_with(expected_plan=plan)
+                manager.run_manager.stop.assert_called_once_with(expected_plan=plan,
+                    expected_cancel_event=manager.run_manager.cancel_event)
                 self.assertIsNone(manager.state["result"])
                 self.assertIsNone(manager.active_plan)
 
@@ -331,14 +341,15 @@ class MTPLX2111WorkerTests(unittest.TestCase):
         # Caller-supplied flags are not authority to bypass a normal launch.
         request["allow_unmeasured_mtplx_operator"] = True
         request["purpose"] = "benchmark"
-        resource = {"memoryAvailable": True, "totalBytes": 48 * 1024**3,
-                    "freePercent": 80.0}
+        resource = physical_snapshot({"memoryAvailable": True, "totalBytes": 48 * 1024**3,
+                    "freePercent": 80.0})
         estimate = {"geometryReady": True, "estimatedWorkingSetBytes": 28 * 1024**3,
                     "requiredHeadroomBytes": 33 * 1024**3}
         with (
             mock.patch.dict(launcher.BINARIES, {"mtplx": "/test/mtplx"}),
             mock.patch.object(launcher, "_revalidated_mtplx_long_context_receipt", return_value=self.receipt) as binding,
-            mock.patch.object(launcher, "launch_memory_estimate", return_value=estimate) as capacity,
+            mock.patch.object(launcher.resource_admission.ResourceAdmission,
+                              "launch_memory_estimate", return_value=estimate) as capacity,
         ):
             with self.assertRaisesRegex(ValueError, "matching completed Calibration"):
                 launcher.session_memory_admission(
@@ -362,7 +373,7 @@ class MTPLX2111WorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Capacity changed"):
                 launcher.require_live_model_load_admission(
                     request, [self.model], purpose="benchmark",
-                    resource_snapshot={**resource, "freePercent":10.0},
+                    resource_snapshot=physical_snapshot({**resource, "freePercent":10.0}),
                     hub={"phase":"idle"}, operation={"active":False},
                 )
             binding.return_value = None
@@ -408,7 +419,7 @@ class MTPLX2111WorkerTests(unittest.TestCase):
                 copy.deepcopy(payload_options),
             ))
             result = copy.deepcopy(measured[route])
-            result["resourceTelemetry"] = {
+            result["resourceTelemetry"] = physical_telemetry({
                 "version": 1,
                 "sampleCount": 3,
                 "memoryAvailable": True,
@@ -422,7 +433,7 @@ class MTPLX2111WorkerTests(unittest.TestCase):
                 "thermalWorstValue": 0,
                 "thermalWorst": "nominal",
                 "lowPowerMode": False,
-            }
+            })
             result["resourceCooldown"] = {
                 key: copy.deepcopy(value)
                 for key, value in gate.items()
@@ -1973,7 +1984,7 @@ class MTPLX2111WorkerTests(unittest.TestCase):
             else:
                 result = self._result(speeds=[90.0] * 4)
                 pressure = 3 * 1024**3
-            result["resourceTelemetry"] = {
+            result["resourceTelemetry"] = physical_telemetry({
                 "version": 1,
                 "sampleCount": 3,
                 "memoryAvailable": True,
@@ -1987,7 +1998,7 @@ class MTPLX2111WorkerTests(unittest.TestCase):
                 "thermalWorstValue": 0,
                 "thermalWorst": "nominal",
                 "lowPowerMode": False,
-            }
+            })
             result["resourceCooldown"] = {
                 key: copy.deepcopy(value)
                 for key, value in gate.items()

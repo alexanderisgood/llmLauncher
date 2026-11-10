@@ -1,0 +1,772 @@
+{
+  "sourceSha256": "dc2b25f6f94873a82a6a4aec8e6cf6737a3137e6eaf5b610a9b3d5c26ca4cc46",
+  "request": {
+    "backend": "mtplx",
+    "client": "pi",
+    "modelId": "model-1",
+    "project": "/fixture/project",
+    "context": 8192,
+    "output": 256,
+    "reasoning": "off",
+    "agentHost": "console",
+    "mode": "custom",
+    "options": {
+      "kv": "8",
+      "depth": 2,
+      "fan": "max",
+      "unknownFuture": "SECRET"
+    },
+    "generation": {
+      "sampling": "custom",
+      "temperature": 0.7,
+      "topP": 0.9,
+      "topK": 24,
+      "seed": 17
+    },
+    "apiKey": "SECRET",
+    "port": 17777,
+    "messages": [
+      {
+        "role": "user",
+        "content": "TRANSCRIPT"
+      }
+    ]
+  },
+  "binding": {
+    "scope": "engine",
+    "preference": "throughput",
+    "suite": "quick",
+    "shootoutId": "fixture-shootout",
+    "recordIds": {
+      "mtplx": "fixture-record"
+    }
+  },
+  "model": {
+    "id": "model-1",
+    "name": "Exact model"
+  },
+  "backendLabels": {
+    "omlx": "oMLX",
+    "lmstudio": "LM Studio",
+    "mtplx": "MTPLX",
+    "uzu": "Uzu · Mirai",
+    "freetoken": "FreeToken",
+    "swiftlm": "SwiftLM",
+    "mference": "Mference",
+    "slotstream": "Slotstream",
+    "kolibri": "Kolibri SSD",
+    "splash": "Splash",
+    "whallm": "Whallm",
+    "llamacpp": "llama.cpp · SSD PLE"
+  },
+  "clientLabels": {
+    "pi": "Pi",
+    "omp": "oh-my-pi",
+    "opencode": "OpenCode",
+    "codex": "Codex",
+    "chat": "Chat"
+  },
+  "expected": {
+    "fixed": {
+      "profiles": [
+        {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "name": "Fixed 雪",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "enginePolicy": "fixed",
+          "enginePreference": "throughput",
+          "modelName": "Exact model",
+          "request": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          },
+          "resolution": {
+            "backend": "mtplx",
+            "label": "MTPLX",
+            "engineChanged": false,
+            "evidenceTier": "fixed-profile",
+            "evidenceLabel": "Fixed engine",
+            "trustedWinner": false,
+            "detail": "Uses the saved engine and exact visible runtime controls."
+          },
+          "ready": true,
+          "reason": "Ready to apply."
+        }
+      ],
+      "limit": 32,
+      "privacy": {
+        "settingsOnly": true,
+        "storesTranscripts": false,
+        "storesCredentials": false
+      }
+    },
+    "measured": {
+      "profiles": [
+        {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "name": "Measured",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "enginePolicy": "measured",
+          "enginePreference": "throughput",
+          "modelName": "Exact model",
+          "request": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          },
+          "resolution": {
+            "backend": "mtplx",
+            "label": "MTPLX",
+            "engineChanged": false,
+            "evidenceTier": "cross-engine-local-benchmark",
+            "evidenceLabel": "Measured exact controls",
+            "trustedWinner": true,
+            "detail": "Exact native fixture"
+          },
+          "evidenceBinding": {
+            "scope": "engine",
+            "preference": "throughput",
+            "suite": "quick",
+            "shootoutId": "fixture-shootout",
+            "recordIds": {
+              "mtplx": "fixture-record"
+            }
+          },
+          "ready": true,
+          "reason": "Ready to apply."
+        },
+        {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "name": "Fixed 雪",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "enginePolicy": "fixed",
+          "enginePreference": "throughput",
+          "modelName": "Exact model",
+          "request": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          },
+          "resolution": {
+            "backend": "mtplx",
+            "label": "MTPLX",
+            "engineChanged": false,
+            "evidenceTier": "fixed-profile",
+            "evidenceLabel": "Fixed engine",
+            "trustedWinner": false,
+            "detail": "Uses the saved engine and exact visible runtime controls."
+          },
+          "ready": true,
+          "reason": "Ready to apply."
+        }
+      ],
+      "limit": 32,
+      "privacy": {
+        "settingsOnly": true,
+        "storesTranscripts": false,
+        "storesCredentials": false
+      }
+    },
+    "updated": {
+      "profiles": [
+        {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "name": "Fixed updated",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "enginePolicy": "fixed",
+          "enginePreference": "throughput",
+          "modelName": "Exact model",
+          "request": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          },
+          "resolution": {
+            "backend": "mtplx",
+            "label": "MTPLX",
+            "engineChanged": false,
+            "evidenceTier": "fixed-profile",
+            "evidenceLabel": "Fixed engine",
+            "trustedWinner": false,
+            "detail": "Uses the saved engine and exact visible runtime controls."
+          },
+          "ready": true,
+          "reason": "Ready to apply."
+        },
+        {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "name": "Measured",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "enginePolicy": "measured",
+          "enginePreference": "throughput",
+          "modelName": "Exact model",
+          "request": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          },
+          "resolution": {
+            "backend": "mtplx",
+            "label": "MTPLX",
+            "engineChanged": false,
+            "evidenceTier": "cross-engine-local-benchmark",
+            "evidenceLabel": "Measured exact controls",
+            "trustedWinner": true,
+            "detail": "Exact native fixture"
+          },
+          "evidenceBinding": {
+            "scope": "engine",
+            "preference": "throughput",
+            "suite": "quick",
+            "shootoutId": "fixture-shootout",
+            "recordIds": {
+              "mtplx": "fixture-record"
+            }
+          },
+          "ready": true,
+          "reason": "Ready to apply."
+        }
+      ],
+      "limit": 32,
+      "privacy": {
+        "settingsOnly": true,
+        "storesTranscripts": false,
+        "storesCredentials": false
+      }
+    },
+    "profilesUnavailable": {
+      "profiles": [
+        {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "name": "Fixed updated",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "enginePolicy": "fixed",
+          "enginePreference": "throughput",
+          "modelName": "Exact model",
+          "request": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          },
+          "resolution": null,
+          "ready": false,
+          "reason": "Fixture model is no longer available."
+        },
+        {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "name": "Measured",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "enginePolicy": "measured",
+          "enginePreference": "throughput",
+          "modelName": "Exact model",
+          "request": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          },
+          "resolution": null,
+          "ready": false,
+          "reason": "Fixture model is no longer available."
+        }
+      ],
+      "limit": 32,
+      "privacy": {
+        "settingsOnly": true,
+        "storesTranscripts": false,
+        "storesCredentials": false
+      }
+    },
+    "profileDocument": {
+      "version": 1,
+      "updatedAt": "2026-10-06T13:00:00+00:00",
+      "profiles": [
+        {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "name": "Fixed updated",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "enginePolicy": "fixed",
+          "enginePreference": "throughput",
+          "modelName": "Exact model",
+          "request": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          }
+        },
+        {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "name": "Measured",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "enginePolicy": "measured",
+          "enginePreference": "throughput",
+          "modelName": "Exact model",
+          "request": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          },
+          "evidenceBinding": {
+            "scope": "engine",
+            "preference": "throughput",
+            "suite": "quick",
+            "shootoutId": "fixture-shootout",
+            "recordIds": {
+              "mtplx": "fixture-record"
+            }
+          }
+        }
+      ]
+    },
+    "sets": {
+      "version": 1,
+      "sets": [
+        {
+          "id": "33333333-3333-4333-8333-333333333333",
+          "name": "Workspace 雪",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "modelName": "Exact model",
+          "baseRequest": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          },
+          "surfaces": [
+            {
+              "client": "chat",
+              "project": "/fixture/project",
+              "agentHost": "launcher",
+              "generation": {
+                "sampling": "model"
+              },
+              "chat": {
+                "sampling": "model",
+                "systemPrompt": "User-chosen system 雪"
+              }
+            }
+          ],
+          "surfaceCount": 2,
+          "surfaceLabels": [
+            "Pi",
+            "Chat"
+          ],
+          "terminalCount": 0,
+          "ready": true,
+          "reason": "Ready to plan."
+        }
+      ],
+      "limit": 16,
+      "surfaceLimit": 12,
+      "privacy": {
+        "settingsOnly": true,
+        "storesTranscripts": false,
+        "storesConsoleOutput": false,
+        "storesCredentials": false,
+        "storesPorts": false
+      }
+    },
+    "setDocument": {
+      "version": 1,
+      "updatedAt": "2026-10-06T13:00:00+00:00",
+      "sets": [
+        {
+          "id": "33333333-3333-4333-8333-333333333333",
+          "name": "Workspace 雪",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "modelName": "Exact model",
+          "baseRequest": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          },
+          "surfaces": [
+            {
+              "client": "chat",
+              "project": "/fixture/project",
+              "agentHost": "launcher",
+              "generation": {
+                "sampling": "model"
+              },
+              "chat": {
+                "sampling": "model",
+                "systemPrompt": "User-chosen system 雪"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "requests": [
+      {
+        "backend": "mtplx",
+        "client": "pi",
+        "modelId": "model-1",
+        "project": "/fixture/project",
+        "context": 8192,
+        "output": 256,
+        "reasoning": "off",
+        "mode": "custom",
+        "agentHost": "console",
+        "options": {
+          "kv": "8",
+          "fan": "max",
+          "depth": 2
+        },
+        "generation": {
+          "seed": 17,
+          "topP": 0.9,
+          "sampling": "custom",
+          "topK": 24,
+          "temperature": 0.7
+        }
+      },
+      {
+        "backend": "mtplx",
+        "client": "chat",
+        "modelId": "model-1",
+        "project": "/fixture/project",
+        "context": 8192,
+        "output": 256,
+        "reasoning": "off",
+        "mode": "custom",
+        "agentHost": "launcher",
+        "options": {
+          "kv": "8",
+          "fan": "max",
+          "depth": 2
+        },
+        "generation": {
+          "sampling": "model"
+        },
+        "chat": {
+          "sampling": "model",
+          "systemPrompt": "User-chosen system 雪"
+        }
+      }
+    ],
+    "setsUnavailable": {
+      "version": 1,
+      "sets": [
+        {
+          "id": "33333333-3333-4333-8333-333333333333",
+          "name": "Workspace 雪",
+          "createdAt": "2026-10-06T13:00:00+00:00",
+          "updatedAt": "2026-10-06T13:00:00+00:00",
+          "modelName": "Exact model",
+          "baseRequest": {
+            "backend": "mtplx",
+            "client": "pi",
+            "modelId": "model-1",
+            "project": "/fixture/project",
+            "context": 8192,
+            "output": 256,
+            "reasoning": "off",
+            "mode": "custom",
+            "agentHost": "console",
+            "options": {
+              "kv": "8",
+              "fan": "max",
+              "depth": 2
+            },
+            "generation": {
+              "seed": 17,
+              "topP": 0.9,
+              "sampling": "custom",
+              "topK": 24,
+              "temperature": 0.7
+            }
+          },
+          "surfaces": [
+            {
+              "client": "chat",
+              "project": "/fixture/project",
+              "agentHost": "launcher",
+              "generation": {
+                "sampling": "model"
+              },
+              "chat": {
+                "sampling": "model",
+                "systemPrompt": "User-chosen system 雪"
+              }
+            }
+          ],
+          "surfaceCount": 2,
+          "surfaceLabels": [],
+          "terminalCount": 0,
+          "ready": false,
+          "reason": "Fixture model is no longer available."
+        }
+      ],
+      "limit": 16,
+      "surfaceLimit": 12,
+      "privacy": {
+        "settingsOnly": true,
+        "storesTranscripts": false,
+        "storesConsoleOutput": false,
+        "storesCredentials": false,
+        "storesPorts": false
+      }
+    }
+  },
+  "activeBase": {
+    "backend": "mtplx",
+    "client": "pi",
+    "modelId": "model-1",
+    "project": "/fixture/project",
+    "context": 8192,
+    "output": 256,
+    "reasoning": "off",
+    "mode": "custom",
+    "agentHost": "console",
+    "options": {
+      "kv": "8",
+      "fan": "max",
+      "depth": 2
+    },
+    "generation": {
+      "seed": 17,
+      "topP": 0.9,
+      "sampling": "custom",
+      "topK": 24,
+      "temperature": 0.7
+    }
+  },
+  "activeSurfaces": [
+    {
+      "backend": "mtplx",
+      "client": "chat",
+      "modelId": "model-1",
+      "project": "/fixture/project",
+      "context": 8192,
+      "output": 256,
+      "reasoning": "off",
+      "mode": "custom",
+      "agentHost": "launcher",
+      "options": {
+        "kv": "8",
+        "fan": "max",
+        "depth": 2
+      },
+      "generation": {
+        "sampling": "model"
+      },
+      "chat": {
+        "systemPrompt": "User-chosen system 雪",
+        "sampling": "model"
+      },
+      "apiKey": "SECRET",
+      "messages": [
+        "TRANSCRIPT"
+      ]
+    }
+  ]
+}

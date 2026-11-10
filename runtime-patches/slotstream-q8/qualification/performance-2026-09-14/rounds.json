@@ -1,0 +1,728 @@
+[
+  {
+    "round": 0,
+    "depth": 2,
+    "memoryGB": 32,
+    "warm": {
+      "events": [
+        {
+          "at": 4.688583416020265,
+          "metrics": {
+            "phase": "prefilled",
+            "prefill_seconds": 4.584860333,
+            "expert_pool_bytes": 14888448000,
+            "expert_pool_slots": 5385,
+            "version": 1,
+            "prompt_tokens": 49,
+            "processed_tokens": 49,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "at": 13.971382957999595,
+          "metrics": {
+            "decode_io_seconds": 1.9436185870000005,
+            "decode_seconds": 9.282681833,
+            "expert_pool_slots": 5385,
+            "phase": "completed",
+            "cached_tokens": 0,
+            "prompt_tokens": 49,
+            "prefill_seconds": 4.584860333,
+            "drafted_tokens": 122,
+            "version": 1,
+            "expert_pool_bytes": 14888448000,
+            "decode_tokens": 128,
+            "expert_hit_rate": 0.8392021007339914,
+            "decode_read_bytes": 12601958400,
+            "processed_tokens": 49,
+            "accepted_drafts": 66
+          }
+        }
+      ],
+      "firstOutputSeconds": 4.688971249997849,
+      "seconds": 13.971425791009096,
+      "usage": {
+        "completion_tokens": 128,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "prompt_tokens": 49,
+        "total_tokens": 177
+      },
+      "before": {
+        "reclaimableBytes": 17310072832,
+        "swapins": 6596754,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15686860800,
+        "swapins": 6596754,
+        "swapouts": 7606726
+      },
+      "output": "```python\n\"\"\"\nBounded LRU Cache with TTL and Thread Safety\n\nDesign Decisions:\n1. Use OrderedDict for O(1) LRU operations (move_to_end, popitem)\n2. Store values as tuples (value, expiry_time) to support TTL\n3. Use threading.RLock for reentrant lock safety in multi-threaded environments\n4. Lazy deletion of expired entries on access to avoid background cleanup threads\n5. Check expiry on every get/put operation to ensure correctness\n6. Maximum size bound enforced by evicting least recently used items when full\n7. All public methods are thread"
+    },
+    "measured": {
+      "events": [
+        {
+          "at": 0.0023120419937185943,
+          "metrics": {
+            "phase": "prefilled",
+            "prefill_seconds": 1.083e-06,
+            "expert_pool_bytes": 14888448000,
+            "expert_pool_slots": 5385,
+            "version": 1,
+            "prompt_tokens": 49,
+            "processed_tokens": 0,
+            "cached_tokens": 49
+          }
+        },
+        {
+          "at": 27.56044341699453,
+          "metrics": {
+            "processed_tokens": 0,
+            "expert_pool_bytes": 14888448000,
+            "prompt_tokens": 49,
+            "cached_tokens": 49,
+            "expert_pool_slots": 5385,
+            "accepted_drafts": 207,
+            "expert_hit_rate": 0.8106692394065256,
+            "prefill_seconds": 1.083e-06,
+            "version": 1,
+            "decode_seconds": 27.55769325,
+            "drafted_tokens": 352,
+            "phase": "completed",
+            "decode_io_seconds": 6.596739784999997,
+            "decode_tokens": 384,
+            "decode_read_bytes": 43551129600
+          }
+        }
+      ],
+      "firstOutputSeconds": 0.002499333000741899,
+      "seconds": 27.56048462499166,
+      "usage": {
+        "completion_tokens": 384,
+        "prompt_tokens_details": {
+          "cached_tokens": 49
+        },
+        "prompt_tokens": 49,
+        "total_tokens": 433
+      },
+      "before": {
+        "reclaimableBytes": 15686598656,
+        "swapins": 6596754,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15388475392,
+        "swapins": 6596754,
+        "swapouts": 7606726
+      },
+      "output": "```python\n\"\"\"\nBounded LRU Cache with TTL and Thread Safety\n\nDesign Decisions:\n1. Use OrderedDict for O(1) LRU operations (move_to_end, popitem)\n2. Store values as tuples (value, expiry_time) to support TTL\n3. Use threading.RLock for reentrant lock safety in multi-threaded environments\n4. Lazy deletion of expired entries on access to avoid background cleanup threads\n5. Check expiry on every get/put operation to ensure correctness\n6. Maximum size bound enforced by evicting least recently used items when full\n7. All public methods are thread-safe via RLock protection\n8. Return None for cache misses or expired entries\n9. Support both integer and float TTL values\n10. Handle edge cases: zero/negative TTL treated as immediate expiry\n\"\"\"\n\nimport time\nimport threading\nfrom collections import OrderedDict\nfrom typing import Any, Optional\n\n\nclass LRUCacheWithTTL:\n    \"\"\"\n    A bounded LRU cache with Time-To-Live (TTL) support and thread safety.\n    \n    Key Design Decisions Explained:\n    \n    1. **OrderedDict for LRU**: Python's OrderedDict maintains insertion order and\n       provides O(1) move_to_end() and popitem(last=False) operations, making it\n       ideal for implementing LRU eviction policy efficiently.\n    \n    2. **Tuple Storage (value, expiry)**: Each entry stores the value alongside its\n       absolute expiry timestamp. This allows lazy expiration checking without needing\n       a separate timer or background cleanup thread, reducing complexity and resource usage.\n    \n    3. **RLock vs Lock**: We use RLock (reentrant lock) instead of Lock because some\n       internal helper methods may need to acquire the same lock multiple times in\n       nested calls. While our"
+    }
+  },
+  {
+    "round": 0,
+    "depth": 3,
+    "memoryGB": 32,
+    "warm": {
+      "events": [
+        {
+          "at": 2.3113923339988105,
+          "metrics": {
+            "phase": "prefilled",
+            "prefill_seconds": 2.270479208,
+            "expert_pool_bytes": 14888448000,
+            "expert_pool_slots": 5385,
+            "prompt_tokens": 49,
+            "version": 1,
+            "cached_tokens": 0,
+            "processed_tokens": 49
+          }
+        },
+        {
+          "at": 10.823459709004965,
+          "metrics": {
+            "cached_tokens": 0,
+            "phase": "completed",
+            "accepted_drafts": 78,
+            "expert_pool_slots": 5385,
+            "expert_hit_rate": 0.8389845216869941,
+            "prompt_tokens": 49,
+            "decode_tokens": 128,
+            "expert_pool_bytes": 14888448000,
+            "prefill_seconds": 2.270479208,
+            "drafted_tokens": 150,
+            "processed_tokens": 49,
+            "decode_io_seconds": 1.9315590099999993,
+            "decode_read_bytes": 12629606400,
+            "decode_seconds": 8.511855667,
+            "version": 1
+          }
+        }
+      ],
+      "firstOutputSeconds": 2.311744209000608,
+      "seconds": 10.823499417019775,
+      "usage": {
+        "prompt_tokens": 49,
+        "total_tokens": 177,
+        "completion_tokens": 128,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "before": {
+        "reclaimableBytes": 17187930112,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15394914304,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "output": "```python\n\"\"\"\nBounded LRU Cache with TTL and Thread Safety\n\nDesign Decisions:\n1. Use OrderedDict for O(1) LRU operations (move_to_end, popitem)\n2. Store values as tuples (value, expiry_time) to support TTL\n3. Use threading.RLock for reentrant lock safety in multi-threaded environments\n4. Lazy deletion of expired entries on access to avoid background cleanup threads\n5. Check expiry on every get/put operation to ensure correctness\n6. Maximum size bound enforced by evicting least recently used items when full\n7. All public methods are thread"
+    },
+    "measured": {
+      "events": [
+        {
+          "at": 0.0023029170115478337,
+          "metrics": {
+            "phase": "prefilled",
+            "prefill_seconds": 7.91e-07,
+            "expert_pool_bytes": 14888448000,
+            "expert_pool_slots": 5385,
+            "prompt_tokens": 49,
+            "version": 1,
+            "cached_tokens": 49,
+            "processed_tokens": 0
+          }
+        },
+        {
+          "at": 30.0444290000014,
+          "metrics": {
+            "cached_tokens": 49,
+            "phase": "completed",
+            "accepted_drafts": 239,
+            "expert_pool_slots": 5385,
+            "expert_hit_rate": 0.803147722143366,
+            "prompt_tokens": 49,
+            "decode_tokens": 384,
+            "expert_pool_bytes": 14888448000,
+            "prefill_seconds": 7.91e-07,
+            "drafted_tokens": 432,
+            "processed_tokens": 0,
+            "decode_io_seconds": 6.63938481299996,
+            "decode_read_bytes": 44941824000,
+            "decode_seconds": 30.041682542,
+            "version": 1
+          }
+        }
+      ],
+      "firstOutputSeconds": 0.002472958993166685,
+      "seconds": 30.04448524999316,
+      "usage": {
+        "prompt_tokens": 49,
+        "total_tokens": 433,
+        "completion_tokens": 384,
+        "prompt_tokens_details": {
+          "cached_tokens": 49
+        }
+      },
+      "before": {
+        "reclaimableBytes": 15394914304,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15059877888,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "output": "```python\n\"\"\"\nBounded LRU Cache with TTL and Thread Safety\n\nDesign Decisions:\n1. Use OrderedDict for O(1) LRU operations (move_to_end, popitem)\n2. Store values as tuples (value, expiry_time) to support TTL\n3. Use threading.RLock for reentrant lock safety in multi-threaded environments\n4. Lazy deletion of expired entries on access to avoid background cleanup threads\n5. Check expiry on every get/put operation to ensure correctness\n6. Maximum size bound enforced by evicting least recently used items when full\n7. All public methods are thread-safe via RLock protection\n8. Return None for cache misses or expired entries\n9. Support both integer and float TTL values\n10. Handle edge cases: zero/negative TTL treated as immediate expiry\n\"\"\"\n\nimport time\nimport threading\nfrom collections import OrderedDict\nfrom typing import Any, Optional\n\n\nclass LRUCacheWithTTL:\n    \"\"\"\n    A bounded LRU cache with Time-To-Live (TTL) support and thread safety.\n    \n    Key Design Decisions Explained:\n    \n    1. **OrderedDict for LRU**: Python's OrderedDict maintains insertion order and\n       provides O(1) move_to_end() and popitem(last=False) operations, making it\n       ideal for implementing LRU eviction policy efficiently.\n    \n    2. **Tuple Storage (value, expiry)**: Each entry stores the value alongside its\n       absolute expiry timestamp. This allows lazy expiration checking without needing\n       a separate timer or background cleanup thread, reducing complexity and resource usage.\n    \n    3. **RLock vs Lock**: We use RLock (reentrant lock) instead of Lock because some\n       internal helper methods may need to acquire the same lock multiple times in\n       nested calls. While our"
+    }
+  },
+  {
+    "round": 1,
+    "depth": 3,
+    "memoryGB": 32,
+    "warm": {
+      "events": [
+        {
+          "at": 2.260124624997843,
+          "metrics": {
+            "cached_tokens": 0,
+            "prefill_seconds": 2.213793584,
+            "prompt_tokens": 50,
+            "expert_pool_bytes": 14888448000,
+            "expert_pool_slots": 5385,
+            "processed_tokens": 50,
+            "version": 1,
+            "phase": "prefilled"
+          }
+        },
+        {
+          "at": 11.818779249995714,
+          "metrics": {
+            "cached_tokens": 0,
+            "processed_tokens": 50,
+            "prefill_seconds": 2.213793584,
+            "expert_pool_slots": 5385,
+            "phase": "completed",
+            "decode_seconds": 9.558388125,
+            "decode_io_seconds": 2.2708394869999973,
+            "accepted_drafts": 76,
+            "prompt_tokens": 50,
+            "version": 1,
+            "drafted_tokens": 153,
+            "expert_hit_rate": 0.8209038525356744,
+            "decode_read_bytes": 15206400000,
+            "decode_tokens": 128,
+            "expert_pool_bytes": 14888448000
+          }
+        }
+      ],
+      "firstOutputSeconds": 2.260573207982816,
+      "seconds": 11.818830083007924,
+      "usage": {
+        "prompt_tokens": 50,
+        "completion_tokens": 128,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 178
+      },
+      "before": {
+        "reclaimableBytes": 17406050304,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15498690560,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "output": "```typescript\n/**\n * Task Queue with Retry Backoff, Cancellation, Concurrency Limits\n * \n * Design Decisions:\n * 1. We use a generic Task type to allow any async function as a task.\n * 2. Each task has metadata including retry count, max retries, and backoff strategy.\n * 3. The queue manages concurrency by tracking active tasks and queuing pending ones.\n * 4. Cancellation is handled via AbortController per task, allowing graceful cancellation.\n * 5. Exponential backoff with jitter prevents thundering herd problems on retries.\n * "
+    },
+    "measured": {
+      "events": [
+        {
+          "at": 0.002647290995810181,
+          "metrics": {
+            "phase": "prefilled",
+            "cached_tokens": 50,
+            "processed_tokens": 0,
+            "version": 1,
+            "prefill_seconds": 8.34e-07,
+            "expert_pool_slots": 5385,
+            "expert_pool_bytes": 14888448000,
+            "prompt_tokens": 50
+          }
+        },
+        {
+          "at": 25.60387391599943,
+          "metrics": {
+            "cached_tokens": 50,
+            "prefill_seconds": 8.34e-07,
+            "expert_pool_slots": 5385,
+            "decode_seconds": 25.600727125,
+            "processed_tokens": 0,
+            "phase": "completed",
+            "decode_io_seconds": 6.025815941000016,
+            "accepted_drafts": 248,
+            "prompt_tokens": 50,
+            "version": 1,
+            "drafted_tokens": 408,
+            "expert_hit_rate": 0.824936912135811,
+            "decode_read_bytes": 40266547200,
+            "decode_tokens": 384,
+            "expert_pool_bytes": 14888448000
+          }
+        }
+      ],
+      "firstOutputSeconds": 0.0028661249962169677,
+      "seconds": 25.60391662499751,
+      "usage": {
+        "prompt_tokens": 50,
+        "completion_tokens": 384,
+        "prompt_tokens_details": {
+          "cached_tokens": 50
+        },
+        "total_tokens": 434
+      },
+      "before": {
+        "reclaimableBytes": 15500460032,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15337193472,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "output": "```typescript\n/**\n * Task Queue with Retry Backoff, Cancellation, Concurrency Limits\n * \n * Design Decisions:\n * 1. We use a generic Task type to allow any async function as a task.\n * 2. Each task has metadata including retry count, max retries, and backoff strategy.\n * 3. The queue manages concurrency by tracking active tasks and queuing pending ones.\n * 4. Cancellation is handled via AbortController per task, allowing graceful cancellation.\n * 5. Exponential backoff with jitter prevents thundering herd problems on retries.\n * 6. Tasks are processed in FIFO order but can be prioritized if needed (not implemented here).\n * 7. Error handling distinguishes between cancellations and actual errors.\n * 8. The queue emits events for monitoring purposes (start, complete, error, cancel).\n */\n\n// ==================== Types ====================\n\ntype TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';\n\ninterface TaskMetadata {\n  id: string;\n  status: TaskStatus;\n  createdAt: number;\n  startedAt?: number;\n  completedAt?: number;\n  retryCount: number;\n  maxRetries: number;\n  lastError?: Error;\n}\n\ninterface TaskResult<T> {\n  taskId: string;\n  success: boolean;\n  data?: T;\n  error?: Error;\n  duration: number;\n  attempts: number;\n}\n\ninterface TaskOptions {\n  maxRetries?: number;\n  backoffBaseMs?: number;\n  backoffMaxMs?: number;\n  timeoutMs?: number;\n  priority?: number; // Higher priority runs first among same-status tasks\n}\n\ninterface Queued"
+    }
+  },
+  {
+    "round": 1,
+    "depth": 2,
+    "memoryGB": 32,
+    "warm": {
+      "events": [
+        {
+          "at": 2.1729204170114826,
+          "metrics": {
+            "phase": "prefilled",
+            "processed_tokens": 50,
+            "expert_pool_bytes": 14888448000,
+            "prefill_seconds": 2.131619375,
+            "expert_pool_slots": 5385,
+            "prompt_tokens": 50,
+            "cached_tokens": 0,
+            "version": 1
+          }
+        },
+        {
+          "at": 11.052628708013799,
+          "metrics": {
+            "expert_pool_slots": 5385,
+            "version": 1,
+            "prompt_tokens": 50,
+            "phase": "completed",
+            "prefill_seconds": 2.131619375,
+            "expert_pool_bytes": 14888448000,
+            "decode_tokens": 128,
+            "drafted_tokens": 112,
+            "accepted_drafts": 72,
+            "cached_tokens": 0,
+            "processed_tokens": 50,
+            "decode_seconds": 8.879424125,
+            "decode_io_seconds": 2.0878064100000038,
+            "expert_hit_rate": 0.8184901605211902,
+            "decode_read_bytes": 13732761600
+          }
+        }
+      ],
+      "firstOutputSeconds": 2.1733300000196323,
+      "seconds": 11.052672457997687,
+      "usage": {
+        "prompt_tokens": 50,
+        "completion_tokens": 128,
+        "total_tokens": 178,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "before": {
+        "reclaimableBytes": 17485594624,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15751544832,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "output": "```typescript\n/**\n * Task Queue with Retry Backoff, Cancellation, Concurrency Limits\n * \n * Design Decisions:\n * 1. We use a generic Task type to allow any async function as a task.\n * 2. Each task has metadata including retry count, max retries, and backoff strategy.\n * 3. The queue manages concurrency by tracking active tasks and queuing pending ones.\n * 4. Cancellation is handled via AbortController per task, allowing graceful cancellation.\n * 5. Exponential backoff with jitter prevents thundering herd problems on retries.\n * "
+    },
+    "measured": {
+      "events": [
+        {
+          "at": 0.002950292022433132,
+          "metrics": {
+            "phase": "prefilled",
+            "processed_tokens": 0,
+            "expert_pool_bytes": 14888448000,
+            "prefill_seconds": 7.5e-07,
+            "expert_pool_slots": 5385,
+            "prompt_tokens": 50,
+            "cached_tokens": 50,
+            "version": 1
+          }
+        },
+        {
+          "at": 24.928868999995757,
+          "metrics": {
+            "expert_pool_slots": 5385,
+            "version": 1,
+            "prompt_tokens": 50,
+            "phase": "completed",
+            "prefill_seconds": 7.5e-07,
+            "drafted_tokens": 320,
+            "decode_tokens": 384,
+            "expert_pool_bytes": 14888448000,
+            "accepted_drafts": 224,
+            "cached_tokens": 50,
+            "processed_tokens": 0,
+            "decode_seconds": 24.925562875,
+            "decode_io_seconds": 5.561954526000017,
+            "expert_hit_rate": 0.8397869790020456,
+            "decode_read_bytes": 35748864000
+          }
+        }
+      ],
+      "firstOutputSeconds": 0.003196000005118549,
+      "seconds": 24.928919334022794,
+      "usage": {
+        "prompt_tokens": 50,
+        "completion_tokens": 384,
+        "total_tokens": 434,
+        "prompt_tokens_details": {
+          "cached_tokens": 50
+        }
+      },
+      "before": {
+        "reclaimableBytes": 15750971392,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15307014144,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "output": "```typescript\n/**\n * Task Queue with Retry Backoff, Cancellation, Concurrency Limits\n * \n * Design Decisions:\n * 1. We use a generic Task type to allow any async function as a task.\n * 2. Each task has metadata including retry count, max retries, and backoff strategy.\n * 3. The queue manages concurrency by tracking active tasks and queuing pending ones.\n * 4. Cancellation is handled via AbortController per task, allowing graceful cancellation.\n * 5. Exponential backoff with jitter prevents thundering herd problems on retries.\n * 6. Tasks are processed in FIFO order but can be prioritized if needed (not implemented here).\n * 7. Error handling distinguishes between cancellations and actual errors.\n * 8. The queue emits events for monitoring purposes (start, complete, error, cancel).\n */\n\n// ==================== Types ====================\n\ntype TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';\n\ninterface TaskMetadata {\n  id: string;\n  status: TaskStatus;\n  createdAt: number;\n  startedAt?: number;\n  completedAt?: number;\n  retryCount: number;\n  maxRetries: number;\n  lastError?: Error;\n}\n\ninterface TaskResult<T> {\n  taskId: string;\n  success: boolean;\n  data?: T;\n  error?: Error;\n  duration: number;\n  attempts: number;\n}\n\ninterface TaskOptions {\n  maxRetries?: number;\n  backoffBaseMs?: number;\n  backoffMaxMs?: number;\n  timeoutMs?: number;\n  priority?: number; // Higher priority runs first among same-status tasks\n}\n\ninterface Queued"
+    }
+  },
+  {
+    "round": 2,
+    "depth": 2,
+    "memoryGB": 32,
+    "warm": {
+      "events": [
+        {
+          "at": 2.441845291003119,
+          "metrics": {
+            "prefill_seconds": 2.387557125,
+            "processed_tokens": 52,
+            "prompt_tokens": 52,
+            "cached_tokens": 0,
+            "phase": "prefilled",
+            "expert_pool_slots": 5385,
+            "expert_pool_bytes": 14888448000,
+            "version": 1
+          }
+        },
+        {
+          "at": 12.880792790994747,
+          "metrics": {
+            "expert_pool_slots": 5385,
+            "accepted_drafts": 68,
+            "cached_tokens": 0,
+            "prefill_seconds": 2.387557125,
+            "drafted_tokens": 120,
+            "version": 1,
+            "phase": "completed",
+            "decode_tokens": 128,
+            "prompt_tokens": 52,
+            "decode_io_seconds": 2.013626261000001,
+            "expert_hit_rate": 0.8335590142258614,
+            "decode_seconds": 10.438675916,
+            "decode_read_bytes": 12861849600,
+            "expert_pool_bytes": 14888448000,
+            "processed_tokens": 52
+          }
+        }
+      ],
+      "firstOutputSeconds": 2.442233582987683,
+      "seconds": 12.880831124988617,
+      "usage": {
+        "prompt_tokens": 52,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 180,
+        "completion_tokens": 128
+      },
+      "before": {
+        "reclaimableBytes": 17307533312,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15791013888,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "output": "# Streaming JSON Lines Parser with Bounded Memory\n\n## Design Overview\n\nThis implementation provides a streaming parser for JSON Lines (JSONL) format, where each line is a complete JSON object. Key design decisions:\n\n1. **Bounded Memory**: We process input in chunks rather than loading entire files into memory. The `ChunkedLineReader` reads fixed-size buffers and yields complete lines without accumulating all data.\n\n2. **Error Recovery**: When a malformed line is encountered, we log the error and continue processing subsequent lines rather than aborting entirely. This is critical for production systems where partial data loss is preferable to total failure."
+    },
+    "measured": {
+      "events": [
+        {
+          "at": 0.0024857080134097487,
+          "metrics": {
+            "prefill_seconds": 1.5e-06,
+            "processed_tokens": 0,
+            "prompt_tokens": 52,
+            "cached_tokens": 52,
+            "phase": "prefilled",
+            "expert_pool_slots": 5385,
+            "expert_pool_bytes": 14888448000,
+            "version": 1
+          }
+        },
+        {
+          "at": 31.315474583010655,
+          "metrics": {
+            "expert_pool_slots": 5385,
+            "accepted_drafts": 209,
+            "cached_tokens": 52,
+            "prefill_seconds": 1.5e-06,
+            "drafted_tokens": 350,
+            "version": 1,
+            "phase": "completed",
+            "decode_tokens": 384,
+            "prompt_tokens": 52,
+            "decode_io_seconds": 6.520898563999996,
+            "expert_hit_rate": 0.8186306225975001,
+            "decode_seconds": 31.312552667,
+            "decode_read_bytes": 42425856000,
+            "expert_pool_bytes": 14888448000,
+            "processed_tokens": 0
+          }
+        }
+      ],
+      "firstOutputSeconds": 0.0032271670061163604,
+      "seconds": 31.315524333011126,
+      "usage": {
+        "prompt_tokens": 52,
+        "prompt_tokens_details": {
+          "cached_tokens": 52
+        },
+        "total_tokens": 436,
+        "completion_tokens": 384
+      },
+      "before": {
+        "reclaimableBytes": 15788638208,
+        "swapins": 6596761,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15200010240,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "output": "# Streaming JSON Lines Parser with Bounded Memory\n\n## Design Overview\n\nThis implementation provides a streaming parser for JSON Lines (JSONL) format, where each line is a complete JSON object. Key design decisions:\n\n1. **Bounded Memory**: We process input in chunks rather than loading entire files into memory. The `ChunkedLineReader` reads fixed-size buffers and yields complete lines without accumulating all data.\n\n2. **Error Recovery**: When a malformed line is encountered, we log the error and continue processing subsequent lines rather than aborting entirely. This is critical for production systems where partial data loss is preferable to total failure.\n\n3. **Unicode Handling**: We properly handle UTF-8 encoded bytes, including multi-byte characters that may span chunk boundaries. The decoder uses incremental decoding to correctly reassemble split Unicode code points.\n\n4. **Streaming Architecture**: The parser operates as an iterator/generator chain, allowing consumers to process records one at a time without buffering the entire dataset.\n\n```python\n\"\"\"\nStreaming JSON Lines Parser with bounded memory, error recovery, and Unicode handling.\n\nDesign Decisions:\n- Chunked reading prevents OOM on large files by using fixed-size buffers.\n- Incremental UTF-8 decoding handles multi-byte chars split across chunks.\n- Error recovery skips bad lines instead of crashing, ensuring resilience.\n- Generator-based pipeline enables lazy evaluation and low memory footprint.\n- Detailed logging aids debugging while not interfering with normal operation.\n\"\"\"\n\nimport json\nimport io\nimport logging\nimport traceback\nfrom typing import Iterator, Optional, Tuple, Any, Dict, List\nfrom dataclasses import dataclass, field\nfrom enum import Enum, auto\n\n# Configure logging for detailed diagnostics\nlogging.basicConfig(\n    level=logging.INFO,\n    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'\n)\n"
+    }
+  },
+  {
+    "round": 2,
+    "depth": 3,
+    "memoryGB": 32,
+    "warm": {
+      "events": [
+        {
+          "at": 2.471873834001599,
+          "metrics": {
+            "cached_tokens": 0,
+            "processed_tokens": 52,
+            "expert_pool_slots": 5385,
+            "prompt_tokens": 52,
+            "version": 1,
+            "phase": "prefilled",
+            "prefill_seconds": 2.412331083,
+            "expert_pool_bytes": 14888448000
+          }
+        },
+        {
+          "at": 13.423232667002594,
+          "metrics": {
+            "prompt_tokens": 52,
+            "prefill_seconds": 2.412331083,
+            "phase": "completed",
+            "cached_tokens": 0,
+            "accepted_drafts": 74,
+            "decode_seconds": 10.951105583,
+            "decode_tokens": 128,
+            "expert_pool_slots": 5385,
+            "expert_pool_bytes": 14888448000,
+            "version": 1,
+            "decode_io_seconds": 2.2474041849999975,
+            "expert_hit_rate": 0.8248264134901516,
+            "processed_tokens": 52,
+            "drafted_tokens": 162,
+            "decode_read_bytes": 14788915200
+          }
+        }
+      ],
+      "firstOutputSeconds": 2.4722939589992166,
+      "seconds": 13.423269583989168,
+      "usage": {
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens": 128,
+        "prompt_tokens": 52,
+        "total_tokens": 180
+      },
+      "before": {
+        "reclaimableBytes": 17308286976,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15572959232,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "output": "# Streaming JSON Lines Parser with Bounded Memory\n\n## Design Overview\n\nThis implementation provides a streaming parser for JSON Lines (JSONL) format, where each line is a complete JSON object. Key design decisions:\n\n1. **Bounded Memory**: We process input in chunks rather than loading entire files into memory. The `ChunkedLineReader` reads fixed-size buffers and yields complete lines without accumulating all data.\n\n2. **Error Recovery**: When a malformed line is encountered, we log the error and continue processing subsequent lines rather than aborting entirely. This is critical for production systems where partial data loss is preferable to total failure."
+    },
+    "measured": {
+      "events": [
+        {
+          "at": 0.0022868339729029685,
+          "metrics": {
+            "expert_pool_bytes": 14888448000,
+            "phase": "prefilled",
+            "cached_tokens": 52,
+            "version": 1,
+            "processed_tokens": 0,
+            "prompt_tokens": 52,
+            "prefill_seconds": 1.125e-06,
+            "expert_pool_slots": 5385
+          }
+        },
+        {
+          "at": 33.20581158399,
+          "metrics": {
+            "expert_pool_slots": 5385,
+            "version": 1,
+            "expert_hit_rate": 0.8201246150540715,
+            "prefill_seconds": 1.125e-06,
+            "processed_tokens": 0,
+            "cached_tokens": 52,
+            "decode_io_seconds": 7.090977250999996,
+            "prompt_tokens": 52,
+            "decode_tokens": 384,
+            "decode_seconds": 33.203059708,
+            "accepted_drafts": 223,
+            "phase": "completed",
+            "drafted_tokens": 483,
+            "expert_pool_bytes": 14888448000,
+            "decode_read_bytes": 47383142400
+          }
+        }
+      ],
+      "firstOutputSeconds": 0.002497208974091336,
+      "seconds": 33.20586612497573,
+      "usage": {
+        "prompt_tokens_details": {
+          "cached_tokens": 52
+        },
+        "completion_tokens": 384,
+        "prompt_tokens": 52,
+        "total_tokens": 436
+      },
+      "before": {
+        "reclaimableBytes": 15572303872,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15398076416,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "output": "# Streaming JSON Lines Parser with Bounded Memory\n\n## Design Overview\n\nThis implementation provides a streaming parser for JSON Lines (JSONL) format, where each line is a complete JSON object. Key design decisions:\n\n1. **Bounded Memory**: We process input in chunks rather than loading entire files into memory. The `ChunkedLineReader` reads fixed-size buffers and yields complete lines without accumulating all data.\n\n2. **Error Recovery**: When a malformed line is encountered, we log the error and continue processing subsequent lines rather than aborting entirely. This is critical for production systems where partial data loss is preferable to total failure.\n\n3. **Unicode Handling**: We properly handle UTF-8 encoded bytes, including multi-byte characters that may span chunk boundaries. The decoder uses incremental decoding to correctly reassemble split Unicode code points.\n\n4. **Streaming Architecture**: The parser operates as an iterator/generator chain, allowing consumers to process records one at a time without buffering the entire dataset.\n\n```python\n\"\"\"\nStreaming JSON Lines Parser with bounded memory, error recovery, and Unicode handling.\n\nDesign Decisions:\n- Chunked reading prevents OOM on large files by using fixed-size buffers.\n- Incremental UTF-8 decoding handles multi-byte chars split across chunks.\n- Error recovery skips bad lines instead of crashing, ensuring resilience.\n- Generator-based pipeline enables lazy evaluation and low memory footprint.\n- Detailed logging aids debugging while not interfering with normal operation.\n\"\"\"\n\nimport json\nimport io\nimport logging\nimport traceback\nfrom typing import Iterator, Optional, Tuple, Any, Dict, List\nfrom dataclasses import dataclass, field\nfrom enum import Enum, auto\n\n# Configure logging for detailed diagnostics\nlogging.basicConfig(\n    level=logging.INFO,\n    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'\n)\n"
+    }
+  }
+]

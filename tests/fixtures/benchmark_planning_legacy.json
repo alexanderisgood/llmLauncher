@@ -1,0 +1,366 @@
+{
+  "functions": [
+    "benchmark_words",
+    "qwen_token_budgeted_words",
+    "uzu_qualification_words",
+    "benchmark_prompt",
+    "benchmark_agentic_cases",
+    "uzu_conversation_target",
+    "uzu_conversation_case",
+    "benchmark_measurement_count",
+    "benchmark_speed_sampling",
+    "validated_benchmark_request",
+    "_ordered_unique",
+    "_mtplx_long_context_suite_requested",
+    "mtplx_long_context_operator_tuning_plan",
+    "benchmark_job_measurement_routes",
+    "benchmark_job_base_maximum_route_count",
+    "benchmark_job_maximum_route_count",
+    "benchmark_job_public_modes",
+    "_public_benchmark_count",
+    "_public_rejected_faster_candidate_count",
+    "public_benchmark_settings_search_plan",
+    "_public_runtime_search_axes",
+    "_public_benchmark_route_search_plan",
+    "public_benchmark_settings_search_result",
+    "_public_benchmark_route_search_result",
+    "lmstudio_mtp_tuning_candidate_key",
+    "lmstudio_mtp_tuning_depths",
+    "lmstudio_mtp_tuning_plan",
+    "validated_lmstudio_mtp_tuning_request",
+    "dflash2_tuning_candidate_key",
+    "dflash2_tuning_block_sizes",
+    "dflash2_tuning_plan",
+    "validated_dflash2_tuning_request",
+    "prepare_calibration_tuning_plan",
+    "engine_settings_sweep_contract",
+    "_engine_settings_candidate_key",
+    "_engine_settings_candidate_label",
+    "_engine_settings_for_sweep_candidate",
+    "_engine_settings_sweep_candidates",
+    "prepare_engine_settings_sweep",
+    "validate_engine_settings_sweep_budget",
+    "rotated_engine_shootout_jobs",
+    "validated_route_qualification_request",
+    "validated_engine_shootout_request",
+    "validated_calibration_cooling",
+    "qwen_ple_qualification_preparation",
+    "calibration_plan",
+    "validated_ane_tuning_request"
+  ],
+  "pureFunctions": [
+    "_engine_settings_candidate_key",
+    "_ordered_unique",
+    "_public_benchmark_count",
+    "_public_rejected_faster_candidate_count",
+    "_public_runtime_search_axes",
+    "benchmark_measurement_count",
+    "dflash2_tuning_block_sizes",
+    "dflash2_tuning_candidate_key",
+    "lmstudio_mtp_tuning_candidate_key",
+    "lmstudio_mtp_tuning_depths",
+    "rotated_engine_shootout_jobs",
+    "validated_calibration_cooling"
+  ],
+  "constants": [
+    "ANE_TUNER_MINIMUM_RUNTIME",
+    "ANE_TUNER_MINIMUM_SPEEDUP_PERCENT",
+    "ANE_TUNER_REPEATS",
+    "ANE_TUNER_SEQUENCE_LENGTH",
+    "BACKEND_LABELS",
+    "BENCHMARK_COOLDOWN_MAX_SECONDS",
+    "BENCHMARK_COOLDOWN_MEMORY_TOLERANCE_BYTES",
+    "BENCHMARK_DFLASH_TUNER_DRAFT_QUANTS",
+    "BENCHMARK_DFLASH_TUNER_MAX_CANDIDATES",
+    "BENCHMARK_DFLASH_TUNER_VERIFY_MODES",
+    "BENCHMARK_DFLASH_TUNER_VERSION",
+    "BENCHMARK_MINIMUM_SPEEDUP",
+    "BENCHMARK_MTP_TUNER_CUTOFFS",
+    "BENCHMARK_MTP_TUNER_MAX_CANDIDATES",
+    "BENCHMARK_MTP_TUNER_VERSION",
+    "BENCHMARK_REASONING_POLICY_ALL_ENGINES",
+    "BENCHMARK_SUITES",
+    "BENCHMARK_WORDS",
+    "CLIENT_ADAPTERS",
+    "DFLASH_KV_COMPARISON_REASON",
+    "ENGINE_ADAPTERS",
+    "ENGINE_PREFERENCE_LABELS",
+    "ENGINE_SETTINGS_SWEEP_MAX_GENERATED_REQUESTS",
+    "ENGINE_SETTINGS_SWEEP_MAX_MODEL_LOADS",
+    "ENGINE_SETTINGS_SWEEP_VERSION",
+    "LAUNCH_PROFILE_NAME_MAX",
+    "LLAMACPP_PLE_CONTEXT",
+    "MTPLX_LONG_CONTEXT_2111_ROUTE",
+    "MTPLX_LONG_CONTEXT_2111_SWEEP_VERSION",
+    "MTPLX_LONG_CONTEXT_64K_SUITE",
+    "MTPLX_LONG_CONTEXT_BASELINE_ENV",
+    "MTPLX_LONG_CONTEXT_CANDIDATE_ENV",
+    "MTPLX_LONG_CONTEXT_DEFAULT_ROUTE",
+    "MTPLX_LONG_CONTEXT_MINIMUM",
+    "MTPLX_LONG_CONTEXT_MINIMUM_PROMPT",
+    "MTPLX_LONG_CONTEXT_TARGET_PROMPT",
+    "QWEN_PLE_QUALIFICATION_CONTEXT",
+    "QWEN_PLE_QUALIFICATION_OUTPUT",
+    "QWEN_PLE_QUALIFICATION_REASONING",
+    "ROUTE_QUALIFICATION_MAX_TOKENS",
+    "ROUTE_QUALIFICATION_VERSION",
+    "SSD_STREAMING_BACKENDS",
+    "SSD_STREAMING_PREFILL_SIZES",
+    "UZU_PI_BENCHMARK_LIMITATION",
+    "UZU_QUALIFICATION_SAMPLE_MIN_TOKENS"
+  ],
+  "callbacks": {
+    "_mtplx_long_context_capability_matches": [
+      "artifacts",
+      "mtplx_long_context_capability_matches"
+    ],
+    "accelerated_model_alternatives": [
+      "evidence",
+      "accelerated_model_alternatives"
+    ],
+    "add_benchmark_engine_evidence": [
+      "evidence",
+      "add_benchmark_engine_evidence"
+    ],
+    "ane_cpu_sharing_profile": [
+      "artifacts",
+      "ane_cpu_sharing_profile"
+    ],
+    "ane_memory_readiness": [
+      "artifacts",
+      "ane_memory_readiness"
+    ],
+    "ane_quantization_profile": [
+      "artifacts",
+      "ane_quantization_profile"
+    ],
+    "apply_route_qualification_budget": [
+      "qualification",
+      "apply_route_qualification_budget"
+    ],
+    "benchmark_acceleration_reason": [
+      "evidence",
+      "benchmark_acceleration_reason"
+    ],
+    "benchmark_backend_eligibility": [
+      "evidence",
+      "benchmark_backend_eligibility"
+    ],
+    "benchmark_engine_settings": [
+      "evidence",
+      "benchmark_engine_settings"
+    ],
+    "benchmark_engine_settings_label": [
+      "evidence",
+      "benchmark_engine_settings_label"
+    ],
+    "benchmark_mode_summary": [
+      "evidence",
+      "benchmark_mode_summary"
+    ],
+    "benchmark_public_mode_label": [
+      "evidence",
+      "benchmark_public_mode_label"
+    ],
+    "benchmark_reasoning_contract": [
+      "evidence",
+      "benchmark_reasoning_contract"
+    ],
+    "benchmark_route_selection_metric": [
+      "evidence",
+      "benchmark_route_selection_metric"
+    ],
+    "benchmark_route_settings_label": [
+      "evidence",
+      "benchmark_route_settings_label"
+    ],
+    "best_engine_request": [
+      "evidence",
+      "best_engine_request"
+    ],
+    "bounded_integer": [
+      "contracts",
+      "bounded_integer"
+    ],
+    "build_route_qualification_contract": [
+      "qualification",
+      "build_route_qualification_contract"
+    ],
+    "chat_settings_from_sampling_contract": [
+      "contracts",
+      "chat_settings_from_sampling_contract"
+    ],
+    "command_version": [
+      "artifacts",
+      "command_version"
+    ],
+    "dflash2_capability_valid": [
+      "evidence",
+      "dflash2_capability_valid"
+    ],
+    "dflash2_tuning_controls": [
+      "evidence",
+      "dflash2_tuning_controls"
+    ],
+    "dflash_quantized_fallback": [
+      "evidence",
+      "dflash_quantized_fallback"
+    ],
+    "hardware_fingerprint": [
+      "artifacts",
+      "hardware_fingerprint"
+    ],
+    "is_qwen4_exp_record": [
+      "artifacts",
+      "is_qwen4_exp_record"
+    ],
+    "lmstudio_mtp_controls": [
+      "evidence",
+      "lmstudio_mtp_controls"
+    ],
+    "model_artifact_fingerprint": [
+      "artifacts",
+      "model_artifact_fingerprint"
+    ],
+    "mtplx_long_context_2111_contract": [
+      "artifacts",
+      "mtplx_long_context_2111_contract"
+    ],
+    "mtplx_mtp_depth_candidates": [
+      "evidence",
+      "mtplx_mtp_depth_candidates"
+    ],
+    "normalized_request": [
+      "contracts",
+      "normalized_request"
+    ],
+    "normalized_ssd_comparison_request": [
+      "contracts",
+      "normalized_ssd_comparison_request"
+    ],
+    "omlx_has_recommended_dflash2_runtime": [
+      "artifacts",
+      "omlx_has_recommended_dflash2_runtime"
+    ],
+    "omlx_qwen_kernel_status": [
+      "artifacts",
+      "omlx_qwen_kernel_status"
+    ],
+    "omlx_version_at_least": [
+      "artifacts",
+      "omlx_version_at_least"
+    ],
+    "optimal_request": [
+      "evidence",
+      "optimal_request"
+    ],
+    "optimizer_evidence": [
+      "evidence",
+      "optimizer_evidence"
+    ],
+    "physical_memory_bytes": [
+      "resources",
+      "physical_memory_bytes"
+    ],
+    "qwen_flash_next_model_alternatives": [
+      "evidence",
+      "qwen_flash_next_model_alternatives"
+    ],
+    "read_json": [
+      "artifacts",
+      "read_json"
+    ],
+    "route_host_support": [
+      "evidence",
+      "route_host_support"
+    ],
+    "route_performance_evidence": [
+      "evidence",
+      "route_performance_evidence"
+    ],
+    "route_qualification_admission_ready": [
+      "resources",
+      "route_qualification_admission_ready"
+    ],
+    "route_qualification_engine_reason": [
+      "evidence",
+      "route_qualification_engine_reason"
+    ],
+    "route_qualification_memory_admission": [
+      "resources",
+      "route_qualification_memory_admission"
+    ],
+    "route_qualification_reasoning_contract": [
+      "qualification",
+      "route_qualification_reasoning_contract"
+    ],
+    "route_qualification_spec": [
+      "qualification",
+      "route_qualification_spec"
+    ],
+    "sampling_contract_from_settings": [
+      "contracts",
+      "sampling_contract_from_settings"
+    ],
+    "sampling_route_enforcement": [
+      "contracts",
+      "sampling_route_enforcement"
+    ],
+    "ssd_profile_candidate_backends": [
+      "evidence",
+      "ssd_profile_candidate_backends"
+    ],
+    "uzu_qualification_request_tokens": [
+      "qualification",
+      "uzu_qualification_request_tokens"
+    ],
+    "validate_runtime_context": [
+      "contracts",
+      "validate_runtime_context"
+    ],
+    "validate_sampling_capability": [
+      "contracts",
+      "validate_sampling_capability"
+    ],
+    "validated_chat_settings": [
+      "contracts",
+      "validated_chat_settings"
+    ],
+    "validated_cross_engine_profile_options": [
+      "contracts",
+      "validated_cross_engine_profile_options"
+    ],
+    "validated_launch_profile_request": [
+      "contracts",
+      "validated_launch_profile_request"
+    ],
+    "validated_limits": [
+      "contracts",
+      "validated_limits"
+    ],
+    "validated_optimizer_evidence_binding": [
+      "contracts",
+      "validated_optimizer_evidence_binding"
+    ],
+    "validated_profile_options": [
+      "contracts",
+      "validated_profile_options"
+    ],
+    "validated_sampling_contract": [
+      "contracts",
+      "validated_sampling_contract"
+    ],
+    "weight_completeness": [
+      "artifacts",
+      "weight_completeness"
+    ]
+  },
+  "fixtureSha256": "65e7550dd22c2fa0cedad7269740b54584850ebbf40e85b9f0ca49043971440b",
+  "sourceSha256": "814e8d6083a05cb520a400058a9bb5008a6f6aa1459235c04dedadca9c68bb83",
+  "dynamicAttributes": {
+    "BINARIES.get": "self.live.binary"
+  },
+  "dynamicCalls": {
+    "ENGINE_ADAPTERS[backend].public()": "self.live.engine_public(backend)"
+  }
+}

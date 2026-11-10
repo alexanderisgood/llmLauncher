@@ -1,0 +1,1701 @@
+{
+  "kind": "frozen-benchmark-evidence-v4",
+  "preExtractionFunctionsSha256": "7843a3c772d6d8e83f7f9d441cdec8d33c81a1e89a16b1778a3a5eadbc87b0c0",
+  "cases": [
+    {
+      "method": "benchmark_engine_settings",
+      "args": [
+        "omlx",
+        {
+          "profile": "turbo",
+          "fan": "default",
+          "kv": "q8",
+          "depth": 3,
+          "prefillSize": 64,
+          "privateUnlisted": "generated-private"
+        }
+      ],
+      "kwargs": {},
+      "expected": {}
+    },
+    {
+      "method": "benchmark_engine_settings",
+      "args": [
+        "lmstudio",
+        {
+          "profile": "turbo",
+          "fan": "default",
+          "kv": "q8",
+          "depth": 3,
+          "prefillSize": 64,
+          "privateUnlisted": "generated-private"
+        }
+      ],
+      "kwargs": {},
+      "expected": {}
+    },
+    {
+      "method": "benchmark_engine_settings",
+      "args": [
+        "mtplx",
+        {
+          "profile": "turbo",
+          "fan": "default",
+          "kv": "q8",
+          "depth": 3,
+          "prefillSize": 64,
+          "privateUnlisted": "generated-private"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "profile": "turbo",
+        "fan": "default"
+      }
+    },
+    {
+      "method": "benchmark_engine_settings",
+      "args": [
+        "swiftlm",
+        {
+          "profile": "turbo",
+          "fan": "default",
+          "kv": "q8",
+          "depth": 3,
+          "prefillSize": 64,
+          "privateUnlisted": "generated-private"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "prefillSize": 64
+      }
+    },
+    {
+      "method": "benchmark_engine_settings",
+      "args": [
+        "mference",
+        {
+          "profile": "turbo",
+          "fan": "default",
+          "kv": "q8",
+          "depth": 3,
+          "prefillSize": 64,
+          "privateUnlisted": "generated-private"
+        }
+      ],
+      "kwargs": {},
+      "expected": {}
+    },
+    {
+      "method": "benchmark_engine_settings",
+      "args": [
+        "slotstream",
+        {
+          "profile": "turbo",
+          "fan": "default",
+          "kv": "q8",
+          "depth": 3,
+          "prefillSize": 64,
+          "privateUnlisted": "generated-private"
+        }
+      ],
+      "kwargs": {},
+      "expected": {}
+    },
+    {
+      "method": "benchmark_engine_settings",
+      "args": [
+        "kolibri",
+        {
+          "profile": "turbo",
+          "fan": "default",
+          "kv": "q8",
+          "depth": 3,
+          "prefillSize": 64,
+          "privateUnlisted": "generated-private"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "prefillSize": 64
+      }
+    },
+    {
+      "method": "benchmark_engine_settings",
+      "args": [
+        "splash",
+        {
+          "profile": "turbo",
+          "fan": "default",
+          "kv": "q8",
+          "depth": 3,
+          "prefillSize": 64,
+          "privateUnlisted": "generated-private"
+        }
+      ],
+      "kwargs": {},
+      "expected": {}
+    },
+    {
+      "method": "benchmark_engine_settings",
+      "args": [
+        "uzu",
+        {
+          "profile": "turbo",
+          "fan": "default",
+          "kv": "q8",
+          "depth": 3,
+          "prefillSize": 64,
+          "privateUnlisted": "generated-private"
+        }
+      ],
+      "kwargs": {},
+      "expected": {}
+    },
+    {
+      "method": "benchmark_engine_settings",
+      "args": [
+        "unknown",
+        {
+          "profile": "turbo",
+          "fan": "default",
+          "kv": "q8",
+          "depth": 3,
+          "prefillSize": 64,
+          "privateUnlisted": "generated-private"
+        }
+      ],
+      "kwargs": {},
+      "expected": {}
+    },
+    {
+      "method": "benchmark_runtime_integrity_issue",
+      "args": [
+        {
+          "backend": "mtplx",
+          "runtimeVersion": "2.9.0",
+          "engineSettings": {
+            "profile": "turbo"
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": "MTPLX 2.9.0 did not apply its complete Turbo fast path. Update to 2.9.1 and repeat this route; a legacy 2.9.0 record without a captured profile is treated as affected."
+    },
+    {
+      "method": "benchmark_runtime_integrity_issue",
+      "args": [
+        {
+          "backend": "mtplx",
+          "runtimeVersion": "2.9.0",
+          "engineSettings": {
+            "profile": "stable"
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_runtime_integrity_issue",
+      "args": [
+        {
+          "backend": "mtplx",
+          "runtimeVersion": "2.9.0",
+          "engineSettings": {
+            "profile": ""
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": "MTPLX 2.9.0 did not apply its complete Turbo fast path. Update to 2.9.1 and repeat this route; a legacy 2.9.0 record without a captured profile is treated as affected."
+    },
+    {
+      "method": "benchmark_runtime_integrity_issue",
+      "args": [
+        {
+          "backend": "mtplx",
+          "runtimeVersion": "2.9.1",
+          "engineSettings": {
+            "profile": "turbo"
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "omlx"
+        }
+      ],
+      "kwargs": {},
+      "expected": "This saved run does not verify the corrected correctness-test sampling contract. Its measurements remain in history, but re-test this route before using it to choose settings automatically."
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "omlx",
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "lmstudio"
+        }
+      ],
+      "kwargs": {},
+      "expected": "This saved run does not verify the corrected correctness-test sampling contract. Its measurements remain in history, but re-test this route before using it to choose settings automatically."
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "lmstudio",
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "mtplx"
+        }
+      ],
+      "kwargs": {},
+      "expected": "This saved run does not verify the corrected correctness-test sampling contract. Its measurements remain in history, but re-test this route before using it to choose settings automatically."
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "mtplx",
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "kolibri"
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "kolibri",
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "splash"
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "splash",
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "mtplx",
+          "kind": "mtplx-long-context-operator-tuning",
+          "mtplxOperatorSweep": {
+            "version": 4
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": "This saved run does not verify the corrected correctness-test sampling contract. Its measurements remain in history, but re-test this route before using it to choose settings automatically."
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "mtplx",
+          "kind": "mtplx-long-context-operator-tuning",
+          "mtplxOperatorSweep": {
+            "version": 5
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_probe_integrity_issue",
+      "args": [
+        {
+          "backend": "mtplx",
+          "kind": "mtplx-long-context-operator-tuning",
+          "mtplxOperatorSweep": {
+            "version": 6
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": "This saved run does not verify the corrected correctness-test sampling contract. Its measurements remain in history, but re-test this route before using it to choose settings automatically."
+    },
+    {
+      "method": "_positive_finite_number",
+      "args": [
+        null
+      ],
+      "kwargs": {},
+      "expected": false
+    },
+    {
+      "method": "_positive_finite_number",
+      "args": [
+        false
+      ],
+      "kwargs": {},
+      "expected": false
+    },
+    {
+      "method": "_positive_finite_number",
+      "args": [
+        true
+      ],
+      "kwargs": {},
+      "expected": false
+    },
+    {
+      "method": "_positive_finite_number",
+      "args": [
+        -1
+      ],
+      "kwargs": {},
+      "expected": false
+    },
+    {
+      "method": "_positive_finite_number",
+      "args": [
+        0
+      ],
+      "kwargs": {},
+      "expected": false
+    },
+    {
+      "method": "_positive_finite_number",
+      "args": [
+        1
+      ],
+      "kwargs": {},
+      "expected": true
+    },
+    {
+      "method": "_positive_finite_number",
+      "args": [
+        1.5
+      ],
+      "kwargs": {},
+      "expected": true
+    },
+    {
+      "method": "_positive_finite_number",
+      "args": [
+        "1.5"
+      ],
+      "kwargs": {},
+      "expected": false
+    },
+    {
+      "method": "benchmark_route_selection_metric",
+      "args": [
+        {}
+      ],
+      "kwargs": {},
+      "expected": "end-to-end-tokens-per-second"
+    },
+    {
+      "method": "benchmark_route_selection_metric",
+      "args": [
+        {
+          "enginePreference": "throughput"
+        }
+      ],
+      "kwargs": {},
+      "expected": "generation-tokens-per-second"
+    },
+    {
+      "method": "benchmark_route_selection_metric",
+      "args": [
+        {
+          "enginePreference": "fastest"
+        }
+      ],
+      "kwargs": {},
+      "expected": "end-to-end-tokens-per-second"
+    },
+    {
+      "method": "benchmark_route_selection_metric",
+      "args": [
+        {
+          "enginePreference": "fastest",
+          "calibrationTuningPlan": {
+            "strategy": "isolated-long-context-operator-comparison"
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": "generation-tokens-per-second"
+    },
+    {
+      "method": "tuning_speed_fields",
+      "args": [
+        "generation-tokens-per-second"
+      ],
+      "kwargs": {},
+      "expected": [
+        "decodeTokensPerSecond",
+        "medianDecodeTokensPerSecond"
+      ]
+    },
+    {
+      "method": "tuning_speed_fields",
+      "args": [
+        "end-to-end-tokens-per-second"
+      ],
+      "kwargs": {},
+      "expected": [
+        "endToEndTokensPerSecond",
+        "medianEndToEndTokensPerSecond"
+      ]
+    },
+    {
+      "method": "benchmark_integrity_issue",
+      "args": [
+        {
+          "backend": "omlx",
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_integrity_issue",
+      "args": [
+        {
+          "backend": "mtplx",
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_integrity_issue",
+      "args": [
+        {
+          "backend": "swiftlm",
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": null
+    },
+    {
+      "method": "benchmark_integrity_issue",
+      "args": [
+        {
+          "backend": "kolibri",
+          "selectionPreference": "throughput",
+          "modes": {
+            "ar": {
+              "samples": [
+                {
+                  "decodeTokensPerSecond": 999
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": "This saved generation comparison used delivery timing without native request proof. Its end-to-end measurements remain historical; repeat the route before selecting it for generation TPS."
+    },
+    {
+      "method": "benchmark_integrity_issue",
+      "args": [
+        {
+          "backend": "splash",
+          "selectionPreference": "throughput",
+          "modes": {
+            "ar": {
+              "samples": [
+                {
+                  "decodeTokensPerSecond": 999
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "kwargs": {},
+      "expected": "This saved generation comparison used delivery timing without native request proof. Its end-to-end measurements remain historical; repeat the route before selecting it for generation TPS."
+    },
+    {
+      "method": "benchmark_record_identity",
+      "args": [
+        {
+          "id": "0",
+          "kind": "throughput",
+          "backend": "omlx",
+          "scope": "local",
+          "modelFingerprint": "generated-model",
+          "hardwareFingerprint": "generated-mac",
+          "runtimeVersion": "generated-runtime",
+          "createdAt": "2026-10-06T12:00:00Z",
+          "configuredOutputLimit": 1024,
+          "measuredRequestMaxTokens": 512,
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          },
+          "engineSettings": {
+            "profile": "turbo"
+          },
+          "scenarioContract": [
+            "cold",
+            "warmPrefix"
+          ]
+        }
+      ],
+      "kwargs": {},
+      "expected": [
+        "omlx",
+        "generated-model",
+        null,
+        "generated-runtime",
+        "generated-mac",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "{\"profile\":\"turbo\"}",
+        "[\"cold\",\"warmPrefix\"]",
+        null,
+        null
+      ]
+    },
+    {
+      "method": "benchmark_record_identity",
+      "args": [
+        {
+          "id": "1",
+          "kind": "route-qualification",
+          "backend": "llamacpp",
+          "scope": "local",
+          "modelFingerprint": "generated-model",
+          "hardwareFingerprint": "generated-mac",
+          "runtimeVersion": "generated-runtime",
+          "createdAt": "2026-10-06T12:00:01Z",
+          "configuredOutputLimit": 1024,
+          "measuredRequestMaxTokens": 512,
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          },
+          "engineSettings": {
+            "profile": "turbo"
+          },
+          "scenarioContract": [
+            "cold",
+            "warmPrefix"
+          ]
+        }
+      ],
+      "kwargs": {},
+      "expected": [
+        "llamacpp",
+        "generated-model",
+        null,
+        "generated-runtime",
+        "generated-mac",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "{\"profile\":\"turbo\"}",
+        "[\"cold\",\"warmPrefix\"]",
+        1024,
+        512
+      ]
+    },
+    {
+      "method": "benchmark_record_identity",
+      "args": [
+        {
+          "id": "2",
+          "kind": "route-qualification",
+          "backend": "llamacpp",
+          "scope": "local",
+          "modelFingerprint": "generated-model",
+          "hardwareFingerprint": "generated-mac",
+          "runtimeVersion": "generated-runtime",
+          "createdAt": "2026-10-06T12:00:02Z",
+          "configuredOutputLimit": 2048,
+          "measuredRequestMaxTokens": 512,
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          },
+          "engineSettings": {
+            "profile": "turbo"
+          },
+          "scenarioContract": [
+            "cold",
+            "warmPrefix"
+          ]
+        }
+      ],
+      "kwargs": {},
+      "expected": [
+        "llamacpp",
+        "generated-model",
+        null,
+        "generated-runtime",
+        "generated-mac",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "{\"profile\":\"turbo\"}",
+        "[\"cold\",\"warmPrefix\"]",
+        2048,
+        512
+      ]
+    },
+    {
+      "method": "benchmark_record_identity",
+      "args": [
+        {
+          "id": "3",
+          "kind": "route-qualification",
+          "backend": "uzu",
+          "scope": "local",
+          "modelFingerprint": "generated-model",
+          "hardwareFingerprint": "generated-mac",
+          "runtimeVersion": "generated-runtime",
+          "createdAt": "2026-10-06T12:00:03Z",
+          "configuredOutputLimit": 1024,
+          "measuredRequestMaxTokens": 512,
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          },
+          "engineSettings": {
+            "profile": "turbo"
+          },
+          "scenarioContract": [
+            "cold",
+            "warmPrefix"
+          ]
+        }
+      ],
+      "kwargs": {},
+      "expected": [
+        "uzu",
+        "generated-model",
+        null,
+        "generated-runtime",
+        "generated-mac",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "{\"profile\":\"turbo\"}",
+        "[\"cold\",\"warmPrefix\"]",
+        1024,
+        512
+      ]
+    },
+    {
+      "method": "latest_benchmark_records_by_identity",
+      "args": [
+        [
+          {
+            "id": "0",
+            "kind": "throughput",
+            "backend": "omlx",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:00Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "1",
+            "kind": "route-qualification",
+            "backend": "llamacpp",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:01Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "2",
+            "kind": "route-qualification",
+            "backend": "llamacpp",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:02Z",
+            "configuredOutputLimit": 2048,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "3",
+            "kind": "route-qualification",
+            "backend": "uzu",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:03Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "latest",
+            "kind": "throughput",
+            "backend": "omlx",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T13:00:00Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          }
+        ]
+      ],
+      "kwargs": {},
+      "expected": [
+        {
+          "id": "1",
+          "kind": "route-qualification",
+          "backend": "llamacpp",
+          "scope": "local",
+          "modelFingerprint": "generated-model",
+          "hardwareFingerprint": "generated-mac",
+          "runtimeVersion": "generated-runtime",
+          "createdAt": "2026-10-06T12:00:01Z",
+          "configuredOutputLimit": 1024,
+          "measuredRequestMaxTokens": 512,
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          },
+          "engineSettings": {
+            "profile": "turbo"
+          },
+          "scenarioContract": [
+            "cold",
+            "warmPrefix"
+          ]
+        },
+        {
+          "id": "2",
+          "kind": "route-qualification",
+          "backend": "llamacpp",
+          "scope": "local",
+          "modelFingerprint": "generated-model",
+          "hardwareFingerprint": "generated-mac",
+          "runtimeVersion": "generated-runtime",
+          "createdAt": "2026-10-06T12:00:02Z",
+          "configuredOutputLimit": 2048,
+          "measuredRequestMaxTokens": 512,
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          },
+          "engineSettings": {
+            "profile": "turbo"
+          },
+          "scenarioContract": [
+            "cold",
+            "warmPrefix"
+          ]
+        },
+        {
+          "id": "3",
+          "kind": "route-qualification",
+          "backend": "uzu",
+          "scope": "local",
+          "modelFingerprint": "generated-model",
+          "hardwareFingerprint": "generated-mac",
+          "runtimeVersion": "generated-runtime",
+          "createdAt": "2026-10-06T12:00:03Z",
+          "configuredOutputLimit": 1024,
+          "measuredRequestMaxTokens": 512,
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          },
+          "engineSettings": {
+            "profile": "turbo"
+          },
+          "scenarioContract": [
+            "cold",
+            "warmPrefix"
+          ]
+        },
+        {
+          "id": "latest",
+          "kind": "throughput",
+          "backend": "omlx",
+          "scope": "local",
+          "modelFingerprint": "generated-model",
+          "hardwareFingerprint": "generated-mac",
+          "runtimeVersion": "generated-runtime",
+          "createdAt": "2026-10-06T13:00:00Z",
+          "configuredOutputLimit": 1024,
+          "measuredRequestMaxTokens": 512,
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          },
+          "engineSettings": {
+            "profile": "turbo"
+          },
+          "scenarioContract": [
+            "cold",
+            "warmPrefix"
+          ]
+        }
+      ]
+    },
+    {
+      "method": "matching_benchmark_records",
+      "args": [
+        [
+          {
+            "id": "0",
+            "kind": "throughput",
+            "backend": "omlx",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:00Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "1",
+            "kind": "route-qualification",
+            "backend": "llamacpp",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:01Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "2",
+            "kind": "route-qualification",
+            "backend": "llamacpp",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:02Z",
+            "configuredOutputLimit": 2048,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "3",
+            "kind": "route-qualification",
+            "backend": "uzu",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:03Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          }
+        ],
+        "omlx",
+        "generated-model",
+        "generated-runtime",
+        {},
+        "generated-mac"
+      ],
+      "kwargs": {},
+      "expected": [
+        {
+          "id": "0",
+          "kind": "throughput",
+          "backend": "omlx",
+          "scope": "local",
+          "modelFingerprint": "generated-model",
+          "hardwareFingerprint": "generated-mac",
+          "runtimeVersion": "generated-runtime",
+          "createdAt": "2026-10-06T12:00:00Z",
+          "configuredOutputLimit": 1024,
+          "measuredRequestMaxTokens": 512,
+          "probeContract": {
+            "version": "fixed-greedy-wire-v1",
+            "sampling": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "top_k": 0,
+              "seed": 17
+            }
+          },
+          "engineSettings": {
+            "profile": "turbo"
+          },
+          "scenarioContract": [
+            "cold",
+            "warmPrefix"
+          ]
+        }
+      ]
+    },
+    {
+      "method": "matching_benchmark_records",
+      "args": [
+        [
+          {
+            "id": "0",
+            "kind": "throughput",
+            "backend": "omlx",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:00Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "1",
+            "kind": "route-qualification",
+            "backend": "llamacpp",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:01Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "2",
+            "kind": "route-qualification",
+            "backend": "llamacpp",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:02Z",
+            "configuredOutputLimit": 2048,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "3",
+            "kind": "route-qualification",
+            "backend": "uzu",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:03Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          }
+        ],
+        "omlx",
+        "changed-model",
+        "generated-runtime",
+        {},
+        "generated-mac"
+      ],
+      "kwargs": {},
+      "expected": []
+    },
+    {
+      "method": "matching_benchmark_record",
+      "args": [
+        [
+          {
+            "id": "0",
+            "kind": "throughput",
+            "backend": "omlx",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:00Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "1",
+            "kind": "route-qualification",
+            "backend": "llamacpp",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:01Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "2",
+            "kind": "route-qualification",
+            "backend": "llamacpp",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:02Z",
+            "configuredOutputLimit": 2048,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          },
+          {
+            "id": "3",
+            "kind": "route-qualification",
+            "backend": "uzu",
+            "scope": "local",
+            "modelFingerprint": "generated-model",
+            "hardwareFingerprint": "generated-mac",
+            "runtimeVersion": "generated-runtime",
+            "createdAt": "2026-10-06T12:00:03Z",
+            "configuredOutputLimit": 1024,
+            "measuredRequestMaxTokens": 512,
+            "probeContract": {
+              "version": "fixed-greedy-wire-v1",
+              "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "seed": 17
+              }
+            },
+            "engineSettings": {
+              "profile": "turbo"
+            },
+            "scenarioContract": [
+              "cold",
+              "warmPrefix"
+            ]
+          }
+        ],
+        "omlx",
+        "generated-model",
+        "generated-runtime",
+        {},
+        "generated-mac"
+      ],
+      "kwargs": {},
+      "expected": {
+        "id": "0",
+        "kind": "throughput",
+        "backend": "omlx",
+        "scope": "local",
+        "modelFingerprint": "generated-model",
+        "hardwareFingerprint": "generated-mac",
+        "runtimeVersion": "generated-runtime",
+        "createdAt": "2026-10-06T12:00:00Z",
+        "configuredOutputLimit": 1024,
+        "measuredRequestMaxTokens": 512,
+        "probeContract": {
+          "version": "fixed-greedy-wire-v1",
+          "sampling": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 0,
+            "seed": 17
+          }
+        },
+        "engineSettings": {
+          "profile": "turbo"
+        },
+        "scenarioContract": [
+          "cold",
+          "warmPrefix"
+        ]
+      }
+    },
+    {
+      "method": "_mtplx_operator_measurement_evidence",
+      "args": [
+        {
+          "qualityHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "qualityCompletionTokens": 128,
+          "samples": [
+            {
+              "scenario": "cold",
+              "promptTokens": 512,
+              "completionTokens": 128,
+              "privateUnlisted": "generated-private"
+            }
+          ],
+          "privateUnlisted": "generated-private"
+        }
+      ],
+      "kwargs": {},
+      "expected": {
+        "qualityHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "qualityCompletionTokens": 128,
+        "medianTTFT": null,
+        "medianDecodeTokensPerSecond": null,
+        "medianEndToEndTokensPerSecond": null,
+        "agenticMetrics": null,
+        "resourceTelemetry": null,
+        "resourceCooldown": null,
+        "samples": [
+          {
+            "scenario": "cold",
+            "targetPromptTokens": null,
+            "promptTokens": 512,
+            "completionTokens": 128,
+            "requestedMaxTokens": null,
+            "authoritativeUsage": null,
+            "cachedPromptTokens": null,
+            "cacheHitRate": null,
+            "ttftSeconds": null,
+            "totalSeconds": null,
+            "decodeTokensPerSecond": null,
+            "endToEndTokensPerSecond": null
+          }
+        ]
+      }
+    },
+    {
+      "method": "deterministic_tuning_best_candidate",
+      "args": [
+        [
+          {
+            "id": "fast-wrong",
+            "qualityMatchesAR": false,
+            "medianSpeedupVsAR": 3,
+            "worstCaseSpeedupVsAR": 3
+          },
+          {
+            "id": "matching",
+            "qualityMatchesAR": true,
+            "medianSpeedupVsAR": 1.2,
+            "worstCaseSpeedupVsAR": 1.1
+          }
+        ]
+      ],
+      "kwargs": {},
+      "expected": {
+        "id": "matching",
+        "qualityMatchesAR": true,
+        "medianSpeedupVsAR": 1.2,
+        "worstCaseSpeedupVsAR": 1.1
+      }
+    },
+    {
+      "method": "route_performance_evidence",
+      "args": [
+        {},
+        "unknown",
+        {},
+        null
+      ],
+      "kwargs": {},
+      "expected": {
+        "version": 1,
+        "tier": "unmeasured",
+        "label": "Not measured on this Mac",
+        "detail": "No exact local benchmark is available for this model, runtime, Mac, and request contract.",
+        "source": "none",
+        "sourceUrl": null,
+        "sourceHardware": null,
+        "recordId": null,
+        "createdAt": null,
+        "automaticEligible": false
+      }
+    },
+    {
+      "method": "route_performance_evidence",
+      "args": [
+        {},
+        "omlx",
+        {
+          "dflash": true,
+          "dflashVersion": "2",
+          "dflashDraftPath": "/generated/draft",
+          "dflashPairFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "dflashRuntimeVersion": "generated-runtime"
+        },
+        null
+      ],
+      "kwargs": {},
+      "expected": {
+        "version": 1,
+        "tier": "upstream-measured",
+        "label": "Upstream measured",
+        "detail": "Upstream oMLX measurements reported a 1.33–1.43× decode speedup for the tested Qwen3.8 DFlash target across 4K–32K context. This is useful directional evidence, not a prediction for this Mac or this work contract.",
+        "source": "omlx-upstream",
+        "sourceUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.4",
+        "sourceHardware": "Apple M3 Ultra",
+        "recordId": null,
+        "createdAt": null,
+        "automaticEligible": false
+      }
+    },
+    {
+      "method": "route_performance_evidence",
+      "args": [
+        {
+          "sharedServer": true
+        },
+        "whallm",
+        {},
+        null
+      ],
+      "kwargs": {},
+      "expected": {
+        "version": 1,
+        "tier": "upstream-measured",
+        "label": "Upstream measured",
+        "detail": "Whallm reports 9.7–10.4 generation tok/s on its tested M5 Pro Qwen3.8 Flash-Next route through 16K input. This is not a local result.",
+        "source": "whallm-upstream",
+        "sourceUrl": "https://github.com/yanun0323/Whallm/blob/master/BENCHMARK.md",
+        "sourceHardware": "Apple M5 Pro",
+        "recordId": null,
+        "createdAt": null,
+        "automaticEligible": false
+      }
+    }
+  ]
+}

@@ -25,3 +25,15 @@ https://github.com/youssofal/mtplx
 The repository can interoperate with oMLX, LM Studio, MTPLX, Mirai/Uzu, FreeToken, Pi, OpenCode, Codex, Hugging Face tooling, MLX, and safetensors. Except for source explicitly present in this repository, those projects, applications, libraries, model weights, names, and trademarks are not bundled and remain subject to their own licences and terms.
 
 References to third-party products describe compatibility and do not imply endorsement or affiliation.
+
+## Kolibri MLX implementation and streamlx
+
+`runtime_patches/kolibri/kolibri1.py` comes from the Apple MLX-LM MIT-licensed
+implementation at `here-be-dragons-ai/mlx-lm`, commit
+`5bc45adb8733f9af29c1c03e9ea947d155328b75`. Its license is preserved in
+`runtime_patches/kolibri/LICENSE.MLX-LM`.
+
+The streamlx package and server wrapper come from `srcterm/streamlx`, commit
+`146507b59293058b3a1cecc43f47947b25012297`, under the MIT license preserved in
+`runtime_patches/kolibri/LICENSE`. Local adaptations and file hashes are recorded
+in `runtime_patches/kolibri/provenance.json`. Model weights are not redistributed.

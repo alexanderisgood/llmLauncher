@@ -1,0 +1,116 @@
+--- a/runtime/engine/Bootstrap.mm
++++ b/runtime/engine/Bootstrap.mm
+@@ -1,8 +1,10 @@
+ #include "engine/Bootstrap.hpp"
+ #include "StderrLine.hpp"
++#include "model/Runtime.hpp"
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <cstdlib>
+ #include <limits>
+ #include <span>
+ #include <sstream>
+@@ -345,6 +347,11 @@
+     std::function<double()> loopMaxTick) {
+   if (!loopMaxTick)
+     throw std::invalid_argument("the serving runtime was given no measure of its loop's ticks");
++  const char *lookupValue = std::getenv("SPLASH_EXPERIMENTAL_PROMPT_LOOKUP");
++  const std::string_view lookupMode = lookupValue ? lookupValue : "off";
++  if (lookupMode != "off" && lookupMode != "fixed16")
++    fail({}, RuntimeBootstrapStage::ResourceAssembly,
++         "SPLASH_EXPERIMENTAL_PROMPT_LOOKUP requires off or fixed16");
+   std::unique_ptr<RuntimeResources> resources;
+   try {
+     resources = RuntimeResources::create(config.resources, config.nativeLoop.engine.maxContext);
+@@ -507,6 +514,19 @@
+                                                          pressure ? pressure() : MemoryPressure::Normal);
+         return report;
+       });
++
++  if (lookupMode == "fixed16") {
++    auto *runtime = dynamic_cast<model::Runtime *>(modelRuntime.get());
++    if (!runtime)
++      fail(std::move(report), RuntimeBootstrapStage::ModelCreation,
++           "this runtime does not expose experimental prompt lookup");
++    try {
++      runtime->experimentalPromptLookup(true);
++    } catch (const std::exception &error) {
++      fail(std::move(report), RuntimeBootstrapStage::ModelCreation, error.what());
++    }
++    logLine("experimental prompt lookup fixed16 enabled for eligible greedy decode cycles");
++  }
+ 
+   return std::unique_ptr<ServingRuntime>(
+       new ServingRuntime(std::move(resources), std::move(modelRuntime), std::move(nativeLoop), ready,
+--- a/runtime/model/Runtime.cpp
++++ b/runtime/model/Runtime.cpp
+@@ -4,6 +4,7 @@
+ #include "model/RuntimeInstrumentation.hpp"
+ #endif
+ #include "AwakeClock.hpp"
++#include "StderrLine.hpp"
+ #include "model/ExpertStore.hpp"
+ #include "model/KvBlockCache.hpp"
+ #include "model/KvHistoryStream.hpp"
+@@ -321,6 +322,9 @@
+     uint32_t stateLane = 0;
+     bool resident = false;
+     bool promptComplete = false;
++    // Prompt lookup is qualified for GPU prefill. A restored prefix may have
++    // come from a previous Neural Engine prefill.
++    bool prefillMayUseAne = false;
+     // Rebuild state from already-emitted tokens without sampling an initial
+     // anchor, consuming RNG, or replaying output to the caller.
+     bool replayingGeneration = false;
+@@ -1931,6 +1935,8 @@
+       QwenTargetPrefillChunk &model = modelChunks.emplace_back();
+       model.buffers = prefillBuffers(*prefillArena, c);
+       model.rows = chunk.rows;
++      const bool splitPrefillOnAne =
++          experimentalPromptLookup && aneFfn && aneFfn->splits(chunk.rows);
+       if (begins) {
+         addRopeTables(graph, p(PrefillTensor::TargetPositions), chunk.rows, p(PrefillTensor::DraftPositions),
+                       chunk.capturedRows, model.buffers.ropeCos, model.buffers.ropeSin,
+@@ -1940,6 +1946,7 @@
+       for (uint32_t s = 0; s < chunk.sequences.size(); ++s) {
+         const PrefillSequence &sequence = chunk.sequences[s];
+         const ModelBatchItem &part = sequence.part;
++        sequence.entry->prefillMayUseAne |= splitPrefillOnAne;
+         if (begins) addImageRows(graph, encodes, *sequence.entry, part, model.buffers.hidden[0], sequence.rowBegin);
+         const GdnParityBuffers &in = *from[sequence.lane], &out = *written[c][s];
+         from[sequence.lane] = &out;
+@@ -2085,7 +2092,7 @@
+     const bool dense = std::visit([](const auto &layout) {
+       return layout.ffnKind != QwenFfnKind::SparseMoe;
+     }, model.descriptor.target);
+-    if (!dense || aneFfn ||
++    if (!dense || (aneFfn && (entry.prefillMayUseAne || entry.restoredTokens)) ||
+         model.expertStore() || historyStream || verifyBudget || !entry.images.empty() ||
+         samplingEnabled(entry) || entry.constraint != ConstraintMode::None ||
+         samplingPenalties(entry).active() || entry.thinking || !entry.pendingToken ||
+@@ -2885,6 +2892,7 @@
+       image.rows.reset();
+     }
+   }
++  entry.prefillMayUseAne |= impl_->aneFfn && restoredPrefixLength > 0;
+   entry.promptComplete = false;
+   if (!entry.replayingGeneration) {
+     entry.finalTargetHidden.clear();
+@@ -3461,6 +3469,16 @@
+     impl_->releaseLane(found->second);
+   impl_->requests.erase(found);
+   impl_->releaseLeftStaging();
++  if (impl_->experimentalPromptLookup) {
++    const auto &stats = impl_->counters;
++    logLine("prompt-lookup fixed16 cumulative request=", requestId,
++            " searches=", stats.promptLookupSearches,
++            " hits=", stats.promptLookupHits,
++            " bypassed=", stats.promptLookupBypassedCycles,
++            " proposed=", stats.promptLookupProposedTokens,
++            " accepted=", stats.promptLookupAcceptedTokens,
++            " search_seconds=", stats.promptLookupSearchWallSeconds);
++  }
+ }
+ 
+ namespace {

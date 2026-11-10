@@ -1,4 +1,5 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -6,8 +7,9 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 const RoutePreferenceCore = require("../route_preferences.js");
+const connectSavedLaunches = require("./helpers/saved_launches_harness.js");
 
-const app = fs.readFileSync(path.join(__dirname, "../app.js"), "utf8");
+const app = benchmarkSources.controllerSource;
 const html = fs.readFileSync(path.join(__dirname, "../index.html"), "utf8");
 const plain = value => JSON.parse(JSON.stringify(value));
 const APPLIED_PROFILE_KEY = "llm-launcher-applied-profile-v1";
@@ -47,6 +49,7 @@ class Element {
     return this.children.get(selector);
   }
   setAttribute(name, value) { this[name] = String(value); }
+  removeAttribute(name) { delete this[name]; }
   close() { this.open = false; }
   showModal() { this.open = true; }
   focus() { this.focused = true; }
@@ -151,16 +154,22 @@ function fixture({runPhase = "running", storage = new Map()} = {}) {
         generation:{sampling:$("samplingMode").value}};
     },
   });
-  vm.runInContext(between('function runtimeKvLabel(', 'function updateOmlxKvControl('), context);
-  vm.runInContext(
+  benchmarkSources.runInContext(between('function runtimeKvLabel(', 'function updateOmlxKvControl('), context);
+  benchmarkSources.runInContext(
     between("function currentVisibleRoute(", "function persistVisibleRoute(")
       + between("function profileSettingsBlockReason(", "function profileBackendLabel(")
       + between("function profileBackendLabel(", "function measuredProfileEvidenceBinding(")
       + between("function profileDate(", "async function deleteSavedProfile("), context,
   );
-  vm.runInContext(between('$("profileRunAction").addEventListener(', '$("quickStartCustom").addEventListener('), context);
-  vm.runInContext(between('$("projectPath").addEventListener(', '$("agentHostSelect").addEventListener('), context);
-  return {context, state, $, profile, calls, notices, persisted, storage, get launches() { return launches; },
+  benchmarkSources.runInContext(between('function profileExternalSettingsReason()', 'const profilesManager ='), context);
+  const manager=connectSavedLaunches(context);
+  for(const [key,field] of Object.entries({profiles:"profiles",profileBusy:"busy",profileLoading:"loading",
+    profileEditingId:"editingId",profileEditingEvidenceBinding:"editingEvidence",profileDeleteConfirmId:"deleteConfirmId"})) {
+    Object.defineProperty(state,key,{configurable:true,get:()=>manager.snapshot()[field]});
+  }
+  if(!storage.size)manager.useInventory({profiles:[plain(profile)]});
+  benchmarkSources.runInContext(between('$("projectPath").addEventListener(', '$("agentHostSelect").addEventListener('), context);
+  return {context, state, $, profile, manager, calls, notices, persisted, storage, get launches() { return launches; },
     get refreshes() { return refreshes; },
     get sessionOpens() { return sessionOpens; },
     selectRoute(request = profile.request) {
@@ -397,11 +406,18 @@ test("Preparation blocks draft changes and reports why even outside the modal", 
 test("Loading, profile writes and optimization cannot race a second Apply", async () => {
   for (const field of ["profileLoading", "profileBusy", "applyingOptimal"]) {
     const f = fixture();
-    f.state[field] = true;
+    let complete, pending;
+    if(field==="applyingOptimal")f.state.applyingOptimal=true;
+    else {
+      f.inventory(()=>new Promise(resolve=>{complete=resolve;}));
+      pending=field==="profileLoading"?f.manager.load():f.context.applySavedProfile(f.profile.id,false);
+    }
     assert.ok(f.context.profileSettingsBlockReason(), `${field} must block draft changes`);
+    const previousCalls=f.calls.length;
     await f.context.applySavedProfile(f.profile.id, false);
-    assert.equal(f.calls.length, 0, `${field} must not fetch or apply another profile`);
+    assert.equal(f.calls.length, previousCalls, `${field} must not fetch or apply another profile`);
     assert.equal(f.$("contextInput").value, "131072");
+    if(complete){complete({profiles:[plain(f.profile)]});await pending;}
   }
 });
 

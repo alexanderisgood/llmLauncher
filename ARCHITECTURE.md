@@ -47,6 +47,383 @@ For MTPLX Codex requests, `responses_bridge.py` converts text messages, standard
 
 `serve()` holds an owner-only advisory lock in the launcher state directory for the whole controller lifetime. A contender reads only the bounded port record and treats it as live only when the loopback `/api/status` response carries the launcher server identity and valid JSON; it then opens that existing page and exits. A starting/stopping owner is retried for three seconds, stale records are overwritten only after acquiring the lock, and the active port is published only after the server has bound. TERM/HUP/Control-C cleanup stops every launcher-owned operation and process before closing the server and releasing the lock.
 
+Authenticated `/api/quit` additionally invokes `launcher_shutdown.py` for local
+engine services. It blocks new mutations before dispatch, cancels jobs through
+their existing publication barriers, invalidates older Terminal handoffs with a
+private marker, and reads primary/attachment agent PID receipts. Exact installed
+executables and known server scripts select same-user services; descendants are
+signalled individually after identity checks. TERM gets a bounded grace period,
+then unchanged survivors receive KILL. Completion reports verified exits and
+errors through `/api/quit/status` before the listener closes. HTTP worker threads
+are daemon threads so a stranded client cannot prevent controller exit.
+`service_shutdown.py` additionally verifies a current-user LaunchAgent's safe
+plist, loaded executable/arguments, exact label and process birth before
+unloading it. This covers renamed services and prevents KeepAlive respawn.
+Verified descendant receipts survive reparenting and feed the final PID sweep;
+they never enter public status JSON. Unrelated jobs and arbitrary shell launch
+commands remain outside that engine-service contract.
+`retitled_servers.py` also identifies manually started servers whose argv was
+overwritten. oMLX needs its reserved serve title, native UID/birth/interpreter
+and exact mapped native libraries from one installed environment. Dedicated
+server binaries use exact native image identity. Birth/image and the fixed
+oMLX title are rechecked before each signal; a title alone never authorizes it.
+Per-process private receipts also retain multiple Terminal instances opened
+from the same run, including agents that later change their title.
+
+Failed worker starts release job publications and private bearer files before
+reporting a recoverable failure. Prepared Route Check, ANE tuning, clone and
+Session Set jobs also clear their thread handles. A Session Set failure keeps
+its already resident model and opened surfaces available.
+
+## Performance boundaries
+
+Inference remains in the existing native engines. The measured launcher hot
+paths were repeated metadata reads, unfinished-stream rescanning, tool-fragment
+copying and unchanged UI writes. Replacing the controller language would not
+remove those algorithms or establish a model TPS gain. This refactor extracts
+those paths while preserving exact model, precision, reasoning and safety policy.
+
+- `resource_telemetry.py` reads macOS pressure counters directly, retaining the
+  former helper as a pressure compatibility fallback. `darwin_memory.py` reads
+  physical page counters through Mach for admission and OS reserves. Pressure
+  percentages include pageable app memory, so they cannot promise physical
+  capacity. Live safety readings remain uncached.
+- `runtime_probes.py` keys bounded CLI-help/version caches by executable and
+  symlink identity. `controller_cache.py` coalesces concurrent reads and isolates
+  returned objects. `controller_read_api.py` routes presentation requests; new
+  launches and mutations still scan fresh model data.
+- `sse_framing.py` scans each newly received byte once. `stream_observer.py`
+  shares bounded event decodes, `response_metrics.py` observes authoritative
+  metadata, and `responses_bridge.py` accumulates fragments before joining.
+  TPS retains engine versus relay provenance and never estimates token usage.
+- `launcher_home.js`, `request_metrics.js` and `ui_presenter.js` separate
+  presentation and skip unchanged updates without replacing focused controls.
+- `model_assets.js` owns Model Library filters, route application and the
+  complete acquisition review/download interaction. Explicit catalog, policy
+  and route callbacks preserve the selected model while filtering. Choosing a
+  library entry applies settings; download review binds the exact files,
+  revision, license and destination. Errors remain visible with retry controls.
+- `runtime_manager.js` owns runtime inventory, updates, comparisons, explicit
+  promotion/selection and application opening. Named endpoint and refresh
+  adapters keep it separate from launch settings. Approvals bind exact plans,
+  admission/commit revisions fence stale reads, and retries restore controls
+  without replacing focused cards or disclosures. Updates and comparisons
+  retain the selected runtime until the user chooses a verified replacement.
+- `tensor_inventory.py` and `qwen_ple.py` own current checkpoint structure and
+  tensor-storage proofs. Only immutable header decoding is cached; each launch
+  validates current paths, descriptors and any present checkpoint index.
+- `model_catalog.py` owns complete discovery, artifact/model records and library
+  readiness for all twelve engines. Frozen descriptor/model policies and named
+  runtime, artifact, evidence, surface and I/O ports replace controller globals.
+  Presentation caching stays in the controller; launches still scan fresh data.
+  Current-process AtomicChat SHA proof and background job epochs remain separate
+  from its inert persisted presentation snapshot. Native FreeToken/MTPLX probe
+  caches retain immutable raw receipts bound to executable, link, directory and
+  metadata-file identities, including inode and change time. They validate current
+  capability fields again on every use and reject inputs changed during a probe.
+  Generated same-tree scans compare complete artifact fingerprints and doctor
+  outputs; separate frozen cases preserve settings, precision and rejection text.
+  A failed background verifier constructor/start clears only its own thread
+  publication, exposes a bounded failed state and permits a fresh scan to retry;
+  it never accepts the artifact or replaces a superseding job. The pure memory
+  geometry facade calls one stateless algorithm with the current Qwen predicate
+  and allocation step, avoiding a rebuild of complete catalog wiring. A private
+  paired microbenchmark reduced that helper overhead from about 112 microseconds
+  to about 1 microsecond; this is controller CPU cost, not model generation TPS.
+- `runtime_identity.py` owns executable revisions and the Uzu/llama.cpp closure
+  contracts. Its immutable policies receive only the exact expected paths,
+  hashes and safety limits. Retained descriptors still cross the existing
+  controller launch handoff, so extraction does not replace launch-time proof.
+- `engine_planning.py` owns all twelve native/connected engine builders, private
+  launch files and immediate Uzu/llama.cpp executable handoffs. Per-engine frozen
+  policies and named runtime, artifact, memory and I/O ports preserve exact
+  sampling, reasoning, context, output, precision and current source proofs.
+  The structural plan never holds a process manager; public builder/helper/type
+  facades remain in the controller. Twenty frozen generated native/variant plans
+  compare complete arguments, environment, settings, warnings and private files.
+  Disposal removes only fixed credential files and plan-owned credential
+  environment fields. Nested oMLX cleanup uses owner-controlled directory
+  descriptors without following parent links; unrelated settings and model links
+  survive. Failed exclusive key creation preserves preexisting files, and failed
+  writes roll back only the exact inode created by that call.
+- `client_planning.py` owns private work-surface configuration for Pi, oh-my-pi,
+  OpenCode, Codex and built-in Chat. Eleven complete planning functions receive
+  individual current-binary, artifact, input-modality and session-file services.
+  Frozen generated comparisons cover twelve engines, five surfaces and both
+  Terminal/Console modes, preserving command, environment, overlay, limits,
+  reasoning, stable model identity and helper-model routing. The controller
+  retains its shared adapter registry and narrow compatibility facades.
+- `inference_requests.py` owns complete Chat, benchmark and Route Check request
+  construction, completion interpretation and Chat byte forwarding. Frozen wire
+  policy, structural plans and named validation/observation callbacks preserve
+  exact model, port, credential, sampling, reasoning and token-limit contracts.
+  The browser relay receives six HTTP output callbacks and never receives a
+  controller, handler or process manager. Cache observations retain their
+  private owner/surface identifiers and pass through the lifecycle's scope check.
+  Native generation proofs remain with `response_metrics.py` and
+  `generation_metrics.py`; transport EOF, terminal markers and tool-call identity
+  retain their established completion rules. Frozen comparisons cover every
+  request/helper/assembler/relay body, with all twelve engine wire formats and
+  generated local HTTP/SSE fixtures exercising the public compatibility facades.
+  Browser header failures close the upstream response and record an interrupted
+  request without draining it. Bounded HTTP error bodies also close on every
+  path. Non-stream JSON metadata is decoded once after clean EOF within the
+  existing quota; formatting does not change completion or usage evidence.
+  JSON delivery timing uses its last body byte and never supplies native TPS.
+- `chat_history_store.py` owns the saved transcript and recovery journal as one
+  feature. `chat_store_io.py` reads and writes bounded records incrementally.
+  Corrupt, oversized or future-format stores are preserved and return a bounded
+  storage error instead of becoming an empty history that a later save overwrites.
+  `chat_resume.js` owns the separate review/apply/launch interaction through
+  explicit callbacks. Reviewing a saved route remains read-only; applying it
+  revalidates the route, and starting it still uses ordinary capacity admission.
+- `agent_console_rpc.py` owns the complete bounded semantic Console state,
+  replay, prompt outcomes, dialogs and persisted follow-up queue. It receives a
+  frozen per-console policy and two queue I/O callbacks; process ownership,
+  native wire decoding and command scheduling belong to `run_lifecycle.py`.
+- `chat_workspace.js` owns the complete built-in Chat interface: 150 methods,
+  59 event handlers, 63 private state fields, drafts/paused queues, context,
+  streaming, history, revisions, recovery and navigation. The app supplies
+  explicit DOM nodes, pure cores, named endpoints and narrow status/review/
+  navigation callbacks. External launch and shortcut changes use actions and
+  detached views; no private Chat state or whole app state crosses the boundary.
+  Completed message rows stay attached while their rendered values are unchanged.
+  Pending Markdown keeps its full parser; action predicates and scalar row
+  signatures preserve exact output while retaining focus, edit selection and
+  reasoning disclosures. Generated long-history browser checks, frozen complete
+  methods/handlers and actual Pi/oh-my-pi Console fixtures verify the boundary.
+- `launch_workspace.js` owns the complete selected-route Launch interface,
+  optimiser commits, fresh memory admission, first-use preparation and resident
+  Session Dashboard, cache/activity/attachment views and session-only idle policy.
+  Its 132 methods, 58 handler blocks and 59 private fields use explicit nodes,
+  named network operations, immutable control policy and narrow live registry,
+  operation, navigation and child-workspace ports. Home uses a nine-field read-only
+  view and explicit option/body capabilities, preserving its existing rendering core.
+  Other workspaces receive detached views and owner-bound actions. Accepted Launch
+  and Stop retire older status reads; idle-policy replies cannot update a replacement
+  owner, and the selected value remains visible while saving. Unchanged activity
+  and cache markup retains existing controls and focus without caching eligibility.
+  Root keeps authentication, startup/poll composition, feature policy, navigation,
+  appearance and complete Quit plus the separate Setup/ANE/RouteCheck workflows.
+  Generated full desktop/mobile flows verify exact settings, memory acknowledgement,
+  cancelled/blocked preparation, recovery and native TPS source labels.
+- `benchmark_workspace.js` owns the complete Benchmark Lab and Calibration
+  interface: 65 methods, all job/history/review actions, 24 event handlers,
+  polling, private plans and exact-contract Apply references. Explicit nodes,
+  immutable qualification policy and named endpoint/status/settings/evidence
+  ports keep launch, settings commits and Performance Receipt orchestration in
+  the app. Public plan/status/review results are detached. Mutation epochs retire
+  earlier status reads; invalid inputs retire plan/history requests, and the
+  latest saved-result selection wins. Bounded action errors survive polling.
+  Failed same-contract history refreshes retain cached rows with a visible Retry
+  action, while changed-contract failures clear them. Identical rendered markup
+  preserves existing rows, focus and disclosures without caching live eligibility.
+  Frozen complete source and generated desktop/mobile browser flows verify exact
+  suite/record Apply, Stop, typed-profile save failure/recovery and mobile reachability.
+- `run_lifecycle.py` owns the complete model-session lifecycle: owned engine,
+  auxiliary and proxy groups, exact attachment overlays, cache/activity and idle
+  policy, readiness and memory watchdogs, Terminal handoff, Pi/oh-my-pi Console
+  transport, cancellation, Stop and exact LM Studio model-unload retries.
+  Its immutable policy and named contract, activity, history, runtime, resource,
+  workspace and Console services keep private paths and live identity checks
+  explicit. The controller retains its constructor and static compatibility
+  facades. Plans and cancellation epochs still fence process publication and
+  Stop; retained executable descriptors, RPC settlement, bounded EOF/diagnostic
+  drains and once-only cleanup preserve the existing ownership contract.
+  Frozen comparisons cover every original method; generated process, PTY and
+  resource fixtures exercise the integrated facade without loading models.
+- `route_check_jobs.py`, `ane_jobs.py` and `session_set_jobs.py` own complete
+  Route Check, ANE tuning/FP16 clone and saved-workspace opening operations,
+  including their review plans and result contracts. Frozen policies and named
+  live ports retain current launch, capacity, artifact and evidence authorities.
+  `operation_contracts.py` exposes accepted-plan/cancellation-epoch lifetimes and
+  opaque resident leases; controller managers remain private to the Root bridge.
+  Temporary requests fence loopback connect/send under the state lock for at
+  most one second, then release it before response reads. Strict central unload
+  receipts gate ready-route and tuning evidence. Session Set reservations keep
+  the same cancellation event through planning, admission and attachments,
+  with a second atomic admission check and exact resident epoch on every action.
+  Relay activity targets carry that private epoch and both registration and
+  failed-overlay cleanup retain the original relay bearer. Unpublished overlay
+  credential files are disposed without deleting unrelated files or accepted
+  surfaces. FP16 clones use exclusive private staging, a helper-created inode
+  receipt, descriptor-anchored helper writes, fresh source and parent identity
+  checks, and native exclusive publication; cancellation and collisions cannot
+  replace or clean foreign destinations. `owned_cli_capture.py` bounds output
+  and observers while retaining the unreaped owned child/group until cleanup.
+  Complete generated before/after plans, states, records and clone files plus
+  cancellation, replacement, request, thread-start and collision fixtures cover
+  these operations without loading a model or changing global settings.
+- `saved_sessions.py` owns saved-launch and Session Set schemas, inventories,
+  CRUD and persistence. Three explicit callbacks provide current request
+  validation, measurement-reference validation and measured-route resolution.
+  The controller captures live requests under its manager lock; the store
+  receives plain settings and never holds a manager. Its incremental I/O bounds
+  cover every permitted system prompt and record, fixing the former 4 MiB
+  whole-file mismatch. Unreadable files remain intact and return the same
+  bounded storage error used by Chat History.
+- `session_sets.js` and `saved_launches.js` own their respective browser state,
+  dialogs, actions, loading and retry behavior. Narrow adapters apply selected
+  settings and open routes through the existing admission flow. Neither review
+  nor Apply starts an engine. Failed reads retain cached entries and show the
+  storage error; unchanged polls preserve focused controls.
+- `download_jobs.py` owns both Setup Assistant and Model Acquisition job state,
+  inspection-plan caches, consent, cancellation and verification orchestration.
+  Immutable policies and named callbacks bind private paths and authoritative
+  artifact validators. A stopped worker cannot publish or commit a successful
+  result; downloader groups retire before long verification. HTTP operation
+  locks, fresh catalog scanning and runtime installation remain controller-owned.
+- `acquisition_planning.py` owns complete anonymous Hub search, pinned snapshot
+  inspection, setup/download previews, safe command construction and downloaded
+  artifact verification. Detached registry policy and named current binary,
+  clock, storage and artifact ports preserve revision, license, consent,
+  destination, size and checksum contracts. Nine stateless helpers avoid
+  constructing policy, and shared wiring invalidates changed static inputs.
+  `owned_cli_capture.py` drains complete query output within a fixed byte quota
+  while preserving the existing decoded-character limit. It retains its child
+  until its new process session is retired, revalidates ownership before each
+  signal and handles inherited output pipes, timeouts and cancellation. No
+  foreign process inventory or independent server shutdown is involved.
+- `runtime_update_jobs.py` owns audited side-by-side runtime installation and
+  adoption, wheel/source checks, smoke tests, staged promotion and failure
+  cleanup. It receives private path getters and explicit live ports for plan
+  validation, provenance, selected-runtime reads and kernel/candidate metadata.
+  Completion never selects a runtime. Smoke output is drained concurrently into
+  a bounded tail, so a full pipe cannot masquerade as a command timeout.
+  Cancellation cannot publish a new process or commit trust after it wins;
+  an already committed verified copy remains a completed operation. Generated
+  fixtures cover final-path failure and removal of only the newly owned target.
+  Worker/output-reader start failures release their publications and owned
+  processes; staging cleanup accepts only a directory this worker atomically
+  created, preserving a preexisting collision. Launch-worker start failure also
+  releases its plan and bearer files, so Stop and a later launch remain usable.
+- `benchmark_evidence.py` owns saved-measurement integrity, exact contract
+  matching, tuner replay and route eligibility. A frozen policy and individually
+  named live callbacks replace access to the controller namespace. Static wiring
+  is reused, while hardware, artifact, runtime and qualification checks still
+  run at every decision. Frozen pre-refactor verdicts cover both the independent
+  domain and public compatibility facades.
+- `benchmark_selection.py` owns complete measured-route selection, cross-engine
+  ranking, exact Apply bindings and measurement-history presentation. Frozen
+  registry descriptors and policy are separate from current validation, runtime,
+  artifact, capacity and evidence callbacks. Immutable wiring is reused only
+  while every policy input matches its detached snapshot; live verdicts are
+  never cached. Six stateless helpers bypass configuration construction.
+  History indexes the identities of its independently verified records, avoiding
+  quadratic comparisons of full records. Equal copies still receive separate
+  current checks, including when a later equal copy fails verification.
+  Generated CPU checks measured about 179 µs versus 9 µs for this membership
+  operation alone, without a whole-request or inference-speed claim.
+- `measurement_store.py` owns benchmark, ANE-tuning and runtime-comparison
+  persistence, including their existing identity/deduplication/retention rules.
+  Incremental I/O replaces the generic 4 MiB reader that could silently erase
+  larger histories on a later save. Corrupt, future-format, unsafe and oversized
+  files remain intact and produce a bounded storage error. Owner-only append
+  locks serialize threads and processes with a finite wait; a changed file is
+  rejected before replacement. Record and collection quotas apply before commit
+  (16 MiB per record, 128 MiB per document). Reused decodes are keyed by current
+  file identity and returned as detached data, while eligibility remains live.
+  Private generated histories measured about 3.8× lower repeated-read CPU cost;
+  this is not an inference TPS measurement.
+  Explicit saved mode-unload receipts must prove clean owned-process cleanup
+  or the versioned LM Studio contract that unloads the exact launcher model
+  while retaining its shared server. Failed or malformed receipts cannot drive
+  automatic selection or Apply; their stored TPS remains readable. Older records
+  without a receipt retain the existing compatibility checks.
+- `benchmark_jobs.py` owns complete current-engine, cross-engine, tuning,
+  qualification and runtime-comparison state machines. Immutable policies and
+  grouped planning, workload, resource, presentation and persistence ports keep
+  native parameters and live admission intact. The controller's ownership
+  adapter binds process, port and post-unload safety receipts to one accepted
+  plan/cancellation epoch; every Stop names that plan. Evidence commit and
+  cancellation share a lock, failed worker publication remains retryable, and
+  telemetry failures still dispose private plans or finish owned cleanup.
+  Explicit promotion rechecks exact runtime receipts and keeps rollback identity.
+  Completed measurements also require the same pure unload-receipt validator
+  used by historical eligibility. Owned servers prove process/group exit and
+  closed listeners; LM Studio instead proves its exact launcher model unloaded
+  while the shared server remains available. Failed receipts stay visible and
+  prevent saving evidence or loading a subsequent comparison route.
+  Frozen source/behavior comparisons and generated process fixtures exercise
+  these boundaries without loading models or changing runtime preferences.
+
+`launch_contract.py` owns request limits, host/model selection, reasoning,
+sampling protocol representation, native options and saved/live canonicalization.
+Named read-only runtime, artifact and performance ports check every current
+engine receipt before a validation seal binds a recursively frozen request.
+Live and saved defaults and experimental consent stay distinct. The controller
+then materializes that detached contract: ports, run identity, credentials,
+private directories and engine/client commands. Native Whallm's reserved port
+is rejected before allocation and excluded from automatic server selection.
+Engine builders deliberately recheck their current artifacts at materialization;
+the seal never becomes cached permission to launch stale runtime/model files.
+oMLX shares its read-only preparation with the artifact port, and MTPLX's
+inverse-baseline and Hub Python gates precede key/template writes. Frozen
+pre-refactor cases cover values, exact rejection messages, saved requests and
+complete oMLX/MTPLX/Kolibri/Splash command, configuration and environment output.
+
+`generation_metrics.py` carries versioned, count-and-duration generation proof
+from engine observations into saved samples, comparisons and the interface.
+Kolibri's source-bound worker collects native `mlx-lm` generation fields before
+its HTTP producer yields the terminal item. Splash timings are correlated with
+final usage by response ID and model; decode excludes the whole first native
+speculative batch because its clock starts after that batch. A response entirely
+contained in the first batch has no measured decode interval. These routes never
+fall back to buffered socket delivery as GPU generation speed. Total request
+time and first visible output remain separate measurements. Historic delivery
+rates remain readable but cannot authorize automatic generation-speed ranking.
+
+Measurements on 6 October 2026 are in
+[`bench/results/20261006-controller-resources.json`](bench/results/20261006-controller-resources.json)
+and [`bench/results/20261006-stream-pipeline.json`](bench/results/20261006-stream-pipeline.json).
+The former compares 100 native/helper memory reads; the latter compares isolated
+former/current algorithms for generated streams. Neither measures inference.
+Model performance still requires an exact local engine/model/request benchmark;
+the existing calibration receipts remain authoritative.
+
+Physical-capacity evidence now has semantics version 2. The public capacity
+view and reserve guards use current reclaimable bytes, excluding ordinary
+anonymous/compressed app pages and avoiding duplicate speculative pages.
+Pressure remains a separate signal. Historical TPS and thermal observations
+remain readable; legacy pressure-only data cannot certify Uzu capacity or be
+compared with physical memory use. Native readings are independently checked
+against `vm_stat` in
+[`20261006-darwin-memory.json`](bench/results/20261006-darwin-memory.json).
+
+Kolibri's SSD range planner now merges span members in linear time and caches
+immutable tensor row strides. Byte-exact tests cover coalesced and separate
+reads; [`20261006-kolibri-reader.json`](bench/results/20261006-kolibri-reader.json)
+records CPU planning improvements of about 1.4–1.5× with no disk/GPU/TPS claim.
+[`20261006-kolibri-native-cache.json`](bench/results/20261006-kolibri-native-cache.json)
+checks Q8/Q6/Q4 execution and hybrid prefix restoration using a tiny synthetic
+native MLX model. It does not qualify the real checkpoint at 256K.
+
+`runtime_patches/kolibri/streamlx/prefill.py` consumes resident experts before
+missing rows can evict them, then restores the original router pick order.
+Native proofs retain original Q6 tensors, exact outputs and warm-cache order.
+[`20261006-kolibri-cached-prefill.json`](bench/results/20261006-kolibri-cached-prefill.json)
+and the corresponding 2048-token fixture measure isolated expert sweeps, not
+the complete model's generation TPS. The legacy path remains available for A/B
+comparison and S3FIFO retains its existing separate implementation.
+The separate full-model
+[`20261006-kolibri-model-ab.json`](bench/results/20261006-kolibri-model-ab.json)
+compares fresh original-checkpoint workers at the same 8 GB process ceiling,
+2K context, 64-token prefill, BF16 KV and 128-token response. All four generated
+requests returned identical token/text hashes. Prefill improved 24.8% cold and
+18.8% warm; first output fell 26.80→21.49 s and 25.97→21.87 s. Decode varied in
+both directions, so this single process pair does not prove a decode TPS gain
+or establish a fastest route.
+
+Catalog inspection now uses `tensor_inventory.py` and `qwen_ple.py`. Each
+inventory call still reads and hashes current headers, verifies file/link
+identity and reads the current index. Only immutable validation results for
+identical headers are reused. Sequential prime enumeration produces the exact
+former PLE geometry without repeating the search for each head. The separate
+[`20261006-tensor-inventory.json`](bench/results/20261006-tensor-inventory.json)
+and [`20261006-qwen-ple-geometry.json`](bench/results/20261006-qwen-ple-geometry.json)
+measure inspection overhead. A malformed present model index now fails closed;
+standalone checkpoints may still omit an index.
+
 ## Presentation boundary
 
 Appearance is deliberately outside the launch contract. `theme.js` validates two independent browser-local names: one palette and one information level. It applies both to `document.documentElement` before first paint, falls back to Graphite and Focused when storage is absent or malformed, and never reads or writes the model/session/profile stores. `app.js` only reflects those values into menu state and a Show details toggle. A presentation change cannot call a builder, mutate `state.backend`, select a model, rewrite a visible control, start a request, or alter benchmark evidence. Frost is the optional polished light material layer; it changes presentation selectors only. Hub Console is intentionally scoped out of palette switching: its complete workspace owns black chrome, a pure-black terminal viewport, and fixed high-contrast ANSI variables in every appearance.
@@ -121,6 +498,10 @@ Subprocess success is insufficient. `verify_model_acquisition()` rejects symlink
 
 ## Runtime update boundary
 
+`runtime_catalog.py` owns the complete local runtime inventory and review plans: known and launcher-managed copies, verified LM Studio pack manifests and preferences, app metadata, release comparisons, audited install/adoption previews, and exact runtime-promotion plans/results. Its immutable release/feature policies are separate from named live paths, installed-copy, native trust, benchmark evidence, and physical-capacity callbacks. Controller facades preserve existing schemas, nine inventory rows, confirmations, defaults, revision binding and rollback; vendor app opening, selection, persistent evidence, installation and benchmark execution remain separate actions. The existing audited Splash release page supplies its missing documentation link so the inventory remains readable.
+
+Repeated facade calls reuse immutable wiring only while every current policy input still matches its detached snapshot; in-place metadata changes invalidate it. Pure version/identity helpers bypass that wiring. A private CPU-only check measured about 2.6 microseconds for reused wiring versus 137 microseconds to rebuild it; this does not measure inference TPS. The bounded oMLX kernel cache stores only immutable raw successful self-check observations. Every read freshly binds the named executable and interpreter plus current oMLX/MLX package files (including source, bytecode and native artifacts), rejects excessive or external directory trees, checks identity before and after the probe, and reinterprets the response. The child self-check disables bytecode writes, so inspecting a fresh package does not modify it or reject its own generated files; the parent environment remains unchanged. File replacement with a preserved modification time cannot reuse old readiness; failed, malformed, oversized or unsuccessful self-checks retry without acceptance.
+
 `RUNTIME_UPDATE_CATALOG` is a deliberately small, locally audited trust root rather than a live “latest” query. Each supported oMLX track fixes the release tag, full source commit, exact CPython 3.11 universal wheel URL, and GitHub-published SHA-256. `build_runtime_update_plan()` is side-effect free and binds that artifact to the detected interpreter, versioned launcher-owned destination, current installed provenance, free-space reserve, action, and rollback selection. Existing non-exact directories and symlinked roots fail closed.
 
 `RUNTIME_RELEASE_CATALOG` is a separate, presentation-only audited snapshot for all three engines. It records the reviewed official release identity, source page, bounded highlights, and safe evaluation order, then compares those values only with local version metadata. It performs no live update lookup. Missing, unparsable, older, and newer-than-catalog versions remain distinct states; only an exact semantic match is labelled audited current. This catalog can recommend the vendor-owned LM Studio or MTPLX updater without granting the launcher authority to modify either app.
@@ -159,6 +540,18 @@ An engine builder receives a validated `LaunchPlan` and the selected model's cap
 For a local engine those fields start or address the model runtime. The FreeToken builder is the explicit connected-engine exception: its `engine_argv` starts the private local upstream bridge, while the separately operated server retains model ownership. The same cleanup machinery may terminate that bridge but has no upstream stop authority.
 
 A work-surface builder receives the same plan plus a private `ClientRoute`. It must populate `client_argv` and `client_env` without rewriting the user's normal Pi, OpenCode, Codex, or runtime configuration. Built-in Chat has no external executable.
+
+`omp_runtime.py` and `omp-provider.mjs` provide oh-my-pi's session surface.
+The CLI uses a qualified `--model provider/model` so registration happens before
+model resolution; explicit `--provider` would resolve too early in 18.6.3. A
+private owner-only overlay binds all standard helper roles to that local route,
+disables fallback/context promotion, and preserves the actual served model ID.
+The relay owns selected reasoning policy; the provider replays real reasoning
+on assistant/tool history instead of fabricating empty thinking blocks.
+`omp_protocol.py` adapts the explicitly verified 18.6.3 native Hub dialect through
+bounded framing, negotiation and correlated prompt outcomes. Native settlement
+and pending background work control queue advancement. Terminal remains available
+for other versions. Uzu qualification remains a separate contract.
 
 Generated secrets stay in the controller and process environment. They must not appear in bootstrap metadata, public run state, logs, exported Chat history, or command previews.
 
@@ -210,7 +603,7 @@ Long Pi thinking and answer blocks retain their newest UTF-8 text once they exce
 
 `terminal_core.js` keeps character and SGR-style cells in parallel across the main screen, alternate screen, bounded scrollback, erasure, insertion, deletion, resize, and cursor overwrites. A row shrink moves displaced main-screen rows into the same bounded scrollback, and a later grow restores them, so responsive layout changes preserve the newest transcript rather than clipping it. It accepts only a fixed presentation subset: reset and common emphasis flags plus standard, 256-indexed, and bounded RGB foreground/background colours. `CSI 3J` clears scrollback without changing visible cells. Styled output is coalesced and capped at 4,096 style runs, after which presentation fails safely to a plain-text tail. `app.js` maps standard colours through CSS variables scoped to the pure-black terminal viewport and converts only validated numeric indexed/RGB values into CSS. It renders terminal content exclusively through `textContent`, text nodes, constrained `<span>` elements, and bounded `<mark>` search nodes; terminal bytes never become HTML or CSS input. Pi RPC text is stripped of control bytes before trusted launcher headings are added. Search segmentation preserves style boundaries and copy still uses the same plain bounded screen.
 
-Refresh recovery in `sessionStorage` is owner-scoped and contains only version, active surface ID, visibility, and numeric seen offsets; terminal content is rebuilt from the in-memory backend buffer and is never persisted. Stop/restart affect only that agent; route cleanup terminates every owned console before the relay/engine. External Terminal handoffs remain outside launcher ownership.
+Refresh recovery in `sessionStorage` is owner-scoped and contains only version, active surface ID, visibility, and numeric seen offsets; terminal content is rebuilt from the in-memory backend buffer and is never persisted. Stop/restart affect only that agent; route cleanup terminates every owned console before the relay/engine. External Terminal handoffs remain outside ordinary session Stop; explicit Quit uses their private process receipts.
 
 Idle unloading is controller policy rather than relay authority. It is off at every start, begins counting only after explicit selection, pauses while relay activity is active or queued, and invokes ordinary owned-route cleanup when the timeout expires. It fails closed when the relay is unavailable. For FreeToken that cleanup is labelled auto-close and ends only the local bridges; the server/model is unchanged. LM Studio is permanently ineligible because its shared unauthenticated service may have clients that independently know the engine port; relay silence cannot prove that model slot is unused.
 
@@ -255,7 +648,7 @@ The registry completeness test intentionally makes partial additions fail. A new
 - Every launcher-created normal-session surface uses one shared private relay and a unique bearer key; the upstream runtime key is never exposed to a surface.
 - Generation admission is bounded FCFS with the exact loaded lane contract, and one request can be cancelled without inventing control over an external Terminal process.
 - Request activity is session-only, content-free, capped at 32 completed rows, and never presented as coverage of independent engine clients. Completion TPS comes from exact allowlisted LM Studio response stats when present or from runtime-reported token counts plus relay timing. oMLX 0.6.3rc2+ and MTPLX 2.9.1+ live TPS/context is attached only to an exact one-relay-request/one-engine-record match, publishes no engine IDs, admin credential, or text tail, and fails closed to unavailable rather than estimating or guessing attribution.
-- Hub Console owns only its exact PTY children, caps each output buffer in memory, persists no transcript, and can switch, stop, or restart one agent without unloading the shared model. Tab recovery persists only identifiers, visibility, and numeric seen offsets. External Terminal handoffs remain unowned.
+- Hub Console owns only its exact PTY children, caps each output buffer in memory, persists no transcript, and can switch, stop, or restart one agent without unloading the shared model. Tab recovery persists only identifiers, visibility, and numeric seen offsets. External Terminal handoffs use separate private receipts for explicit Quit.
 - Idle unloading is off by default, pauses for admitted or queued work, fails closed without relay evidence, is unavailable for LM Studio's shared service, and closes only local bridges for FreeToken.
 - Engine residency, cache configuration, and a runtime-reported prefix hit are separate public states; cache timing alone is never hit evidence.
 - Cache observations are session-only, number-only, capped at 64, and limited to controller-relayed built-in Chat turns.

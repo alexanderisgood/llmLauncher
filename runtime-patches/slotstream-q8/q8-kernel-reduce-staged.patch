@@ -1,0 +1,49 @@
+Kernel change for 0.2.20-q8.2: stage the Q8 reduce kernel's row maximum and
+per-part softmax weights in threadgroup memory instead of recomputing them in
+all 256 threads of the row. Bit-exact (verified: greedy continuation hash
+unchanged) and +2.5% decode at a 112,881-token prompt.
+
+--- a/Sources/Slotstream/Q8Attention.swift
++++ b/Sources/Slotstream/Q8Attention.swift
+@@ -58,9 +58,40 @@
+             uint channel = thread_position_in_grid.x % 256;
+             uint row = thread_position_in_grid.x / 256;
+             int parts = meta[5];
++            // Staged path: one threadgroup per row, so the row maximum and the
++            // per-part softmax weight are identical across all 256 threads.
++            // Compute each once into threadgroup memory instead of 256 times.
++            // Same values, same ascending-p accumulation order: bit-exact.
++            threadgroup float stagedMax[256];
++            threadgroup float stagedWeight[2048];
++            float numerator = 0.0f, denominator = 0.0f;
++            if (parts <= 2048) {
++                float local = -INFINITY;
++                for (int p = (int)channel; p < parts; p += 256) local = max(local, partial[(row * parts + p) * 258 + 256]);
++                stagedMax[channel] = local;
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++                for (uint step = 128; step > 0; step >>= 1) {
++                    if (channel < step) stagedMax[channel] = max(stagedMax[channel], stagedMax[channel + step]);
++                    threadgroup_barrier(mem_flags::mem_threadgroup);
++                }
++                float maximum = stagedMax[0];
++                for (int p = (int)channel; p < parts; p += 256) {
++                    int base = (row * parts + p) * 258;
++                    stagedWeight[p] = partial[base + 257] == 0.0f ? 0.0f : exp(partial[base + 256] - maximum);
++                }
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++                for (int p = 0; p < parts; ++p) {
++                    float weight = stagedWeight[p];
++                    if (weight == 0.0f) continue;
++                    int base = (row * parts + p) * 258;
++                    numerator += partial[base + channel] * weight;
++                    denominator += partial[base + 257] * weight;
++                }
++                output[row * 256 + channel] = InT(denominator > 0.0f ? numerator / denominator : 0.0f);
++                return;
++            }
+             float maximum = -INFINITY;
+             for (int p = 0; p < parts; ++p) maximum = max(maximum, partial[(row * parts + p) * 258 + 256]);
+-            float numerator = 0.0f, denominator = 0.0f;
+             for (int p = 0; p < parts; ++p) {
+                 int base = (row * parts + p) * 258;
+                 float sum = partial[base + 257];

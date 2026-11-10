@@ -1,0 +1,2229 @@
+{
+  "preExtractionDefinitionsSha256": "5012d80d987e122e2c8d4d21db2aca5f349cba1f10710e690f5e1c75f18884a6",
+  "cases": [
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "omlx",
+        ""
+      ],
+      "expected": {
+        "version": "0.6.4",
+        "displayVersion": "0.6.4",
+        "channel": "stable",
+        "releasedAt": "2026-08-29T17:05:15Z",
+        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.4",
+        "summary": "Current stable release with Qwen3.8 Flash-Next acceleration and long-session correctness fixes.",
+        "highlights": [
+          {
+            "value": "+14.6%",
+            "label": "reported 32K Flash-Next TG"
+          },
+          {
+            "value": "QSA",
+            "label": "exact sparse acceleration"
+          },
+          {
+            "value": "Stable",
+            "label": "release channel"
+          }
+        ],
+        "workflow": [
+          "Install the checksum-verified 0.6.4 wheel beside the selected copy; nothing switches automatically.",
+          "Compare 0.6.4 with the selected copy through Measured Runtime Promotion before preferring it for speed."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": null,
+        "state": "not-installed",
+        "label": "Not installed",
+        "detail": "Audited upstream release 0.6.4 is available.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "omlx",
+        "0.6.4"
+      ],
+      "expected": {
+        "version": "0.6.4",
+        "displayVersion": "0.6.4",
+        "channel": "stable",
+        "releasedAt": "2026-08-29T17:05:15Z",
+        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.4",
+        "summary": "Current stable release with Qwen3.8 Flash-Next acceleration and long-session correctness fixes.",
+        "highlights": [
+          {
+            "value": "+14.6%",
+            "label": "reported 32K Flash-Next TG"
+          },
+          {
+            "value": "QSA",
+            "label": "exact sparse acceleration"
+          },
+          {
+            "value": "Stable",
+            "label": "release channel"
+          }
+        ],
+        "workflow": [
+          "Install the checksum-verified 0.6.4 wheel beside the selected copy; nothing switches automatically.",
+          "Compare 0.6.4 with the selected copy through Measured Runtime Promotion before preferring it for speed."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "0.6.4",
+        "state": "current",
+        "label": "Audited current",
+        "detail": "The selected runtime matches audited release 0.6.4.",
+        "updateAvailable": false,
+        "catalogCurrent": true,
+        "activeAdvisory": null,
+        "needsReview": false
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "omlx",
+        "0.0.1"
+      ],
+      "expected": {
+        "version": "0.6.4",
+        "displayVersion": "0.6.4",
+        "channel": "stable",
+        "releasedAt": "2026-08-29T17:05:15Z",
+        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.4",
+        "summary": "Current stable release with Qwen3.8 Flash-Next acceleration and long-session correctness fixes.",
+        "highlights": [
+          {
+            "value": "+14.6%",
+            "label": "reported 32K Flash-Next TG"
+          },
+          {
+            "value": "QSA",
+            "label": "exact sparse acceleration"
+          },
+          {
+            "value": "Stable",
+            "label": "release channel"
+          }
+        ],
+        "workflow": [
+          "Install the checksum-verified 0.6.4 wheel beside the selected copy; nothing switches automatically.",
+          "Compare 0.6.4 with the selected copy through Measured Runtime Promotion before preferring it for speed."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "0.0.1",
+        "state": "update-available",
+        "label": "Update available",
+        "detail": "Audited upstream release 0.6.4 is newer than the selected 0.0.1.",
+        "updateAvailable": true,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "omlx",
+        "99.99.99"
+      ],
+      "expected": {
+        "version": "0.6.4",
+        "displayVersion": "0.6.4",
+        "channel": "stable",
+        "releasedAt": "2026-08-29T17:05:15Z",
+        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.4",
+        "summary": "Current stable release with Qwen3.8 Flash-Next acceleration and long-session correctness fixes.",
+        "highlights": [
+          {
+            "value": "+14.6%",
+            "label": "reported 32K Flash-Next TG"
+          },
+          {
+            "value": "QSA",
+            "label": "exact sparse acceleration"
+          },
+          {
+            "value": "Stable",
+            "label": "release channel"
+          }
+        ],
+        "workflow": [
+          "Install the checksum-verified 0.6.4 wheel beside the selected copy; nothing switches automatically.",
+          "Compare 0.6.4 with the selected copy through Measured Runtime Promotion before preferring it for speed."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "99.99.99",
+        "state": "newer-unreviewed",
+        "label": "Newer than catalog",
+        "detail": "The selected 99.99.99 is newer than audited release 0.6.4; no current-release claim is made.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "omlx",
+        "unknown"
+      ],
+      "expected": {
+        "version": "0.6.4",
+        "displayVersion": "0.6.4",
+        "channel": "stable",
+        "releasedAt": "2026-08-29T17:05:15Z",
+        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.6.4",
+        "summary": "Current stable release with Qwen3.8 Flash-Next acceleration and long-session correctness fixes.",
+        "highlights": [
+          {
+            "value": "+14.6%",
+            "label": "reported 32K Flash-Next TG"
+          },
+          {
+            "value": "QSA",
+            "label": "exact sparse acceleration"
+          },
+          {
+            "value": "Stable",
+            "label": "release channel"
+          }
+        ],
+        "workflow": [
+          "Install the checksum-verified 0.6.4 wheel beside the selected copy; nothing switches automatically.",
+          "Compare 0.6.4 with the selected copy through Measured Runtime Promotion before preferring it for speed."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "unknown",
+        "state": "unknown-local-version",
+        "label": "Review version",
+        "detail": "The selected version could not be compared with audited release 0.6.4.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "lms",
+        ""
+      ],
+      "expected": {
+        "version": "0.4.23",
+        "displayVersion": "0.4.23+1",
+        "channel": "stable",
+        "releasedAt": "2026-08-28T00:00:00Z",
+        "releaseUrl": "https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23",
+        "summary": "Current stable LM Studio app release with improved Qwen3.8 Flash-Next reliability.",
+        "highlights": [
+          {
+            "value": "0.4.23+1",
+            "label": "stable app"
+          },
+          {
+            "value": "Flash-Next",
+            "label": "reliability update"
+          },
+          {
+            "value": "Separate",
+            "label": "engine packs"
+          }
+        ],
+        "workflow": [
+          "Use LM Studio's app updater for the app and its runtime manager for engine packs.",
+          "Re-run the same local benchmark after either identity changes."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": null,
+        "state": "not-installed",
+        "label": "Not installed",
+        "detail": "Audited upstream release 0.4.23+1 is available.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "lms",
+        "0.4.23"
+      ],
+      "expected": {
+        "version": "0.4.23",
+        "displayVersion": "0.4.23+1",
+        "channel": "stable",
+        "releasedAt": "2026-08-28T00:00:00Z",
+        "releaseUrl": "https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23",
+        "summary": "Current stable LM Studio app release with improved Qwen3.8 Flash-Next reliability.",
+        "highlights": [
+          {
+            "value": "0.4.23+1",
+            "label": "stable app"
+          },
+          {
+            "value": "Flash-Next",
+            "label": "reliability update"
+          },
+          {
+            "value": "Separate",
+            "label": "engine packs"
+          }
+        ],
+        "workflow": [
+          "Use LM Studio's app updater for the app and its runtime manager for engine packs.",
+          "Re-run the same local benchmark after either identity changes."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "0.4.23",
+        "state": "current",
+        "label": "Audited current",
+        "detail": "The selected runtime matches audited release 0.4.23+1.",
+        "updateAvailable": false,
+        "catalogCurrent": true,
+        "activeAdvisory": null,
+        "needsReview": false
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "lms",
+        "0.0.1"
+      ],
+      "expected": {
+        "version": "0.4.23",
+        "displayVersion": "0.4.23+1",
+        "channel": "stable",
+        "releasedAt": "2026-08-28T00:00:00Z",
+        "releaseUrl": "https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23",
+        "summary": "Current stable LM Studio app release with improved Qwen3.8 Flash-Next reliability.",
+        "highlights": [
+          {
+            "value": "0.4.23+1",
+            "label": "stable app"
+          },
+          {
+            "value": "Flash-Next",
+            "label": "reliability update"
+          },
+          {
+            "value": "Separate",
+            "label": "engine packs"
+          }
+        ],
+        "workflow": [
+          "Use LM Studio's app updater for the app and its runtime manager for engine packs.",
+          "Re-run the same local benchmark after either identity changes."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "0.0.1",
+        "state": "update-available",
+        "label": "Update available",
+        "detail": "Audited upstream release 0.4.23+1 is newer than the selected 0.0.1.",
+        "updateAvailable": true,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "lms",
+        "99.99.99"
+      ],
+      "expected": {
+        "version": "0.4.23",
+        "displayVersion": "0.4.23+1",
+        "channel": "stable",
+        "releasedAt": "2026-08-28T00:00:00Z",
+        "releaseUrl": "https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23",
+        "summary": "Current stable LM Studio app release with improved Qwen3.8 Flash-Next reliability.",
+        "highlights": [
+          {
+            "value": "0.4.23+1",
+            "label": "stable app"
+          },
+          {
+            "value": "Flash-Next",
+            "label": "reliability update"
+          },
+          {
+            "value": "Separate",
+            "label": "engine packs"
+          }
+        ],
+        "workflow": [
+          "Use LM Studio's app updater for the app and its runtime manager for engine packs.",
+          "Re-run the same local benchmark after either identity changes."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "99.99.99",
+        "state": "newer-unreviewed",
+        "label": "Newer than catalog",
+        "detail": "The selected 99.99.99 is newer than audited release 0.4.23+1; no current-release claim is made.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "lms",
+        "unknown"
+      ],
+      "expected": {
+        "version": "0.4.23",
+        "displayVersion": "0.4.23+1",
+        "channel": "stable",
+        "releasedAt": "2026-08-28T00:00:00Z",
+        "releaseUrl": "https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23",
+        "summary": "Current stable LM Studio app release with improved Qwen3.8 Flash-Next reliability.",
+        "highlights": [
+          {
+            "value": "0.4.23+1",
+            "label": "stable app"
+          },
+          {
+            "value": "Flash-Next",
+            "label": "reliability update"
+          },
+          {
+            "value": "Separate",
+            "label": "engine packs"
+          }
+        ],
+        "workflow": [
+          "Use LM Studio's app updater for the app and its runtime manager for engine packs.",
+          "Re-run the same local benchmark after either identity changes."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "unknown",
+        "state": "unknown-local-version",
+        "label": "Review version",
+        "detail": "The selected version could not be compared with audited release 0.4.23+1.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "mtplx",
+        ""
+      ],
+      "expected": {
+        "version": "2.11.2",
+        "displayVersion": "2.11.2",
+        "channel": "stable",
+        "releasedAt": "2026-09-06T14:04:18Z",
+        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.11.2",
+        "commit": "21be78b3f51820eecef020e5e4855c0715eaf9a5",
+        "summary": "Hardware-gated Qwen 27B attention, repaired long-session cache reuse, and corrected memory and timing accounting.",
+        "highlights": [
+          {
+            "value": "M1\u2013M4",
+            "label": "27B attention corrected"
+          },
+          {
+            "value": "Session bank",
+            "label": "later conversations cache again"
+          },
+          {
+            "value": "Local checks",
+            "label": "speed requires measurement"
+          }
+        ],
+        "advisories": [
+          {
+            "affectedVersion": "2.11.1",
+            "headline": "Update for attention and long-session correctness",
+            "detail": "2.11.1's Turbo 27B flash verifier can produce incorrect attention on M1\u2013M4 GPUs above 8,192 context tokens. 2.11.2 gates it to supported M5 hardware and fixes session-bank reuse and later-conversation admission. The M1\u2013M4 defect is not evidence of an M5 failure."
+          },
+          {
+            "affectedVersion": "2.9.0",
+            "headline": "Re-test Turbo after updating",
+            "detail": "MTPLX says one 2.9.0 Turbo fast-path flag was runtime-dead. Legacy 2.9.0 Turbo evidence is retained as history but cannot choose a fastest route."
+          },
+          {
+            "affectedVersion": "2.10.0",
+            "headline": "Use 2.11.2 for agent and Flash-Next fixes",
+            "detail": "MTPLX 2.11.2 includes the intervening visible-answer, memory-admission, stream-diagnostics, agent-session, and Flash-Next fixes."
+          },
+          {
+            "affectedVersion": "2.10.1",
+            "headline": "Use 2.11.2 for memory and agent-session safety",
+            "detail": "MTPLX 2.11.2 includes the later memory guard, SessionBank, postcommit, forced-tool, and warm-agent fixes."
+          },
+          {
+            "affectedVersion": "2.10.2",
+            "headline": "Use 2.11.2 for the current agent and decode fixes",
+            "detail": "MTPLX 2.11.2 repairs warm agent turns and forced-tool session restores, and adds the audited dense-27B and Flash-Next decode work."
+          },
+          {
+            "affectedVersion": "2.11.0",
+            "headline": "The 2.11.0 upload was retracted",
+            "detail": "MTPLX says 2.11.0 was a mis-stamped PyPI upload containing nothing beyond 2.10.2. It was retracted; update a surviving copy to 2.11.2."
+          }
+        ],
+        "workflow": [
+          "Keep valid older evidence as history, but never reuse it as proof for the changed 2.11.2 runtime.",
+          "Update the app-managed engine through MTPLX's signed app updater or official DMG.",
+          "Keep swap overcommit and unmeasured context-specific operator settings disabled.",
+          "Run mtplx models --check, then repeat the same local benchmark on 2.11.2 before preferring it for TPS."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": null,
+        "state": "not-installed",
+        "label": "Not installed",
+        "detail": "Audited upstream release 2.11.2 is available.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "mtplx",
+        "2.11.2"
+      ],
+      "expected": {
+        "version": "2.11.2",
+        "displayVersion": "2.11.2",
+        "channel": "stable",
+        "releasedAt": "2026-09-06T14:04:18Z",
+        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.11.2",
+        "commit": "21be78b3f51820eecef020e5e4855c0715eaf9a5",
+        "summary": "Hardware-gated Qwen 27B attention, repaired long-session cache reuse, and corrected memory and timing accounting.",
+        "highlights": [
+          {
+            "value": "M1\u2013M4",
+            "label": "27B attention corrected"
+          },
+          {
+            "value": "Session bank",
+            "label": "later conversations cache again"
+          },
+          {
+            "value": "Local checks",
+            "label": "speed requires measurement"
+          }
+        ],
+        "advisories": [
+          {
+            "affectedVersion": "2.11.1",
+            "headline": "Update for attention and long-session correctness",
+            "detail": "2.11.1's Turbo 27B flash verifier can produce incorrect attention on M1\u2013M4 GPUs above 8,192 context tokens. 2.11.2 gates it to supported M5 hardware and fixes session-bank reuse and later-conversation admission. The M1\u2013M4 defect is not evidence of an M5 failure."
+          },
+          {
+            "affectedVersion": "2.9.0",
+            "headline": "Re-test Turbo after updating",
+            "detail": "MTPLX says one 2.9.0 Turbo fast-path flag was runtime-dead. Legacy 2.9.0 Turbo evidence is retained as history but cannot choose a fastest route."
+          },
+          {
+            "affectedVersion": "2.10.0",
+            "headline": "Use 2.11.2 for agent and Flash-Next fixes",
+            "detail": "MTPLX 2.11.2 includes the intervening visible-answer, memory-admission, stream-diagnostics, agent-session, and Flash-Next fixes."
+          },
+          {
+            "affectedVersion": "2.10.1",
+            "headline": "Use 2.11.2 for memory and agent-session safety",
+            "detail": "MTPLX 2.11.2 includes the later memory guard, SessionBank, postcommit, forced-tool, and warm-agent fixes."
+          },
+          {
+            "affectedVersion": "2.10.2",
+            "headline": "Use 2.11.2 for the current agent and decode fixes",
+            "detail": "MTPLX 2.11.2 repairs warm agent turns and forced-tool session restores, and adds the audited dense-27B and Flash-Next decode work."
+          },
+          {
+            "affectedVersion": "2.11.0",
+            "headline": "The 2.11.0 upload was retracted",
+            "detail": "MTPLX says 2.11.0 was a mis-stamped PyPI upload containing nothing beyond 2.10.2. It was retracted; update a surviving copy to 2.11.2."
+          }
+        ],
+        "workflow": [
+          "Keep valid older evidence as history, but never reuse it as proof for the changed 2.11.2 runtime.",
+          "Update the app-managed engine through MTPLX's signed app updater or official DMG.",
+          "Keep swap overcommit and unmeasured context-specific operator settings disabled.",
+          "Run mtplx models --check, then repeat the same local benchmark on 2.11.2 before preferring it for TPS."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "2.11.2",
+        "state": "current",
+        "label": "Audited current",
+        "detail": "The selected runtime matches audited release 2.11.2.",
+        "updateAvailable": false,
+        "catalogCurrent": true,
+        "activeAdvisory": null,
+        "needsReview": false
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "mtplx",
+        "0.0.1"
+      ],
+      "expected": {
+        "version": "2.11.2",
+        "displayVersion": "2.11.2",
+        "channel": "stable",
+        "releasedAt": "2026-09-06T14:04:18Z",
+        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.11.2",
+        "commit": "21be78b3f51820eecef020e5e4855c0715eaf9a5",
+        "summary": "Hardware-gated Qwen 27B attention, repaired long-session cache reuse, and corrected memory and timing accounting.",
+        "highlights": [
+          {
+            "value": "M1\u2013M4",
+            "label": "27B attention corrected"
+          },
+          {
+            "value": "Session bank",
+            "label": "later conversations cache again"
+          },
+          {
+            "value": "Local checks",
+            "label": "speed requires measurement"
+          }
+        ],
+        "advisories": [
+          {
+            "affectedVersion": "2.11.1",
+            "headline": "Update for attention and long-session correctness",
+            "detail": "2.11.1's Turbo 27B flash verifier can produce incorrect attention on M1\u2013M4 GPUs above 8,192 context tokens. 2.11.2 gates it to supported M5 hardware and fixes session-bank reuse and later-conversation admission. The M1\u2013M4 defect is not evidence of an M5 failure."
+          },
+          {
+            "affectedVersion": "2.9.0",
+            "headline": "Re-test Turbo after updating",
+            "detail": "MTPLX says one 2.9.0 Turbo fast-path flag was runtime-dead. Legacy 2.9.0 Turbo evidence is retained as history but cannot choose a fastest route."
+          },
+          {
+            "affectedVersion": "2.10.0",
+            "headline": "Use 2.11.2 for agent and Flash-Next fixes",
+            "detail": "MTPLX 2.11.2 includes the intervening visible-answer, memory-admission, stream-diagnostics, agent-session, and Flash-Next fixes."
+          },
+          {
+            "affectedVersion": "2.10.1",
+            "headline": "Use 2.11.2 for memory and agent-session safety",
+            "detail": "MTPLX 2.11.2 includes the later memory guard, SessionBank, postcommit, forced-tool, and warm-agent fixes."
+          },
+          {
+            "affectedVersion": "2.10.2",
+            "headline": "Use 2.11.2 for the current agent and decode fixes",
+            "detail": "MTPLX 2.11.2 repairs warm agent turns and forced-tool session restores, and adds the audited dense-27B and Flash-Next decode work."
+          },
+          {
+            "affectedVersion": "2.11.0",
+            "headline": "The 2.11.0 upload was retracted",
+            "detail": "MTPLX says 2.11.0 was a mis-stamped PyPI upload containing nothing beyond 2.10.2. It was retracted; update a surviving copy to 2.11.2."
+          }
+        ],
+        "workflow": [
+          "Keep valid older evidence as history, but never reuse it as proof for the changed 2.11.2 runtime.",
+          "Update the app-managed engine through MTPLX's signed app updater or official DMG.",
+          "Keep swap overcommit and unmeasured context-specific operator settings disabled.",
+          "Run mtplx models --check, then repeat the same local benchmark on 2.11.2 before preferring it for TPS."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "0.0.1",
+        "state": "update-available",
+        "label": "Update available",
+        "detail": "Audited upstream release 2.11.2 is newer than the selected 0.0.1.",
+        "updateAvailable": true,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "mtplx",
+        "99.99.99"
+      ],
+      "expected": {
+        "version": "2.11.2",
+        "displayVersion": "2.11.2",
+        "channel": "stable",
+        "releasedAt": "2026-09-06T14:04:18Z",
+        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.11.2",
+        "commit": "21be78b3f51820eecef020e5e4855c0715eaf9a5",
+        "summary": "Hardware-gated Qwen 27B attention, repaired long-session cache reuse, and corrected memory and timing accounting.",
+        "highlights": [
+          {
+            "value": "M1\u2013M4",
+            "label": "27B attention corrected"
+          },
+          {
+            "value": "Session bank",
+            "label": "later conversations cache again"
+          },
+          {
+            "value": "Local checks",
+            "label": "speed requires measurement"
+          }
+        ],
+        "advisories": [
+          {
+            "affectedVersion": "2.11.1",
+            "headline": "Update for attention and long-session correctness",
+            "detail": "2.11.1's Turbo 27B flash verifier can produce incorrect attention on M1\u2013M4 GPUs above 8,192 context tokens. 2.11.2 gates it to supported M5 hardware and fixes session-bank reuse and later-conversation admission. The M1\u2013M4 defect is not evidence of an M5 failure."
+          },
+          {
+            "affectedVersion": "2.9.0",
+            "headline": "Re-test Turbo after updating",
+            "detail": "MTPLX says one 2.9.0 Turbo fast-path flag was runtime-dead. Legacy 2.9.0 Turbo evidence is retained as history but cannot choose a fastest route."
+          },
+          {
+            "affectedVersion": "2.10.0",
+            "headline": "Use 2.11.2 for agent and Flash-Next fixes",
+            "detail": "MTPLX 2.11.2 includes the intervening visible-answer, memory-admission, stream-diagnostics, agent-session, and Flash-Next fixes."
+          },
+          {
+            "affectedVersion": "2.10.1",
+            "headline": "Use 2.11.2 for memory and agent-session safety",
+            "detail": "MTPLX 2.11.2 includes the later memory guard, SessionBank, postcommit, forced-tool, and warm-agent fixes."
+          },
+          {
+            "affectedVersion": "2.10.2",
+            "headline": "Use 2.11.2 for the current agent and decode fixes",
+            "detail": "MTPLX 2.11.2 repairs warm agent turns and forced-tool session restores, and adds the audited dense-27B and Flash-Next decode work."
+          },
+          {
+            "affectedVersion": "2.11.0",
+            "headline": "The 2.11.0 upload was retracted",
+            "detail": "MTPLX says 2.11.0 was a mis-stamped PyPI upload containing nothing beyond 2.10.2. It was retracted; update a surviving copy to 2.11.2."
+          }
+        ],
+        "workflow": [
+          "Keep valid older evidence as history, but never reuse it as proof for the changed 2.11.2 runtime.",
+          "Update the app-managed engine through MTPLX's signed app updater or official DMG.",
+          "Keep swap overcommit and unmeasured context-specific operator settings disabled.",
+          "Run mtplx models --check, then repeat the same local benchmark on 2.11.2 before preferring it for TPS."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "99.99.99",
+        "state": "newer-unreviewed",
+        "label": "Newer than catalog",
+        "detail": "The selected 99.99.99 is newer than audited release 2.11.2; no current-release claim is made.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "mtplx",
+        "unknown"
+      ],
+      "expected": {
+        "version": "2.11.2",
+        "displayVersion": "2.11.2",
+        "channel": "stable",
+        "releasedAt": "2026-09-06T14:04:18Z",
+        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.11.2",
+        "commit": "21be78b3f51820eecef020e5e4855c0715eaf9a5",
+        "summary": "Hardware-gated Qwen 27B attention, repaired long-session cache reuse, and corrected memory and timing accounting.",
+        "highlights": [
+          {
+            "value": "M1\u2013M4",
+            "label": "27B attention corrected"
+          },
+          {
+            "value": "Session bank",
+            "label": "later conversations cache again"
+          },
+          {
+            "value": "Local checks",
+            "label": "speed requires measurement"
+          }
+        ],
+        "advisories": [
+          {
+            "affectedVersion": "2.11.1",
+            "headline": "Update for attention and long-session correctness",
+            "detail": "2.11.1's Turbo 27B flash verifier can produce incorrect attention on M1\u2013M4 GPUs above 8,192 context tokens. 2.11.2 gates it to supported M5 hardware and fixes session-bank reuse and later-conversation admission. The M1\u2013M4 defect is not evidence of an M5 failure."
+          },
+          {
+            "affectedVersion": "2.9.0",
+            "headline": "Re-test Turbo after updating",
+            "detail": "MTPLX says one 2.9.0 Turbo fast-path flag was runtime-dead. Legacy 2.9.0 Turbo evidence is retained as history but cannot choose a fastest route."
+          },
+          {
+            "affectedVersion": "2.10.0",
+            "headline": "Use 2.11.2 for agent and Flash-Next fixes",
+            "detail": "MTPLX 2.11.2 includes the intervening visible-answer, memory-admission, stream-diagnostics, agent-session, and Flash-Next fixes."
+          },
+          {
+            "affectedVersion": "2.10.1",
+            "headline": "Use 2.11.2 for memory and agent-session safety",
+            "detail": "MTPLX 2.11.2 includes the later memory guard, SessionBank, postcommit, forced-tool, and warm-agent fixes."
+          },
+          {
+            "affectedVersion": "2.10.2",
+            "headline": "Use 2.11.2 for the current agent and decode fixes",
+            "detail": "MTPLX 2.11.2 repairs warm agent turns and forced-tool session restores, and adds the audited dense-27B and Flash-Next decode work."
+          },
+          {
+            "affectedVersion": "2.11.0",
+            "headline": "The 2.11.0 upload was retracted",
+            "detail": "MTPLX says 2.11.0 was a mis-stamped PyPI upload containing nothing beyond 2.10.2. It was retracted; update a surviving copy to 2.11.2."
+          }
+        ],
+        "workflow": [
+          "Keep valid older evidence as history, but never reuse it as proof for the changed 2.11.2 runtime.",
+          "Update the app-managed engine through MTPLX's signed app updater or official DMG.",
+          "Keep swap overcommit and unmeasured context-specific operator settings disabled.",
+          "Run mtplx models --check, then repeat the same local benchmark on 2.11.2 before preferring it for TPS."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "unknown",
+        "state": "unknown-local-version",
+        "label": "Review version",
+        "detail": "The selected version could not be compared with audited release 2.11.2.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "slotstream",
+        ""
+      ],
+      "expected": {
+        "version": "0.2.17",
+        "displayVersion": "0.2.17",
+        "channel": "experimental",
+        "releaseUrl": "https://github.com/carloslfu/slotstream/releases/tag/v0.2.17",
+        "summary": "Pinned full-expert Qwen3.8 Flash-Next with SSD n-grams, native MTP and context-aware memory planning.",
+        "highlights": [
+          {
+            "value": "512",
+            "label": "experts preserved"
+          },
+          {
+            "value": "MTP",
+            "label": "native draft head"
+          }
+        ],
+        "workflow": [
+          "Install the audited macOS 26 arm64 archive, with mlx.metallib beside the executable.",
+          "Use the pinned pull command to download or resume the separate 105.3 GB model, then rescan.",
+          "Select a context, MTP setting and process budget; native memory planning runs before every load."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": null,
+        "state": "not-installed",
+        "label": "Not installed",
+        "detail": "Audited upstream release 0.2.17 is available.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "slotstream",
+        "0.2.17"
+      ],
+      "expected": {
+        "version": "0.2.17",
+        "displayVersion": "0.2.17",
+        "channel": "experimental",
+        "releaseUrl": "https://github.com/carloslfu/slotstream/releases/tag/v0.2.17",
+        "summary": "Pinned full-expert Qwen3.8 Flash-Next with SSD n-grams, native MTP and context-aware memory planning.",
+        "highlights": [
+          {
+            "value": "512",
+            "label": "experts preserved"
+          },
+          {
+            "value": "MTP",
+            "label": "native draft head"
+          }
+        ],
+        "workflow": [
+          "Install the audited macOS 26 arm64 archive, with mlx.metallib beside the executable.",
+          "Use the pinned pull command to download or resume the separate 105.3 GB model, then rescan.",
+          "Select a context, MTP setting and process budget; native memory planning runs before every load."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "0.2.17",
+        "state": "current",
+        "label": "Audited current",
+        "detail": "The selected runtime matches audited release 0.2.17.",
+        "updateAvailable": false,
+        "catalogCurrent": true,
+        "activeAdvisory": null,
+        "needsReview": false
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "slotstream",
+        "0.0.1"
+      ],
+      "expected": {
+        "version": "0.2.17",
+        "displayVersion": "0.2.17",
+        "channel": "experimental",
+        "releaseUrl": "https://github.com/carloslfu/slotstream/releases/tag/v0.2.17",
+        "summary": "Pinned full-expert Qwen3.8 Flash-Next with SSD n-grams, native MTP and context-aware memory planning.",
+        "highlights": [
+          {
+            "value": "512",
+            "label": "experts preserved"
+          },
+          {
+            "value": "MTP",
+            "label": "native draft head"
+          }
+        ],
+        "workflow": [
+          "Install the audited macOS 26 arm64 archive, with mlx.metallib beside the executable.",
+          "Use the pinned pull command to download or resume the separate 105.3 GB model, then rescan.",
+          "Select a context, MTP setting and process budget; native memory planning runs before every load."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "0.0.1",
+        "state": "update-available",
+        "label": "Update available",
+        "detail": "Audited upstream release 0.2.17 is newer than the selected 0.0.1.",
+        "updateAvailable": true,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "slotstream",
+        "99.99.99"
+      ],
+      "expected": {
+        "version": "0.2.17",
+        "displayVersion": "0.2.17",
+        "channel": "experimental",
+        "releaseUrl": "https://github.com/carloslfu/slotstream/releases/tag/v0.2.17",
+        "summary": "Pinned full-expert Qwen3.8 Flash-Next with SSD n-grams, native MTP and context-aware memory planning.",
+        "highlights": [
+          {
+            "value": "512",
+            "label": "experts preserved"
+          },
+          {
+            "value": "MTP",
+            "label": "native draft head"
+          }
+        ],
+        "workflow": [
+          "Install the audited macOS 26 arm64 archive, with mlx.metallib beside the executable.",
+          "Use the pinned pull command to download or resume the separate 105.3 GB model, then rescan.",
+          "Select a context, MTP setting and process budget; native memory planning runs before every load."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "99.99.99",
+        "state": "newer-unreviewed",
+        "label": "Newer than catalog",
+        "detail": "The selected 99.99.99 is newer than audited release 0.2.17; no current-release claim is made.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "slotstream",
+        "unknown"
+      ],
+      "expected": {
+        "version": "0.2.17",
+        "displayVersion": "0.2.17",
+        "channel": "experimental",
+        "releaseUrl": "https://github.com/carloslfu/slotstream/releases/tag/v0.2.17",
+        "summary": "Pinned full-expert Qwen3.8 Flash-Next with SSD n-grams, native MTP and context-aware memory planning.",
+        "highlights": [
+          {
+            "value": "512",
+            "label": "experts preserved"
+          },
+          {
+            "value": "MTP",
+            "label": "native draft head"
+          }
+        ],
+        "workflow": [
+          "Install the audited macOS 26 arm64 archive, with mlx.metallib beside the executable.",
+          "Use the pinned pull command to download or resume the separate 105.3 GB model, then rescan.",
+          "Select a context, MTP setting and process budget; native memory planning runs before every load."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "unknown",
+        "state": "unknown-local-version",
+        "label": "Review version",
+        "detail": "The selected version could not be compared with audited release 0.2.17.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "splash",
+        ""
+      ],
+      "expected": {
+        "version": "1.2.1",
+        "displayVersion": "1.2.1",
+        "channel": "stable",
+        "releasedAt": "2026-10-05",
+        "releaseUrl": "https://github.com/incoai/splash/releases/tag/1.2.1",
+        "summary": "Inco's Qwen 27B and 35B-A3B engine supports GGUF quantizations, MLX affine Q4 and legacy packs with a matching DFlash2 draft.",
+        "highlights": [
+          {
+            "value": "DFlash 2",
+            "label": "matching draft"
+          },
+          {
+            "value": "GGUF / MLX Q4",
+            "label": "local checkpoints"
+          },
+          {
+            "value": "256K",
+            "label": "native window"
+          }
+        ],
+        "workflow": [
+          "Use Splash 1.2.1 or newer; the launcher verifies the engine's release hashes before loading.",
+          "Rescan local models to find compatible GGUF files and MLX affine Q4 checkpoints. Each GGUF quantization appears separately.",
+          "Existing target weights are linked in place; the matching DFlash2 draft is downloaded only if no compatible local draft is available.",
+          "Splash needs macOS 26.4+, Apple silicon M3+ and 36 GB unified memory; the launcher serves it on a free loopback port."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": null,
+        "state": "not-installed",
+        "label": "Not installed",
+        "detail": "Audited upstream release 1.2.1 is available.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "splash",
+        "1.2.1"
+      ],
+      "expected": {
+        "version": "1.2.1",
+        "displayVersion": "1.2.1",
+        "channel": "stable",
+        "releasedAt": "2026-10-05",
+        "releaseUrl": "https://github.com/incoai/splash/releases/tag/1.2.1",
+        "summary": "Inco's Qwen 27B and 35B-A3B engine supports GGUF quantizations, MLX affine Q4 and legacy packs with a matching DFlash2 draft.",
+        "highlights": [
+          {
+            "value": "DFlash 2",
+            "label": "matching draft"
+          },
+          {
+            "value": "GGUF / MLX Q4",
+            "label": "local checkpoints"
+          },
+          {
+            "value": "256K",
+            "label": "native window"
+          }
+        ],
+        "workflow": [
+          "Use Splash 1.2.1 or newer; the launcher verifies the engine's release hashes before loading.",
+          "Rescan local models to find compatible GGUF files and MLX affine Q4 checkpoints. Each GGUF quantization appears separately.",
+          "Existing target weights are linked in place; the matching DFlash2 draft is downloaded only if no compatible local draft is available.",
+          "Splash needs macOS 26.4+, Apple silicon M3+ and 36 GB unified memory; the launcher serves it on a free loopback port."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "1.2.1",
+        "state": "current",
+        "label": "Audited current",
+        "detail": "The selected runtime matches audited release 1.2.1.",
+        "updateAvailable": false,
+        "catalogCurrent": true,
+        "activeAdvisory": null,
+        "needsReview": false
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "splash",
+        "0.0.1"
+      ],
+      "expected": {
+        "version": "1.2.1",
+        "displayVersion": "1.2.1",
+        "channel": "stable",
+        "releasedAt": "2026-10-05",
+        "releaseUrl": "https://github.com/incoai/splash/releases/tag/1.2.1",
+        "summary": "Inco's Qwen 27B and 35B-A3B engine supports GGUF quantizations, MLX affine Q4 and legacy packs with a matching DFlash2 draft.",
+        "highlights": [
+          {
+            "value": "DFlash 2",
+            "label": "matching draft"
+          },
+          {
+            "value": "GGUF / MLX Q4",
+            "label": "local checkpoints"
+          },
+          {
+            "value": "256K",
+            "label": "native window"
+          }
+        ],
+        "workflow": [
+          "Use Splash 1.2.1 or newer; the launcher verifies the engine's release hashes before loading.",
+          "Rescan local models to find compatible GGUF files and MLX affine Q4 checkpoints. Each GGUF quantization appears separately.",
+          "Existing target weights are linked in place; the matching DFlash2 draft is downloaded only if no compatible local draft is available.",
+          "Splash needs macOS 26.4+, Apple silicon M3+ and 36 GB unified memory; the launcher serves it on a free loopback port."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "0.0.1",
+        "state": "update-available",
+        "label": "Update available",
+        "detail": "Audited upstream release 1.2.1 is newer than the selected 0.0.1.",
+        "updateAvailable": true,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "splash",
+        "99.99.99"
+      ],
+      "expected": {
+        "version": "1.2.1",
+        "displayVersion": "1.2.1",
+        "channel": "stable",
+        "releasedAt": "2026-10-05",
+        "releaseUrl": "https://github.com/incoai/splash/releases/tag/1.2.1",
+        "summary": "Inco's Qwen 27B and 35B-A3B engine supports GGUF quantizations, MLX affine Q4 and legacy packs with a matching DFlash2 draft.",
+        "highlights": [
+          {
+            "value": "DFlash 2",
+            "label": "matching draft"
+          },
+          {
+            "value": "GGUF / MLX Q4",
+            "label": "local checkpoints"
+          },
+          {
+            "value": "256K",
+            "label": "native window"
+          }
+        ],
+        "workflow": [
+          "Use Splash 1.2.1 or newer; the launcher verifies the engine's release hashes before loading.",
+          "Rescan local models to find compatible GGUF files and MLX affine Q4 checkpoints. Each GGUF quantization appears separately.",
+          "Existing target weights are linked in place; the matching DFlash2 draft is downloaded only if no compatible local draft is available.",
+          "Splash needs macOS 26.4+, Apple silicon M3+ and 36 GB unified memory; the launcher serves it on a free loopback port."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "99.99.99",
+        "state": "newer-unreviewed",
+        "label": "Newer than catalog",
+        "detail": "The selected 99.99.99 is newer than audited release 1.2.1; no current-release claim is made.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "splash",
+        "unknown"
+      ],
+      "expected": {
+        "version": "1.2.1",
+        "displayVersion": "1.2.1",
+        "channel": "stable",
+        "releasedAt": "2026-10-05",
+        "releaseUrl": "https://github.com/incoai/splash/releases/tag/1.2.1",
+        "summary": "Inco's Qwen 27B and 35B-A3B engine supports GGUF quantizations, MLX affine Q4 and legacy packs with a matching DFlash2 draft.",
+        "highlights": [
+          {
+            "value": "DFlash 2",
+            "label": "matching draft"
+          },
+          {
+            "value": "GGUF / MLX Q4",
+            "label": "local checkpoints"
+          },
+          {
+            "value": "256K",
+            "label": "native window"
+          }
+        ],
+        "workflow": [
+          "Use Splash 1.2.1 or newer; the launcher verifies the engine's release hashes before loading.",
+          "Rescan local models to find compatible GGUF files and MLX affine Q4 checkpoints. Each GGUF quantization appears separately.",
+          "Existing target weights are linked in place; the matching DFlash2 draft is downloaded only if no compatible local draft is available.",
+          "Splash needs macOS 26.4+, Apple silicon M3+ and 36 GB unified memory; the launcher serves it on a free loopback port."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "unknown",
+        "state": "unknown-local-version",
+        "label": "Review version",
+        "detail": "The selected version could not be compared with audited release 1.2.1.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "swiftlm",
+        ""
+      ],
+      "expected": {
+        "version": "b709",
+        "displayVersion": "b709",
+        "channel": "stable",
+        "releasedAt": "2026-08-31T15:48:40Z",
+        "releaseUrl": "https://github.com/SharpAI/SwiftLM/releases/tag/b709",
+        "summary": "Current signed Apple-Silicon build with Aegis shutdown signalling and repaired benchmark/submodule pins.",
+        "highlights": [
+          {
+            "value": "b709",
+            "label": "signed build"
+          },
+          {
+            "value": "Aegis v1",
+            "label": "clean shutdown"
+          }
+        ],
+        "workflow": [
+          "Install the signed arm64 archive from the official release and keep mlx.metallib beside the binary.",
+          "Calibrate only accepted source-bound SSD model families; b709 still does not advertise Qwen3.8 Flash-Next."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": null,
+        "state": "not-installed",
+        "label": "Not installed",
+        "detail": "Audited upstream release b709 is available.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "swiftlm",
+        "b709"
+      ],
+      "expected": {
+        "version": "b709",
+        "displayVersion": "b709",
+        "channel": "stable",
+        "releasedAt": "2026-08-31T15:48:40Z",
+        "releaseUrl": "https://github.com/SharpAI/SwiftLM/releases/tag/b709",
+        "summary": "Current signed Apple-Silicon build with Aegis shutdown signalling and repaired benchmark/submodule pins.",
+        "highlights": [
+          {
+            "value": "b709",
+            "label": "signed build"
+          },
+          {
+            "value": "Aegis v1",
+            "label": "clean shutdown"
+          }
+        ],
+        "workflow": [
+          "Install the signed arm64 archive from the official release and keep mlx.metallib beside the binary.",
+          "Calibrate only accepted source-bound SSD model families; b709 still does not advertise Qwen3.8 Flash-Next."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "b709",
+        "state": "current",
+        "label": "Audited current",
+        "detail": "The selected runtime matches audited release b709.",
+        "updateAvailable": false,
+        "catalogCurrent": true,
+        "activeAdvisory": null,
+        "needsReview": false
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "swiftlm",
+        "0.0.1"
+      ],
+      "expected": {
+        "version": "b709",
+        "displayVersion": "b709",
+        "channel": "stable",
+        "releasedAt": "2026-08-31T15:48:40Z",
+        "releaseUrl": "https://github.com/SharpAI/SwiftLM/releases/tag/b709",
+        "summary": "Current signed Apple-Silicon build with Aegis shutdown signalling and repaired benchmark/submodule pins.",
+        "highlights": [
+          {
+            "value": "b709",
+            "label": "signed build"
+          },
+          {
+            "value": "Aegis v1",
+            "label": "clean shutdown"
+          }
+        ],
+        "workflow": [
+          "Install the signed arm64 archive from the official release and keep mlx.metallib beside the binary.",
+          "Calibrate only accepted source-bound SSD model families; b709 still does not advertise Qwen3.8 Flash-Next."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "0.0.1",
+        "state": "unknown-local-version",
+        "label": "Review version",
+        "detail": "The selected version could not be compared with audited release b709.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "swiftlm",
+        "99.99.99"
+      ],
+      "expected": {
+        "version": "b709",
+        "displayVersion": "b709",
+        "channel": "stable",
+        "releasedAt": "2026-08-31T15:48:40Z",
+        "releaseUrl": "https://github.com/SharpAI/SwiftLM/releases/tag/b709",
+        "summary": "Current signed Apple-Silicon build with Aegis shutdown signalling and repaired benchmark/submodule pins.",
+        "highlights": [
+          {
+            "value": "b709",
+            "label": "signed build"
+          },
+          {
+            "value": "Aegis v1",
+            "label": "clean shutdown"
+          }
+        ],
+        "workflow": [
+          "Install the signed arm64 archive from the official release and keep mlx.metallib beside the binary.",
+          "Calibrate only accepted source-bound SSD model families; b709 still does not advertise Qwen3.8 Flash-Next."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "99.99.99",
+        "state": "unknown-local-version",
+        "label": "Review version",
+        "detail": "The selected version could not be compared with audited release b709.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "swiftlm",
+        "unknown"
+      ],
+      "expected": {
+        "version": "b709",
+        "displayVersion": "b709",
+        "channel": "stable",
+        "releasedAt": "2026-08-31T15:48:40Z",
+        "releaseUrl": "https://github.com/SharpAI/SwiftLM/releases/tag/b709",
+        "summary": "Current signed Apple-Silicon build with Aegis shutdown signalling and repaired benchmark/submodule pins.",
+        "highlights": [
+          {
+            "value": "b709",
+            "label": "signed build"
+          },
+          {
+            "value": "Aegis v1",
+            "label": "clean shutdown"
+          }
+        ],
+        "workflow": [
+          "Install the signed arm64 archive from the official release and keep mlx.metallib beside the binary.",
+          "Calibrate only accepted source-bound SSD model families; b709 still does not advertise Qwen3.8 Flash-Next."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "unknown",
+        "state": "unknown-local-version",
+        "label": "Review version",
+        "detail": "The selected version could not be compared with audited release b709.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "whallm",
+        ""
+      ],
+      "expected": {
+        "version": "1.1.4",
+        "displayVersion": "1.1.4",
+        "channel": "stable",
+        "releasedAt": "2026-09-03T17:49:37Z",
+        "releaseUrl": "https://github.com/yanun0323/Whallm/releases/tag/v1.1.4",
+        "summary": "Current experimental Apple-Silicon app with repaired Qwen/Codex tool replies, prompt-cache snapshots, ANE prefill, and full 512-expert SSD streaming.",
+        "highlights": [
+          {
+            "value": "20.9\u201322.8 GiB",
+            "label": "M5 Pro MLX active memory"
+          },
+          {
+            "value": "512",
+            "label": "experts preserved"
+          },
+          {
+            "value": "9.7\u201310.4 tok/s",
+            "label": "measured decode range"
+          }
+        ],
+        "advisories": [
+          {
+            "affectedVersion": "1.1.2",
+            "headline": "Update for Qwen/Codex reliability fixes",
+            "detail": "Whallm 1.1.4 fixes blank Codex replies caused by conflicting tool-call stream parsers and rejects affected mutable prompt-cache snapshots."
+          },
+          {
+            "affectedVersion": "1.1.4",
+            "headline": "48 GiB remains outside the published support floor",
+            "detail": "Whallm measures Qwen at up to 22.75 GiB of MLX active memory on an M5 Pro and caps automatic Qwen memory at 48 GiB, but its public requirements still say 64 GiB or more. The launcher therefore labels this Mac route experimental rather than guaranteed."
+          }
+        ],
+        "workflow": [
+          "Install the signed 1.1.4 arm64 app from the official release.",
+          "Download the app's pinned Qwen model, then start its loopback server.",
+          "Rescan the launcher; upstream figures remain reference-only until this Mac completes a matching local measurement."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": null,
+        "state": "not-installed",
+        "label": "Not installed",
+        "detail": "Audited upstream release 1.1.4 is available.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "whallm",
+        "1.1.4"
+      ],
+      "expected": {
+        "version": "1.1.4",
+        "displayVersion": "1.1.4",
+        "channel": "stable",
+        "releasedAt": "2026-09-03T17:49:37Z",
+        "releaseUrl": "https://github.com/yanun0323/Whallm/releases/tag/v1.1.4",
+        "summary": "Current experimental Apple-Silicon app with repaired Qwen/Codex tool replies, prompt-cache snapshots, ANE prefill, and full 512-expert SSD streaming.",
+        "highlights": [
+          {
+            "value": "20.9\u201322.8 GiB",
+            "label": "M5 Pro MLX active memory"
+          },
+          {
+            "value": "512",
+            "label": "experts preserved"
+          },
+          {
+            "value": "9.7\u201310.4 tok/s",
+            "label": "measured decode range"
+          }
+        ],
+        "advisories": [
+          {
+            "affectedVersion": "1.1.2",
+            "headline": "Update for Qwen/Codex reliability fixes",
+            "detail": "Whallm 1.1.4 fixes blank Codex replies caused by conflicting tool-call stream parsers and rejects affected mutable prompt-cache snapshots."
+          },
+          {
+            "affectedVersion": "1.1.4",
+            "headline": "48 GiB remains outside the published support floor",
+            "detail": "Whallm measures Qwen at up to 22.75 GiB of MLX active memory on an M5 Pro and caps automatic Qwen memory at 48 GiB, but its public requirements still say 64 GiB or more. The launcher therefore labels this Mac route experimental rather than guaranteed."
+          }
+        ],
+        "workflow": [
+          "Install the signed 1.1.4 arm64 app from the official release.",
+          "Download the app's pinned Qwen model, then start its loopback server.",
+          "Rescan the launcher; upstream figures remain reference-only until this Mac completes a matching local measurement."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "1.1.4",
+        "state": "current",
+        "label": "Audited current",
+        "detail": "The selected runtime matches audited release 1.1.4.",
+        "updateAvailable": false,
+        "catalogCurrent": true,
+        "activeAdvisory": {
+          "affectedVersion": "1.1.4",
+          "headline": "48 GiB remains outside the published support floor",
+          "detail": "Whallm measures Qwen at up to 22.75 GiB of MLX active memory on an M5 Pro and caps automatic Qwen memory at 48 GiB, but its public requirements still say 64 GiB or more. The launcher therefore labels this Mac route experimental rather than guaranteed."
+        },
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "whallm",
+        "0.0.1"
+      ],
+      "expected": {
+        "version": "1.1.4",
+        "displayVersion": "1.1.4",
+        "channel": "stable",
+        "releasedAt": "2026-09-03T17:49:37Z",
+        "releaseUrl": "https://github.com/yanun0323/Whallm/releases/tag/v1.1.4",
+        "summary": "Current experimental Apple-Silicon app with repaired Qwen/Codex tool replies, prompt-cache snapshots, ANE prefill, and full 512-expert SSD streaming.",
+        "highlights": [
+          {
+            "value": "20.9\u201322.8 GiB",
+            "label": "M5 Pro MLX active memory"
+          },
+          {
+            "value": "512",
+            "label": "experts preserved"
+          },
+          {
+            "value": "9.7\u201310.4 tok/s",
+            "label": "measured decode range"
+          }
+        ],
+        "advisories": [
+          {
+            "affectedVersion": "1.1.2",
+            "headline": "Update for Qwen/Codex reliability fixes",
+            "detail": "Whallm 1.1.4 fixes blank Codex replies caused by conflicting tool-call stream parsers and rejects affected mutable prompt-cache snapshots."
+          },
+          {
+            "affectedVersion": "1.1.4",
+            "headline": "48 GiB remains outside the published support floor",
+            "detail": "Whallm measures Qwen at up to 22.75 GiB of MLX active memory on an M5 Pro and caps automatic Qwen memory at 48 GiB, but its public requirements still say 64 GiB or more. The launcher therefore labels this Mac route experimental rather than guaranteed."
+          }
+        ],
+        "workflow": [
+          "Install the signed 1.1.4 arm64 app from the official release.",
+          "Download the app's pinned Qwen model, then start its loopback server.",
+          "Rescan the launcher; upstream figures remain reference-only until this Mac completes a matching local measurement."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "0.0.1",
+        "state": "update-available",
+        "label": "Update available",
+        "detail": "Audited upstream release 1.1.4 is newer than the selected 0.0.1.",
+        "updateAvailable": true,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "whallm",
+        "99.99.99"
+      ],
+      "expected": {
+        "version": "1.1.4",
+        "displayVersion": "1.1.4",
+        "channel": "stable",
+        "releasedAt": "2026-09-03T17:49:37Z",
+        "releaseUrl": "https://github.com/yanun0323/Whallm/releases/tag/v1.1.4",
+        "summary": "Current experimental Apple-Silicon app with repaired Qwen/Codex tool replies, prompt-cache snapshots, ANE prefill, and full 512-expert SSD streaming.",
+        "highlights": [
+          {
+            "value": "20.9\u201322.8 GiB",
+            "label": "M5 Pro MLX active memory"
+          },
+          {
+            "value": "512",
+            "label": "experts preserved"
+          },
+          {
+            "value": "9.7\u201310.4 tok/s",
+            "label": "measured decode range"
+          }
+        ],
+        "advisories": [
+          {
+            "affectedVersion": "1.1.2",
+            "headline": "Update for Qwen/Codex reliability fixes",
+            "detail": "Whallm 1.1.4 fixes blank Codex replies caused by conflicting tool-call stream parsers and rejects affected mutable prompt-cache snapshots."
+          },
+          {
+            "affectedVersion": "1.1.4",
+            "headline": "48 GiB remains outside the published support floor",
+            "detail": "Whallm measures Qwen at up to 22.75 GiB of MLX active memory on an M5 Pro and caps automatic Qwen memory at 48 GiB, but its public requirements still say 64 GiB or more. The launcher therefore labels this Mac route experimental rather than guaranteed."
+          }
+        ],
+        "workflow": [
+          "Install the signed 1.1.4 arm64 app from the official release.",
+          "Download the app's pinned Qwen model, then start its loopback server.",
+          "Rescan the launcher; upstream figures remain reference-only until this Mac completes a matching local measurement."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "99.99.99",
+        "state": "newer-unreviewed",
+        "label": "Newer than catalog",
+        "detail": "The selected 99.99.99 is newer than audited release 1.1.4; no current-release claim is made.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "whallm",
+        "unknown"
+      ],
+      "expected": {
+        "version": "1.1.4",
+        "displayVersion": "1.1.4",
+        "channel": "stable",
+        "releasedAt": "2026-09-03T17:49:37Z",
+        "releaseUrl": "https://github.com/yanun0323/Whallm/releases/tag/v1.1.4",
+        "summary": "Current experimental Apple-Silicon app with repaired Qwen/Codex tool replies, prompt-cache snapshots, ANE prefill, and full 512-expert SSD streaming.",
+        "highlights": [
+          {
+            "value": "20.9\u201322.8 GiB",
+            "label": "M5 Pro MLX active memory"
+          },
+          {
+            "value": "512",
+            "label": "experts preserved"
+          },
+          {
+            "value": "9.7\u201310.4 tok/s",
+            "label": "measured decode range"
+          }
+        ],
+        "advisories": [
+          {
+            "affectedVersion": "1.1.2",
+            "headline": "Update for Qwen/Codex reliability fixes",
+            "detail": "Whallm 1.1.4 fixes blank Codex replies caused by conflicting tool-call stream parsers and rejects affected mutable prompt-cache snapshots."
+          },
+          {
+            "affectedVersion": "1.1.4",
+            "headline": "48 GiB remains outside the published support floor",
+            "detail": "Whallm measures Qwen at up to 22.75 GiB of MLX active memory on an M5 Pro and caps automatic Qwen memory at 48 GiB, but its public requirements still say 64 GiB or more. The launcher therefore labels this Mac route experimental rather than guaranteed."
+          }
+        ],
+        "workflow": [
+          "Install the signed 1.1.4 arm64 app from the official release.",
+          "Download the app's pinned Qwen model, then start its loopback server.",
+          "Rescan the launcher; upstream figures remain reference-only until this Mac completes a matching local measurement."
+        ],
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-07",
+        "installedVersion": "unknown",
+        "state": "unknown-local-version",
+        "label": "Review version",
+        "detail": "The selected version could not be compared with audited release 1.1.4.",
+        "updateAvailable": false,
+        "catalogCurrent": false,
+        "activeAdvisory": null,
+        "needsReview": true
+      }
+    },
+    {
+      "method": "parsed_omlx_version",
+      "args": [
+        "0.6.3rc1"
+      ],
+      "expected": [
+        0,
+        6,
+        3,
+        1
+      ]
+    },
+    {
+      "method": "semantic_version_key",
+      "args": [
+        "0.6.3rc1"
+      ],
+      "expected": [
+        0,
+        6,
+        3,
+        1
+      ]
+    },
+    {
+      "method": "omlx_supports_dflash2",
+      "args": [
+        "0.6.3rc1"
+      ],
+      "expected": true
+    },
+    {
+      "method": "omlx_has_recommended_dflash2_runtime",
+      "args": [
+        "0.6.3rc1"
+      ],
+      "expected": false
+    },
+    {
+      "method": "parsed_omlx_version",
+      "args": [
+        "0.6.4"
+      ],
+      "expected": [
+        0,
+        6,
+        4,
+        1000000
+      ]
+    },
+    {
+      "method": "semantic_version_key",
+      "args": [
+        "0.6.4"
+      ],
+      "expected": [
+        0,
+        6,
+        4,
+        1000000
+      ]
+    },
+    {
+      "method": "omlx_supports_dflash2",
+      "args": [
+        "0.6.4"
+      ],
+      "expected": true
+    },
+    {
+      "method": "omlx_has_recommended_dflash2_runtime",
+      "args": [
+        "0.6.4"
+      ],
+      "expected": true
+    },
+    {
+      "method": "parsed_omlx_version",
+      "args": [
+        "0.7.0.dev1"
+      ],
+      "expected": [
+        0,
+        7,
+        0,
+        -999999
+      ]
+    },
+    {
+      "method": "semantic_version_key",
+      "args": [
+        "0.7.0.dev1"
+      ],
+      "expected": [
+        0,
+        7,
+        0,
+        -999999
+      ]
+    },
+    {
+      "method": "omlx_supports_dflash2",
+      "args": [
+        "0.7.0.dev1"
+      ],
+      "expected": true
+    },
+    {
+      "method": "omlx_has_recommended_dflash2_runtime",
+      "args": [
+        "0.7.0.dev1"
+      ],
+      "expected": true
+    },
+    {
+      "method": "parsed_omlx_version",
+      "args": [
+        "0.7.0.dev2"
+      ],
+      "expected": [
+        0,
+        7,
+        0,
+        -999998
+      ]
+    },
+    {
+      "method": "semantic_version_key",
+      "args": [
+        "0.7.0.dev2"
+      ],
+      "expected": [
+        0,
+        7,
+        0,
+        -999998
+      ]
+    },
+    {
+      "method": "omlx_supports_dflash2",
+      "args": [
+        "0.7.0.dev2"
+      ],
+      "expected": true
+    },
+    {
+      "method": "omlx_has_recommended_dflash2_runtime",
+      "args": [
+        "0.7.0.dev2"
+      ],
+      "expected": true
+    },
+    {
+      "method": "parsed_omlx_version",
+      "args": [
+        "0.7.0rc1"
+      ],
+      "expected": [
+        0,
+        7,
+        0,
+        1
+      ]
+    },
+    {
+      "method": "semantic_version_key",
+      "args": [
+        "0.7.0rc1"
+      ],
+      "expected": [
+        0,
+        7,
+        0,
+        1
+      ]
+    },
+    {
+      "method": "omlx_supports_dflash2",
+      "args": [
+        "0.7.0rc1"
+      ],
+      "expected": true
+    },
+    {
+      "method": "omlx_has_recommended_dflash2_runtime",
+      "args": [
+        "0.7.0rc1"
+      ],
+      "expected": true
+    },
+    {
+      "method": "parsed_omlx_version",
+      "args": [
+        "0.7.0"
+      ],
+      "expected": [
+        0,
+        7,
+        0,
+        1000000
+      ]
+    },
+    {
+      "method": "semantic_version_key",
+      "args": [
+        "0.7.0"
+      ],
+      "expected": [
+        0,
+        7,
+        0,
+        1000000
+      ]
+    },
+    {
+      "method": "omlx_supports_dflash2",
+      "args": [
+        "0.7.0"
+      ],
+      "expected": true
+    },
+    {
+      "method": "omlx_has_recommended_dflash2_runtime",
+      "args": [
+        "0.7.0"
+      ],
+      "expected": true
+    },
+    {
+      "method": "parsed_omlx_version",
+      "args": [
+        "omlx 0.7.0.dev2"
+      ],
+      "expected": [
+        0,
+        7,
+        0,
+        -999998
+      ]
+    },
+    {
+      "method": "semantic_version_key",
+      "args": [
+        "omlx 0.7.0.dev2"
+      ],
+      "expected": [
+        0,
+        7,
+        0,
+        -999998
+      ]
+    },
+    {
+      "method": "omlx_supports_dflash2",
+      "args": [
+        "omlx 0.7.0.dev2"
+      ],
+      "expected": true
+    },
+    {
+      "method": "omlx_has_recommended_dflash2_runtime",
+      "args": [
+        "omlx 0.7.0.dev2"
+      ],
+      "expected": true
+    },
+    {
+      "method": "parsed_omlx_version",
+      "args": [
+        "0.7.0.dev2evil"
+      ],
+      "expected": null
+    },
+    {
+      "method": "semantic_version_key",
+      "args": [
+        "0.7.0.dev2evil"
+      ],
+      "expected": [
+        -1,
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "method": "omlx_supports_dflash2",
+      "args": [
+        "0.7.0.dev2evil"
+      ],
+      "expected": false
+    },
+    {
+      "method": "omlx_has_recommended_dflash2_runtime",
+      "args": [
+        "0.7.0.dev2evil"
+      ],
+      "expected": false
+    },
+    {
+      "method": "parsed_omlx_version",
+      "args": [
+        "0.7.0.dev"
+      ],
+      "expected": null
+    },
+    {
+      "method": "semantic_version_key",
+      "args": [
+        "0.7.0.dev"
+      ],
+      "expected": [
+        -1,
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "method": "omlx_supports_dflash2",
+      "args": [
+        "0.7.0.dev"
+      ],
+      "expected": false
+    },
+    {
+      "method": "omlx_has_recommended_dflash2_runtime",
+      "args": [
+        "0.7.0.dev"
+      ],
+      "expected": false
+    },
+    {
+      "method": "parsed_omlx_version",
+      "args": [
+        "Unknown"
+      ],
+      "expected": null
+    },
+    {
+      "method": "semantic_version_key",
+      "args": [
+        "Unknown"
+      ],
+      "expected": [
+        -1,
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "method": "omlx_supports_dflash2",
+      "args": [
+        "Unknown"
+      ],
+      "expected": false
+    },
+    {
+      "method": "omlx_has_recommended_dflash2_runtime",
+      "args": [
+        "Unknown"
+      ],
+      "expected": false
+    },
+    {
+      "method": "runtime_release_key",
+      "args": [
+        "swiftlm",
+        "SwiftLM b28"
+      ],
+      "expected": [
+        28,
+        0,
+        0,
+        1000000
+      ]
+    },
+    {
+      "method": "runtime_release_key",
+      "args": [
+        "swiftlm",
+        "unknown"
+      ],
+      "expected": [
+        -1,
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "method": "audited_runtime_release",
+      "args": [
+        "omlx",
+        "0.7.0.dev2"
+      ],
+      "expected": {
+        "version": "0.7.0.dev2",
+        "displayVersion": "0.7.0.dev2",
+        "channel": "preview",
+        "releasedAt": "2026-09-11T14:42:08Z",
+        "releaseUrl": "https://github.com/jundot/omlx/releases/tag/v0.7.0.dev2",
+        "summary": "Preview with Flash-Next expert and PLE SSD offload. Select expert residency to fit memory; speculative decoding must be off.",
+        "highlights": [
+          {
+            "value": "Preview",
+            "label": "release channel"
+          },
+          {
+            "value": "Flash-Next",
+            "label": "decode and prefill optimizations"
+          },
+          {
+            "value": "Expert SSD",
+            "label": "configurable resident expert cache"
+          }
+        ],
+        "workflow": [
+          "Select the installed preview in Engine versions to try it; the stable copy remains available."
+        ],
+        "commit": "b390b31e0c6831225fed0f24d278eb1db7fcb68b",
+        "schemaVersion": 1,
+        "auditedAt": "2026-09-15",
+        "installedVersion": "0.7.0.dev2",
+        "state": "current",
+        "label": "Audited current",
+        "detail": "The selected runtime matches audited release 0.7.0.dev2.",
+        "updateAvailable": false,
+        "catalogCurrent": true,
+        "activeAdvisory": null,
+        "needsReview": false
+      }
+    },
+    {
+      "method": "launch_runtime_advisory",
+      "args": [
+        "mtplx",
+        {
+          "backends": {
+            "mtplx": {
+              "runtimeVersion": "MTPLX 2.11.1"
+            }
+          }
+        }
+      ],
+      "expected": {
+        "id": "mtplx-long-agent-update",
+        "level": "warning",
+        "title": "Update MTPLX for safer long agent runs",
+        "detail": "MTPLX 2.11.1 is selected. Upstream 2.11.2 includes hardware-gated 27B attention plus warm-turn, postcommit, session-bank and memory fixes. Open Tools \u2192 Runtimes before relying on a hard Pi, OpenCode, or Codex task.",
+        "releaseUrl": "https://github.com/youssofal/MTPLX/releases/tag/v2.11.2"
+      }
+    },
+    {
+      "method": "launch_runtime_advisory",
+      "args": [
+        "mtplx",
+        {
+          "backends": {
+            "mtplx": {
+              "runtimeVersion": "MTPLX 2.11.2"
+            }
+          }
+        }
+      ],
+      "expected": null
+    }
+  ],
+  "extractedFunctions": [
+    "launcher_managed_runtime_specs",
+    "runtime_candidates",
+    "lmstudio_backend_preference",
+    "lmstudio_runtime_identity",
+    "parsed_omlx_version",
+    "omlx_version_at_least",
+    "omlx_supports_dflash2",
+    "omlx_has_recommended_dflash2_runtime",
+    "plist_version",
+    "runtime_app_status",
+    "semantic_version_key",
+    "runtime_release_key",
+    "audited_runtime_release",
+    "launch_runtime_advisory",
+    "omlx_kernel_artifacts",
+    "omlx_runtime_python",
+    "omlx_qwen_kernel_status",
+    "metal_toolchain_status",
+    "_exact_omlx_version",
+    "runtime_update_python",
+    "_runtime_update_release",
+    "_runtime_update_target",
+    "_runtime_update_direct_hash",
+    "managed_runtime_verification",
+    "build_runtime_update_plan",
+    "runtime_update_overview",
+    "_lmstudio_llamacpp_pack_contract",
+    "lmstudio_runtime_packs",
+    "runtime_candidate_details",
+    "runtime_inventory",
+    "runtime_promotion_public_plan",
+    "_runtime_promotion_candidate",
+    "build_runtime_promotion_plan",
+    "_runtime_promotion_measurement",
+    "build_runtime_promotion_result"
+  ]
+}

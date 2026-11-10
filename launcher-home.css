@@ -1,71 +1,214 @@
 /* Everyday launch and Hub layouts stay compact at either information level. */
-:root .simple-launcher .app-workspace{grid-template-columns:minmax(0,1fr);max-width:832px;border:0}
-:root .simple-launcher .inspector{display:none!important}
-:root .simple-launcher .app-bar{padding:0 24px;height:52px;background:var(--surface-heading);border-bottom:1px solid var(--line-soft)}
-:root .simple-launcher .app-title strong{font-size:15px;letter-spacing:-.03em}
-:root .simple-launcher .app-title small{font-size:11px}
-:root .simple-launcher .brandmark{border-radius:11px;width:34px;height:34px}
-:root .simple-launcher .toolbar-button{font-size:12px;min-height:36px;border-radius:9px}
-:root .simple-launcher .status-pill{font-size:10px}
-:root .simple-launcher .status-pill:is(.idle,.running,.neutral),:root .simple-launcher .toolbar-separator{display:none}
-:root .simple-launcher .hub-tools-menu{width:240px;right:0;padding:8px}
-:root .simple-launcher .hub-tools-menu :is(button,a){display:flex;justify-content:space-between;min-height:36px;padding:8px 10px;font-size:13px;margin:0}
-:root .simple-launcher .hub-tools-menu hr{border:0;border-top:1px solid var(--line-soft);margin:6px 4px}
-:root .simple-launcher .theme-menu{right:0}
-:root .simple-launcher .theme-menu button{min-height:38px}
-:root .simple-launcher .config-pane{background:transparent;min-height:0}
-:root .simple-launcher .pane-heading{padding:22px 36px 14px;background:transparent;border:0;align-items:flex-start}
-:root .simple-launcher .pane-heading h1{font-size:30px;letter-spacing:-.045em;font-weight:650}
-:root .simple-launcher .pane-heading p{font-size:14px;margin-top:9px;line-height:1.5}
-:root .simple-launcher #interfaceDetailButton,:root .simple-launcher #localChip{display:none}
-:root .simple-launcher #focusedRunStatus{display:flex;max-width:260px;background:var(--surface-raised);border:1px solid var(--line-soft);border-radius:12px;padding:8px 10px}
-:root .simple-launcher #focusedRunStatus[data-phase="idle"]{display:none}
-:root .simple-launcher #focusedRunStatus [hidden]{display:none!important}
-:root .simple-launcher #focusedRunStatus:has(#focusedConsoleButton:not([hidden])) #focusedRunMessage{display:none}
-:root .simple-launcher #focusedConsoleButton{color:var(--accent);font-size:12px;white-space:nowrap}
-:root .simple-launcher .config-scroll{padding:12px 36px 24px;scrollbar-gutter:auto}
-:root .simple-launcher #customLaunchEditor{max-width:760px;margin:auto}
-:root .simple-launcher .config-section{padding:12px 0;background:transparent;border:0;border-radius:0}
-:root .simple-launcher .config-section+.config-section{margin-top:0;border-top:1px solid var(--line-soft)}
-:root .simple-launcher .section-head{margin-bottom:14px}
-:root .simple-launcher .section-head h2{font-size:14px;font-weight:650}
-:root .simple-launcher #customLaunchEditor>.config-section>.section-head>span{display:none}
-:root .simple-launcher .model-section{padding-top:4px}
-:root .simple-launcher #modelSelect{height:54px;font-size:17px;font-weight:600;padding:0 18px;border-radius:13px;background:var(--field);letter-spacing:-.02em}
-:root .simple-launcher .field>span{font-size:12px}
-:root .simple-launcher .field input,:root .simple-launcher .field select{font-size:13px;min-height:42px}
-:root .simple-launcher #projectPath{height:46px;border-radius:10px;font-size:13px}
-:root .simple-launcher .engine-picker{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px}
-:root .simple-launcher .engine-picker select{max-width:195px;border:1px solid var(--line-soft);border-radius:8px;background:var(--field);color:var(--text);padding:7px 9px;font:inherit;font-size:12px}
-:root .simple-launcher .model-information{margin-top:12px;color:var(--muted);font-size:12px}
-:root .simple-launcher .model-information>summary{cursor:pointer;width:fit-content;min-height:24px;line-height:24px}
-:root .simple-launcher .model-information .model-card{margin-top:10px;padding:12px;border:1px solid var(--line-soft);border-radius:10px}
-:root .simple-launcher #clientChoices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;padding:0;border:0;background:transparent}
-:root .simple-launcher #clientChoices button{height:44px;display:flex;align-items:center;justify-content:center;gap:8px;padding:8px;border:1px solid var(--line);border-radius:9px;text-align:left;background:var(--field);color:var(--text)}
-:root .simple-launcher #clientChoices button b{font-size:17px;margin:0;color:var(--muted)}
-:root .simple-launcher #clientChoices button strong{display:block;font-size:13px;font-weight:650}
-:root .simple-launcher #clientChoices button small{display:none}
-:root .simple-launcher #clientChoices button[aria-pressed="true"]{border-color:var(--accent);background:rgba(var(--accent-rgb),.08);box-shadow:0 0 0 1px rgba(var(--accent-rgb),.12)}
-:root .simple-launcher #clientChoices button[aria-pressed="true"] b{color:var(--accent)}
-:root .simple-launcher #clientChoices button:disabled{opacity:.4}
-:root .simple-launcher #compatibilityLine{display:block!important;font-size:11px;min-height:0;margin:10px 0 0;color:var(--muted)}
-:root .simple-launcher .launch-settings{border:1px solid var(--line-soft);border-radius:12px;background:var(--surface-raised);margin-top:4px}
-:root .simple-launcher .launch-settings>summary{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:14px 18px;cursor:pointer;list-style:none}
-:root .simple-launcher .launch-settings>summary::-webkit-details-marker{display:none}
-:root .simple-launcher .launch-settings>summary strong{font-size:13px;font-weight:600;display:block}
-:root .simple-launcher .launch-settings>summary small{display:block;color:var(--muted);font-size:11px;margin-top:5px;line-height:1.5}
-:root .simple-launcher .launch-settings-body{border-top:1px solid var(--line-soft);padding:0 18px 18px}
-:root .simple-launcher .launch-settings-body .config-section{padding:18px 0}
-:root .simple-launcher .launch-settings .invariant{display:none}
-:root .simple-launcher .launch-settings .section-head>span{display:none}
-:root .simple-launcher .launch-settings .field small{font-size:11px;line-height:1.5}
-:root .simple-launcher #notice{max-width:760px;margin:12px auto 0;font-size:12px;line-height:1.5}
-:root .simple-launcher .launch-dock{display:block!important;max-width:832px;width:100%;margin:0 auto;padding:0 36px 24px;border:0;background:var(--panel);box-shadow:none}
+.skip-link{position:fixed;left:16px;top:-60px;z-index:100;padding:12px 16px;border-radius:9px;background:var(--accent);color:var(--bg);font-weight:700;text-decoration:none;opacity:0;pointer-events:none}
+.skip-link:focus{top:10px;opacity:1;pointer-events:auto}
+:root .simple-launcher .quit-launcher-button{color:var(--muted)}
+:root .simple-launcher .quit-launcher-button:hover{color:var(--danger);background:rgba(var(--danger-rgb),.08)}
+:root .simple-launcher #quitLauncherButton{width:auto;min-width:56px}
+:root .simple-launcher #quitLauncherButton span{display:inline}
+/* The library stays beside the settings on desktop and stacks on small screens. */
+:root .simple-launcher .app-workspace {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 1200px;
+  border: 0;
+}
+:root .simple-launcher .inspector { display: none !important; }
+:root .simple-launcher .app-bar {
+  padding: 0 24px;
+  height: 52px;
+  background: var(--surface-heading);
+  border-bottom: 1px solid var(--line-soft);
+}
+:root .simple-launcher .app-title strong { font-size: 15px; letter-spacing: -.02em; }
+:root .simple-launcher .brandmark { border-radius: 9px; width: 32px; height: 32px; }
+:root .simple-launcher .toolbar-button { font-size: 12px; min-height: 36px; border-radius: 8px; }
+:root .simple-launcher .status-pill:is(.idle,.running,.neutral),
+:root .simple-launcher .toolbar-separator,
+:root .simple-launcher #interfaceDetailButton,
+:root .simple-launcher #localChip { display: none; }
+:root .simple-launcher .hub-tools-menu { width: 240px; right: 0; padding: 8px; }
+:root .simple-launcher .hub-tools-menu :is(button,a) { display: flex; justify-content: space-between; min-height: 36px; padding: 8px 10px; font-size: 13px; margin: 0; }
+:root .simple-launcher .hub-tools-menu hr { border: 0; border-top: 1px solid var(--line-soft); margin: 6px 4px; }
+:root .simple-launcher .theme-menu { right: 0; }
+:root .simple-launcher .theme-menu button { min-height: 38px; }
+
+:root .simple-launcher .config-pane { background: var(--panel); min-height: 0; }
+:root .simple-launcher .pane-heading {
+  padding: 12px 24px;
+  min-height: 55px;
+  background: var(--surface-heading);
+  border-bottom: 1px solid var(--line-soft);
+  align-items: center;
+}
+:root .simple-launcher .pane-heading h1 { font-size: 18px; letter-spacing: -.02em; font-weight: 650; }
+:root .simple-launcher #focusedRunStatus { display: flex; max-width: 320px; border-radius: 8px; padding: 5px 8px; }
+:root .simple-launcher #focusedRunStatus[data-phase="idle"] { display: none; }
+:root .simple-launcher #focusedRunStatus [hidden] { display: none !important; }
+:root .simple-launcher #focusedRunStatus:has(#focusedConsoleButton:not([hidden])) #focusedRunMessage { display: none; }
+:root .simple-launcher #focusedConsoleButton { color: var(--accent); font-size: 12px; white-space: nowrap; }
+:root .simple-launcher #configScroll { padding: 0; scrollbar-gutter: auto; }
+:root .simple-launcher #customLaunchEditor {
+  display: grid;
+  grid-template-columns: minmax(220px, 282px) minmax(0, 1fr);
+  align-items: start;
+  min-height: 100%;
+}
+:root .simple-launcher #profileEditBanner { grid-column: 1 / -1; margin: 12px 24px 0; }
+
+.model-sidebar {
+  position: sticky;
+  top: 0;
+  min-width: 0;
+  padding: 20px 14px 18px;
+  background: var(--surface-raised);
+}
+.model-sidebar-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 4px 12px; }
+.model-sidebar-heading h2 { margin: 0; font-size: 13px; font-weight: 650; }
+.model-sidebar-heading span { color: var(--muted); font-size: 10px; }
+.home-model-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--muted);
+}
+.home-model-search:focus-within { border-color: var(--accent); }
+.home-model-search input { width: 100%; min-width: 0; min-height: 36px; border: 0; background: transparent; color: var(--text); font-size: 12px; }
+:root .simple-launcher .home-model-search input:focus-visible { outline: 0; }
+.home-model-list { display: grid; gap: 3px; max-height: 63dvh; overflow-y: auto; overscroll-behavior: contain; }
+.home-model-list .model-list-item {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 9px 7px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.home-model-list .model-list-item:hover { background: var(--field); }
+.home-model-list .model-list-item[aria-pressed="true"] { background: rgba(var(--accent-rgb), .09); border-color: rgba(var(--accent-rgb), .35); }
+.home-model-list .model-list-item:focus-visible { outline-offset: -2px; }
+.model-list-mark, .selected-model-mark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--field);
+  color: var(--muted);
+}
+.model-list-item[aria-pressed="true"] .model-list-mark,
+.selected-model-mark { color: var(--accent); background: rgba(var(--accent-rgb), .1); }
+.model-list-item strong, .model-list-item small { display: block; overflow-wrap: anywhere; }
+.model-list-item strong { font-size: 12px; line-height: 1.35; }
+.model-list-item small { margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.3; }
+
+.launch-content { min-width: 0; min-height: 100%; padding: 24px 28px 20px; border-inline-start: 1px solid var(--line-soft); }
+.selected-model { display: flex; align-items: center; gap: 12px; min-width: 0; margin-bottom: 19px; }
+.selected-model-mark { width: 38px; height: 38px; flex: none; font-size: 18px; }
+.selected-model > div { min-width: 0; flex: 1; }
+.selected-model h2 { margin: 0; font-size: clamp(17px, 2vw, 23px); font-weight: 650; letter-spacing: -.02em; overflow-wrap: anywhere; }
+.selected-model p { margin: 4px 0 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.overview-readiness { padding: 5px 7px; border-radius: 6px; background: var(--field); color: var(--muted); font-size: 10px; text-align: center; }
+.launch-overview[data-ready="true"] .overview-readiness { color: var(--success); background: rgba(var(--success-rgb), .09); }
+:root .simple-launcher #customLaunchEditor .config-section { padding: 0; margin: 0; background: transparent; border: 0; border-radius: 0; }
+:root .simple-launcher .launch-content .section-head { margin: 0 0 7px; }
+:root .simple-launcher .launch-content .section-head h2 { font-size: 12px; font-weight: 650; }
+:root .simple-launcher .launch-content .field > span { font-size: 12px; }
+:root .simple-launcher .launch-content .field :is(input:not([type=range]),select) { min-height: 36px; font-size: 13px; border-radius: 7px; }
+:root .simple-launcher .engine-picker { margin-bottom: 14px; }
+:root .simple-launcher #clientChoices { display: flex; flex-wrap: wrap; gap: 5px; padding: 0; border: 0; background: transparent; }
+:root .simple-launcher #clientChoices button {
+  display: inline-flex;
+  flex: 0 1 auto;
+  gap: 5px;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  height: auto;
+  padding: 6px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--field);
+  color: var(--text);
+  font-size: 12px;
+}
+:root .simple-launcher #clientChoices button b { margin: 0; color: var(--muted); }
+:root .simple-launcher #clientChoices button[aria-pressed="true"] { border-color: var(--accent); background: rgba(var(--accent-rgb), .08); }
+:root .simple-launcher #clientChoices button[aria-pressed="true"] b { color: var(--accent); }
+:root .simple-launcher #clientChoices button:disabled { opacity: .45; }
+:root .simple-launcher #compatibilityLine { display: block; font-size: 11px; min-height: 0; margin: 7px 0 0; color: var(--muted); }
+:root .simple-launcher #compatibilityLine[data-available="true"] { display: none !important; }
+.session-location { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; margin-top: 14px; }
+.session-location:has(#agentHostSettings.hidden) { grid-template-columns: minmax(0, 1fr); }
+
+:root .simple-launcher .launch-settings { margin-top: 22px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }
+:root .simple-launcher .launch-settings > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; padding: 8px 13px; cursor: pointer; list-style: none; }
+:root .simple-launcher .launch-settings > summary::-webkit-details-marker { display: none; }
+:root .simple-launcher .launch-settings > summary strong { display: block; font-size: 13px; font-weight: 650; }
+:root .simple-launcher .launch-settings > summary small { display: block; color: var(--muted); font-size: 11px; margin-top: 3px; }
+:root .simple-launcher .launch-settings[open] > summary small { display: none; }
+:root .simple-launcher .launch-settings[open] > summary > span:last-child { transform: rotate(180deg); }
+:root .simple-launcher .launch-settings-body { padding: 0 13px 13px; }
+.settings-scope { margin: 0 0 12px; color: var(--muted); font-size: 11px; }
+:root .simple-launcher .limits-row { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+:root .simple-launcher #chatSettings { margin-top: 12px !important; }
+:root .simple-launcher .launch-settings .field small { font-size: 11px; line-height: 1.45; }
+:root .simple-launcher #advancedControls { margin-top: 12px; }
+:root .simple-launcher .model-information { margin-top: 12px; color: var(--muted); font-size: 12px; }
+:root .simple-launcher .model-information > summary { cursor: pointer; min-height: 25px; width: fit-content; }
+:root .simple-launcher .model-information .model-card { margin-top: 8px; }
+:root .simple-launcher .launch-tools { margin: 14px 0 8px; padding: 0 0 8px; border-bottom: 1px solid var(--line-soft); }
+:root .simple-launcher .launch-tools > summary { cursor: pointer; min-height: 30px; line-height: 30px; font-size: 12px; color: var(--muted); list-style: none; }
+:root .simple-launcher .launch-tools > summary::-webkit-details-marker { display: none; }
+:root .simple-launcher .launch-tools > summary span { margin-left: 4px; }
+:root .simple-launcher .home-engine-guide { margin: 6px 0 14px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.overview-facts { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 12px; font-size: 11px; }
+.overview-facts dt, .home-performance span, .home-performance p { color: var(--muted); }
+.overview-facts dd { margin: 4px 0 0; }
+.home-performance { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: baseline; font-size: 11px; }
+.home-performance strong { margin-left: 6px; font-variant-numeric: tabular-nums; }
+.home-performance[data-state="measured"] > div:first-child > strong { color: var(--success); }
+.home-performance p { flex-basis: 100%; margin: 0; }
+:root .simple-launcher .home-engine-action { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+:root .simple-launcher .home-engine-action button { min-height: 34px; font-size: 12px; }
+:root .simple-launcher #homeFastestEngineHelp { margin: 0; color: var(--muted); font-size: 11px; }
+
+@media (max-width: 760px) {
+  :root .simple-launcher #customLaunchEditor { grid-template-columns: minmax(0, 1fr); }
+  .model-sidebar { position: static; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); }
+  .home-model-list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 185px; }
+  .launch-content { padding: 16px; border: 0; }
+  :root .simple-launcher .app-bar, :root .simple-launcher .pane-heading { padding-inline: 12px; }
+  :root .simple-launcher #profileEditBanner { margin-inline: 16px; }
+}
+@media (max-width: 510px) {
+  .home-model-list { grid-template-columns: minmax(0, 1fr); }
+  .selected-model { flex-wrap: wrap; }
+  .selected-model > div { flex-basis: calc(100% - 50px); }
+  .selected-model .overview-readiness { margin-left: 50px; }
+  .session-location { grid-template-columns: minmax(0, 1fr); }
+  :root .simple-launcher .limits-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  :root .simple-launcher .limits-row > :last-child { grid-column: 1 / -1; }
+}
+.quit-launcher-dialog{width:min(400px,calc(100vw - 32px));text-align:center;padding:32px;border:1px solid var(--line);border-radius:18px;background:var(--panel);color:var(--text);box-shadow:var(--shadow)}
+.quit-launcher-dialog::backdrop{background:rgba(0,0,0,.65)}
+.quit-mark{display:grid;place-items:center;width:48px;height:48px;margin:0 auto 20px;border:1px solid var(--line);border-radius:14px;color:var(--accent);font-size:24px}
+.quit-launcher-dialog h2{font-size:20px;letter-spacing:-.025em;font-weight:600}
+.quit-launcher-dialog p{font-size:13px;line-height:1.7;color:var(--muted)}
+.quit-launcher-dialog progress{width:100%;height:5px;margin-top:12px;accent-color:var(--accent)}
+.quit-error-actions{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:20px}
+.quit-error-actions[hidden]{display:none}
+.quit-error-actions button{min-height:38px;min-width:100px;padding:8px 14px}
+:root .simple-launcher .launch-dock{display:block!important;max-width:1200px;width:100%;margin:0 auto;padding:10px 24px 12px;border-top:1px solid var(--line-soft);background:var(--panel);box-shadow:0 -8px 24px rgba(0,0,0,.025)}
 :root .simple-launcher .launch-dock.hidden{display:none!important}
-:root .simple-launcher .launch-tools{border-bottom:1px solid var(--line-soft);margin-bottom:18px;padding:0 0 14px}
-:root .simple-launcher .launch-tools>summary{color:var(--muted);font-size:11px;cursor:pointer;list-style:none;min-height:28px;line-height:28px}
-:root .simple-launcher .launch-tools>summary::-webkit-details-marker{display:none}
-:root .simple-launcher .launch-tools>summary span{margin-left:8px}
 :root .simple-launcher .launch-tools[open]>.optimization-panel{display:grid!important;padding:12px 0;gap:12px}
 :root .simple-launcher .diagnostic-actions{display:flex;gap:8px;padding-bottom:8px}
 :root .simple-launcher .diagnostic-actions button{display:inline-flex!important;font-size:12px;min-height:36px}
@@ -94,14 +237,10 @@
 :root .simple-launcher #quickStart{max-width:760px;margin:0 auto 16px}
 :root .simple-launcher #chatWorkspace,:root .simple-launcher #agentWorkspace{min-height:0}
 :root .simple-launcher :is(button,input,select,summary):focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-@media(min-width:1001px){:root .simple-launcher .app-workspace{max-width:832px}:root .simple-launcher .config-pane{grid-template-rows:auto minmax(0,1fr) auto}}
 @media(max-width:1000px){:root .simple-launcher .launch-dock{position:relative}:root .simple-launcher .config-pane{display:block}:root .simple-launcher .config-scroll{overflow:visible}}
-@media(max-width:640px){:root .simple-launcher .app-bar{padding:0 12px;height:56px}:root .simple-launcher .pane-heading{padding:24px 20px 14px}:root .simple-launcher .pane-heading h1{font-size:26px}:root .simple-launcher .pane-heading p{font-size:12px}:root .simple-launcher .config-scroll{padding:8px 20px 20px}:root .simple-launcher .launch-dock{padding:0 20px 24px}:root .simple-launcher #clientChoices{grid-template-columns:repeat(2,minmax(0,1fr))}:root .simple-launcher #clientChoices button{height:65px}:root .simple-launcher .dock-actions{align-items:stretch;flex-direction:column;gap:14px}:root .simple-launcher #launchButton{width:100%}:root .simple-launcher .engine-picker{gap:5px}:root .simple-launcher .engine-picker select{max-width:145px}:root .simple-launcher .section-head h2{font-size:13px}:root .simple-launcher #focusedRunStatus{max-width:150px}:root .simple-launcher .focused-run-copy small{display:none}:root .simple-launcher #modelSelect{font-size:14px}}
 @media(prefers-reduced-motion:reduce){:root .simple-launcher *{scroll-behavior:auto!important}}
 
 :root .simple-launcher .app-workspace:has(#configScroll.hidden){max-width:1440px}
-:root .simple-launcher .config-pane:has(#configScroll.hidden) .pane-heading{padding:14px 20px}
-:root .simple-launcher .config-pane:has(#configScroll.hidden) .pane-heading h1{font-size:20px}
 
 :root .simple-launcher .app-shell{grid-template-rows:52px minmax(0,1fr)}
 @media(max-width:640px){:root .simple-launcher .app-shell{grid-template-rows:56px minmax(0,1fr)}}
@@ -109,16 +248,12 @@
 :root .simple-launcher #launchDock [hidden]{display:none!important}
 :root .simple-launcher[data-preparing-launch="true"] #notice,
 :root .simple-launcher[data-preparing-launch="true"] #focusedRunStatus{display:none!important}
-:root .simple-launcher .home-engine-action{display:flex;align-items:center;gap:14px;margin-top:12px}
-:root .simple-launcher #homeFastestEngine{display:inline-flex;align-items:center;justify-content:center;gap:7px;flex:none;min-height:36px;padding:8px 12px;font-size:12px;border-radius:9px;border-color:rgba(var(--accent-rgb),.3);color:var(--accent);background:rgba(var(--accent-rgb),.04)}
-:root .simple-launcher #homeFastestEngine strong{font-size:12px;font-weight:600}
-:root .simple-launcher #homeFastestEngineHelp{margin:0;color:var(--muted);font-size:11px;line-height:1.5;max-width:350px}
-@media(max-width:640px){:root .simple-launcher .home-engine-action{align-items:flex-start;flex-direction:column;gap:8px}:root .simple-launcher #homeFastestEngine{width:100%}}
-:root .simple-launcher #homeFastestEngineHelp{flex:1;max-width:none}
-:root .simple-launcher #compatibilityLine[data-available="true"]{display:none!important}
-:root .simple-launcher .config-pane:not(:has(#configScroll.hidden)) .pane-heading{padding-top:16px;padding-bottom:10px}
-:root .simple-launcher #customLaunchEditor>.config-section>.section-head{margin-bottom:10px}
 
+:root .simple-launcher #launchDock #notice { margin: 0 0 8px; font-size: 12px; line-height: 1.4; }
+@media (max-width: 640px) {
+  :root .simple-launcher .launch-dock { padding: 8px 12px; }
+  :root .simple-launcher #focusedRunStatus { max-width: 170px; }
+}
 /* The Hub's existing toolbar carries its identity; no separate title banner. */
 :root .simple-launcher:has(#agentWorkspace:not(.hidden)) .app-bar {display:none}
 :root .simple-launcher .config-pane:has(#agentWorkspace:not(.hidden)) > .pane-heading {display:none}
@@ -165,7 +300,9 @@
 
 /* One console bar: tabs, route/measurements, then actions. */
 :root .simple-launcher .app-workspace:has(#agentWorkspace:not(.hidden)) {max-width:none;width:100%}
-:root .simple-launcher .agent-workspace {grid-template-rows:auto minmax(0,1fr) auto}
+:root .simple-launcher .agent-workspace {grid-template-rows:auto auto minmax(0,1fr) auto}
+:root .simple-launcher .agent-workspace > .agent-terminal-shell {grid-row:3}
+:root .simple-launcher .agent-workspace > .agent-console-composer {grid-row:4}
 :root .simple-launcher .agent-console-toolbar {
   position:relative;z-index:5;display:grid;
   grid-template-columns:minmax(100px,auto) minmax(0,1fr) auto;
@@ -204,7 +341,31 @@
   border:1px solid #353d49;border-radius:10px;background:#12161d;
   box-shadow:0 12px 32px #0008;padding:12px;z-index:7;
 }
-:root .simple-launcher .agent-console-live-phase {display:none!important}
+
+:root .simple-launcher .agent-console-live-phase {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px 16px;
+  padding: 7px 14px;
+  border-bottom: 1px solid #292f39;
+  background: #161b23;
+  color: #b3c0cf;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.hub-activity-message { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
+.hub-activity-message i { align-self: center; flex: none; width: 7px; height: 7px; border-radius: 50%; background: #e8b767; }
+.hub-activity-message strong { color: #edf2fa; font-weight: 600; }
+.agent-console-live-phase[data-state="flowing"] i { background: #71d5a1; }
+.agent-console-live-phase[data-state="quiet"] i { background: #aab6c5; }
+.hub-activity-queue { font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 760px) {
+  :root .simple-launcher .agent-console-live-phase { padding: 5px 8px; }
+  .hub-activity-message span { flex-basis: 100%; padding-inline-start: 15px; }
+}
+
 :root .simple-launcher .agent-console-composer {padding:10px 14px;gap:8px}
 :root .simple-launcher .agent-console-composer>label {gap:0}
 :root .simple-launcher .agent-workspace [hidden] {display:none!important}
@@ -258,6 +419,18 @@
   :root .simple-launcher .agent-console-keys {gap:4px;flex-wrap:wrap}
   :root .simple-launcher .agent-console-keys button {padding-left:6px;padding-right:6px;font-size:10px}
 }
+.hub-fan-group {display:flex;align-items:center;gap:6px;min-width:0}
+@media(max-width:760px) {
+  /* Home and actions use the reserved top corner. Cooling has its own row,
+     leaving route identity and all four measurements readable on phones. */
+  :root .simple-launcher .agent-console-toolbar,
+  :root .simple-launcher .agent-console-toolbar:has(.agent-console-tab:only-child) {grid-template-columns:minmax(0,1fr) auto auto}
+  :root .simple-launcher .agent-console-toolbar .agent-console-header-actions {display:contents}
+  :root .simple-launcher #agentConsoleBackButton {grid-column:2;grid-row:1;align-self:start;z-index:1}
+  :root .simple-launcher #agentConsoleActionsMenu {grid-column:3;grid-row:1;align-self:start;z-index:1}
+  :root .simple-launcher .hub-fan-group {grid-column:1/-1;grid-row:2;justify-content:flex-start;max-width:100%}
+  :root .simple-launcher .hub-fan-message {max-width:none;min-width:0;white-space:normal;line-height:1.35}
+}
 :root .simple-launcher .agent-console-context-tokens {display:block;max-width:220px;margin-top:2px;color:#aab6c5;font-size:10px;line-height:1.35;font-variant-numeric:tabular-nums;white-space:normal}
 :root .simple-launcher .agent-console-context-tokens[hidden] {display:none}
 :root .simple-launcher #agentConsoleStatusContext {min-width:150px}
@@ -285,3 +458,12 @@
 .agent-console-drafts-dialog .agent-console-saved-draft{display:flex;height:auto;min-height:56px;padding:12px;align-items:stretch;flex-direction:column;gap:6px;text-align:left;white-space:normal;overflow-wrap:anywhere}
 .agent-console-saved-draft span{font-size:13px;line-height:1.4}
 .agent-console-saved-draft small{color:var(--muted);font-size:11px}
+
+
+@media (max-width: 480px) {
+  :root .simple-launcher .app-title strong { font-size: 12px; }
+  :root .simple-launcher .brandmark { width: 27px; height: 27px; }
+  :root .simple-launcher .app-title { gap: 7px; }
+  :root .simple-launcher .app-toolbar { gap: 0; }
+  :root .simple-launcher .toolbar-button { padding: 0 7px; font-size: 11px; }
+}

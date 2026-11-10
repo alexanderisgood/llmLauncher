@@ -1,0 +1,46 @@
+/* Runtime controls stay readable without changing the exact reviewed contract. */
+.runtime-dialog .runtime-manager-summary,.runtime-dialog .runtime-manager-status,
+.runtime-dialog .runtime-safety span,.runtime-dialog .runtime-check small,
+.runtime-dialog .runtime-agent small,.runtime-dialog .runtime-update-detail,
+.runtime-dialog .runtime-update-track p,.runtime-dialog .runtime-update-track a,
+.runtime-dialog .runtime-update-plan-head p,.runtime-dialog .runtime-update-check small,
+.runtime-dialog .runtime-update-contract li,.runtime-dialog .runtime-update-contract p,
+.runtime-dialog .runtime-update-progress p,.runtime-dialog .runtime-promotion-progress p,
+.runtime-dialog .runtime-promotion-current small,.runtime-dialog .runtime-release p,
+.runtime-dialog .runtime-promotion-result>p{font-size:12px;line-height:1.5}
+.runtime-dialog .runtime-card>header strong,.runtime-dialog .runtime-update-plan-head h4{font-size:15px}
+.runtime-dialog .runtime-card>header small,.runtime-dialog .runtime-card-details>summary strong,
+.runtime-dialog .runtime-agent strong,.runtime-dialog .runtime-update-track header strong,
+.runtime-dialog .runtime-update-check strong,.runtime-dialog .runtime-update-contract>summary,
+.runtime-dialog .runtime-candidate strong,.runtime-dialog .runtime-selected>strong,
+.runtime-dialog .runtime-update>strong,.runtime-dialog .runtime-promotion-copy strong{font-size:12px}
+.runtime-dialog .runtime-card-details>summary small,.runtime-dialog .runtime-update-facts small,
+.runtime-dialog .runtime-promotion-summary small,.runtime-dialog .runtime-promotion-metrics small,
+.runtime-dialog .runtime-card-overview small{font-size:10px}
+.runtime-dialog .runtime-update-facts strong,.runtime-dialog .runtime-promotion-summary strong,
+.runtime-dialog .runtime-promotion-metrics strong,.runtime-dialog .runtime-card-overview strong,
+.runtime-dialog .runtime-candidate span,.runtime-dialog .runtime-check strong{font-size:12px}
+.runtime-dialog .runtime-selected>code,.runtime-dialog .runtime-candidate code,
+.runtime-dialog .runtime-update-facts code,.runtime-dialog .runtime-promotion-copy code,
+.runtime-dialog .runtime-promotion-copy small{font-size:10px;line-height:1.5;white-space:normal;overflow-wrap:anywhere}
+.runtime-dialog .runtime-update-track .secondary,.runtime-dialog .runtime-candidate-action .text-button,
+.runtime-dialog .runtime-links a,.runtime-dialog .runtime-links .runtime-open-app{font-size:12px;min-height:32px}
+.runtime-dialog .runtime-candidate-action{align-items:flex-start}
+.runtime-dialog .runtime-candidate{grid-template-columns:minmax(0,1fr)}
+.runtime-dialog [data-error="true"]{color:var(--red)}
+.runtime-dialog .runtime-update-center>.section-head p,.runtime-dialog .runtime-promotion-center>.section-head p{font-size:12px;line-height:1.5}
+.runtime-dialog .runtime-update-center>.section-head h3,.runtime-dialog .runtime-promotion-center>.section-head h3{font-size:15px}
+.runtime-dialog .runtime-promotion-result>header{flex-wrap:wrap}
+.runtime-dialog .runtime-card-details>summary,.runtime-dialog .runtime-advanced-tools>summary{min-height:44px}
+@media(max-width:560px){
+  .runtime-dialog{width:calc(100% - 16px);max-height:calc(100dvh - 16px);padding:15px}
+  .runtime-dialog .setup-heading{flex-wrap:wrap;gap:8px}
+  .runtime-dialog .runtime-update-track>div{align-items:flex-start;flex-wrap:wrap}
+  .runtime-dialog .runtime-update-track .secondary{width:100%;min-height:42px}
+  .runtime-dialog .runtime-update-facts strong,.runtime-dialog .runtime-promotion-summary strong{white-space:normal;overflow-wrap:anywhere}
+}
+.runtime-dialog .runtime-promotion-result>header strong,.runtime-dialog .runtime-promotion-result .text-button,
+.runtime-dialog .runtime-update-result strong,.runtime-dialog .runtime-update-empty strong,.runtime-dialog .runtime-promotion-empty strong{font-size:12px}
+.runtime-dialog .runtime-promotion-result .text-button{min-height:36px;text-align:left}
+.runtime-dialog .runtime-update-result small,.runtime-dialog .runtime-update-result em,
+.runtime-dialog .runtime-update-empty span,.runtime-dialog .runtime-promotion-empty span{font-size:11px;line-height:1.5}

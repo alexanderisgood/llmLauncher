@@ -1,0 +1,302 @@
+{
+  "save": {
+    "thread": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "title": "Generated fixture prompt",
+      "createdAt": "2026-10-06T12:00:00+00:00",
+      "updatedAt": "2026-10-06T12:00:00+00:00",
+      "pinned": false,
+      "originModel": "Synthetic Qwen",
+      "originBackend": "omlx",
+      "originContext": 4096,
+      "originOutput": 512,
+      "originReasoning": "auto",
+      "model": "Synthetic Qwen",
+      "backend": "omlx",
+      "context": 4096,
+      "output": 512,
+      "reasoning": "auto",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Generated fixture prompt"
+        },
+        {
+          "role": "assistant",
+          "content": "Generated answer",
+          "reasoning": "Visible model reasoning",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "usage": {
+            "source": "runtime",
+            "promptTokens": 128,
+            "completionTokens": 32,
+            "cachedPromptTokens": 100
+          }
+        }
+      ],
+      "resumeAvailable": true,
+      "resumeNeedsSystemPrompt": true,
+      "resumeBackend": "omlx",
+      "resumeModelId": "synthetic-qwen"
+    },
+    "version": 8,
+    "threads": [
+      {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "title": "Generated fixture prompt",
+        "createdAt": "2026-10-06T12:00:00+00:00",
+        "updatedAt": "2026-10-06T12:00:00+00:00",
+        "model": "Synthetic Qwen",
+        "backend": "omlx",
+        "context": 4096,
+        "output": 512,
+        "reasoning": "auto",
+        "pinned": false,
+        "branchParentId": null,
+        "branchParentTitle": null,
+        "branchPoint": null,
+        "branchKind": null,
+        "originModel": "Synthetic Qwen",
+        "originBackend": "omlx",
+        "originContext": 4096,
+        "originOutput": 512,
+        "originReasoning": "auto",
+        "messageCount": 2,
+        "preview": "Generated fixture prompt",
+        "hasInterruptedTurn": false,
+        "resumeAvailable": true,
+        "resumeNeedsSystemPrompt": true,
+        "resumeBackend": "omlx",
+        "resumeModelId": "synthetic-qwen"
+      }
+    ],
+    "limit": 100,
+    "privacy": {
+      "localOnly": true,
+      "storesMessages": true,
+      "storesDisplayedReasoning": true,
+      "storesRuntimeUsage": true,
+      "storesMessageTimestamps": true,
+      "storesBranchLineage": true,
+      "storesRouteMetadata": true,
+      "storesInterruptedRecovery": true,
+      "storesResponseLimitState": true,
+      "storesResumeRouteSettings": true,
+      "storesProjectPathForResume": true,
+      "storesSystemPrompt": false,
+      "storesProjectData": false
+    }
+  },
+  "get": {
+    "thread": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "title": "Generated fixture prompt",
+      "createdAt": "2026-10-06T12:00:00+00:00",
+      "updatedAt": "2026-10-06T12:00:00+00:00",
+      "pinned": false,
+      "originModel": "Synthetic Qwen",
+      "originBackend": "omlx",
+      "originContext": 4096,
+      "originOutput": 512,
+      "originReasoning": "auto",
+      "model": "Synthetic Qwen",
+      "backend": "omlx",
+      "context": 4096,
+      "output": 512,
+      "reasoning": "auto",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Generated fixture prompt"
+        },
+        {
+          "role": "assistant",
+          "content": "Generated answer",
+          "reasoning": "Visible model reasoning",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "usage": {
+            "source": "runtime",
+            "promptTokens": 128,
+            "completionTokens": 32,
+            "cachedPromptTokens": 100
+          }
+        }
+      ],
+      "resumeAvailable": true,
+      "resumeNeedsSystemPrompt": true,
+      "resumeBackend": "omlx",
+      "resumeModelId": "synthetic-qwen"
+    }
+  },
+  "update": {
+    "thread": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "title": "Renamed conversation",
+      "createdAt": "2026-10-06T12:00:00+00:00",
+      "updatedAt": "2026-10-06T12:00:00+00:00",
+      "pinned": true,
+      "originModel": "Synthetic Qwen",
+      "originBackend": "omlx",
+      "originContext": 4096,
+      "originOutput": 512,
+      "originReasoning": "auto",
+      "model": "Synthetic Qwen",
+      "backend": "omlx",
+      "context": 4096,
+      "output": 512,
+      "reasoning": "auto",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Generated fixture prompt"
+        },
+        {
+          "role": "assistant",
+          "content": "Generated answer",
+          "reasoning": "Visible model reasoning",
+          "createdAt": "2026-10-06T12:00:00+00:00",
+          "usage": {
+            "source": "runtime",
+            "promptTokens": 128,
+            "completionTokens": 32,
+            "cachedPromptTokens": 100
+          }
+        }
+      ],
+      "resumeAvailable": true,
+      "resumeNeedsSystemPrompt": true,
+      "resumeBackend": "omlx",
+      "resumeModelId": "synthetic-qwen"
+    },
+    "version": 8,
+    "threads": [
+      {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "title": "Renamed conversation",
+        "createdAt": "2026-10-06T12:00:00+00:00",
+        "updatedAt": "2026-10-06T12:00:00+00:00",
+        "model": "Synthetic Qwen",
+        "backend": "omlx",
+        "context": 4096,
+        "output": 512,
+        "reasoning": "auto",
+        "pinned": true,
+        "branchParentId": null,
+        "branchParentTitle": null,
+        "branchPoint": null,
+        "branchKind": null,
+        "originModel": "Synthetic Qwen",
+        "originBackend": "omlx",
+        "originContext": 4096,
+        "originOutput": 512,
+        "originReasoning": "auto",
+        "messageCount": 2,
+        "preview": "Generated fixture prompt",
+        "hasInterruptedTurn": false,
+        "resumeAvailable": true,
+        "resumeNeedsSystemPrompt": true,
+        "resumeBackend": "omlx",
+        "resumeModelId": "synthetic-qwen"
+      }
+    ],
+    "limit": 100,
+    "privacy": {
+      "localOnly": true,
+      "storesMessages": true,
+      "storesDisplayedReasoning": true,
+      "storesRuntimeUsage": true,
+      "storesMessageTimestamps": true,
+      "storesBranchLineage": true,
+      "storesRouteMetadata": true,
+      "storesInterruptedRecovery": true,
+      "storesResponseLimitState": true,
+      "storesResumeRouteSettings": true,
+      "storesProjectPathForResume": true,
+      "storesSystemPrompt": false,
+      "storesProjectData": false
+    }
+  },
+  "storedAfterUpdate": {
+    "version": 8,
+    "threads": [
+      {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "title": "Renamed conversation",
+        "createdAt": "2026-10-06T12:00:00+00:00",
+        "updatedAt": "2026-10-06T12:00:00+00:00",
+        "pinned": true,
+        "originModel": "Synthetic Qwen",
+        "originBackend": "omlx",
+        "originContext": 4096,
+        "originOutput": 512,
+        "originReasoning": "auto",
+        "model": "Synthetic Qwen",
+        "backend": "omlx",
+        "context": 4096,
+        "output": 512,
+        "reasoning": "auto",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Generated fixture prompt"
+          },
+          {
+            "role": "assistant",
+            "content": "Generated answer",
+            "reasoning": "Visible model reasoning",
+            "createdAt": "2026-10-06T12:00:00+00:00",
+            "usage": {
+              "source": "runtime",
+              "promptTokens": 128,
+              "completionTokens": 32,
+              "cachedPromptTokens": 100
+            }
+          }
+        ],
+        "resumeContract": {
+          "version": 1,
+          "capturedAt": "2026-10-06T12:00:00+00:00",
+          "requiresSystemPrompt": true,
+          "request": {
+            "backend": "omlx",
+            "client": "chat",
+            "modelId": "synthetic-qwen",
+            "project": "/tmp/generated-fixture",
+            "context": 4096,
+            "output": 512,
+            "reasoning": "auto",
+            "options": {
+              "kv": "off"
+            },
+            "chat": {
+              "systemPrompt": "",
+              "sampling": "model"
+            },
+            "agentHost": "launcher",
+            "mode": "custom"
+          }
+        }
+      }
+    ]
+  },
+  "delete": {
+    "version": 8,
+    "threads": [],
+    "limit": 100,
+    "privacy": {
+      "localOnly": true,
+      "storesMessages": true,
+      "storesDisplayedReasoning": true,
+      "storesRuntimeUsage": true,
+      "storesMessageTimestamps": true,
+      "storesBranchLineage": true,
+      "storesRouteMetadata": true,
+      "storesInterruptedRecovery": true,
+      "storesResponseLimitState": true,
+      "storesResumeRouteSettings": true,
+      "storesProjectPathForResume": true,
+      "storesSystemPrompt": false,
+      "storesProjectData": false
+    }
+  }
+}

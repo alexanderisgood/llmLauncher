@@ -248,9 +248,13 @@
     };
   }
 
-  function timelinePlainText(value) {
+  function agentLabel(protocol = "pi-rpc") { return protocol === "omp-rpc" ? "oh-my-pi" : "Pi"; }
+
+  function isStructuredProtocol(protocol) { return protocol === "pi-rpc" || protocol === "omp-rpc"; }
+
+  function timelinePlainText(value, protocol = "pi-rpc") {
     const labels = {
-      user:"You", thinking:"Thinking", answer:"Pi", toolCall:"Tool call",
+      user:"You", thinking:"Thinking", answer:agentLabel(protocol), toolCall:"Tool call",
       toolResult:"Tool result", notice:"Notice", error:"Error", queue:"Queue", summary:"Prompt summary",
     };
     return (Array.isArray(value?.items) ? value.items : []).map(item => {
@@ -268,7 +272,7 @@
   }
 
   function shouldUseTimeline(protocol, timelineLoaded) {
-    return protocol === "pi-rpc" && timelineLoaded === true;
+    return isStructuredProtocol(protocol) && timelineLoaded === true;
   }
 
   function shouldRenderTimeline(wasLoaded, result) {
@@ -336,6 +340,7 @@
   }
 
   function piTokenSpeed(metadata, now = Date.now()) {
+    if (metadata?.protocol && metadata.protocol !== "pi-rpc") return null;
     const status = metadata?.extensionStatuses?.tokenSpeed;
     const match = /(?:TPS:\s*)?([\d]+(?:\.[\d]+)?)\s*tok\/s/.exec(status?.text || "");
     if (!match) return null;
@@ -355,7 +360,7 @@
     boundItem, boundMaterializedItems, emptyTimeline, normalizeEvent,
     isLegacyPresentationNotice, thinkingIsOpen,
     toolIsActive, toolIsOpen, toolDisplayText, piTokenSpeed,
-    applyTimelineEnvelope, timelinePlainText, timelineAvailableRevision,
+    applyTimelineEnvelope, timelinePlainText, timelineAvailableRevision, agentLabel, isStructuredProtocol,
     shouldUseTimeline, shouldRenderTimeline,
     isNearBottom, restoredScrollTop, followTailAfterScroll, anchoredScrollTop,
   };

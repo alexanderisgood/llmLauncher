@@ -33,8 +33,8 @@ class TimelineTextTests(unittest.TestCase):
         def replay(sanitizer):
             console = launcher.AgentConsole(owner_run_id="fixture", plan=Mock(), process=Mock(),
                                             master_fd=-1, cols=100, rows=30, protocol="pi-rpc")
-            with patch.object(launcher, "safe_agent_timeline_text", sanitizer), \
-                    patch.object(launcher, "datetime") as clock:
+            with patch.object(launcher.agent_console_rpc, "safe_agent_timeline_text", sanitizer), \
+                    patch.object(launcher.agent_console_rpc, "datetime") as clock:
                 clock.now.return_value = datetime(2026, 9, 12, tzinfo=timezone.utc)
                 console.append_timeline("user", "Keep this original request")
                 launcher.pi_rpc_append_timeline_delta(console, "thinking", "Initial 🦙 reasoning. " * 3500,

@@ -1,0 +1,13 @@
+/* Optional saved routes remain alongside the ordinary launch form. */
+:root .simple-launcher #quickStart:not(.hidden){display:block;max-width:none;margin:14px 0 18px;padding:12px;border:1px solid var(--line-soft);border-radius:10px;background:var(--surface-heading)}
+#quickStart .quick-start-heading h2{font-size:12px}
+#quickStart .quick-start-heading p{font-size:10px}
+#quickStart .quick-start-heading .text-button{font-size:11px;padding:6px}
+#quickStart .quick-start-card{padding:10px}
+#quickStart .quick-start-card small{font-size:9px}
+#quickStart .quick-start-card strong{font-size:12px}
+#quickStart .quick-start-card>div>span{font-size:10px}
+#quickStart .quick-start-card button{font-size:11px;min-width:70px}
+#quickStart .quick-start-icon{font-size:13px}
+#quickStartStatus{font-size:11px;line-height:1.5;overflow-wrap:anywhere}
+@media(max-width:640px){#quickStart .quick-start-heading>div{display:block}#quickStart .quick-start-heading p{margin-top:4px}#quickStart .quick-start-card{grid-template-columns:auto minmax(0,1fr)}#quickStart .quick-start-card button{grid-column:2;justify-self:start;margin-top:2px}}

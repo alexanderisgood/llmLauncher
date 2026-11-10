@@ -117,14 +117,33 @@ assert.deepEqual(setup.controls, {
   contextInput:"65536", outputInput:"16384", reasoningSelect:"auto",
   profileSelect:"turbo", fanSelect:"default", mtplxKv:"off",
 });
-assert.doesNotMatch(values.get(routes.SETUP_STORAGE_KEY), /private|secret|Consent/);
+assert.doesNotMatch(values.get(routes.MODEL_SETTINGS_KEY), /private|secret|Consent/);
 assert.equal(routes.readSetup(storage, {...savedRoute, modelId:"other"}), null);
 assert.equal(routes.readSetup(storage, {...savedRoute, backend:"omlx"}), null);
-assert.equal(routes.readSetup(storage, {...savedRoute, client:"pi"}), null);
+assert.deepEqual(routes.readSetup(storage, {...savedRoute, client:"pi"}), setup);
 assert.equal(routes.writeSetup(blockedStorage, savedRoute, setup.controls), false);
 assert.equal(routes.readSetup(blockedStorage, savedRoute), null);
-values.set(routes.SETUP_STORAGE_KEY, JSON.stringify({...setup, version:2}));
+values.set(routes.MODEL_SETTINGS_KEY, JSON.stringify({...setup, version:3}));
 assert.equal(routes.readSetup(storage, savedRoute), null);
 values.set(routes.SETUP_STORAGE_KEY, "x".repeat(8193));
 assert.equal(routes.readSetup(storage, savedRoute), null);
 console.log("Exact-route context, sampling and runtime controls persist without prompts, credentials or approvals.");
+
+const strataRoute = {backend:"strata", modelId:"strata-qwen-flash-next", client:"omp"};
+assert.equal(routes.writeRoute(storage, strataRoute).stored, true);
+assert.equal(routes.writeSetup(storage, strataRoute, {contextInput:"262144", outputInput:"65536"}), true);
+assert.deepEqual(routes.readRoute(storage), strataRoute);
+assert.deepEqual(routes.selectInitialRoute({preference:routes.readRoute(storage), routes:[...available,strataRoute]}),
+  {...strataRoute,source:"remembered"});
+assert.deepEqual(routes.readSetup(storage, strataRoute).controls, {contextInput:"262144",outputInput:"65536"});
+assert.deepEqual(routes.reconcileRuntimeLimits({context:262144,output:65536,contextWindows:[16384,32768,65536,131072,262144],outputMaximum:261120}),
+  {context:262144,output:65536,contextChanged:false,outputChanged:false,promptBudget:196608});
+console.log("Strata context and response settings survive route persistence.");
+const legacyRoute = {...savedRoute, modelId:"legacy-model"};
+values.set(routes.SETUP_STORAGE_KEY, JSON.stringify({version:1, route:legacyRoute, controls:{outputInput:"4567"}}));
+const secondEngine = {...strataRoute, backend:"splash"};
+assert.equal(routes.writeSetup(storage, secondEngine, {contextInput:"131072", outputInput:"12000"}), true);
+assert.equal(routes.readSetup(storage, strataRoute).controls.outputInput, "65536");
+assert.equal(routes.readSetup(storage, secondEngine).controls.outputInput, "12000");
+assert.equal(routes.readSetup(storage, legacyRoute).controls.outputInput, "4567");
+console.log("Settings stay separate by model and runtime, with legacy settings still readable.");

@@ -1,0 +1,41 @@
+{
+  "architecture_repo": "https://github.com/here-be-dragons-ai/mlx-lm",
+  "architecture_revision": "5bc45adb8733f9af29c1c03e9ea947d155328b75",
+  "streaming_repo": "https://github.com/srcterm/streamlx",
+  "streaming_revision": "146507b59293058b3a1cecc43f47947b25012297",
+  "model_repo": "audreyt/Kolibri-1-MLX-6bit",
+  "model_revision": "e4a6d4c2e9e85097bd4532ac31894cdcf534cb1c",
+  "runtime_versions": {
+    "mlx": "0.32.0",
+    "mlx_lm": "0.31.3"
+  },
+  "adaptations": [
+    "Process-local Kolibri module registration",
+    "In-memory expert key rename",
+    "Original Q6 expert byte ranges",
+    "No router lookahead",
+    "Owned authenticated loopback chat server",
+    "Maximal bounded expert cache",
+    "Full-attention Q8/Q6/Q4 KV from token zero; native BF16 sliding caches",
+    "Correct packed Q6 KV allocation in mlx-lm 0.31.3",
+    "256K context and configurable prefill/prompt-cache budgets",
+    "Reusable hybrid-prefix snapshot before generation suffix; absolute token keys",
+    "Pi native JSON function tools and history; tool-aware context guard and bounded reasoning-free summaries",
+    "Linear expert span-member merging and memoized immutable tensor row strides; byte-exact reads",
+    "Cache-aware LRU prefill consumes original resident Q6 rows before misses; exact router/output ordering and bounded mini-pools",
+    "Request-bound native generation timings for buffered tool output; physical capacity for automatic cache sizing"
+  ],
+  "sha256": {
+    "kolibri1.py": "7265a6612dbf9947aac14e8de0f481be682e924813fa83660a09fba684037fc5",
+    "kolibri_adapter.py": "e223338992f318ea6be7777b6e0f278069ae420d59431c044fad50b5cf454f8c",
+    "serve.py": "4b6113c58d30ce57b2d93b64247161eba6413d9cb23c14e3ed91a73a95308b4f",
+    "native_metrics.py": "6b05f01f123a5d9f36e6d64bc84297d3e8b57063c65d1c2b44cccae489df99a6",
+    "streamlx/__init__.py": "b1bb18f69110dc8813bae5d63c2f49cec9b99c6884b7ee6a6750973779e7ab16",
+    "streamlx/integrate.py": "547d05e571912735ca1f5246b08fed968b515d3c07ed0d69ace2af927ebae605",
+    "streamlx/prefill.py": "01997eee83d19705ff3a4d5b3596ba0a85275d313f3e4a454b3b85275cd230a0",
+    "streamlx/pool.py": "ff07e30386b942d5d3662b5f09a92f8899a313db98b3e137940c58af4445d4c1",
+    "streamlx/reader.py": "16023f72adf132239abe1f8c231cee240d28caea7fb31e0b54991a24f001ca7f",
+    "streamlx/stindex.py": "eefa50baac31f8c8ead6598de60d4d13a4fe5f808dec7f09dcb339ba78fdff4a",
+    "worker.py": "f4723991536822427744ca426b5da5c6cb2e468ff2d30f1c140ca49e69da3c52"
+  }
+}

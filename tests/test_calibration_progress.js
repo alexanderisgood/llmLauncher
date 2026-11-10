@@ -1,9 +1,10 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const source = fs.readFileSync(path.resolve(__dirname, "../app.js"), "utf8");
+const source = benchmarkSources.controllerSource;
 const start = source.indexOf("function renderCalibrationBenchmark(");
 const end = source.indexOf("\nfunction renderCalibration()", start);
 assert.ok(start >= 0 && end > start);
@@ -22,7 +23,7 @@ const context = {
   calibrationOwnsBenchmark:status => status.owned === true,
 };
 vm.createContext(context);
-vm.runInContext(source.slice(start, end), context);
+benchmarkSources.runInContext(source.slice(start, end), context);
 context.renderCalibrationBenchmark({phase:"idle"});
 assert.equal(field("calibrationPercent").textContent, "100%");
 assert.equal(field("calibrationProgressBar").style.width, "100%");

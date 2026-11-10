@@ -4,16 +4,32 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](CHANGELOG.md)
 
-LLM Launcher is a macOS hub for selecting a local model, choosing the best compatible inference engine, and opening that route in **Pi**, **OpenCode**, **Codex**, or a built-in streaming **Chat**.
+LLM Launcher is a macOS hub for selecting a local model, choosing the best compatible inference engine, and opening that route in **Pi**, **oh-my-pi**, **OpenCode**, **Codex**, or a built-in streaming **Chat**.
 
 **New in 1.67.0-alpha.1:** a compact Pi Hub, editable queues and steering,
 live tool previews, clearer prompt/decode/context statistics, and version-gated
 DFlash Q4/Q6/Q8 KV support with memory-pressure recovery. See the
 [release notes](CHANGELOG.md) for scope and remaining limitations.
 
+The current refactor adds a searchable launch screen, clearer readiness and
+saved speed results, an oh-my-pi adapter, and **Quit** in the top bar
+and Console menu. Streaming, resource monitoring, runtime probes and screen
+updates now avoid repeated work. CPU measurements are recorded separately from
+model generation TPS; see [performance boundaries](ARCHITECTURE.md#performance-boundaries).
+
 Its primary in-memory engines are **oMLX**, **LM Studio**, and **MTPLX**. The source also contains a developer-machine-only experimental **Mirai/Uzu** adapter for the exact [`trymirai/Qwen3.6-27B-M`](https://huggingface.co/trymirai/Qwen3.6-27B-M) target plus its bundled DFlash draft and Weaver proposal tree; this is Qwen3.6, not Qwen3.8 Flash. Its exact hardened executable is installed only on the qualification Mac and is not distributed by this repository, so a fresh public clone cannot enable that route. Oversized Mixture-of-Experts models can also use source-bound **SwiftLM** or **Mference** routes, Whallm's full-expert runtime, or one receipt-bound **llama.cpp** SSD-PLE route for the exact pinned AtomicChat Qwen3.8 Flash-Next AD-3.84 GGUF. The Uzu route is resident and its speculative acceleration is fixed and runtime-managed, while the llama.cpp route maps only its isolated PLE table from SSD; neither is a generic out-of-core fallback. Instead of treating every OpenAI-compatible server as identical, the launcher keeps model format, reasoning support, context, sampling, accelerator settings, agent protocol, and locally measured performance in one visible contract.
 
 > **Alpha software:** this is an early public release for macOS and Apple Silicon enthusiasts. It is not signed or notarized yet, runtime interfaces may change, and you should review a route before trusting it with important work.
+
+## Kolibri Q6 on SSD
+
+**Kolibri SSD** runs the complete Q6 MLX checkpoint in built-in Chat, Pi and
+oh-my-pi, including function tools and reasoning history. Automatic
+memory sizing keeps the largest expert cache that fits current headroom, the
+selected process ceiling and Metal, with separate context and macOS reserves.
+Context now reaches the checkpoint's native 256K, with Q8/Q6/Q4 KV cache,
+configurable prefill chunks and retained prompt-cache budgets.
+See [Kolibri setup and memory sizing](docs/KOLIBRI.md).
 
 ## Slotstream Qwen3.8 Flash-Next
 
@@ -22,6 +38,14 @@ longer context choices and checked process-memory budgets. See the
 [Slotstream setup and execution contract](docs/SLOTSTREAM.md).
 
 ## Launching a model
+
+**Rapid MLX** reuses installed local MLX checkpoints in Chat and coding agents,
+including the Flint INT4 files already installed for Rec. Its isolated runtime
+starts only when you launch a session. See [Rapid MLX setup and controls](docs/RAPID_MLX.md).
+
+**Recursive Flint INT4** runs through the official **Rec** engine in Chat, Pi,
+oh-my-pi or OpenCode, with native reasoning and function tools. Select **Rec**
+after installing its runtime and weights. See [Flint setup and controls](docs/FLINT.md).
 
 Choose an installed engine and model, select Chat or a coding agent, and press
 **Launch**. Model, memory, and client-connection checks run automatically.
@@ -51,10 +75,34 @@ saved launches, chat history, calibration, engines and appearance. Optional
 diagnostics are not prerequisites for launching. Required memory acknowledgement
 appears inline with Launch; failed checks never change the model or settings.
 
+**oh-my-pi** opens in Hub Console with the verified 18.6.3 release, or in
+Terminal. Other versions keep the Terminal option until their console protocol
+is verified. Its selected model, helper roles, context,
+response allowance and reasoning use a private session configuration. Install
+`omp` separately; the launcher does not rewrite its permanent settings. The
+adapter has passed real native reasoning/tools, history, queued follow-ups,
+abort and local-command checks against generated local data. Pi and oh-my-pi
+also passed actual Splash and Kolibri tool tasks. Each engine's model and capacity checks still apply;
+Uzu and the native FreeToken milestone remain unavailable for oh-my-pi.
+
+**Quit** stops launcher jobs and agents, unloads LM Studio through its local
+CLI, stops recognised local engine servers (including independently started
+ones), and closes the launcher. The dialog displays any shutdown errors. Process
+matching uses exact installed paths and verified process identities. **Stop**
+continues to stop the selected launcher session.
+Quit also unloads verified user LaunchAgent services so their automatic restart
+policy cannot immediately bring a model server back.
+
 The Hub uses one compact bar for model identity, decode speed, prompt speed,
 context and activity. **Home** and **Return to Pi** switch views without stopping
 the task. Copy, compaction, queue cleanup and session actions live in **•••**;
 steering and queueing remain beside the message field while Pi responds.
+
+Kolibri's controlled prefill comparison improved 19–25% with identical output
+tokens. Native generation timing now remains separate from buffered network
+delivery, prompt processing and total request time in live status and saved
+benchmarks. See [Kolibri measurements](docs/KOLIBRI.md#performance-and-agent-verification-on-6-october-2026)
+and [Splash timing](docs/SPLASH.md#native-agent-timing-verified-on-6-october-2026).
 
 When Playwright is already installed, Pi also receives a private `browser_check`
 tool for short page checks. It owns a headless Chromium session, keeps page state
@@ -66,7 +114,7 @@ claims still need the corresponding verification.
 
 - Finds compatible local models across supported model folders.
 - Recognizes the separate Mirai cache and presents Uzu as a resident runtime with fixed DFlash-plus-Weaver acceleration, without misclassifying its custom artifact as a generic MLX model.
-- Launches one model into Pi, OpenCode, Codex, or local Chat without rewriting those tools' permanent configuration.
+- Launches one model into Pi, oh-my-pi, OpenCode, Codex, or local Chat without rewriting those tools' permanent configuration.
 - Preserves context, output, reasoning, sampling, and KV-cache choices across the complete route.
 - Separates host compatibility from speed evidence. **Verified on this Mac** means an exact local model/runtime/Mac/request match and is the only tier eligible for automatic fastest-route selection; **Upstream measured** is reference-only, while **Not measured on this Mac** remains untrusted. Host support is reported independently as **Supported**, **Experimental**, or **Unavailable**.
 - When Qwen3.8 Flash-Next is selected, Calibration may expose one installed Qwen3.8-27B DFlash 2 route as an explicit different-model alternative. It is offered only when the exact target/draft pair and unchanged visible context, output, reasoning, KV, and Chat contract pass fresh validation; it changes the model, architecture, and intelligence contract and is never selected automatically.
@@ -80,11 +128,13 @@ claims still need the corresponding verification.
 - Supports streaming thinking, message queues, history, branching, TPS, warm-route reuse, and resumable local Chat.
 - Gives Pi a stable, bounded in-launcher conversation timeline with restored session messages, separate thinking/answer/tool/status cards, queued follow-ups, unread tabs, fixed-position scrolling during generation, abort/clear-queue controls, and answerable extension prompts. Periodic and authoritative-final snapshots make refresh replay independent of expired token chunks, while response-limit continuation cues prevent a long reasoning turn from silently disappearing. Codex Responses routes likewise turn a falsely completed exact-ceiling result into the protocol's continuable incomplete state in both Hub Console and external Terminal. External Terminal remains available for Pi's full TUI.
 - Includes a polished light **Frost** appearance plus Focused progressive disclosure for a calmer Mac-style interface; the Hub Console remains a black terminal workspace in every appearance.
-- Keeps generated routes on authenticated loopback addresses and stops only launcher-owned processes.
+- Keeps generated routes on authenticated loopback addresses. Stop cleans up launcher-owned processes; the explicit Quit action also stops recognised local engine services.
 - Provides profiles, Session Sets, model acquisition, runtime inspection, route checks, and capacity controls.
 - Opens installed LM Studio, MTPLX, and Whallm apps directly from Runtime Manager after revalidating their exact macOS bundles; opening an app remains distinct from loading a model.
 
 Runtime Manager uses a reviewable release snapshot rather than an unchecked “latest” query. The snapshot updated on 7 September 2026 covers [oMLX 0.6.4](https://github.com/jundot/omlx/releases/tag/v0.6.4), [LM Studio 0.4.23 Build 1](https://lmstudio.ai/changelog/lmstudio/lmstudio-v0.4.23), [MTPLX 2.11.2](https://github.com/youssofal/MTPLX/releases/tag/v2.11.2) at official release commit [`21be78b3f51820eecef020e5e4855c0715eaf9a5`](https://github.com/youssofal/MTPLX/commit/21be78b3f51820eecef020e5e4855c0715eaf9a5), optional [SwiftLM b709](https://github.com/SharpAI/SwiftLM/releases/tag/b709), and experimental [Whallm 1.1.4](https://github.com/yanun0323/Whallm/releases/tag/v1.1.4). MTPLX remains vendor-owned: the launcher keeps swap overcommit off and never enables its context-specific operator recipe globally. An exact dense-27B, MTPLX 2.11.1, verified-MTP, Turbo, 64K-or-larger route can instead run a user-triggered isolated comparison; only its matching immutable local result can be applied or reused. The release's dense-27B, Flash-Next, and agent-session results are upstream M5 Max measurements, not evidence for this Mac. The exact AtomicChat SSD-PLE route independently pins launcher-managed llama.cpp b10740. The experimental Uzu route pins launcher build `0.5.23-llm-launcher.prefill-experiment.1` to upstream commit `115609b6ef7ce5a94fc761bf395780f032b09f9b`, the included three-patch chain `680e2d72f0ba7a63fc822543022c6a1fc9b2895276fb7252a8049219de58692f`, and binary `efe7fc98a8e063c30103a27badb4f308b8cb782708134a7805178f9e16caa0ce`. This local build is ad-hoc signed only—not Developer ID signed or notarized—and is admitted by exact source, patch, binary, model, sandbox, and qualification evidence rather than a signing claim.
+
+The oMLX Preview track was separately audited on 15 September 2026 and now offers **0.7.0.dev2** with Flash-Next expert and PLE SSD offload, adjustable expert RAM share and a separate RAM ceiling. See [installation and model-fit details](docs/OMLX_PREVIEW.md).
 
 The experimental FreeToken integration remains implemented and tested but is hidden behind an off-by-default UI feature flag while the native route matures.
 
@@ -97,7 +147,7 @@ The experimental FreeToken integration remains implemented and tested but is hid
 - Optional: [SwiftLM](https://github.com/SharpAI/SwiftLM) or [Mference](https://github.com/NeelM0906/Mference) for compatible oversized-MoE artifacts. Mference requires its verified model-specific `.gturbo` repack.
 - Optional and experimental: [Whallm](https://github.com/yanun0323/Whallm) for its own pinned full-512-expert Qwen3.8 Flash-Next download. Whallm publishes a 64 GiB unified-memory floor; its current M5 Pro measurements reach 22.75 GiB of MLX active memory through 16K input.
 - Optional and experimental: the exact pinned 28-shard AtomicChat Qwen3.8 Flash-Next AD-3.84 GGUF and launcher-managed llama.cpp b10740 for the receipt-bound 8K SSD-PLE route.
-- Pi, OpenCode, or Codex only if you want to launch that agent. Built-in Chat needs no separate agent.
+- Pi, oh-my-pi, OpenCode, or Codex only if you want to launch that agent. Built-in Chat needs no separate agent.
 - Local model weights compatible with the selected engine. Models and commercial runtimes are not bundled.
 
 ## Quick start
@@ -114,7 +164,7 @@ On first use:
 
 1. Choose **Models** to inspect detected artifacts and engine compatibility.
 2. Select oMLX, LM Studio, or MTPLX. The developer-only Mirai/Uzu card is a separate resident route and remains unavailable in a public clone; on the qualification host it also stays unavailable until its displayed safety gates pass. For a supported MoE whose weights do not fit safely in memory, open **Huge models on SSD** and select SwiftLM, Mference, or a live Whallm Qwen route. The exact AtomicChat llama.cpp option becomes available for ordinary launch only after current-process model verification and its local route qualification succeed.
-3. Select Pi, OpenCode, Codex, or Chat.
+3. Select Pi, oh-my-pi, OpenCode, Codex, or Chat.
 4. Review context, maximum response, reasoning, and engine controls.
 5. Choose **Launch** or **Start chat**.
 

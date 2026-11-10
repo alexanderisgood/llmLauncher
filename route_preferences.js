@@ -9,37 +9,64 @@
   const VERSION = 1;
   const MAX_MODEL_ID = 2048;
   const BACKENDS = new Set([
-    "mtplx", "omlx", "lmstudio", "uzu", "freetoken", "swiftlm", "mference", "whallm", "llamacpp",
+    "mtplx", "omlx", "lmstudio", "uzu", "freetoken", "swiftlm", "mference", "whallm", "slotstream", "splash", "strata", "rec", "llamacpp", "kolibri", "rapidmlx",
   ]);
-  const CLIENTS = new Set(["pi", "opencode", "codex", "chat"]);
+  const CLIENTS = new Set(["pi", "omp", "opencode", "codex", "chat"]);
   const MIN_CONTEXT = 1024;
   const MIN_OUTPUT = 256;
   const MIN_PROMPT_BUDGET = 1024;
   const SETUP_STORAGE_KEY = "llm-launcher-visible-settings-v1";
+  const MODEL_SETTINGS_KEY = "llm-launcher-model-settings-v2";
+  const MAX_SAVED_SETUPS = 64;
   // Only non-secret form controls. Never persist prompts, project paths,
   // credentials, consent checkboxes, or a claim that a route is qualified.
   const SETUP_FIELDS = Object.freeze([
     "contextInput", "outputInput", "reasoningSelect", "samplingMode",
     "temperatureInput", "topPInput", "topKInput", "presencePenaltyInput",
     "frequencyPenaltyInput", "repetitionPenaltyInput", "seedInput",
-    "accelerationSelect", "depthInput", "profileSelect", "fanSelect",
+    "accelerationSelect", "splashAccelerationSelect", "depthInput", "profileSelect", "fanSelect",
     "omlxKv", "mtplxKv", "burstSelect", "dflashVerifySelect", "dflashDraftQuantSelect",
     "anePrefillSelect", "memoryGuardSelect", "gpuSelect", "parallelInput",
     "mtpMinTokensInput", "mtpMinContinueProbabilityInput", "mtplxOperatorRouteSelect",
+    "kolibriKv", "kolibriMemoryMode", "kolibriMemoryGB", "kolibriPrefillSelect", "kolibriPromptCacheGB",
+    "omlxExpertResidentPercent", "omlxMemoryGB",
+    "slotstreamKv", "slotstreamMemoryMode", "slotstreamMemoryGB",
+    "swiftlmPrefillSelect", "mferencePromptCache", "mferenceQueueLimit",
+    "freeTokenBatchSelect", "freeTokenPrefixCacheSelect", "freeTokenExpertCacheInput",
   ]);
 
+  function setupKey(value) {
+    const route = normaliseRoute(value);
+    return route ? `${route.backend}\u0000${route.modelId}` : "";
+  }
+
   function normaliseSetup(value, route) {
-    if (!value || routeKey(value.route) !== routeKey(route) || !routeKey(route)) return null;
+    const key = setupKey(route);
+    if (!value || !key || setupKey(value.route) !== key) return null;
     const controls = {};
     for (const key of SETUP_FIELDS) {
       const field = value.controls?.[key];
       if (typeof field === "string" && field.length <= 64 && /^[a-zA-Z0-9_.+-]*$/.test(field)) controls[key] = field;
     }
-    return {version:1, route:normaliseRoute(route), controls};
+    return {route:normaliseRoute(value.route), controls};
+  }
+
+  function readModelSetups(storage) {
+    const raw = storage?.getItem?.(MODEL_SETTINGS_KEY);
+    if (!raw || raw.length > 512 * 1024) return [];
+    try {
+      const value = JSON.parse(raw);
+      return value?.version === 2 && Array.isArray(value.setups)
+        ? value.setups.slice(0, MAX_SAVED_SETUPS).map(item => normaliseSetup(item, item?.route)).filter(Boolean) : [];
+    } catch (_error) { return []; }
   }
 
   function readSetup(storage, route) {
     try {
+      const key = setupKey(route);
+      if (!key) return null;
+      const saved = readModelSetups(storage).find(item => setupKey(item.route) === key);
+      if (saved) return saved;
       const raw = storage?.getItem?.(SETUP_STORAGE_KEY);
       if (!raw || raw.length > 8192) return null;
       const value = JSON.parse(raw);
@@ -51,7 +78,11 @@
     const value = normaliseSetup({route, controls}, route);
     if (!value) return false;
     try {
-      storage?.setItem?.(SETUP_STORAGE_KEY, JSON.stringify(value));
+      const key = setupKey(route);
+      const otherSetups = readModelSetups(storage).filter(item => setupKey(item.route) !== key);
+      storage?.setItem?.(MODEL_SETTINGS_KEY, JSON.stringify({
+        version:2, setups:[value, ...otherSetups.slice(0, MAX_SAVED_SETUPS - 1)],
+      }));
       return Boolean(storage?.setItem);
     } catch (_error) { return false; }
   }
@@ -173,6 +204,6 @@
     STORAGE_KEY, VERSION, MAX_MODEL_ID, MIN_CONTEXT, MIN_OUTPUT, MIN_PROMPT_BUDGET,
     normaliseRoute, readRoute, writeRoute, routeKey,
     availableRoutes, isRouteAvailable, selectInitialRoute, reconcileRuntimeLimits,
-    SETUP_STORAGE_KEY, SETUP_FIELDS, normaliseSetup, readSetup, writeSetup,
+    SETUP_STORAGE_KEY, MODEL_SETTINGS_KEY, SETUP_FIELDS, normaliseSetup, readSetup, writeSetup,
   });
 });

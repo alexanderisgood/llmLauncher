@@ -1,0 +1,348 @@
+{
+  "kind": "native-functional-verification",
+  "beforeAfterTPSClaim": false,
+  "runtime": "Splash 1.2.1",
+  "release": {
+    "version": "1.2.1",
+    "binarySha256": "90d0374b9fac37146d8503516eedb629b6c0d366e7a48002b327c6baabf76690",
+    "metallibSha256": "29d79d22971365ef5dda921ad689003513cef4e9975f7b6e5de36a0b8fe0ba33",
+    "binaryVerified": true,
+    "metallibVerified": true
+  },
+  "model": "incoai/Qwen3.8-27B-Splash",
+  "artifactIdentity": "03137aa3989aa007303fa46f57e1ddf903c9cad5d6d3f6f9d86b144e894c15ee",
+  "agents": [
+    {
+      "client": "omp",
+      "requests": 3,
+      "nativeTools": [
+        "write",
+        "read"
+      ],
+      "finalAnswerVerified": true,
+      "historyVerified": true,
+      "actualReadVerified": true,
+      "surfaceAuthenticationEnforced": true,
+      "reasoningOffVerified": true,
+      "model": "incoai/Qwen3.8-27B-Splash",
+      "context": 16384,
+      "output": 1024,
+      "reasoning": "off",
+      "elapsedSeconds": 12.624,
+      "nativeRequests": [
+        {
+          "source": "splash-native-stream-request-lifecycle",
+          "usage": {
+            "prompt_tokens": 2956,
+            "completion_tokens": 63,
+            "total_tokens": 3019,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "timings": {
+            "prompt_n": 2956,
+            "prompt_ms": 6463.563,
+            "prompt_per_second": 457.33289827916894,
+            "predicted_n": 63,
+            "predicted_ms": 952.321,
+            "predicted_per_second": 60.90383389634378,
+            "cache_n": 0
+          },
+          "metrics": {
+            "prefill": {
+              "tokens": 2956
+            },
+            "decode": {
+              "tokens": 58
+            },
+            "request_latency": {
+              "start_to_first_token_ms": 6463.563,
+              "first_token_to_done_ms": 952.321,
+              "wall_ms": 7416.492,
+              "ttft_ms": 6464.171,
+              "queue_to_start_ms": 0.6080000000001746,
+              "stream_tokens_per_second": 60.90383389634378
+            },
+            "cache": {
+              "status": "miss",
+              "matched_tokens": 0,
+              "lane": 0
+            }
+          }
+        },
+        {
+          "source": "splash-native-stream-request-lifecycle",
+          "usage": {
+            "prompt_tokens": 3045,
+            "completion_tokens": 40,
+            "total_tokens": 3085,
+            "prompt_tokens_details": {
+              "cached_tokens": 2944
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "timings": {
+            "prompt_n": 3045,
+            "prompt_ms": 427.384,
+            "prompt_per_second": 236.32143458809875,
+            "predicted_n": 40,
+            "predicted_ms": 604.005,
+            "predicted_per_second": 59.602155611294606,
+            "cache_n": 2944
+          },
+          "metrics": {
+            "prefill": {
+              "tokens": 101
+            },
+            "decode": {
+              "tokens": 36
+            },
+            "request_latency": {
+              "start_to_first_token_ms": 427.384,
+              "first_token_to_done_ms": 604.005,
+              "wall_ms": 1036.685,
+              "ttft_ms": 432.67999999999995,
+              "queue_to_start_ms": 5.295999999999935,
+              "stream_tokens_per_second": 59.602155611294606
+            },
+            "cache": {
+              "status": "hit",
+              "matched_tokens": 2944,
+              "lane": 0
+            }
+          }
+        },
+        {
+          "source": "splash-native-stream-request-lifecycle",
+          "usage": {
+            "prompt_tokens": 3114,
+            "completion_tokens": 29,
+            "total_tokens": 3143,
+            "prompt_tokens_details": {
+              "cached_tokens": 3008
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "timings": {
+            "prompt_n": 3114,
+            "prompt_ms": 479.985,
+            "prompt_per_second": 220.8402345906643,
+            "predicted_n": 29,
+            "predicted_ms": 526.799,
+            "predicted_per_second": 39.86340141116441,
+            "cache_n": 3008
+          },
+          "metrics": {
+            "prefill": {
+              "tokens": 106
+            },
+            "decode": {
+              "tokens": 21
+            },
+            "request_latency": {
+              "start_to_first_token_ms": 479.985,
+              "first_token_to_done_ms": 526.799,
+              "wall_ms": 1010.162,
+              "ttft_ms": 483.36300000000006,
+              "queue_to_start_ms": 3.3780000000000427,
+              "stream_tokens_per_second": 39.86340141116441
+            },
+            "cache": {
+              "status": "hit",
+              "matched_tokens": 3008,
+              "lane": 0
+            }
+          }
+        }
+      ],
+      "nativeStatusBefore": {
+        "source": "splash-native-status-command-counters",
+        "metrics": {
+          "prefill_input_tokens": 0,
+          "prefill_wall_ms": 0,
+          "prefill_tokens_per_second": 0,
+          "decode_output_tokens": 0,
+          "decode_wall_ms": 0,
+          "decode_cycle_ms": 0,
+          "decode_tokens_per_second": 0,
+          "drafted_tokens": 0,
+          "accepted_draft_tokens": 0,
+          "draft_acceptance_rate": 0
+        },
+        "currentMemoryBytes": 18862751744,
+        "peakMemoryBytes": 19913424896,
+        "memoryLimitBytes": 39127154688
+      },
+      "nativeStatusAfter": {
+        "source": "splash-native-status-command-counters",
+        "metrics": {
+          "prefill_input_tokens": 3163,
+          "prefill_wall_ms": 7040.624168,
+          "prefill_tokens_per_second": 449.2499421,
+          "decode_output_tokens": 132,
+          "decode_wall_ms": 2335.879792,
+          "decode_cycle_ms": 2343.257126,
+          "decode_tokens_per_second": 56.50975725,
+          "drafted_tokens": 189,
+          "accepted_draft_tokens": 102,
+          "draft_acceptance_rate": 0.5396825397
+        },
+        "currentMemoryBytes": 19451002880,
+        "peakMemoryBytes": 19913424896,
+        "memoryLimitBytes": 39127154688
+      },
+      "metrics": [
+        {
+          "promptTokens": 2956,
+          "completionTokens": 63,
+          "runSeconds": 7.425,
+          "firstOutputSeconds": 6.559,
+          "generationSeconds": 0.866,
+          "decodeTokensPerSecond": 71.62,
+          "endToEndTokensPerSecond": 8.49,
+          "observedStatsSource": "engine-usage-and-relay-clock",
+          "runtimeTokensPerSecond": null,
+          "runtimeStatsSource": null,
+          "result": "completed",
+          "statusCode": 200
+        },
+        {
+          "promptTokens": 3045,
+          "completionTokens": 40,
+          "runSeconds": 1.039,
+          "firstOutputSeconds": 0.52,
+          "generationSeconds": 0.519,
+          "decodeTokensPerSecond": 75.16,
+          "endToEndTokensPerSecond": 38.49,
+          "observedStatsSource": "engine-usage-and-relay-clock",
+          "runtimeTokensPerSecond": null,
+          "runtimeStatsSource": null,
+          "result": "completed",
+          "statusCode": 200
+        },
+        {
+          "promptTokens": 3114,
+          "completionTokens": 29,
+          "runSeconds": 1.012,
+          "firstOutputSeconds": 0.485,
+          "generationSeconds": 0.527,
+          "decodeTokensPerSecond": 53.1,
+          "endToEndTokensPerSecond": 28.64,
+          "observedStatsSource": "engine-usage-and-relay-clock",
+          "runtimeTokensPerSecond": null,
+          "runtimeStatsSource": null,
+          "result": "completed",
+          "statusCode": 200
+        }
+      ]
+    }
+  ],
+  "selectedAgents": [
+    "omp"
+  ],
+  "harnessSha256": "b424009c632ec549bbe41398758b3ab3a3dc490c4730e4f1df9fc6555b44f6fd",
+  "memoryGuard": {
+    "ready": true,
+    "launcherAdmissions": [
+      {
+        "client": "pi",
+        "launchable": true,
+        "decision": "ready",
+        "requiresAcknowledgement": false,
+        "estimate": {
+          "version": 7,
+          "modelBytes": 17355931648,
+          "ssdWeightBytes": 0,
+          "companionBytes": 2147483648,
+          "companionLabels": [
+            "Splash runtime reserve"
+          ],
+          "kvCacheBytes": 545259520,
+          "kvPrecision": "engine-owned paged INT8 KV",
+          "kvScalarBytes": null,
+          "contextTokens": 16384,
+          "parallelLanes": 4,
+          "runtimeReserveBytes": 2147483648,
+          "estimatedWorkingSetBytes": 20048674816,
+          "osReserveBytes": 5153960755,
+          "requiredHeadroomBytes": 25202635571,
+          "geometryReady": true,
+          "geometry": {
+            "ready": true,
+            "splash": true
+          },
+          "basis": "Packed target+draft+vision bytes from manifest.json plus 33280 bytes/token of paged INT8 KV from the model's attention geometry (or the measured legacy plan), plus a 2 GiB runtime reserve. Splash's native planner rechecks the selected context before loading."
+        }
+      },
+      {
+        "client": "omp",
+        "launchable": true,
+        "decision": "ready",
+        "requiresAcknowledgement": false,
+        "estimate": {
+          "version": 7,
+          "modelBytes": 17355931648,
+          "ssdWeightBytes": 0,
+          "companionBytes": 2147483648,
+          "companionLabels": [
+            "Splash runtime reserve"
+          ],
+          "kvCacheBytes": 545259520,
+          "kvPrecision": "engine-owned paged INT8 KV",
+          "kvScalarBytes": null,
+          "contextTokens": 16384,
+          "parallelLanes": 4,
+          "runtimeReserveBytes": 2147483648,
+          "estimatedWorkingSetBytes": 20048674816,
+          "osReserveBytes": 5153960755,
+          "requiredHeadroomBytes": 25202635571,
+          "geometryReady": true,
+          "geometry": {
+            "ready": true,
+            "splash": true
+          },
+          "basis": "Packed target+draft+vision bytes from manifest.json plus 33280 bytes/token of paged INT8 KV from the model's attention geometry (or the measured legacy plan), plus a 2 GiB runtime reserve. Splash's native planner rechecks the selected context before loading."
+        }
+      }
+    ],
+    "resource": {
+      "memorySemanticsVersion": 2,
+      "memoryAvailable": true,
+      "memorySource": "host_statistics64",
+      "totalMemoryBytes": 51539607552,
+      "headroomPercent": 51.367,
+      "headroomBytes": 26474315776,
+      "pressureAvailable": true,
+      "pressureFreePercent": 73.0,
+      "pressureSource": "memorystatus_get_level",
+      "thermalAvailable": true,
+      "thermalState": "nominal",
+      "thermalStateValue": 0,
+      "lowPowerMode": false,
+      "metalWiredLimitBytes": 0,
+      "metalRecommendedWorkingSetBytes": 40200896512,
+      "capturedAt": "2026-10-06T18:10:08.692038+00:00"
+    },
+    "physicalReclaimableBytes": 26474315776,
+    "physicalRequiredHeadroomBytes": 25202635571,
+    "physicalMemorySource": "host_statistics64",
+    "physicalGuardBasis": "host_statistics64 free-speculative+purgeable+file-backed pages; exact working-set+macOS reserve, minimum20GB"
+  },
+  "engineStarted": true,
+  "nativeContextVerified": true,
+  "engineAuthenticationEnforced": true,
+  "minimumPressureFreePercent": 34.0,
+  "minimumPhysicalReclaimableBytes": 5548146688,
+  "physicalMemorySource": "host_statistics64",
+  "protectedMacOsReserveBytes": 5153960755,
+  "peakOwnedGroupPhysicalFootprintBytes": 20132346760,
+  "ownedEngineStopped": true
+}

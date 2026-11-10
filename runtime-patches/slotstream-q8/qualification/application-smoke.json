@@ -1,0 +1,67 @@
+{
+  "kv": "q8",
+  "runtimeVersion": "0.2.17-q8.1",
+  "context": 131072,
+  "mtp": true,
+  "depth": 2,
+  "memoryGB": 30,
+  "authRejected": true,
+  "text": {
+    "content": "\n\nREADY",
+    "reasoning": "The user is asking me to reply with exactly \"READY\" in my final answer. This is a simple instruction that I should follow directly.\n",
+    "tool_calls": [],
+    "finish_reason": "stop",
+    "usage": {
+      "completion_tokens": 32,
+      "total_tokens": 51,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "prompt_tokens": 19
+    },
+    "seconds": 4.124,
+    "first_token_seconds": 2.282
+  },
+  "tool": {
+    "content": "\n\n",
+    "reasoning": "The user wants me to call the record_ready tool with status \"ready\".\n",
+    "tool_calls": [
+      {
+        "id": "call_C3371088CA7E448FAA3E3F534FF3BEAE",
+        "type": "function",
+        "function": {
+          "name": "record_ready",
+          "arguments": "{\"status\":\"ready\"}"
+        }
+      }
+    ],
+    "finish_reason": "tool_calls",
+    "usage": {
+      "total_tokens": 327,
+      "prompt_tokens": 284,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens": 43
+    },
+    "seconds": 8.897,
+    "first_token_seconds": 5.95
+  },
+  "followup": {
+    "content": "\n\nCOMPLETE",
+    "reasoning": "The user wants me to reply with exactly \"COMPLETE\" as my final answer.\n",
+    "tool_calls": [],
+    "finish_reason": "stop",
+    "usage": {
+      "completion_tokens": 20,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 109,
+      "prompt_tokens": 89
+    },
+    "seconds": 3.998,
+    "first_token_seconds": 2.638
+  },
+  "scope": "Short smoke prompts only; this does not measure full 128K capacity or rank AR against MTP."
+}

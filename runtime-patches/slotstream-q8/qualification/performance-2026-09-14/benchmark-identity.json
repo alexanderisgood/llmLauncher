@@ -1,0 +1,4 @@
+{
+  "binarySHA256": "22cacce5befa959391fcdefb38c82b216481d567a490cdf909ab55a62b55e7c7",
+  "note": "Benchmark build before synchronizing the expert-pool telemetry snapshot. No inference arithmetic or cache policy changes."
+}

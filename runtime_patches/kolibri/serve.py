@@ -1,0 +1,293 @@
+"""OpenAI-compatible HTTP server for SSD-streamed MoE models.
+
+Wraps stock `mlx_lm.server` (all its flags pass through) but loads the model
+with streamlx: trunk resident, experts streamed from SSD on demand.
+
+  python examples/serve.py --budget-gib 16 \
+      --model <local-model-dir> --port 8080 [--trust-remote-code] \
+      [--warmstart-trace trace.npz] [--tokenizer-config key=json ...] \
+      [--resident] [--prompt-cache-gib N] [--mlx-cache-gib N]
+
+--model must be a LOCAL directory (the byte-range reader needs the shards on
+disk). Requests are handled sequentially: concurrent batching multiplies the
+per-step expert working set and collapses cache hit rates.
+
+RAM guard: the stock server bounds its prompt-cache LRU by sequence count
+only (bytes are enforced on the batch path we don't use) and MLX's default
+buffer-cache limit is ~95% of RAM, so freed buffers are hoarded forever.
+With most of that wired for Metal, a long agent session runs the machine out
+of unpageable memory. Both get hard byte caps here: --prompt-cache-gib
+(default: RAM - budget - 12 GiB, clamped to [1, 8]) and --mlx-cache-gib
+(default 2).
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+import sys
+import time
+
+import mlx.core as mx
+import mlx_lm.server as srv
+from mlx_lm.models.cache import can_trim_prompt_cache
+import native_metrics
+
+from streamlx.integrate import (aggregate_stats, load_streaming_model,
+                                preload_popular)
+
+_CFG = {"budget_bytes": 8 * 2**30, "warmstart_trace": None, "trust": False,
+        "tokenizer_config": {}, "resident": None,
+        "prompt_cache_bytes": 4 * 2**30}
+_STATE = {"pools": None, "reader": None}
+
+
+_orig_fetch = srv.LRUPromptCache.fetch_nearest_cache
+
+
+def _recording_fetch(self, model, tokens):
+    # Stash the request's full token key for the prompt-boundary snapshot.
+    _STATE["fetch"] = (self, model, list(tokens))
+    return _orig_fetch(self, model, tokens)
+
+
+srv.LRUPromptCache.fetch_nearest_cache = _recording_fetch
+
+
+_orig_lru_init = srv.LRUPromptCache.__init__
+
+
+def _bounded_lru_init(self, *args, **kwargs):
+    # The stock server only enforces --prompt-cache-bytes on its batch path;
+    # ours is sequential, where inserts are bounded by sequence count alone.
+    # Setting max_bytes makes the stock insert_cache evict on every path.
+    _orig_lru_init(self, *args, **kwargs)
+    self.max_bytes = min(self.max_bytes, _CFG["prompt_cache_bytes"])
+
+
+srv.LRUPromptCache.__init__ = _bounded_lru_init
+
+
+def _snapshot_progress(kwargs):
+    """Cache reusable hybrid KV states before the generation suffix and at EOF.
+
+    Agent clients rewrite history every turn (reasoning stripped, tool
+    output re-rendered), so the post-generation cache the server stores is
+    never a strict prefix of the next prompt — and hybrid-cache models
+    (rotating KV, conv state) cannot trim back to the divergence point, so
+    every turn reprocesses the whole prompt. An extra entry keyed by the
+    prompt itself makes the next turn a pure extension: no trim needed.
+
+    The assistant-generation suffix can differ from the next turn's rendered
+    assistant history (e.g. empty thinking tags). Keep one earlier snapshot
+    at a prefill boundary leaving at least 128 tokens, as well as prompt[:-1].
+    Each callback runs after native cache evaluation and before decode.
+    Callbacks count only the uncached suffix; keys must include its cached
+    prefix. Never label a partial suffix with the complete prompt's token key.
+
+    The final snapshot is skipped while the cache is still trimmable. Keep
+    the earlier snapshot even if it can currently trim: a subsequent chunk
+    may cross the rotating window and make the final state untrimmable.
+    Skip copies exceeding half the LRU byte cap to avoid eviction churn.
+    Disable with STREAMLX_PROMPT_SNAPSHOT=0.
+    """
+    fetch = _STATE.pop("fetch", None)
+    cache = kwargs.get("prompt_cache")
+    if (os.environ.get("STREAMLX_PROMPT_SNAPSHOT", "1") == "0"
+            or fetch is None or cache is None):
+        return
+    lru, model, tokens = fetch
+    if len(tokens) < 256:
+        return
+    orig_cb = kwargs.get("prompt_progress_callback")
+    chunk = kwargs.get("prefill_step_size", 2048)
+    prefix = len(tokens) - len(kwargs.get("prompt", tokens))
+    saved_early = False
+
+    def cb(processed, total):
+        nonlocal saved_early
+        remaining = total - processed
+        early = not saved_early and 128 <= remaining < 128 + chunk
+        if processed > 0 and (early or (remaining == 1 and not can_trim_prompt_cache(cache))):
+            if early:
+                saved_early = True
+            snap = sum(c.nbytes for c in cache)
+            if snap > lru.max_bytes // 2:
+                print(f"[streamlx] prompt snapshot skipped: "
+                      f"{snap / 2**30:.2f} GiB copy vs "
+                      f"{lru.max_bytes / 2**30:.1f} GiB cache cap",
+                      file=sys.stderr)
+            else:
+                t0 = time.perf_counter()
+                length = prefix + processed
+                lru.insert_cache(model, tokens[:length], copy.deepcopy(cache),
+                                 cache_type="user")
+                print(f"[streamlx] prompt snapshot: {length} tok "
+                      f"({time.perf_counter() - t0:.2f}s)", file=sys.stderr)
+        if orig_cb is not None:
+            orig_cb(processed, total)
+
+    kwargs["prompt_progress_callback"] = cb
+
+
+def _instrumented(fn):
+    """Log a per-request summary line (prefill/decode tok/s, miss rate,
+    bytes read) once the wrapped stream_generate finishes."""
+    def gen(*args, **kwargs):
+        pools, reader = _STATE["pools"], _STATE["reader"]
+        base = aggregate_stats(pools) if pools is not None else None
+        r0 = reader.bytes_read if reader else 0
+        _snapshot_progress(kwargs)
+        last = None
+        try:
+            for last in fn(*args, **kwargs):
+                yield last
+        finally:
+            # The server breaks out of its loop on stop conditions, which
+            # closes this generator instead of exhausting it — log either way.
+            if last is not None:
+                msg = (f"[streamlx] prefill {last.prompt_tokens} tok @ "
+                       f"{last.prompt_tps:.1f} tok/s | decode "
+                       f"{last.generation_tokens} tok")
+                if last.generation_tokens >= 2:  # rate meaningless below
+                    msg += f" @ {last.generation_tps:.1f} tok/s"
+                if base is not None:
+                    s = aggregate_stats(pools)
+                    acc = ((s["hits"] - base["hits"])
+                           + (s["misses"] - base["misses"]))
+                    if acc:
+                        miss = (s["misses"] - base["misses"]) / acc
+                        msg += f" | miss {miss * 100:.1f}%"
+                if reader:
+                    msg += f" | {(reader.bytes_read - r0) / 1e9:.1f} GB read"
+                print(msg, file=sys.stderr)
+    return gen
+
+
+native_metrics.install(srv)
+srv.stream_generate = _instrumented(srv.stream_generate)
+
+
+class StreamingModelProvider(srv.ModelProvider):
+    def load(self, model_path, adapter_path=None, draft_model_path=None):
+        # Single-model server: clients send arbitrary model names in the
+        # request body (opencode, most OpenAI SDKs). Treat any requested name
+        # as an alias of the model loaded at startup; the stock provider
+        # would try to resolve it as a new path/repo and hit the HF hub.
+        if self.model is not None:
+            return self.model, self.tokenizer
+        return super().load(model_path, adapter_path, draft_model_path)
+
+    def _load(self, model_path, adapter_path=None, draft_model_path=None):
+        if adapter_path is not None or draft_model_path is not None:
+            raise ValueError("adapters/draft models not supported with "
+                             "expert streaming")
+        self.model_key = None
+        self.model = None
+        self.tokenizer = None
+        self.draft_model = None
+
+        t0 = time.time()
+        model, tokenizer, pools, reader = load_streaming_model(
+            str(model_path), _CFG["budget_bytes"],
+            trust_remote_code=_CFG["trust"],
+            tokenizer_config=_CFG["tokenizer_config"],
+            resident=_CFG["resident"])
+        slots = sum(p.n_slots for p in pools.values())
+        print(f"[streamlx] trunk loaded in {time.time()-t0:.1f}s; "
+              f"{len(pools)} pools, {slots} slots "
+              f"({_CFG['budget_bytes']/2**30:.1f} GiB)", file=sys.stderr)
+        if _CFG["warmstart_trace"]:
+            t0 = time.time()
+            preload_popular(pools, _CFG["warmstart_trace"])
+            print(f"[streamlx] warm-start: {reader.bytes_read/1e9:.1f} GB "
+                  f"in {time.time()-t0:.1f}s", file=sys.stderr)
+        self.pools = pools
+        self.reader = reader
+        _STATE["pools"], _STATE["reader"] = pools, reader
+
+        if self.cli_args.use_default_chat_template:
+            if tokenizer.chat_template is None:
+                tokenizer.chat_template = tokenizer.default_chat_template
+
+        self.model_key = (model_path, adapter_path, draft_model_path)
+        self.model = model
+        self.tokenizer = tokenizer
+        self.draft_model = None
+        self.is_batchable = False  # batch-1 by design
+
+
+def _auto_prompt_cache_bytes(ram: int, budget: int) -> int:
+    """Whatever RAM the budget leaves after ~12 GiB for trunk, OS, the
+    active generation's cache and the per-turn copy transients — clamped
+    to [1, 8] GiB. Fallback 4 GiB if RAM can't be detected."""
+    if not ram:
+        return 4 * 2**30
+    return min(max(ram - budget - 12 * 2**30, 1 * 2**30), 8 * 2**30)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--budget-gib", type=float, default=8.0)
+    ap.add_argument("--warmstart-trace", default=None)
+    ap.add_argument("--trust-remote-code", action="store_true")
+    ap.add_argument("--tokenizer-config", action="append", default=[],
+                    metavar="KEY=JSON",
+                    help="extra tokenizer kwarg, repeatable "
+                         "(e.g. fix_mistral_regex=true)")
+    ap.add_argument("--resident", action="store_true",
+                    help="let fully-covered MoE layers stay on the stock "
+                         "resident path (faster; trades RAM headroom that "
+                         "long contexts need for KV cache)")
+    ap.add_argument("--prompt-cache-gib", type=float, default=None,
+                    help="byte cap for the server's prompt-cache LRU "
+                         "(default: RAM - budget - 12 GiB, clamped to "
+                         "[1, 8]); replaces --prompt-cache-bytes here")
+    ap.add_argument("--mlx-cache-gib", type=float, default=2.0,
+                    help="cap for MLX's freed-buffer cache (default 2; "
+                         "MLX's own default hoards ~95% of RAM)")
+    ours, rest = ap.parse_known_args()
+    _CFG["budget_bytes"] = int(ours.budget_gib * 2**30)
+    _CFG["warmstart_trace"] = ours.warmstart_trace
+    _CFG["trust"] = ours.trust_remote_code
+    if ours.resident:
+        _CFG["resident"] = "auto"
+    try:
+        ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):
+        ram = 0
+    if ours.prompt_cache_gib is not None:
+        _CFG["prompt_cache_bytes"] = int(ours.prompt_cache_gib * 2**30)
+    else:
+        _CFG["prompt_cache_bytes"] = _auto_prompt_cache_bytes(
+            ram, _CFG["budget_bytes"])
+    mx.set_cache_limit(int(ours.mlx_cache_gib * 2**30))
+    print(f"[streamlx] ram guard: {ram / 2**30:.0f} GiB RAM, "
+          f"prompt-cache cap {_CFG['prompt_cache_bytes'] / 2**30:.1f} GiB, "
+          f"mlx buffer-cache cap {ours.mlx_cache_gib:.1f} GiB",
+          file=sys.stderr)
+    for pair in ours.tokenizer_config:
+        key, sep, val = pair.partition("=")
+        if not sep:
+            ap.error(f"--tokenizer-config expects KEY=JSON, got {pair!r}")
+        try:
+            _CFG["tokenizer_config"][key] = json.loads(val)
+        except json.JSONDecodeError:
+            _CFG["tokenizer_config"][key] = val  # bare strings are fine
+
+    if not any(a.startswith("--prefill-step-size") for a in rest):
+        # Expert-major sweeps read each chunk's expert union once, so bytes
+        # scale ~1/chunk: 8k prefill = 455 GB at the stock 512 default vs
+        # 124 GB at 2048, wall-clock identical (F20). 4096 halves bytes
+        # again but widens attention transients at long contexts; 2048 is
+        # the safe default.
+        rest += ["--prefill-step-size", "2048"]
+    srv.ModelProvider = StreamingModelProvider
+    sys.argv = [sys.argv[0]] + rest
+    srv.main()
+
+
+if __name__ == "__main__":
+    main()

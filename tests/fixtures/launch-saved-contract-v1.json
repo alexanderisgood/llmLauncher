@@ -1,0 +1,517 @@
+{
+  "sourceSha256": "abf5e85f6bd56c400fe29cdcb4142ca473afeb2a22308e8cbb6375a707d9c4a0",
+  "model": {
+    "id": "fixture",
+    "name": "Exact fixture",
+    "nativeContext": 131072,
+    "defaultOutput": 16384,
+    "defaultSampling": {
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "seed": 17
+    },
+    "backends": {
+      "omlx": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true
+      },
+      "lmstudio": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true
+      },
+      "mtplx": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true
+      },
+      "uzu": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true
+      },
+      "freetoken": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true
+      },
+      "swiftlm": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true
+      },
+      "mference": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true
+      },
+      "slotstream": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true
+      },
+      "kolibri": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true,
+        "kvChoices": [
+          "off",
+          "q8"
+        ]
+      },
+      "splash": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true
+      },
+      "whallm": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true
+      },
+      "llamacpp": {
+        "runnable": true,
+        "mtp": true,
+        "dflash": true,
+        "kv": true,
+        "depth": 2,
+        "depthMax": 4,
+        "agentReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "codexReasoning": [
+          "auto",
+          "off",
+          "medium"
+        ],
+        "aneTuningVerified": true,
+        "customSampling": true
+      }
+    }
+  },
+  "cases": [
+    {
+      "payload": {
+        "backend": "mtplx",
+        "client": "pi",
+        "modelId": "fixture",
+        "project": "PROJECT",
+        "context": 8192,
+        "output": 256,
+        "reasoning": "auto",
+        "agentHost": "console",
+        "options": {
+          "acceleration": "off",
+          "kv": "off"
+        },
+        "apiKey": "NEVER_STORE",
+        "messages": [
+          "NEVER_STORE"
+        ]
+      },
+      "expected": {
+        "value": {
+          "backend": "mtplx",
+          "client": "pi",
+          "modelId": "fixture",
+          "project": "PROJECT",
+          "context": 8192,
+          "output": 256,
+          "reasoning": "auto",
+          "agentHost": "console",
+          "mode": "custom",
+          "options": {
+            "acceleration": "off",
+            "depth": 1,
+            "kv": "off",
+            "profile": "sustained",
+            "mtplxOperatorRoute": "default",
+            "fan": "smart"
+          },
+          "generation": {
+            "sampling": "model"
+          }
+        }
+      }
+    },
+    {
+      "payload": {
+        "backend": "omlx",
+        "client": "pi",
+        "modelId": "fixture",
+        "project": "PROJECT",
+        "context": 8192,
+        "output": 256,
+        "reasoning": "off",
+        "agentHost": "console",
+        "options": {
+          "acceleration": "mtp",
+          "depth": 2,
+          "kv": "q8",
+          "fan": "max"
+        },
+        "apiKey": "NEVER_STORE",
+        "messages": [
+          "NEVER_STORE"
+        ]
+      },
+      "expected": {
+        "value": {
+          "backend": "omlx",
+          "client": "pi",
+          "modelId": "fixture",
+          "project": "PROJECT",
+          "context": 8192,
+          "output": 256,
+          "reasoning": "off",
+          "agentHost": "console",
+          "mode": "custom",
+          "options": {
+            "acceleration": "mtp",
+            "depth": 2,
+            "kv": "q8",
+            "burst": "balanced",
+            "dflashVerify": "adaptive",
+            "dflashDraftQuant": "native",
+            "anePrefill": "off",
+            "memoryGuard": "balanced",
+            "fan": "max"
+          },
+          "generation": {
+            "sampling": "model"
+          }
+        }
+      }
+    },
+    {
+      "payload": {
+        "backend": "mtplx",
+        "client": "chat",
+        "modelId": "fixture",
+        "project": "PROJECT",
+        "context": 8192,
+        "output": 256,
+        "reasoning": "off",
+        "agentHost": "console",
+        "options": {
+          "acceleration": "off",
+          "kv": "q8",
+          "fan": "max"
+        },
+        "apiKey": "NEVER_STORE",
+        "messages": [
+          "NEVER_STORE"
+        ],
+        "generation": {
+          "sampling": "custom",
+          "temperature": 0.5,
+          "topP": 0.7,
+          "seed": 42
+        },
+        "chat": {
+          "systemPrompt": "System 🙂",
+          "sampling": "custom",
+          "temperature": 0.5,
+          "topP": 0.7,
+          "seed": 42
+        }
+      },
+      "expected": {
+        "value": {
+          "backend": "mtplx",
+          "client": "chat",
+          "modelId": "fixture",
+          "project": "PROJECT",
+          "context": 8192,
+          "output": 256,
+          "reasoning": "off",
+          "agentHost": "launcher",
+          "mode": "custom",
+          "options": {
+            "acceleration": "off",
+            "depth": 1,
+            "kv": "q8",
+            "profile": "sustained",
+            "mtplxOperatorRoute": "default",
+            "fan": "max"
+          },
+          "generation": {
+            "sampling": "custom",
+            "temperature": 0.5,
+            "topP": 0.7,
+            "topK": 0,
+            "presencePenalty": 0.0,
+            "frequencyPenalty": 0.0,
+            "seed": 42
+          },
+          "chat": {
+            "systemPrompt": "System 🙂",
+            "sampling": "custom",
+            "temperature": 0.5,
+            "topP": 0.7,
+            "topK": 0,
+            "presencePenalty": 0.0,
+            "frequencyPenalty": 0.0,
+            "seed": 42
+          }
+        }
+      }
+    },
+    {
+      "payload": {
+        "backend": "splash",
+        "client": "pi",
+        "modelId": "fixture",
+        "project": "PROJECT",
+        "context": 16384,
+        "output": 256,
+        "reasoning": "auto",
+        "agentHost": "console",
+        "options": {
+          "acceleration": "off",
+          "depth": 1,
+          "kv": "off"
+        },
+        "apiKey": "NEVER_STORE",
+        "messages": [
+          "NEVER_STORE"
+        ]
+      },
+      "expected": {
+        "value": {
+          "backend": "splash",
+          "client": "pi",
+          "modelId": "fixture",
+          "project": "PROJECT",
+          "context": 16384,
+          "output": 256,
+          "reasoning": "auto",
+          "agentHost": "console",
+          "mode": "custom",
+          "options": {
+            "acceleration": "off",
+            "depth": 1,
+            "kv": "off"
+          },
+          "generation": {
+            "sampling": "model"
+          }
+        }
+      }
+    },
+    {
+      "payload": {
+        "backend": "kolibri",
+        "client": "pi",
+        "modelId": "fixture",
+        "project": "PROJECT",
+        "context": 8192,
+        "output": 256,
+        "reasoning": "auto",
+        "agentHost": "console",
+        "options": {
+          "kv": "off",
+          "memoryGB": 40,
+          "prefillSize": 64
+        },
+        "apiKey": "NEVER_STORE",
+        "messages": [
+          "NEVER_STORE"
+        ]
+      },
+      "expected": {
+        "value": {
+          "backend": "kolibri",
+          "client": "pi",
+          "modelId": "fixture",
+          "project": "PROJECT",
+          "context": 8192,
+          "output": 256,
+          "reasoning": "auto",
+          "agentHost": "console",
+          "mode": "custom",
+          "options": {
+            "acceleration": "off",
+            "depth": 1,
+            "kv": "off",
+            "memoryGB": 40,
+            "memoryMode": "auto",
+            "prefillSize": 64,
+            "promptCacheGB": 1
+          },
+          "generation": {
+            "sampling": "model"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,8 +1,9 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const source = fs.readFileSync(require("node:path").join(__dirname, "../app.js"), "utf8");
+const source = benchmarkSources.controllerSource;
 const start = source.indexOf("function benchmarkDisplayedStatus(");
 const end = source.indexOf("function performanceReceiptSuite(", start);
 let request = {modelId:"model", context:65536, output:16384, suite:"agentic"};
@@ -22,12 +23,12 @@ const ctx = vm.createContext({state,
   $:() => ({scrollIntoView:() => {scrolled++;}}),
   showNotice:message => errors.push(message),
 });
-vm.runInContext(source.slice(start,end), ctx);
+benchmarkSources.runInContext(source.slice(start,end), ctx);
 const suiteContext = vm.createContext({
   selectedModel:() => ({}), mtplxLongContextCapabilityExact:() => true,
   MTPLX_LONG_CONTEXT_SUITE:record.suite,
 });
-vm.runInContext(source.slice(source.indexOf("function performanceReceiptSuiteOrder("),
+benchmarkSources.runInContext(source.slice(source.indexOf("function performanceReceiptSuiteOrder("),
   source.indexOf("function performanceReceiptNeedsFallback(")), suiteContext);
 assert.deepEqual(Array.from(suiteContext.performanceReceiptSuiteOrder({
   suite:"standard", backend:"mtplx", client:"chat", context:65536, options:{profile:"turbo"},

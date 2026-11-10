@@ -1,0 +1,442 @@
+[
+  {
+    "round": 0,
+    "depth": 3,
+    "memoryCeilingGB": 41,
+    "plan": {
+      "availability_clamped": true,
+      "context_feasibility": {
+        "limiting_resource": "implementation_limit",
+        "maximum_feasible_window": 262144,
+        "maximum_memory_ledger": {
+          "active_capacity_bytes": 4580179968,
+          "additional_active_bytes": 4007657472,
+          "expected_peak_bytes": 33676309760,
+          "fixed_bytes": 5300000000,
+          "long_context_reserve_bytes": 4544528384,
+          "lookahead_reserve_bytes": 391118848,
+          "mtp_resident_bytes": 1600000000,
+          "planning_margin_bytes": 1000000000,
+          "pool_bytes": 10603008000,
+          "prefill_bytes": 2662400000,
+          "retained_capacity_bytes": 4227858432,
+          "retained_recurrent_bytes": 339738624,
+          "version": 1,
+          "vision_resident_bytes": 0
+        },
+        "maximum_pool_slots": 3835,
+        "maximum_prefill_chunk": 2048,
+        "refusal": null,
+        "requested_memory_ledger": {
+          "active_capacity_bytes": 2290089984,
+          "additional_active_bytes": 1717567488,
+          "expected_peak_bytes": 33675531520,
+          "fixed_bytes": 5300000000,
+          "long_context_reserve_bytes": 1986002944,
+          "lookahead_reserve_bytes": 391118848,
+          "mtp_resident_bytes": 1600000000,
+          "planning_margin_bytes": 1000000000,
+          "pool_bytes": 17564774400,
+          "prefill_bytes": 2662400000,
+          "retained_capacity_bytes": 2113929216,
+          "retained_recurrent_bytes": 339738624,
+          "version": 1,
+          "vision_resident_bytes": 0
+        },
+        "requested_window": 131072,
+        "scope": "memory feasibility; independent of prefill deadline"
+      },
+      "context_qualification": false,
+      "context_window_source": "explicit",
+      "decode_lookahead": true,
+      "device_available_gb": 37.3,
+      "device_ram_gb": 51.5,
+      "device_working_set_gb": 40.2,
+      "est_prefill_s_at_max_context": null,
+      "est_prefill_tok_s": 205,
+      "est_warm_tok_s": 11.0203164906748,
+      "expected_peak_gb": 33.7,
+      "experts_per_layer_cached": 132,
+      "fully_resident": false,
+      "implementation_context_limit": 262144,
+      "kv_cache_bits": 8,
+      "kv_cache_group_size": 64,
+      "lookahead_reserve_bytes": 391118848,
+      "max_context_tokens": 131072,
+      "max_prefill_wait_minutes": 30,
+      "max_ram_percent": 79.55046991507211,
+      "memory_ledger": {
+        "active_capacity_bytes": 2290089984,
+        "additional_active_bytes": 1717567488,
+        "expected_peak_bytes": 33675531520,
+        "fixed_bytes": 5300000000,
+        "long_context_reserve_bytes": 1986002944,
+        "lookahead_reserve_bytes": 391118848,
+        "mtp_resident_bytes": 1600000000,
+        "planning_margin_bytes": 1000000000,
+        "pool_bytes": 17564774400,
+        "prefill_bytes": 2662400000,
+        "retained_capacity_bytes": 2113929216,
+        "retained_recurrent_bytes": 339738624,
+        "version": 1,
+        "vision_resident_bytes": 0
+      },
+      "model_context_limit": 262144,
+      "mtp": true,
+      "mtp_context_limit": 262144,
+      "notes": [
+        "only 37.3 GB of 52 GB RAM is reclaimable right now (other apps hold the rest) \u2014 sized down from the usual 38.2 GB; close apps and restart for full speed, or force a size with --memory-gb"
+      ],
+      "pool_gb": 17.6,
+      "pool_slots": 6353,
+      "prefill_chunk": 2048,
+      "prefill_wait_scope": "accepted_request_to_first_model_token",
+      "prefix_cache_max_tokens": 131072,
+      "runtime_prefix_cache_enabled": true,
+      "runtime_version": "0.2.17-q8.2",
+      "source": "auto",
+      "target_gb": 34.7,
+      "vision": false,
+      "vision_charged_gb": 0,
+      "vision_context_limit": 65536,
+      "vision_resident_gb": 0,
+      "vision_resident_reserved": false
+    },
+    "warm": {
+      "events": [
+        {
+          "at": 2.5200122079986613,
+          "metrics": {
+            "expert_pool_bytes": 17562009600,
+            "processed_tokens": 49,
+            "cached_tokens": 0,
+            "prompt_tokens": 49,
+            "prefill_seconds": 2.437341292,
+            "phase": "prefilled",
+            "expert_pool_slots": 6352,
+            "version": 1
+          }
+        },
+        {
+          "at": 11.620469083019998,
+          "metrics": {
+            "prefill_seconds": 2.437341292,
+            "processed_tokens": 49,
+            "prompt_tokens": 49,
+            "decode_seconds": 9.100258583,
+            "version": 1,
+            "accepted_drafts": 78,
+            "expert_pool_slots": 6352,
+            "decode_read_bytes": 9801216000,
+            "drafted_tokens": 150,
+            "decode_tokens": 128,
+            "expert_pool_bytes": 17562009600,
+            "expert_hit_rate": 0.8805282506824027,
+            "cached_tokens": 0,
+            "phase": "completed",
+            "decode_io_seconds": 1.562935661000001
+          }
+        }
+      ],
+      "firstOutputSeconds": 2.5203317500127014,
+      "seconds": 11.620517667004606,
+      "usage": {
+        "prompt_tokens": 49,
+        "completion_tokens": 128,
+        "total_tokens": 177,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "before": {
+        "reclaimableBytes": 14667743232,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 12932300800,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "output": "```python\n\"\"\"\nBounded LRU Cache with TTL and Thread Safety\n\nDesign Decisions:\n1. Use OrderedDict for O(1) LRU operations (move_to_end, popitem)\n2. Store values as tuples (value, expiry_time) to support TTL\n3. Use threading.RLock for reentrant lock safety in multi-threaded environments\n4. Lazy deletion of expired entries on access to avoid background cleanup threads\n5. Check expiry on every get/put operation to ensure correctness\n6. Maximum size bound enforced by evicting least recently used items when full\n7. All public methods are thread"
+    },
+    "measured": {
+      "events": [
+        {
+          "at": 0.0023379999911412597,
+          "metrics": {
+            "expert_pool_bytes": 17562009600,
+            "processed_tokens": 0,
+            "cached_tokens": 49,
+            "prompt_tokens": 49,
+            "prefill_seconds": 1e-06,
+            "phase": "prefilled",
+            "expert_pool_slots": 6352,
+            "version": 1
+          }
+        },
+        {
+          "at": 28.329227834008634,
+          "metrics": {
+            "prefill_seconds": 1e-06,
+            "processed_tokens": 0,
+            "prompt_tokens": 49,
+            "decode_seconds": 28.326433208,
+            "version": 1,
+            "accepted_drafts": 239,
+            "expert_pool_slots": 6352,
+            "decode_read_bytes": 35265024000,
+            "drafted_tokens": 432,
+            "decode_tokens": 384,
+            "expert_pool_bytes": 17562009600,
+            "expert_hit_rate": 0.8480413750346696,
+            "cached_tokens": 49,
+            "phase": "completed",
+            "decode_io_seconds": 5.512620997999991
+          }
+        }
+      ],
+      "firstOutputSeconds": 0.0025192500033881515,
+      "seconds": 28.329274666990386,
+      "usage": {
+        "prompt_tokens": 49,
+        "completion_tokens": 384,
+        "total_tokens": 433,
+        "prompt_tokens_details": {
+          "cached_tokens": 49
+        }
+      },
+      "before": {
+        "reclaimableBytes": 12932333568,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 12522340352,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "output": "```python\n\"\"\"\nBounded LRU Cache with TTL and Thread Safety\n\nDesign Decisions:\n1. Use OrderedDict for O(1) LRU operations (move_to_end, popitem)\n2. Store values as tuples (value, expiry_time) to support TTL\n3. Use threading.RLock for reentrant lock safety in multi-threaded environments\n4. Lazy deletion of expired entries on access to avoid background cleanup threads\n5. Check expiry on every get/put operation to ensure correctness\n6. Maximum size bound enforced by evicting least recently used items when full\n7. All public methods are thread-safe via RLock protection\n8. Return None for cache misses or expired entries\n9. Support both integer and float TTL values\n10. Handle edge cases: zero/negative TTL treated as immediate expiry\n\"\"\"\n\nimport time\nimport threading\nfrom collections import OrderedDict\nfrom typing import Any, Optional\n\n\nclass LRUCacheWithTTL:\n    \"\"\"\n    A bounded LRU cache with Time-To-Live (TTL) support and thread safety.\n    \n    Key Design Decisions Explained:\n    \n    1. **OrderedDict for LRU**: Python's OrderedDict maintains insertion order and\n       provides O(1) move_to_end() and popitem(last=False) operations, making it\n       ideal for implementing LRU eviction policy efficiently.\n    \n    2. **Tuple Storage (value, expiry)**: Each entry stores the value alongside its\n       absolute expiry timestamp. This allows lazy expiration checking without needing\n       a separate timer or background cleanup thread, reducing complexity and resource usage.\n    \n    3. **RLock vs Lock**: We use RLock (reentrant lock) instead of Lock because some\n       internal helper methods may need to acquire the same lock multiple times in\n       nested calls. While our"
+    }
+  },
+  {
+    "round": 0,
+    "depth": 2,
+    "memoryCeilingGB": 41,
+    "plan": {
+      "availability_clamped": true,
+      "context_feasibility": {
+        "limiting_resource": "implementation_limit",
+        "maximum_feasible_window": 262144,
+        "maximum_memory_ledger": {
+          "active_capacity_bytes": 4580179968,
+          "additional_active_bytes": 4007657472,
+          "expected_peak_bytes": 32819221760,
+          "fixed_bytes": 5300000000,
+          "long_context_reserve_bytes": 4544528384,
+          "lookahead_reserve_bytes": 391118848,
+          "mtp_resident_bytes": 1600000000,
+          "planning_margin_bytes": 1000000000,
+          "pool_bytes": 9745920000,
+          "prefill_bytes": 2662400000,
+          "retained_capacity_bytes": 4227858432,
+          "retained_recurrent_bytes": 339738624,
+          "version": 1,
+          "vision_resident_bytes": 0
+        },
+        "maximum_pool_slots": 3525,
+        "maximum_prefill_chunk": 2048,
+        "refusal": null,
+        "requested_memory_ledger": {
+          "active_capacity_bytes": 2290089984,
+          "additional_active_bytes": 1717567488,
+          "expected_peak_bytes": 32818443520,
+          "fixed_bytes": 5300000000,
+          "long_context_reserve_bytes": 1986002944,
+          "lookahead_reserve_bytes": 391118848,
+          "mtp_resident_bytes": 1600000000,
+          "planning_margin_bytes": 1000000000,
+          "pool_bytes": 16707686400,
+          "prefill_bytes": 2662400000,
+          "retained_capacity_bytes": 2113929216,
+          "retained_recurrent_bytes": 339738624,
+          "version": 1,
+          "vision_resident_bytes": 0
+        },
+        "requested_window": 131072,
+        "scope": "memory feasibility; independent of prefill deadline"
+      },
+      "context_qualification": false,
+      "context_window_source": "explicit",
+      "decode_lookahead": true,
+      "device_available_gb": 36.4,
+      "device_ram_gb": 51.5,
+      "device_working_set_gb": 40.2,
+      "est_prefill_s_at_max_context": null,
+      "est_prefill_tok_s": 205,
+      "est_warm_tok_s": 10.79679169454227,
+      "expected_peak_gb": 32.8,
+      "experts_per_layer_cached": 126,
+      "fully_resident": false,
+      "implementation_context_limit": 262144,
+      "kv_cache_bits": 8,
+      "kv_cache_group_size": 64,
+      "lookahead_reserve_bytes": 391118848,
+      "max_context_tokens": 131072,
+      "max_prefill_wait_minutes": 30,
+      "max_ram_percent": 79.55046991507211,
+      "memory_ledger": {
+        "active_capacity_bytes": 2290089984,
+        "additional_active_bytes": 1717567488,
+        "expected_peak_bytes": 32818443520,
+        "fixed_bytes": 5300000000,
+        "long_context_reserve_bytes": 1986002944,
+        "lookahead_reserve_bytes": 391118848,
+        "mtp_resident_bytes": 1600000000,
+        "planning_margin_bytes": 1000000000,
+        "pool_bytes": 16707686400,
+        "prefill_bytes": 2662400000,
+        "retained_capacity_bytes": 2113929216,
+        "retained_recurrent_bytes": 339738624,
+        "version": 1,
+        "vision_resident_bytes": 0
+      },
+      "model_context_limit": 262144,
+      "mtp": true,
+      "mtp_context_limit": 262144,
+      "notes": [
+        "only 36.4 GB of 52 GB RAM is reclaimable right now (other apps hold the rest) \u2014 sized down from the usual 38.2 GB; close apps and restart for full speed, or force a size with --memory-gb"
+      ],
+      "pool_gb": 16.7,
+      "pool_slots": 6043,
+      "prefill_chunk": 2048,
+      "prefill_wait_scope": "accepted_request_to_first_model_token",
+      "prefix_cache_max_tokens": 131072,
+      "runtime_prefix_cache_enabled": true,
+      "runtime_version": "0.2.17-q8.2",
+      "source": "auto",
+      "target_gb": 33.8,
+      "vision": false,
+      "vision_charged_gb": 0,
+      "vision_context_limit": 65536,
+      "vision_resident_gb": 0,
+      "vision_resident_reserved": false
+    },
+    "warm": {
+      "events": [
+        {
+          "at": 2.948196375014959,
+          "metrics": {
+            "prefill_seconds": 2.881396084,
+            "expert_pool_slots": 6042,
+            "phase": "prefilled",
+            "cached_tokens": 0,
+            "prompt_tokens": 49,
+            "processed_tokens": 49,
+            "expert_pool_bytes": 16704921600,
+            "version": 1
+          }
+        },
+        {
+          "at": 13.149370833009016,
+          "metrics": {
+            "cached_tokens": 0,
+            "decode_seconds": 10.201239833,
+            "processed_tokens": 49,
+            "prompt_tokens": 49,
+            "decode_io_seconds": 1.755501581,
+            "drafted_tokens": 122,
+            "phase": "completed",
+            "expert_pool_bytes": 16704921600,
+            "decode_tokens": 128,
+            "accepted_drafts": 66,
+            "expert_hit_rate": 0.8671064287522147,
+            "decode_read_bytes": 10586419200,
+            "version": 1,
+            "expert_pool_slots": 6042,
+            "prefill_seconds": 2.881396084
+          }
+        }
+      ],
+      "firstOutputSeconds": 2.948256208008388,
+      "seconds": 13.149463665991789,
+      "usage": {
+        "prompt_tokens": 49,
+        "total_tokens": 177,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens": 128
+      },
+      "before": {
+        "reclaimableBytes": 17748410368,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 15573352448,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "output": "```python\n\"\"\"\nBounded LRU Cache with TTL and Thread Safety\n\nDesign Decisions:\n1. Use OrderedDict for O(1) LRU operations (move_to_end, popitem)\n2. Store values as tuples (value, expiry_time) to support TTL\n3. Use threading.RLock for reentrant lock safety in multi-threaded environments\n4. Lazy deletion of expired entries on access to avoid background cleanup threads\n5. Check expiry on every get/put operation to ensure correctness\n6. Maximum size bound enforced by evicting least recently used items when full\n7. All public methods are thread"
+    },
+    "measured": {
+      "events": [
+        {
+          "at": 0.003089291014475748,
+          "metrics": {
+            "prefill_seconds": 1.042e-06,
+            "expert_pool_slots": 6042,
+            "phase": "prefilled",
+            "cached_tokens": 49,
+            "prompt_tokens": 49,
+            "processed_tokens": 0,
+            "expert_pool_bytes": 16704921600,
+            "version": 1
+          }
+        },
+        {
+          "at": 27.831037500000093,
+          "metrics": {
+            "prefill_seconds": 1.042e-06,
+            "decode_seconds": 27.827613291,
+            "processed_tokens": 0,
+            "prompt_tokens": 49,
+            "decode_io_seconds": 5.947193766000014,
+            "decode_tokens": 384,
+            "phase": "completed",
+            "expert_pool_bytes": 16704921600,
+            "accepted_drafts": 207,
+            "drafted_tokens": 352,
+            "expert_hit_rate": 0.8382062770491981,
+            "decode_read_bytes": 37869465600,
+            "version": 1,
+            "expert_pool_slots": 6042,
+            "cached_tokens": 49
+          }
+        }
+      ],
+      "firstOutputSeconds": 0.003266958025051281,
+      "seconds": 27.831076250004116,
+      "usage": {
+        "prompt_tokens": 49,
+        "total_tokens": 433,
+        "prompt_tokens_details": {
+          "cached_tokens": 49
+        },
+        "completion_tokens": 384
+      },
+      "before": {
+        "reclaimableBytes": 15575613440,
+        "swapins": 6596888,
+        "swapouts": 7606726
+      },
+      "after": {
+        "reclaimableBytes": 16067428352,
+        "swapins": 6596908,
+        "swapouts": 7606726
+      },
+      "output": "```python\n\"\"\"\nBounded LRU Cache with TTL and Thread Safety\n\nDesign Decisions:\n1. Use OrderedDict for O(1) LRU operations (move_to_end, popitem)\n2. Store values as tuples (value, expiry_time) to support TTL\n3. Use threading.RLock for reentrant lock safety in multi-threaded environments\n4. Lazy deletion of expired entries on access to avoid background cleanup threads\n5. Check expiry on every get/put operation to ensure correctness\n6. Maximum size bound enforced by evicting least recently used items when full\n7. All public methods are thread-safe via RLock protection\n8. Return None for cache misses or expired entries\n9. Support both integer and float TTL values\n10. Handle edge cases: zero/negative TTL treated as immediate expiry\n\"\"\"\n\nimport time\nimport threading\nfrom collections import OrderedDict\nfrom typing import Any, Optional\n\n\nclass LRUCacheWithTTL:\n    \"\"\"\n    A bounded LRU cache with Time-To-Live (TTL) support and thread safety.\n    \n    Key Design Decisions Explained:\n    \n    1. **OrderedDict for LRU**: Python's OrderedDict maintains insertion order and\n       provides O(1) move_to_end() and popitem(last=False) operations, making it\n       ideal for implementing LRU eviction policy efficiently.\n    \n    2. **Tuple Storage (value, expiry)**: Each entry stores the value alongside its\n       absolute expiry timestamp. This allows lazy expiration checking without needing\n       a separate timer or background cleanup thread, reducing complexity and resource usage.\n    \n    3. **RLock vs Lock**: We use RLock (reentrant lock) instead of Lock because some\n       internal helper methods may need to acquire the same lock multiple times in\n       nested calls. While our"
+    }
+  }
+]

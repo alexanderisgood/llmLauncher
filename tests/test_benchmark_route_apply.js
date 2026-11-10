@@ -1,9 +1,10 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const app = fs.readFileSync(path.join(__dirname, "../app.js"), "utf8");
+const app = benchmarkSources.controllerSource;
 function between(start, end) {
   const from = app.indexOf(start), to = app.indexOf(end, from + start.length);
   assert.ok(from >= 0 && to > from);
@@ -31,7 +32,7 @@ const ctx = vm.createContext({
   showNotice:(...args) => notices.push(args),
   applyOptimal:async (...args) => {calls.push(args); return applySucceeds;},
 });
-vm.runInContext(
+benchmarkSources.runInContext(
   between("function copiedEvidenceBinding(", "function clearActiveEvidenceBinding(")
   + between("function benchmarkRouteApplyBinding(", "function renderBenchmarkStatus("), ctx,
 );

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "patchId": "split-gguf-streaming-r1",
+  "version": "0.1.56",
+  "sourceCommit": "06698c674673008395ba6e971580538d6b1ea6e0",
+  "sourceArchiveSha256": "e3c248ee2142f156ccf0c60e4c5239ca82a6d8edc03de358936a37d425c0ce15",
+  "patchSha256": "c1789a96b6694b1fcb957d0e990c19c4f06404062c05a2a22367ebe6db9ff13d",
+  "engineBinarySha256": "3c64d1a1b2a5774eb5fe3f16b2c185d3d277061154e82d255ca67b228768a660",
+  "baseEngineBinarySha256": "3e7facb8e88b58dc1f7efca561c22a5967de3cd18e4f694a72467f568f6e27a0",
+  "sources": {
+    "metal/src/gguf_lite.h": "d6e882f2b7b59edb02a80e4fddda922b829655159a16c0440292f22e9a13aedb",
+    "metal/src/gguf_lite.cpp": "e73d44ca92b5d8f32671148b793434db2bd38d66d2af965e4dbfc3badf1d8cfb",
+    "metal/src/engine/stream.h": "722ae14ee93c705ced430d054a46ba5a2ebed30e700e6e3db0c944399fcc1725",
+    "metal/src/engine/stream.cpp": "b4ad662da887a7682e77e117c5b427ac59526b515a8c60e9be304181d0a7d5b3",
+    "metal/src/engine/window.cpp": "5a487714aea92a97f4870dd603cd6ecd909871901c3c7f5d97a5ffbad6d47576"
+  },
+  "ggmlCommit": "3cf03257f219afbe7334045ff7c6a06ac68c627d",
+  "gpuKernelsChanged": false,
+  "activation": "STRATA_METAL_SPLIT_GGUF=1; SSD streaming only",
+  "checks": {
+    "actualTensorMetadata": 1224,
+    "actualProductionReadsCompared": 3672,
+    "missingMismatchDuplicateTruncationRejected": true,
+    "generation": true,
+    "toolRoundTrip": true,
+    "extraWeightCopy": false
+  }
+}

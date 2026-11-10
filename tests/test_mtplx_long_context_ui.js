@@ -1,4 +1,5 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -6,13 +7,13 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const app = benchmarkSources.controllerSource;
 const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
 
 // Exercise the actual current-engine disclosure before the unrelated engine strip.
 {
   const start = app.indexOf("function renderBenchmarkSetup() {");
-  const end = app.indexOf('  $("benchmarkEngineStrip").innerHTML', start);
+  const end = app.indexOf('  setMarkup($("benchmarkEngineStrip"),' , start);
   const fields = Object.fromEntries([
     "benchmarkSuiteSelect", "contextInput", "profileSelect", "benchmarkStartLabel",
     "benchmarkRoute", "benchmarkModes", "benchmarkSuiteHelp",
@@ -29,7 +30,7 @@ const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
     backendName:value => value, clientName:value => value, esc:value => value,
   };
   vm.createContext(context);
-  vm.runInContext(app.slice(start, end) + "\n}", context);
+  benchmarkSources.runInContext(app.slice(start, end) + "\n}", context);
   context.renderBenchmarkSetup();
   assert.match(fields.benchmarkStartLabel.textContent, /3 setups/);
   assert.match(fields.benchmarkModes.innerHTML, /MTP · 2.11 long-context/);
@@ -171,7 +172,7 @@ const context = {
   setOptimizationState:(...args) => optimizationStateChanges.push(args),
 };
 vm.createContext(context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "const MTPLX_OPERATOR_ROUTE_DEFAULT",
   "\nconst optimizerControls",
 ), context);
@@ -360,7 +361,7 @@ assert.throws(
 );
 assert.equal(context.mtplxOperatorRouteLabel(measuredResult.options), "MTP D3 · 2.11.1 long-context");
 
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "function runtimeKvValue(",
   "\nfunction gatherGenerationSettings",
 ), context);
@@ -384,7 +385,7 @@ assert.match(controlMarkup, /id="mtplxOperatorRouteHelp" aria-live="polite"/);
 assert.doesNotMatch(controlMarkup, /MTPLX_[A-Z_]+/);
 assert.match(app, /mtplxOperatorRoute:\s*"mtplxOperatorRouteSelect"/);
 assert.match(app, /mtplx:\s*\["acceleration",\s*"depth",\s*"profile",\s*"mtplxOperatorRoute",\s*"fan"\]/);
-assert.match(app, /"mtplxOperatorRouteSelect", savedMtplxOperatorRoute\(options\)/);
+assert.match(app, /"mtplxOperatorRouteSelect", registryPort\.savedMtplxOperatorRoute\(options\)/);
 assert.match(app, /mtplxOperatorRouteFromOptimization\(\s*result, engineSelection, model/);
 const profileApplySource = sourceBetween(
   "function applyProfileRequest(",

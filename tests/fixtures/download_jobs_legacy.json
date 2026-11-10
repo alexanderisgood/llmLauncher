@@ -1,0 +1,5 @@
+{
+  "source": "launcher.py SetupManager + ModelAcquisitionManager before download_jobs extraction",
+  "fixtureSha256": "eb9c870fd1efc07a9db7824e7066b23184617a77cb52ea056e6c4f4582b9320b",
+  "managerClassLines": 479
+}

@@ -1,4 +1,5 @@
 "use strict";
+const launchSources=require("./helpers/launch_sources.js");
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -6,15 +7,9 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const app = launchSources.controllerSource;
 
-function sourceBetween(startMarker, endMarker) {
-  const start = app.indexOf(startMarker);
-  const end = app.indexOf(endMarker, start + startMarker.length);
-  assert.ok(start >= 0, `missing production marker: ${startMarker}`);
-  assert.ok(end > start, `missing production end marker: ${endMarker}`);
-  return app.slice(start, end);
-}
+const sourceBetween = require("./helpers/workspace_sources.js").between;
 
 const production = [
   sourceBetween("function leaveAgentConsole()", "\nfunction currentAgentConsoleAttachment"),
@@ -78,7 +73,12 @@ function createHarness({
     JSON,
     Promise,
     console,
-    state,
+    state, agentConsoleIsVisible:()=>state.agentConsoleVisible,
+    navigation:{refreshChat:()=>context.updateChatWorkspace(),closeSessions:()=>{if(elements.sessionDialog.open)elements.sessionDialog.close();},stopRun:()=>context.stopRun()},
+    callbacks:{surfaceDetached:async hub=>{if(state.sessionDashboard)state.sessionDashboard.hub=hub;
+      state.sessionAttachmentPlan=null;state.sessionAttachmentSignature="";await context.loadSessionDashboard();}},
+    chatWorkspace:{view:()=>({surfaceId:state.chatRunId,generating:Boolean(state.chatAbort)}),abortResponse:()=>state.chatAbort?.abort()},
+    agentConsoleWorkspace:{suspend:()=>{state.agentConsoleVisible=false;state.agentConsoleDismissed=true;calls.persistConsole++;}},
     $:id => elements[id] || (elements[id] = {}),
     activateChatDraft:(surfaceId, options) => calls.activate.push({surfaceId, options}),
     api:async (endpoint, options = {}) => {
@@ -150,7 +150,7 @@ function createHarness({
     updateChatWorkspace:() => {},
   };
   vm.createContext(context);
-  vm.runInContext(production, context);
+  launchSources.runInContext(production, context);
   return {calls, context, state};
 }
 
@@ -294,10 +294,11 @@ async function run() {
   assert.equal(nonChat.calls.save.length, 0, "non-Chat Stop must not invoke Chat persistence");
   assert.deepEqual(nonChat.calls.api.map(call => call.endpoint), ["/api/stop"]);
 
-  assert.match(app, /state\.chatTurnSettlement = turnSettlement/);
-  assert.match(app, /silentFailure:turnSettlement\.exitRequested/);
-  assert.match(app, /resolveTurnSettlement\(\{/);
-  assert.match(app, /!turnSettlement\.exitRequested && ChatStreamCore\.shouldDrainQueue/);
+  const chatSource = require("./helpers/workspace_sources.js").chatWorkspace;
+  assert.match(chatSource, /state\.chatTurnSettlement = turnSettlement/);
+  assert.match(chatSource, /silentFailure:turnSettlement\.exitRequested/);
+  assert.match(chatSource, /resolveTurnSettlement\(\{/);
+  assert.match(chatSource, /!turnSettlement\.exitRequested && ChatStreamCore\.shouldDrainQueue/);
   const launchSource = sourceBetween(
     "async function launch(requestOverride = null, launchOptions = {})",
     "\nfunction nextChatMessageId",

@@ -24,7 +24,7 @@ if (!process.env.LLM_LAUNCHER_BROWSER_PACKAGE) {
     for (const file of ["chat_drafts.js","agent_console_tabs.js"]) {
       await page.addScriptTag({path:path.resolve(__dirname,"..",file)});
     }
-    const app = fs.readFileSync(path.resolve(__dirname,"../app.js"),"utf8");
+    const app = fs.readFileSync(path.resolve(__dirname,"../agent_console_workspace.js"),"utf8");
     const between = (a,b)=>app.slice(app.indexOf(a),app.indexOf(b,app.indexOf(a)));
     const longDraft = '<script>alert("unsafe")</script>\n' + 'Full draft retained. '.repeat(1000);
     await page.addScriptTag({content:`
@@ -34,7 +34,7 @@ if (!process.env.LLM_LAUNCHER_BROWSER_PACKAGE) {
       const currentAgentConsoleView=()=>state.agentConsoleViews[state.agentConsoleSurfaceId];
       const ChatDraftsCore=LLMChatDraftsCore, AgentConsoleTabsCore=LLMAgentConsoleTabs;
       const api=()=>{throw new Error('Draft recovery must never call the agent API');};
-      ${between('const AGENT_CONSOLE_DRAFTS_KEY =','const CHAT_QUEUE_MAX_CHARACTERS')}
+      ${between('const AGENT_CONSOLE_DRAFTS_KEY =','function updateAgentConsoleStatusSummaryLabel()')}
       ${between('function agentConsoleRunDraftKey()', 'function reconcileAgentConsoleViewMeta(')}
       persistAgentConsoleDraft('old-run:old-surface','Continue developing');
       persistAgentConsoleDraft('another-run:another-surface',${JSON.stringify(longDraft)});

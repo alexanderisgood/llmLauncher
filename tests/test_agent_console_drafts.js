@@ -2,7 +2,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const app = fs.readFileSync(require.resolve("../app.js"), "utf8");
+const app = fs.readFileSync(require.resolve("../agent_console_workspace.js"), "utf8");
 const between = (start, end) => app.slice(app.indexOf(start), app.indexOf(end,app.indexOf(start)));
 const saved = new Map();
 function harness({owner="owner", conversation=""} = {}) {

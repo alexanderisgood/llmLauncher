@@ -1,4 +1,5 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -6,8 +7,9 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const app = benchmarkSources.controllerSource;
 const CalibrationDecision = require("../calibration_decision.js");
+const connectSavedLaunches = require("./helpers/saved_launches_harness.js");
 
 function sourceBetween(startMarker, endMarker) {
   const start = app.indexOf(startMarker);
@@ -47,10 +49,13 @@ class FakeElement {
     this.open = false;
     this.closeCount = 0;
     this.strong = {textContent:""};
+    this.small = {textContent:""};
     this.progressContainer = {classList:new FakeClassList()};
   }
   setAttribute(name, value) { this.attributes[name] = String(value); }
-  querySelector(selector) { return selector === "strong" ? this.strong : null; }
+  querySelector(selector) { return selector === "strong" ? this.strong : selector === "small" ? this.small : null; }
+  removeAttribute(name) { delete this.attributes[name]; }
+  addEventListener() {}
   closest() { return this.progressContainer; }
   close() { this.open = false; this.closeCount += 1; }
 }
@@ -320,50 +325,51 @@ const context = {
 };
 
 vm.createContext(context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "function engineShootoutApplyBinding(",
   "\nfunction renderEngineShootoutResults",
 ), context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "function optimizerEvidenceContractSignature(",
   "\nfunction optimizerValueSnapshot",
 ), context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "function markOptimizerCustom(",
   "\nfunction cancelOptimization",
 ), context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "async function applyOptimal(",
   "\nasync function prepareVerifiedQuickLaunch",
 ), context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "function calibrationBenchmarkActive(",
   "\nfunction calibrationQualificationProfile",
 ), context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "function completedCalibrationDecision(",
   "\nfunction calibrationParityRejectionNote",
 ), context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "function renderCalibrationPlan(",
   "\nfunction renderCalibrationBenchmark",
 ), context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "function calibrationRouteEvidenceApplyReady(",
   "\nasync function applyCalibrationResult",
 ), context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "async function applyCalibrationResult(",
   "\nfunction sessionDecisionClass",
 ), context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "function measuredProfileEvidenceBinding(",
   "\nfunction requestUsesExperimentalFreeToken",
 ), context);
-vm.runInContext(sourceBetween(
+benchmarkSources.runInContext(sourceBetween(
   "async function applySavedProfile(",
   "\nasync function saveCurrentProfile",
 ), context);
+const profilesManager=connectSavedLaunches(context);
 
 async function run() {
   const initialPlan = state.calibrationPlan;
@@ -390,7 +396,7 @@ async function run() {
   );
   assert.match(
     app,
-    /void applyOptimal\("engine", preference, false, evidenceBinding\)/,
+    /void evidence\.applyOptimal\("engine", preference, false, evidenceBinding\)/,
   );
 
   context.renderCalibrationPlan();
@@ -596,13 +602,13 @@ async function run() {
   assert.equal(context.profileUiReady(calibrationRequired), false);
   assert.equal(context.profileUiReason(calibrationRequired), calibrationRequired.reason);
   assert.equal(context.profileUiReady(measuredProfile), true);
-  assert.match(app, /const ready = profileUiReady\(profile\)/);
+  assert.match(fs.readFileSync(path.join(root,"saved_launches.js"),"utf8"), /const ready = isReady\(profile\)/);
 
   state.profiles = [measuredProfile];
   await context.applySavedProfile(measuredProfile.id, false);
   const profileApply = apiCalls.filter(call => call.endpoint === "/api/optimal-engine").at(-1);
   assert.deepEqual(profileApply.request.evidenceBinding, returnedBinding);
-  assert.equal(state.profileBusy, false);
+  assert.equal(profilesManager.isBusy(), false);
 
   const appliedContext = element("contextInput").value;
   element("contextInput").value = String(Number(appliedContext) + 1);

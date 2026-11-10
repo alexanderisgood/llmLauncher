@@ -1,0 +1,148 @@
+{
+  "kv": "q8",
+  "runtimeVersion": "0.2.17-q8.2",
+  "context": 131072,
+  "mtp": true,
+  "depth": 2,
+  "memoryGB": 41,
+  "authRejected": true,
+  "text": {
+    "content": "\n\nREADY",
+    "reasoning": "The user is asking me to reply with exactly \"READY\" in my final answer. This is a straightforward instruction. I should simply respond with the word \"READY\".\n",
+    "tool_calls": [],
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 19,
+      "completion_tokens": 37,
+      "total_tokens": 56,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "prefill": {
+      "phase": "prefilled",
+      "processed_tokens": 19,
+      "cached_tokens": 0,
+      "expert_pool_slots": 6902,
+      "expert_pool_bytes": 19082649600,
+      "prompt_tokens": 19,
+      "prefill_seconds": 1.609672458,
+      "version": 1
+    },
+    "native": {
+      "decode_seconds": 2.528730333,
+      "drafted_tokens": 32,
+      "expert_pool_slots": 6902,
+      "version": 1,
+      "phase": "completed",
+      "expert_pool_bytes": 19082649600,
+      "prefill_seconds": 1.609672458,
+      "cached_tokens": 0,
+      "decode_read_bytes": 4299264000,
+      "prompt_tokens": 19,
+      "decode_tokens": 37,
+      "accepted_drafts": 21,
+      "expert_hit_rate": 0.8050198777665698,
+      "processed_tokens": 19,
+      "decode_io_seconds": 0.6151522190000002
+    },
+    "seconds": 4.188,
+    "first_token_seconds": 1.883
+  },
+  "tool": {
+    "content": "\n\n",
+    "reasoning": "The user wants me to call the record_ready tool with status \"ready\".\n",
+    "tool_calls": [
+      {
+        "id": "call_C1951F8A40A447DE89E2872EDC414671",
+        "type": "function",
+        "function": {
+          "name": "record_ready",
+          "arguments": "{\"status\":\"ready\"}"
+        }
+      }
+    ],
+    "finish_reason": "tool_calls",
+    "usage": {
+      "prompt_tokens": 284,
+      "completion_tokens": 43,
+      "total_tokens": 327,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "prefill": {
+      "phase": "prefilled",
+      "processed_tokens": 284,
+      "cached_tokens": 0,
+      "expert_pool_slots": 6902,
+      "expert_pool_bytes": 19082649600,
+      "prompt_tokens": 284,
+      "prefill_seconds": 5.424125083,
+      "version": 1
+    },
+    "native": {
+      "decode_seconds": 3.355056333,
+      "drafted_tokens": 30,
+      "expert_pool_slots": 6902,
+      "version": 1,
+      "expert_pool_bytes": 19082649600,
+      "phase": "completed",
+      "prefill_seconds": 5.424125083,
+      "cached_tokens": 0,
+      "decode_read_bytes": 6331392000,
+      "prompt_tokens": 284,
+      "decode_tokens": 43,
+      "accepted_drafts": 28,
+      "expert_hit_rate": 0.7481378307999758,
+      "processed_tokens": 284,
+      "decode_io_seconds": 0.8348349830000001
+    },
+    "seconds": 8.782,
+    "first_token_seconds": 5.99
+  },
+  "followup": {
+    "content": "\n\nCOMPLETE",
+    "reasoning": "We need to respond to user: \"The tool succeeded. Reply with exactly COMPLETE in your final answer.\" We have already called record_ready? In current turn after tool success, user instructs reply exactly COMPLETE. Need final answer exactly COMPLETE. Ensure final only COMPLETE.\n",
+    "tool_calls": [],
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 89,
+      "completion_tokens": 57,
+      "total_tokens": 146,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "prefill": {
+      "phase": "prefilled",
+      "processed_tokens": 89,
+      "cached_tokens": 0,
+      "expert_pool_slots": 6902,
+      "expert_pool_bytes": 19082649600,
+      "prompt_tokens": 89,
+      "prefill_seconds": 1.971951208,
+      "version": 1
+    },
+    "native": {
+      "decode_seconds": 3.87680425,
+      "drafted_tokens": 52,
+      "expert_pool_slots": 6902,
+      "phase": "completed",
+      "expert_pool_bytes": 19082649600,
+      "version": 1,
+      "prefill_seconds": 1.971951208,
+      "cached_tokens": 0,
+      "decode_read_bytes": 5648486400,
+      "decode_tokens": 57,
+      "prompt_tokens": 89,
+      "accepted_drafts": 31,
+      "expert_hit_rate": 0.8557601339058293,
+      "processed_tokens": 89,
+      "decode_io_seconds": 0.8487144969999997
+    },
+    "seconds": 5.861,
+    "first_token_seconds": 2.15
+  },
+  "scope": "Short smoke prompts only; this does not measure full 128K capacity or rank AR against MTP."
+}

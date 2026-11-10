@@ -1,0 +1,1166 @@
+{
+  "sourceSha256": "0b774a90dc84ef6505743539c6c488b2dccb0b5764f7b99ea85208b77e8dc7ac",
+  "provenance": "Frozen complete actual engine/client plan/config output before normalized_request delegated to launch_contract. No model processes.",
+  "cases": [
+    {
+      "backend": "omlx",
+      "expected": {
+        "backend": "omlx",
+        "client": "chat",
+        "model": {
+          "id": "fixture",
+          "name": "Exact fixture",
+          "path": "ROOT/model",
+          "nativeContext": 131072,
+          "defaultOutput": 1024,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "backends": {
+            "omlx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "lmstudio": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "mtplx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "uzu": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "freetoken": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "swiftlm": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "mference": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "slotstream": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "kolibri": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true,
+              "runtimeIdentity": {
+                "identity": "runtime"
+              }
+            },
+            "splash": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "whallm": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "llamacpp": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            }
+          },
+          "kolibri": {
+            "identity": "model"
+          },
+          "splash": {
+            "identity": "pack",
+            "id": "owner/repo",
+            "draftCandidates": []
+          },
+          "servedId": "Exact-fixture-28679586"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 256,
+        "reasoning": "off",
+        "port": 18765,
+        "mode": "custom",
+        "options": {
+          "acceleration": "off",
+          "kv": "off"
+        },
+        "agent_host": "launcher",
+        "purpose": "session",
+        "runtime_binary": null,
+        "client_port": 18766,
+        "pi_session_file": null,
+        "sampling_contract": {
+          "schemaVersion": 1,
+          "controlled": true,
+          "mode": "model",
+          "values": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "seed": 17
+          }
+        },
+        "sampling_enforcement": {
+          "protocol": "chat-completions",
+          "representableFields": [
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "seed",
+            "temperature",
+            "top_k",
+            "top_p"
+          ],
+          "implicitModelDefaults": false
+        },
+        "chat": {
+          "systemPrompt": "",
+          "sampling": "model"
+        },
+        "engine_argv": [
+          "/fixture/omlx",
+          "serve",
+          "--base-path",
+          "ROOT/runs/11111111-1111-4111-8111-111111111111/omlx",
+          "--model-dir",
+          "ROOT/runs/11111111-1111-4111-8111-111111111111/omlx/models",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--max-concurrent-requests",
+          "1"
+        ],
+        "engine_env": {
+          "OMLX_BASE_PATH": "ROOT/runs/11111111-1111-4111-8111-111111111111/omlx",
+          "OMLX_API_KEY": "fixed-test-key"
+        },
+        "client_argv": [],
+        "client_env": {},
+        "warnings": [
+          "Built-in chat streams through the launcher's private loopback route and enforces the visible response ceiling."
+        ],
+        "secrets": {
+          "clientApiKey": "fixed-test-key",
+          "proxyControlKey": "fixed-test-key",
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "omlx/settings.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": \"1.0\",\n  \"server\": {\n    \"host\": \"127.0.0.1\",\n    \"port\": 18765,\n    \"log_level\": \"info\",\n    \"cors_origins\": [],\n    \"server_aliases\": [\n      \"localhost\",\n      \"127.0.0.1\"\n    ],\n    \"sse_keepalive_mode\": \"chunk\",\n    \"auto_start_on_launch\": false,\n    \"burst_decode_mode\": \"balanced\",\n    \"preserve_mid_system_cache\": true\n  },\n  \"model\": {\n    \"model_dirs\": [\n      \"ROOT/runs/11111111-1111-4111-8111-111111111111/omlx/models\"\n    ],\n    \"model_dir\": \"ROOT/runs/11111111-1111-4111-8111-111111111111/omlx/models\",\n    \"model_fallback\": false,\n    \"hide_helper_models\": false\n  },\n  \"memory\": {\n    \"prefill_memory_guard\": true,\n    \"memory_guard_tier\": \"balanced\",\n    \"memory_guard_custom_ceiling_gb\": 0.0,\n    \"soft_threshold\": 0.85,\n    \"hard_threshold\": 0.95,\n    \"prefill_safe_zone_ratio\": 0.8,\n    \"prefill_min_chunk_tokens\": 32\n  },\n  \"scheduler\": {\n    \"max_concurrent_requests\": 1,\n    \"embedding_batch_size\": 8,\n    \"chunked_prefill\": false,\n    \"prefill_step_size\": 2048,\n    \"prefill_priority\": \"context\"\n  },\n  \"cache\": {\n    \"enabled\": true,\n    \"hot_cache_only\": false,\n    \"ssd_cache_dir\": \"ROOT/state/cache/omlx\",\n    \"ssd_cache_max_size\": \"40GB\",\n    \"hot_cache_max_size\": \"0\",\n    \"initial_cache_blocks\": 256\n  },\n  \"auth\": {\n    \"api_key\": \"fixed-test-key\",\n    \"secret_key\": \"fixed-test-hex\",\n    \"skip_api_key_verification\": false,\n    \"sub_keys\": []\n  },\n  \"sampling\": {\n    \"max_context_window\": 8192,\n    \"max_context_window_policy\": 8192,\n    \"max_tokens\": 256\n  },\n  \"logging\": {\n    \"log_dir\": \"ROOT/runs/11111111-1111-4111-8111-111111111111/logs\",\n    \"retention_days\": 7\n  }\n}\n"
+          },
+          "omlx/model_settings.json": {
+            "mode": 384,
+            "text": "{\n  \"version\": 1,\n  \"models\": {\n    \"Exact-fixture-28679586\": {\n      \"max_context_window\": 8192,\n      \"max_tokens\": 256,\n      \"temperature\": 0.7,\n      \"top_p\": 0.9,\n      \"seed\": 17,\n      \"force_sampling\": false,\n      \"chat_template_kwargs\": {\n        \"enable_thinking\": false\n      },\n      \"forced_ct_kwargs\": [],\n      \"preserve_thinking\": false,\n      \"thinking_budget_enabled\": false,\n      \"thinking_budget_tokens\": null,\n      \"qwen4_ple_ssd_offload\": false,\n      \"moe_expert_offload_enabled\": false,\n      \"moe_expert_offload_resident_fraction\": 0.25,\n      \"vlm_mtp_enabled\": false,\n      \"turboquant_kv_enabled\": false,\n      \"turboquant_kv_bits\": 4,\n      \"turboquant_skip_last\": true,\n      \"mtp_enabled\": false,\n      \"mtp_num_draft_tokens\": null,\n      \"dflash_enabled\": false,\n      \"trust_remote_code\": false,\n      \"is_default\": true\n    }\n  }\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "backend": "mtplx",
+      "expected": {
+        "backend": "mtplx",
+        "client": "chat",
+        "model": {
+          "id": "fixture",
+          "name": "Exact fixture",
+          "path": "ROOT/model",
+          "nativeContext": 131072,
+          "defaultOutput": 1024,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "backends": {
+            "omlx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "lmstudio": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "mtplx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "uzu": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "freetoken": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "swiftlm": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "mference": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "slotstream": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "kolibri": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true,
+              "runtimeIdentity": {
+                "identity": "runtime"
+              }
+            },
+            "splash": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "whallm": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "llamacpp": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            }
+          },
+          "kolibri": {
+            "identity": "model"
+          },
+          "splash": {
+            "identity": "pack",
+            "id": "owner/repo",
+            "draftCandidates": []
+          },
+          "servedId": "llm-launcher-11111111"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 256,
+        "reasoning": "off",
+        "port": 18765,
+        "mode": "custom",
+        "options": {
+          "acceleration": "off",
+          "kv": "off",
+          "mtplxOperatorRoute": "default"
+        },
+        "agent_host": "launcher",
+        "purpose": "session",
+        "runtime_binary": null,
+        "client_port": 18766,
+        "pi_session_file": null,
+        "sampling_contract": {
+          "schemaVersion": 1,
+          "controlled": true,
+          "mode": "model",
+          "values": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "seed": 17
+          }
+        },
+        "sampling_enforcement": {
+          "protocol": "chat-completions",
+          "representableFields": [
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "seed",
+            "temperature",
+            "top_k",
+            "top_p"
+          ],
+          "implicitModelDefaults": false
+        },
+        "chat": {
+          "systemPrompt": "",
+          "sampling": "model"
+        },
+        "engine_argv": [
+          "/fixture/mtplx",
+          "serve",
+          "--yes",
+          "--model",
+          "ROOT/model",
+          "--model-id",
+          "llm-launcher-11111111",
+          "--profile",
+          "sustained",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "18765",
+          "--context-window",
+          "8192",
+          "--max-tokens",
+          "256",
+          "--paged-kv-quantization",
+          "off",
+          "--scheduler-mode",
+          "serial",
+          "--batching-preset",
+          "latency",
+          "--ssd-session-cache",
+          "on",
+          "--fan-mode",
+          "smart",
+          "--reasoning",
+          "off",
+          "--reasoning-effort",
+          "auto",
+          "--preserve-thinking",
+          "auto",
+          "--api-key-file",
+          "ROOT/runs/11111111-1111-4111-8111-111111111111/mtplx-api-key",
+          "--no-mtp",
+          "--no-load-mtp",
+          "--generation-mode",
+          "ar"
+        ],
+        "engine_env": {
+          "MTPLX_TOOL_RESULT_COMPACT_THRESHOLD_CHARS": "32768",
+          "MTPLX_ACTIVE_TOOL_RESULT_COMPACT_THRESHOLD_CHARS": "32768",
+          "MTPLX_ACTIVE_READ_INSPECTION_COMPACT_THRESHOLD_CHARS": "32768",
+          "MTPLX_ACTIVE_READ_COMPACT_HEAD_LINES": "4096",
+          "MTPLX_ACTIVE_READ_COMPACT_TAIL_LINES": "0",
+          "MTPLX_ACTIVE_READ_COMPACT_MAX_LINES": "4096",
+          "MTPLX_PI_CONVERGENCE_AFTER_TOOLS": "0",
+          "MTPLX_READ_ONLY_INSPECTION_FORCE_ANSWER_AFTER_TOOLS": "0",
+          "MTPLX_ALLOW_SWAP": "0",
+          "MTPLX_ASYNC_AR": "0",
+          "MTPLX_FUSED_MOE_VERIFY": "0"
+        },
+        "client_argv": [],
+        "client_env": {},
+        "warnings": [
+          "Built-in chat streams through the launcher's private loopback route and enforces the visible response ceiling."
+        ],
+        "secrets": {
+          "clientApiKey": "fixed-test-key",
+          "proxyControlKey": "fixed-test-key",
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "mtplx-api-key": {
+            "mode": 384,
+            "text": "fixed-test-key\n"
+          }
+        }
+      }
+    },
+    {
+      "backend": "kolibri",
+      "expected": {
+        "backend": "kolibri",
+        "client": "chat",
+        "model": {
+          "id": "fixture",
+          "name": "Exact fixture",
+          "path": "ROOT/model",
+          "nativeContext": 131072,
+          "defaultOutput": 1024,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "backends": {
+            "omlx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "lmstudio": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "mtplx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "uzu": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "freetoken": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "swiftlm": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "mference": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "slotstream": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "kolibri": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true,
+              "runtimeIdentity": {
+                "identity": "runtime"
+              }
+            },
+            "splash": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "whallm": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "llamacpp": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            }
+          },
+          "kolibri": {
+            "identity": "model"
+          },
+          "splash": {
+            "identity": "pack",
+            "id": "owner/repo",
+            "draftCandidates": []
+          },
+          "servedId": "kolibri-1-q6-ssd"
+        },
+        "project": "ROOT",
+        "context": 8192,
+        "output": 256,
+        "reasoning": "off",
+        "port": 18765,
+        "mode": "custom",
+        "options": {
+          "acceleration": "off",
+          "kv": "off",
+          "depth": 1,
+          "memoryGB": 40,
+          "memoryMode": "auto",
+          "prefillSize": 64,
+          "promptCacheGB": 1,
+          "_kolibriMemoryPlan": {
+            "ready": true,
+            "expertCacheBytes": 1024,
+            "residentExpertsPerLayer": 1
+          }
+        },
+        "agent_host": "launcher",
+        "purpose": "session",
+        "runtime_binary": null,
+        "client_port": 18766,
+        "pi_session_file": null,
+        "sampling_contract": {
+          "schemaVersion": 1,
+          "controlled": true,
+          "mode": "model",
+          "values": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "seed": 17
+          }
+        },
+        "sampling_enforcement": {
+          "protocol": "chat-completions",
+          "representableFields": [
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "seed",
+            "temperature",
+            "top_k",
+            "top_p"
+          ],
+          "implicitModelDefaults": false
+        },
+        "chat": {
+          "systemPrompt": "",
+          "sampling": "model"
+        },
+        "engine_argv": [
+          "PYTHON",
+          "-I",
+          "-S",
+          "-B",
+          "APP_DIR/kolibri_runtime.py",
+          "ROOT/runs/11111111-1111-4111-8111-111111111111/kolibri.json"
+        ],
+        "engine_env": {},
+        "client_argv": [],
+        "client_env": {},
+        "warnings": [
+          "Kolibri keeps its full Q6 weights on SSD. Automatic sizing currently plans 0.0 GiB of expert cache (1/384 experts per layer), and rechecks available memory before loading.",
+          "Built-in chat streams through the launcher's private loopback route and enforces the visible response ceiling."
+        ],
+        "secrets": {
+          "clientApiKey": "fixed-test-key",
+          "proxyControlKey": "fixed-test-key",
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "kolibri.json": {
+            "mode": 384,
+            "text": "{\n  \"runtime\": {\n    \"identity\": \"runtime\"\n  },\n  \"model\": {\n    \"identity\": \"model\"\n  },\n  \"options\": {\n    \"acceleration\": \"off\",\n    \"depth\": 1,\n    \"kv\": \"off\",\n    \"memoryGB\": 40,\n    \"memoryMode\": \"auto\",\n    \"prefillSize\": 64,\n    \"promptCacheGB\": 1\n  },\n  \"context\": 8192,\n  \"output\": 256,\n  \"reasoning\": \"off\",\n  \"port\": 18765,\n  \"apiKey\": \"fixed-test-key\"\n}\n"
+          }
+        }
+      }
+    },
+    {
+      "backend": "splash",
+      "expected": {
+        "backend": "splash",
+        "client": "chat",
+        "model": {
+          "id": "fixture",
+          "name": "Exact fixture",
+          "path": "ROOT/model",
+          "nativeContext": 131072,
+          "defaultOutput": 1024,
+          "defaultSampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "seed": 17
+          },
+          "templateReasoningEfforts": [
+            "medium"
+          ],
+          "backends": {
+            "omlx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "lmstudio": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "mtplx": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "uzu": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "freetoken": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "swiftlm": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "mference": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "slotstream": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "kolibri": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true,
+              "runtimeIdentity": {
+                "identity": "runtime"
+              }
+            },
+            "splash": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "whallm": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            },
+            "llamacpp": {
+              "runnable": true,
+              "mtp": true,
+              "dflash": true,
+              "kv": true,
+              "depth": 2,
+              "depthMax": 4,
+              "agentReasoning": [
+                "auto",
+                "off",
+                "medium"
+              ],
+              "customSampling": true
+            }
+          },
+          "kolibri": {
+            "identity": "model"
+          },
+          "splash": {
+            "identity": "pack",
+            "id": "owner/repo",
+            "draftCandidates": []
+          },
+          "servedId": "owner/repo"
+        },
+        "project": "ROOT",
+        "context": 16384,
+        "output": 256,
+        "reasoning": "off",
+        "port": 18765,
+        "mode": "custom",
+        "options": {
+          "acceleration": "off",
+          "kv": "off",
+          "depth": 1
+        },
+        "agent_host": "launcher",
+        "purpose": "session",
+        "runtime_binary": null,
+        "client_port": 18766,
+        "pi_session_file": null,
+        "sampling_contract": {
+          "schemaVersion": 1,
+          "controlled": true,
+          "mode": "model",
+          "values": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "seed": 17
+          }
+        },
+        "sampling_enforcement": {
+          "protocol": "chat-completions",
+          "representableFields": [
+            "seed",
+            "temperature",
+            "top_k",
+            "top_p"
+          ],
+          "implicitModelDefaults": false
+        },
+        "chat": {
+          "systemPrompt": "",
+          "sampling": "model"
+        },
+        "engine_argv": [
+          "PYTHON",
+          "-I",
+          "-S",
+          "-B",
+          "APP_DIR/splash_runtime.py",
+          "ROOT/runs/11111111-1111-4111-8111-111111111111/splash.json"
+        ],
+        "engine_env": {
+          "SPLASH_API_KEY": "fixed-test-key"
+        },
+        "client_argv": [],
+        "client_env": {},
+        "warnings": [
+          "Splash uses the selected quantization with a matching DFlash2 draft and 16,384 context tokens. Local weights are reused without conversion. The first launch downloads the draft if it is missing; later turns reuse the prefix cache.",
+          "Built-in chat streams through the launcher's private loopback route and enforces the visible response ceiling."
+        ],
+        "secrets": {
+          "clientApiKey": "fixed-test-key",
+          "proxyControlKey": "fixed-test-key",
+          "apiKey": "fixed-test-key"
+        },
+        "files": {
+          "splash.json": {
+            "mode": 384,
+            "text": "{\n  \"install\": {\n    \"ready\": true\n  },\n  \"pack\": {\n    \"identity\": \"pack\",\n    \"id\": \"owner/repo\",\n    \"draftCandidates\": []\n  },\n  \"drafts\": [],\n  \"modelsRoot\": \"ROOT/state/splash-models\",\n  \"context\": 16384,\n  \"output\": 256,\n  \"port\": 18765,\n  \"servedId\": \"owner/repo\"\n}\n"
+          }
+        }
+      }
+    }
+  ],
+  "environmentParameters": {
+    "interpreter": "PYTHON",
+    "privateRoot": "ROOT",
+    "applicationRoot": "APP_DIR"
+  }
+}

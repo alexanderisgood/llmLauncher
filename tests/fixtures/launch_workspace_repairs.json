@@ -1,0 +1,120 @@
+[
+  {
+    "method": "launch",
+    "patches": [
+      {
+        "start": 21,
+        "end": 21,
+        "before": [],
+        "after": [
+          "      runEpoch+=1;"
+        ]
+      },
+      {
+        "start": 47,
+        "end": 47,
+        "before": [],
+        "after": [
+          "    runEpoch+=1;retireIdlePolicy();"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "renderRequestActivity",
+    "patches": [
+      {
+        "start": 69,
+        "end": 70,
+        "before": [
+          "    const timeout = String(Number(policy.timeoutMinutes || 0));"
+        ],
+        "after": [
+          "    const pendingTimeout=state.idlePolicyBusy && pendingIdlePolicy?.ownerRunId===currentPolicyOwner()",
+          "      ? pendingIdlePolicy.timeoutMinutes : policy.timeoutMinutes;",
+          "    const timeout = String(Number(pendingTimeout || 0));"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "renderRun",
+    "patches": [
+      {
+        "start": 1,
+        "end": 1,
+        "before": [],
+        "after": [
+          "  if((state.runStatus?.run?.runId || null)!==(status.run?.runId || null)){runEpoch+=1;retireIdlePolicy();}"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "setSessionIdlePolicy",
+    "patches": [
+      {
+        "start": 2,
+        "end": 4,
+        "before": [
+          "  const ownerRunId = state.sessionDashboard?.hub?.session?.runId",
+          "    || state.runStatus?.run?.runId;"
+        ],
+        "after": [
+          "  const ownerRunId = currentPolicyOwner();"
+        ]
+      },
+      {
+        "start": 6,
+        "end": 6,
+        "before": [],
+        "after": [
+          "  const generation=++idlePolicyGeneration;",
+          "  pendingIdlePolicy={ownerRunId,timeoutMinutes};"
+        ]
+      },
+      {
+        "start": 12,
+        "end": 12,
+        "before": [],
+        "after": [
+          "    if(generation!==idlePolicyGeneration || currentPolicyOwner()!==ownerRunId)return;"
+        ]
+      },
+      {
+        "start": 16,
+        "end": 17,
+        "before": [
+          "    shellPort.showNotice(error.message, true);"
+        ],
+        "after": [
+          "    if(generation===idlePolicyGeneration && currentPolicyOwner()===ownerRunId)shellPort.showNotice(error.message, true);"
+        ]
+      },
+      {
+        "start": 18,
+        "end": 20,
+        "before": [
+          "    state.idlePolicyBusy = false;",
+          "    renderRequestActivity();"
+        ],
+        "after": [
+          "    if(generation===idlePolicyGeneration){state.idlePolicyBusy=false;pendingIdlePolicy=null;renderRequestActivity();}"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "stopRun",
+    "patches": [
+      {
+        "start": 7,
+        "end": 7,
+        "before": [],
+        "after": [
+          "    runEpoch+=1;retireIdlePolicy();"
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,21 @@
+{
+  "nativeChecks": 54,
+  "nativeSkipped": 0,
+  "prefixForkAssertions": 3827,
+  "mtpPassed": true,
+  "launcherTests": 823,
+  "launcherSkipped": 68,
+  "slotstreamAdapterTests": 21,
+  "javascriptTestFiles": 55,
+  "installedPiIntegrationPassed": true,
+  "applicationSmokePassed": true,
+  "longPromptTokens": 6541,
+  "configuredContext": 131072,
+  "tensorContext": 131072,
+  "limitations": [
+    "Full-window 128K and 256K model quality/capacity not qualified.",
+    "Paired multi-round whole-model speedup not established.",
+    "Dense fused attention is not consistently faster than MLX QMM.",
+    "Cache quantization can change output."
+  ]
+}

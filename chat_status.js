@@ -12,10 +12,12 @@
 
   function requestTps(request) {
     if (!request || typeof request !== "object") return null;
-    const decode = nonNegativeMetric(request.decodeTokensPerSecond);
+    const nativeRequired = ["kolibri", "splash"].includes(request.backend)
+      || ["kolibri-native-stats", "splash-native-stats"].includes(request.runtimeStatsSource);
+    const decode = nativeRequired ? null : nonNegativeMetric(request.decodeTokensPerSecond);
     const endToEnd = nonNegativeMetric(request.endToEndTokensPerSecond);
     const runtimeSource = request.runtimeStatsSource;
-    const runtimeMetric = ["lmstudio-response-stats", "whallm-native-stats"].includes(runtimeSource)
+    const runtimeMetric = ["lmstudio-response-stats", "whallm-native-stats", "slotstream-native-stats", "omlx-native-stats", "kolibri-native-stats", "splash-native-stats"].includes(runtimeSource)
       ? nonNegativeMetric(request.runtimeTokensPerSecond) : null;
     const runtime = runtimeMetric !== null && runtimeMetric > 0 ? runtimeMetric : null;
     const liveSource = request.liveTelemetry?.source;
@@ -29,7 +31,7 @@
         decode, endToEnd, runtime,
         primary:runtime, primaryKind:"runtime",
         compact:`${runtime.toFixed(1)} tok/s engine`,
-        label:`${runtime.toFixed(1)} tok/s · ${runtimeSource === "whallm-native-stats" ? "Whallm native decode, including cache evaluation" : "LM Studio reported"}`,
+        label:`${runtime.toFixed(1)} tok/s · ${runtimeSource === "whallm-native-stats" ? "Whallm native decode, including cache evaluation" : runtimeSource === "slotstream-native-stats" ? "Slotstream native decode" : runtimeSource === "omlx-native-stats" ? "oMLX native decode" : runtimeSource === "kolibri-native-stats" ? "Kolibri native decode" : runtimeSource === "splash-native-stats" ? "Splash stream lifecycle, first native batch excluded" : "LM Studio reported"}`,
       };
     }
     if (decode === null && endToEnd === null) {
@@ -60,6 +62,8 @@
   }
 
   function agentGenerationSpeed(current, latest, piSpeed, fallback) {
+    const nativeRequired = ["kolibri", "splash"].includes(current?.backend || latest?.backend)
+      || ["kolibri-native-stats", "splash-native-stats"].includes((current || latest)?.runtimeStatsSource);
     const currentSpeed = requestTps(current);
     const latestSpeed = requestTps(latest);
     const isDecode = speed => speed && !["live-prefill", "end-to-end"].includes(speed.primaryKind);
@@ -69,7 +73,7 @@
       value:`${measured.primary.toFixed(1)} tok/s · engine`, state:"measured",
       title:`Current decode speed: ${measured.label}. Engine token counts take precedence over Pi's live estimate.`,
     };
-    if (!prefill && current?.state === "running" && piSpeed?.state === "live") return {
+    if (!nativeRequired && !prefill && current?.state === "running" && piSpeed?.state === "live") return {
       ...piSpeed, value:piSpeed.value.replace("Pi live", "Pi estimate"),
     };
     if (prefill && current?.liveTelemetry?.source === "whallm-native-stats") return {
@@ -79,7 +83,7 @@
       value:`${latestSpeed.primary.toFixed(1)} tok/s · last`, state:"measured",
       title:`Last completed decode speed: ${latestSpeed.label}. Prompt processing is shown separately.`,
     };
-    if (!prefill && piSpeed) return {...piSpeed, value:piSpeed.value.replace("Pi live", "Pi estimate")};
+    if (!nativeRequired && !prefill && piSpeed) return {...piSpeed, value:piSpeed.value.replace("Pi live", "Pi estimate")};
     return prefill ? {value:"Waiting…", state:"unknown", title:"Prompt processing is shown separately."} : fallback;
   }
 
@@ -205,10 +209,16 @@
       const speed = nonNegativeMetric(stats?.tokensPerSecond);
       const processed = nonNegativeMetric(stats?.processedTokens);
       const cached = nonNegativeMetric(stats?.cachedTokens);
-      if (!["uzu-native-stats", "omlx-dflash-prefill", "mtplx-prefill", "whallm-prefill"].includes(stats?.source) || speed === null || processed === null || cached === null) continue;
+      if (!["uzu-native-stats", "omlx-dflash-prefill", "mtplx-prefill", "whallm-prefill", "slotstream-native-stats", "omlx-native-stats", "kolibri-native-stats", "splash-native-stats"].includes(stats?.source) || speed === null || processed === null || cached === null) continue;
       if (stats.source === "whallm-prefill" && request === latest && current && current !== latest) continue;
-      const engine = {"uzu-native-stats":"Uzu", "mtplx-prefill":"MTPLX", "whallm-prefill":"Whallm"}[stats.source] || "oMLX DFlash";
-      const attribution = stats.source === "whallm-prefill"
+      const engine = {"uzu-native-stats":"Uzu", "mtplx-prefill":"MTPLX", "whallm-prefill":"Whallm", "slotstream-native-stats":"Slotstream", "omlx-native-stats":"oMLX", "kolibri-native-stats":"Kolibri", "splash-native-stats":"Splash"}[stats.source] || "oMLX DFlash";
+      const attribution = stats.source === "slotstream-native-stats"
+        ? " Native prefill timing attached to this response; excludes decode and cached tokens."
+        : stats.source === "splash-native-stats"
+        ? " Native request-start to first-token timing, including request preparation."
+        : stats.source === "kolibri-native-stats"
+        ? " Native prompt evaluation attached to this request and checked against its final token usage."
+        : stats.source === "whallm-prefill"
         ? " Native prompt-to-first-token measurement, matched by serial request counters and token counts."
         : " Matched to this request's native response ID and token counts.";
       return {value:`${speed.toFixed(1)} tok/s${request === latest ? " · last" : ""}`,

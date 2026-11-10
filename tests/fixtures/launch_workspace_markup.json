@@ -1,0 +1,27 @@
+[
+  {
+    "method": "renderCacheObservatory",
+    "before": "$(\"sessionCacheFacts\").innerHTML = [\n      [\"Engine\", report.engineResident ? \"Resident\" : \"Not loaded\"],\n      [\"Policy\", policyLabel],\n      [\"Observed turns\", formattingPort.formatNumber(report.observationCount || 0)],\n      [\"Cache reports\", formattingPort.formatNumber(report.cacheTelemetryReportedTurns || 0)],\n      [\"Confirmed reuse\", formattingPort.formatNumber(report.confirmedHitTurns || 0)],\n      [\"Reported token reuse\", rate],\n    ].map(([label,value]) => `<span><small>${formattingPort.esc(label)}</small><b title=\"${formattingPort.esc(value)}\">${formattingPort.esc(value)}</b></span>`).join(\"\");",
+    "after": "setMarkup($(\"sessionCacheFacts\"), [\n      [\"Engine\", report.engineResident ? \"Resident\" : \"Not loaded\"],\n      [\"Policy\", policyLabel],\n      [\"Observed turns\", formattingPort.formatNumber(report.observationCount || 0)],\n      [\"Cache reports\", formattingPort.formatNumber(report.cacheTelemetryReportedTurns || 0)],\n      [\"Confirmed reuse\", formattingPort.formatNumber(report.confirmedHitTurns || 0)],\n      [\"Reported token reuse\", rate],\n    ].map(([label,value]) => `<span><small>${formattingPort.esc(label)}</small><b title=\"${formattingPort.esc(value)}\">${formattingPort.esc(value)}</b></span>`).join(\"\"));"
+  },
+  {
+    "method": "renderCacheObservatory",
+    "before": "$(\"sessionCacheLast\").innerHTML = `<strong>${formattingPort.esc(`${turnState} Chat turn`)}</strong><span>${formattingPort.esc(`${cacheDetail}${timing}`)}</span>`;",
+    "after": "setMarkup($(\"sessionCacheLast\"), `<strong>${formattingPort.esc(`${turnState} Chat turn`)}</strong><span>${formattingPort.esc(`${cacheDetail}${timing}`)}</span>`);"
+  },
+  {
+    "method": "renderCacheObservatory",
+    "before": "$(\"sessionCacheLast\").innerHTML = \"<strong>No observed Chat turns</strong><span>Built-in Chat reports appear here when the runtime exposes authoritative usage.</span>\";",
+    "after": "setMarkup($(\"sessionCacheLast\"), \"<strong>No observed Chat turns</strong><span>Built-in Chat reports appear here when the runtime exposes authoritative usage.</span>\");"
+  },
+  {
+    "method": "renderRequestActivity",
+    "before": "$(\"sessionActivityFacts\").innerHTML = [\n      [\"Engine lanes\", formattingPort.formatNumber(report.lanes || 0)],\n      [\"Generating\", formattingPort.formatNumber(report.activeCount || 0)],\n      [\"Waiting\", formattingPort.formatNumber(report.queuedCount || 0)],\n      [\"Surfaces\", formattingPort.formatNumber(report.surfaces?.length || 0)],\n      [liveSpeed ? \"Live TPS\" : \"Latest measured TPS\", latestTps],\n      [\"Idle unload\", idleValue],\n    ].map(([label,value]) => `<span><small>${formattingPort.esc(label)}</small><b title=\"${formattingPort.esc(value)}\">${formattingPort.esc(value)}</b></span>`).join(\"\");",
+    "after": "setMarkup($(\"sessionActivityFacts\"), [\n      [\"Engine lanes\", formattingPort.formatNumber(report.lanes || 0)],\n      [\"Generating\", formattingPort.formatNumber(report.activeCount || 0)],\n      [\"Waiting\", formattingPort.formatNumber(report.queuedCount || 0)],\n      [\"Surfaces\", formattingPort.formatNumber(report.surfaces?.length || 0)],\n      [liveSpeed ? \"Live TPS\" : \"Latest measured TPS\", latestTps],\n      [\"Idle unload\", idleValue],\n    ].map(([label,value]) => `<span><small>${formattingPort.esc(label)}</small><b title=\"${formattingPort.esc(value)}\">${formattingPort.esc(value)}</b></span>`).join(\"\"));"
+  },
+  {
+    "method": "renderRequestActivity",
+    "before": "$(\"sessionActivityList\").innerHTML = rows.length ? rows.join(\"\")\n      : `<div class=\"session-activity-empty\"><strong>${report.engineResident ? \"Relay ready · no requests\" : \"No request activity\"}</strong><span>${formattingPort.esc(report.engineResident ? \"The loaded model is warm and waiting for Chat or an agent.\" : \"Start a normal model session to create its private request relay.\")}</span></div>`;",
+    "after": "setMarkup($(\"sessionActivityList\"), rows.length ? rows.join(\"\")\n      : `<div class=\"session-activity-empty\"><strong>${report.engineResident ? \"Relay ready · no requests\" : \"No request activity\"}</strong><span>${formattingPort.esc(report.engineResident ? \"The loaded model is warm and waiting for Chat or an agent.\" : \"Start a normal model session to create its private request relay.\")}</span></div>`);"
+  }
+]

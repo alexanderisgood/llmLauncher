@@ -1,0 +1,23 @@
+{
+  "samples": [
+    {
+      "depth": 3,
+      "ceilingGB": 41,
+      "plannedTargetGB": 34.7,
+      "actualExpertPoolBytes": 17562009600,
+      "tokensPerSecond": 13.556242580218326
+    },
+    {
+      "depth": 2,
+      "ceilingGB": 41,
+      "plannedTargetGB": 33.8,
+      "actualExpertPoolBytes": 16704921600,
+      "tokensPerSecond": 13.799243075014026
+    }
+  ],
+  "limitations": [
+    "One pair on one short coding prompt.",
+    "Automatic sizing produced different expert-pool allocations; this is an operational spot check, not a matched speed comparison.",
+    "Not a 41 GB resident-memory claim or full-window throughput qualification."
+  ]
+}

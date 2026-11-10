@@ -1,0 +1,117 @@
+[
+  {
+    "method": "renderBenchmarkCard",
+    "before": "$(\"benchmarkCardModes\").innerHTML = candidates.map(mode => `<span class=\"${mode.available ? \"available\" : \"\"}${benchmark?.winner === mode.id ? \" winner\" : \"\"}\">${formatting.esc(mode.label)}</span>`).join(\"\");",
+    "after": "setMarkup($(\"benchmarkCardModes\"), candidates.map(mode => `<span class=\"${mode.available ? \"available\" : \"\"}${benchmark?.winner === mode.id ? \" winner\" : \"\"}\">${formatting.esc(mode.label)}</span>`).join(\"\"));"
+  },
+  {
+    "method": "renderBenchmarkSetup",
+    "before": "$(\"benchmarkModes\").innerHTML = candidates.map(mode => `<span class=\"${mode.available ? \"available\" : \"\"}\">${formatting.esc(mode.label)}</span>`).join(\"\");",
+    "after": "setMarkup($(\"benchmarkModes\"), candidates.map(mode => `<span class=\"${mode.available ? \"available\" : \"\"}\">${formatting.esc(mode.label)}</span>`).join(\"\"));"
+  },
+  {
+    "method": "renderBenchmarkSetup",
+    "before": "$(\"benchmarkModes\").innerHTML = [\"AR\", \"MTP · default\", \"MTP · 2.11 long-context\"]\n      .map(label => `<span class=\"available\">${formatting.esc(label)}</span>`).join(\"\");",
+    "after": "setMarkup($(\"benchmarkModes\"), [\"AR\", \"MTP · default\", \"MTP · 2.11 long-context\"]\n      .map(label => `<span class=\"available\">${formatting.esc(label)}</span>`).join(\"\"));"
+  },
+  {
+    "method": "renderBenchmarkSetup",
+    "before": "$(\"benchmarkEngineStrip\").innerHTML = engineRoutes.map(route => {\n    const routeModes = route.modes.map(mode => mode.label).join(\" + \");\n    const detail = route.eligible ? routeModes : route.reason;\n    return `<span class=\"${route.eligible ? \"available\" : \"excluded\"}\" title=\"${formatting.esc(detail)}\"><i aria-hidden=\"true\">${route.eligible ? \"✓\" : \"×\"}</i><b>${formatting.esc(route.label)}</b><small>${formatting.esc(detail)}</small></span>`;\n  }).join(\"\");",
+    "after": "setMarkup($(\"benchmarkEngineStrip\"), engineRoutes.map(route => {\n    const routeModes = route.modes.map(mode => mode.label).join(\" + \");\n    const detail = route.eligible ? routeModes : route.reason;\n    return `<span class=\"${route.eligible ? \"available\" : \"excluded\"}\" title=\"${formatting.esc(detail)}\"><i aria-hidden=\"true\">${route.eligible ? \"✓\" : \"×\"}</i><b>${formatting.esc(route.label)}</b><small>${formatting.esc(detail)}</small></span>`;\n  }).join(\"\"));"
+  },
+  {
+    "method": "renderBenchmarkHistory",
+    "before": "$(\"benchmarkHistoryTrend\").innerHTML = \"\";",
+    "after": "setMarkup($(\"benchmarkHistoryTrend\"), \"\");"
+  },
+  {
+    "method": "renderBenchmarkHistory",
+    "before": "$(\"benchmarkHistoryRuns\").innerHTML = \"\";",
+    "after": "setMarkup($(\"benchmarkHistoryRuns\"), \"\");"
+  },
+  {
+    "method": "renderBenchmarkHistory",
+    "before": "$(\"benchmarkHistoryOther\").innerHTML = \"\";",
+    "after": "setMarkup($(\"benchmarkHistoryOther\"), \"\");"
+  },
+  {
+    "method": "renderBenchmarkHistory",
+    "before": "$(\"benchmarkHistoryTrend\").innerHTML = (history.series || []).map(series => {\n    const latest = series.points?.at(-1);\n    const change = series.improvementPercent;\n    const changeClass = typeof change === \"number\" ? (change > 0.5 ? \"improved\" : (change < -0.5 ? \"regressed\" : \"flat\")) : \"flat\";\n    const changeText = typeof change === \"number\"\n      ? `${change > 0 ? \"+\" : \"\"}${change.toFixed(1)}% vs previous`\n      : `${series.points?.length || 0} matching run${series.points?.length === 1 ? \"\" : \"s\"}`;\n    return `<article class=\"benchmark-history-series\"><div><strong>${formatting.esc(series.label)}</strong><small>${formatting.esc(latest?.display || \"No comparable value\")}</small><em class=\"${changeClass}\">${formatting.esc(changeText)}</em></div>${benchmarkHistorySparkline(series)}</article>`;\n  }).join(\"\") || `<p class=\"benchmark-history-empty\">A second complete matching shootout will create per-engine trend lines.</p>`;",
+    "after": "setMarkup($(\"benchmarkHistoryTrend\"), (history.series || []).map(series => {\n    const latest = series.points?.at(-1);\n    const change = series.improvementPercent;\n    const changeClass = typeof change === \"number\" ? (change > 0.5 ? \"improved\" : (change < -0.5 ? \"regressed\" : \"flat\")) : \"flat\";\n    const changeText = typeof change === \"number\"\n      ? `${change > 0 ? \"+\" : \"\"}${change.toFixed(1)}% vs previous`\n      : `${series.points?.length || 0} matching run${series.points?.length === 1 ? \"\" : \"s\"}`;\n    return `<article class=\"benchmark-history-series\"><div><strong>${formatting.esc(series.label)}</strong><small>${formatting.esc(latest?.display || \"No comparable value\")}</small><em class=\"${changeClass}\">${formatting.esc(changeText)}</em></div>${benchmarkHistorySparkline(series)}</article>`;\n  }).join(\"\") || `<p class=\"benchmark-history-empty\">A second complete matching shootout will create per-engine trend lines.</p>`);"
+  },
+  {
+    "method": "renderBenchmarkHistory",
+    "before": "$(\"benchmarkHistoryRuns\").innerHTML = [...runRows, ...routeRows].join(\"\") || `<p class=\"benchmark-history-empty\">No saved run matches this exact visible contract yet.</p>`;",
+    "after": "setMarkup($(\"benchmarkHistoryRuns\"), [...runRows, ...routeRows].join(\"\") || `<p class=\"benchmark-history-empty\">No saved run matches this exact visible contract yet.</p>`);"
+  },
+  {
+    "method": "renderBenchmarkHistory",
+    "before": "$(\"benchmarkHistoryOther\").innerHTML = other.count\n    ? `<span>Retained but not comparable now</span>${(other.reasons || []).map(item => `<em>${formatting.esc(item.label)} · ${Number(item.count || 0)}</em>`).join(\"\")}`\n    : `<span>No mismatched historical evidence for this model.</span>`;",
+    "after": "setMarkup($(\"benchmarkHistoryOther\"), other.count\n    ? `<span>Retained but not comparable now</span>${(other.reasons || []).map(item => `<em>${formatting.esc(item.label)} · ${Number(item.count || 0)}</em>`).join(\"\")}`\n    : `<span>No mismatched historical evidence for this model.</span>`);"
+  },
+  {
+    "method": "renderEngineShootoutResults",
+    "before": "$(\"benchmarkResults\").innerHTML = cards + recommendation;",
+    "after": "setMarkup($(\"benchmarkResults\"), cards + recommendation);"
+  },
+  {
+    "method": "renderMtpTuningResults",
+    "before": "$(\"benchmarkResults\").innerHTML = `<section class=\"benchmark-tuning-result\"><div class=\"benchmark-tuning-result-head\"><div><span>Bounded LM Studio search</span><strong>${result ? \"Complete evidence contract\" : \"Provisional measurements\"}</strong></div><em>${candidates.length} tested</em></div>${facts}${cards}</section>${recommendation}`;",
+    "after": "setMarkup($(\"benchmarkResults\"), `<section class=\"benchmark-tuning-result\"><div class=\"benchmark-tuning-result-head\"><div><span>Bounded LM Studio search</span><strong>${result ? \"Complete evidence contract\" : \"Provisional measurements\"}</strong></div><em>${candidates.length} tested</em></div>${facts}${cards}</section>${recommendation}`);"
+  },
+  {
+    "method": "renderDflashTuningResults",
+    "before": "$(\"benchmarkResults\").innerHTML = `<section class=\"benchmark-tuning-result\"><div class=\"benchmark-tuning-result-head\"><div><span>Bounded oMLX DFlash search</span><strong>${result ? \"Complete evidence contract\" : \"Provisional measurements\"}</strong></div><em>${candidates.length} tested</em></div>${facts}${cards}</section>${recommendation}`;",
+    "after": "setMarkup($(\"benchmarkResults\"), `<section class=\"benchmark-tuning-result\"><div class=\"benchmark-tuning-result-head\"><div><span>Bounded oMLX DFlash search</span><strong>${result ? \"Complete evidence contract\" : \"Provisional measurements\"}</strong></div><em>${candidates.length} tested</em></div>${facts}${cards}</section>${recommendation}`);"
+  },
+  {
+    "method": "renderBenchmarkResults",
+    "before": "$(\"benchmarkResults\").innerHTML = cards + `<div class=\"benchmark-recommendation\"><span>${formatting.esc(recommendation)}</span>${benchmarkRouteApplyBinding(status) ? '<button type=\"button\" class=\"text-button\" data-apply-benchmark-route>Use measured settings</button>' : \"\"}</div>`;",
+    "after": "setMarkup($(\"benchmarkResults\"), cards + `<div class=\"benchmark-recommendation\"><span>${formatting.esc(recommendation)}</span>${benchmarkRouteApplyBinding(status) ? '<button type=\"button\" class=\"text-button\" data-apply-benchmark-route>Use measured settings</button>' : \"\"}</div>`);"
+  },
+  {
+    "method": "renderBenchmarkResults",
+    "before": "$(\"benchmarkResults\").innerHTML = cards + recommendation;",
+    "after": "setMarkup($(\"benchmarkResults\"), cards + recommendation);"
+  },
+  {
+    "method": "renderCalibrationPlan",
+    "before": "$(\"calibrationPlanFacts\").innerHTML = \"\";",
+    "after": "setMarkup($(\"calibrationPlanFacts\"), \"\");"
+  },
+  {
+    "method": "renderCalibrationPlan",
+    "before": "$(\"calibrationEngineCards\").innerHTML = \"\";",
+    "after": "setMarkup($(\"calibrationEngineCards\"), \"\");"
+  },
+  {
+    "method": "renderCalibrationPlan",
+    "before": "$(\"calibrationResults\").innerHTML = \"\";",
+    "after": "setMarkup($(\"calibrationResults\"), \"\");"
+  },
+  {
+    "method": "renderCalibrationPlan",
+    "before": "$(\"calibrationEvidence\").innerHTML = `<i aria-hidden=\"true\">!</i><span><strong>${state.calibrationLoading ? \"Inspecting the visible contract…\" : \"A valid calibration plan is not available.\"}</strong><small>${formatting.esc($(\"calibrationStatus\").textContent || \"Choose a ready model and valid settings.\")}</small></span>`;",
+    "after": "setMarkup($(\"calibrationEvidence\"), `<i aria-hidden=\"true\">!</i><span><strong>${state.calibrationLoading ? \"Inspecting the visible contract…\" : \"A valid calibration plan is not available.\"}</strong><small>${formatting.esc($(\"calibrationStatus\").textContent || \"Choose a ready model and valid settings.\")}</small></span>`);"
+  },
+  {
+    "method": "renderCalibrationPlan",
+    "before": "$(\"calibrationPlanFacts\").innerHTML = planFacts\n    .map(([label,value]) => `<span><small>${formatting.esc(label)}</small><b title=\"${formatting.esc(value)}\">${formatting.esc(value)}</b></span>`).join(\"\");",
+    "after": "setMarkup($(\"calibrationPlanFacts\"), planFacts\n    .map(([label,value]) => `<span><small>${formatting.esc(label)}</small><b title=\"${formatting.esc(value)}\">${formatting.esc(value)}</b></span>`).join(\"\"));"
+  },
+  {
+    "method": "renderCalibrationPlan",
+    "before": "$(\"calibrationEngineCards\").innerHTML = `${calibrationEngineMarkup}${calibrationAlternativeMarkup(plan, controlsLocked)}`;",
+    "after": "setMarkup($(\"calibrationEngineCards\"), `${calibrationEngineMarkup}${calibrationAlternativeMarkup(plan, controlsLocked)}`);"
+  },
+  {
+    "method": "renderCalibrationPlan",
+    "before": "$(\"calibrationEvidence\").innerHTML = `<i aria-hidden=\"true\">${!qualificationContractExact ? \"×\" : resultReady ? \"◆\" : plan.ready || preparationAvailable ? \"◇\" : \"×\"}</i><span><strong>${formatting.esc(!qualificationContractExact ? \"Exact qualification contract unavailable\" : resultReady ? shownEvidence.label : plan.ready ? routeQualification ? \"Ready to qualify this route\" : \"Ready to test engines + settings\" : preparationAvailable ? \"Prepare this route safely\" : systemSettingBlocked ? metalApprovalLabel : runtimeConflictBlocked ? memoryBlocker.label : \"This setup cannot be tested yet\")}</strong><small>${formatting.esc(evidenceDetail)}</small></span>`;",
+    "after": "setMarkup($(\"calibrationEvidence\"), `<i aria-hidden=\"true\">${!qualificationContractExact ? \"×\" : resultReady ? \"◆\" : plan.ready || preparationAvailable ? \"◇\" : \"×\"}</i><span><strong>${formatting.esc(!qualificationContractExact ? \"Exact qualification contract unavailable\" : resultReady ? shownEvidence.label : plan.ready ? routeQualification ? \"Ready to qualify this route\" : \"Ready to test engines + settings\" : preparationAvailable ? \"Prepare this route safely\" : systemSettingBlocked ? metalApprovalLabel : runtimeConflictBlocked ? memoryBlocker.label : \"This setup cannot be tested yet\")}</strong><small>${formatting.esc(evidenceDetail)}</small></span>`);"
+  },
+  {
+    "method": "renderCalibrationPlan",
+    "before": "$(\"calibrationResults\").innerHTML = measuredEngines.length ? `<strong>${routeQualification ? \"Route qualification result\" : \"Measured engine results\"}</strong><div>${measuredEngines.map((engine, index) => {\n    const selected = measuredDecisionReady && engine.backend === (measuredDecision.backend || shownEvidence.backend);\n    const mode = qualification.uzu ? \"DFlash + Weaver\"\n      : engine.mode === \"dflash2\" ? \"DFlash 2\" : engine.mode === \"mtp\" ? \"MTP\" : plan.ssdStreaming ? \"SSD stream\" : \"AR\";\n    const testedModes = Array.isArray(engine.testedModes) && engine.testedModes.length\n      ? engine.testedModes : [engine.mode || \"ar\"];\n    const search = engine.settingsSearch || {};\n    const tuningCount = Number(search.testedCandidateCount || 0);\n    const testedRoutes = testedModes.map(item => (\n      item === \"mtp\" && search.kind === \"mtplx-depth\" && tuningCount > 0\n        ? `MTP depth (${tuningCount} candidates)`\n        : item === \"mtp\" && search.kind === \"lmstudio-mtp\" && tuningCount > 0\n          ? `MTP tuned (${tuningCount} candidates)`\n          : item === \"dflash2\" && search.kind === \"omlx-dflash2\" && tuningCount > 0\n            ? `DFlash tuned (${tuningCount} candidates)`\n        : benchmarkWinnerLabel(item)\n    ));\n    const testedLabel = routeQualification\n      ? `Measured ${engine.reasoningTurns || 0}/${engine.sampleCount || 0} reasoning turns with final answers`\n      : plan.ssdStreaming\n      ? \"Tested exact native SSD streaming\"\n      : testedModes.length > 1\n      ? `Tested ${testedRoutes.join(\" + \")}`\n      : `Tested AR only · ${engine.accelerationReason || \"no verified accelerator in this artifact\"}`;\n    const exactRoute = search.selectedSetupLabel || engine.routeSettingsLabel\n      || (qualification.llama ? \"SSD PLE · exact 8K\"\n        : qualification.uzu ? `DFlash + Weaver · exact ${formatting.exactContextTier(request.context)}` : mode);\n    const modeLabel = routeQualification ? exactRoute : plan.ssdStreaming ? exactRoute : search.kind ? `Selected: ${exactRoute}` : testedModes.length > 1 ? `Winner: ${exactRoute}` : \"AR only\";\n    const testedSetups = Number(search.testedSetupCount || 0);\n    const maximumSetups = Number(search.maximumSetupCount || 0);\n    const setupCoverage = search.kind && testedSetups > 0 && maximumSetups >= testedSetups\n      ? `Tested ${testedSetups}/${maximumSetups} setups`\n      : \"\";\n    const searchAxes = Array.isArray(search.axes) ? search.axes : [];\n    const searchDetail = search.kind\n      ? `${tuningCount}/${Number(search.maximumCandidateCount || tuningCount)} ${search.label || \"tuning\"} candidates · ${Number(search.referenceSetupCount || 0)} reference setup${Number(search.referenceSetupCount || 0) === 1 ? \"\" : \"s\"}${searchAxes.length ? ` · axes: ${searchAxes.join(\", \")}` : \"\"}`\n      : \"\";\n    const decodeTps = formatting.finiteMetric(engine.decodeTokensPerSecond);\n    const parityRejectionNote = calibrationParityRejectionNote(engine);\n    const badge = CalibrationDecision.resultBadge(routeQualification ? {...measuredDecision, qualified:true} : measuredDecision, engine, index);\n    const qualificationFacts = routeQualification\n      ? routeQualificationFactsMarkup(engine, completedResult || {}, qualification.backend)\n      : decodeTps === null ? \"\" : `<small class=\"calibration-result-tps\">Generation ${decodeTps.toFixed(1)} tok/s</small>`;\n    return `<article class=\"${selected ? \"selected\" : \"\"}\" title=\"${formatting.esc(engine.modeDetail || testedLabel)}\"><span><b>${formatting.esc(engine.label || formatting.backendName(engine.backend))}</b><small>${formatting.esc(modeLabel)}</small></span><strong>${formatting.esc(engine.profileDisplay || engine.display || \"Measured\")}</strong>${setupCoverage ? `<small class=\"calibration-result-coverage\">${formatting.esc(setupCoverage)}</small>` : \"\"}<small class=\"calibration-result-modes calibration-detail-only\">${formatting.esc(testedLabel)}</small>${searchDetail ? `<small class=\"calibration-result-settings calibration-detail-only\">Search detail · ${formatting.esc(searchDetail)}</small>` : engine.settingsLabel ? `<small class=\"calibration-result-settings calibration-detail-only\">Fixed controls · ${formatting.esc(engine.settingsLabel)}</small>` : \"\"}${parityRejectionNote ? `<small class=\"calibration-result-settings calibration-detail-only\">${formatting.esc(parityRejectionNote)}</small>` : \"\"}${qualificationFacts}<em>${formatting.esc(badge)}</em></article>`;\n  }).join(\"\")}</div>` : \"\";",
+    "after": "setMarkup($(\"calibrationResults\"), measuredEngines.length ? `<strong>${routeQualification ? \"Route qualification result\" : \"Measured engine results\"}</strong><div>${measuredEngines.map((engine, index) => {\n    const selected = measuredDecisionReady && engine.backend === (measuredDecision.backend || shownEvidence.backend);\n    const mode = qualification.uzu ? \"DFlash + Weaver\"\n      : engine.mode === \"dflash2\" ? \"DFlash 2\" : engine.mode === \"mtp\" ? \"MTP\" : plan.ssdStreaming ? \"SSD stream\" : \"AR\";\n    const testedModes = Array.isArray(engine.testedModes) && engine.testedModes.length\n      ? engine.testedModes : [engine.mode || \"ar\"];\n    const search = engine.settingsSearch || {};\n    const tuningCount = Number(search.testedCandidateCount || 0);\n    const testedRoutes = testedModes.map(item => (\n      item === \"mtp\" && search.kind === \"mtplx-depth\" && tuningCount > 0\n        ? `MTP depth (${tuningCount} candidates)`\n        : item === \"mtp\" && search.kind === \"lmstudio-mtp\" && tuningCount > 0\n          ? `MTP tuned (${tuningCount} candidates)`\n          : item === \"dflash2\" && search.kind === \"omlx-dflash2\" && tuningCount > 0\n            ? `DFlash tuned (${tuningCount} candidates)`\n        : benchmarkWinnerLabel(item)\n    ));\n    const testedLabel = routeQualification\n      ? `Measured ${engine.reasoningTurns || 0}/${engine.sampleCount || 0} reasoning turns with final answers`\n      : plan.ssdStreaming\n      ? \"Tested exact native SSD streaming\"\n      : testedModes.length > 1\n      ? `Tested ${testedRoutes.join(\" + \")}`\n      : `Tested AR only · ${engine.accelerationReason || \"no verified accelerator in this artifact\"}`;\n    const exactRoute = search.selectedSetupLabel || engine.routeSettingsLabel\n      || (qualification.llama ? \"SSD PLE · exact 8K\"\n        : qualification.uzu ? `DFlash + Weaver · exact ${formatting.exactContextTier(request.context)}` : mode);\n    const modeLabel = routeQualification ? exactRoute : plan.ssdStreaming ? exactRoute : search.kind ? `Selected: ${exactRoute}` : testedModes.length > 1 ? `Winner: ${exactRoute}` : \"AR only\";\n    const testedSetups = Number(search.testedSetupCount || 0);\n    const maximumSetups = Number(search.maximumSetupCount || 0);\n    const setupCoverage = search.kind && testedSetups > 0 && maximumSetups >= testedSetups\n      ? `Tested ${testedSetups}/${maximumSetups} setups`\n      : \"\";\n    const searchAxes = Array.isArray(search.axes) ? search.axes : [];\n    const searchDetail = search.kind\n      ? `${tuningCount}/${Number(search.maximumCandidateCount || tuningCount)} ${search.label || \"tuning\"} candidates · ${Number(search.referenceSetupCount || 0)} reference setup${Number(search.referenceSetupCount || 0) === 1 ? \"\" : \"s\"}${searchAxes.length ? ` · axes: ${searchAxes.join(\", \")}` : \"\"}`\n      : \"\";\n    const decodeTps = formatting.finiteMetric(engine.decodeTokensPerSecond);\n    const parityRejectionNote = calibrationParityRejectionNote(engine);\n    const badge = CalibrationDecision.resultBadge(routeQualification ? {...measuredDecision, qualified:true} : measuredDecision, engine, index);\n    const qualificationFacts = routeQualification\n      ? routeQualificationFactsMarkup(engine, completedResult || {}, qualification.backend)\n      : decodeTps === null ? \"\" : `<small class=\"calibration-result-tps\">Generation ${decodeTps.toFixed(1)} tok/s</small>`;\n    return `<article class=\"${selected ? \"selected\" : \"\"}\" title=\"${formatting.esc(engine.modeDetail || testedLabel)}\"><span><b>${formatting.esc(engine.label || formatting.backendName(engine.backend))}</b><small>${formatting.esc(modeLabel)}</small></span><strong>${formatting.esc(engine.profileDisplay || engine.display || \"Measured\")}</strong>${setupCoverage ? `<small class=\"calibration-result-coverage\">${formatting.esc(setupCoverage)}</small>` : \"\"}<small class=\"calibration-result-modes calibration-detail-only\">${formatting.esc(testedLabel)}</small>${searchDetail ? `<small class=\"calibration-result-settings calibration-detail-only\">Search detail · ${formatting.esc(searchDetail)}</small>` : engine.settingsLabel ? `<small class=\"calibration-result-settings calibration-detail-only\">Fixed controls · ${formatting.esc(engine.settingsLabel)}</small>` : \"\"}${parityRejectionNote ? `<small class=\"calibration-result-settings calibration-detail-only\">${formatting.esc(parityRejectionNote)}</small>` : \"\"}${qualificationFacts}<em>${formatting.esc(badge)}</em></article>`;\n  }).join(\"\")}</div>` : \"\");"
+  }
+]

@@ -1,0 +1,145 @@
+{
+  "date": "2026-10-05",
+  "contextTokens": 262144,
+  "outputTokens": 65536,
+  "kv": "q8",
+  "prefillSize": 64,
+  "promptCacheGiB": 4,
+  "fullWindowExercised": false,
+  "livePlan": {
+    "version": 2,
+    "ready": true,
+    "memoryMode": "auto",
+    "memoryCeilingBytes": 40000000000,
+    "processLimitBytes": 35046933134,
+    "expertCacheBytes": 16773120000,
+    "residentExpertsPerLayer": 105,
+    "totalExpertsPerLayer": 384,
+    "residentWeightBytes": 18949189120,
+    "residentWeightFraction": 0.2983279078399306,
+    "kvCacheBytes": 2894151680,
+    "fullAttentionKvBytes": 2852126720,
+    "slidingAttentionKvBytes": 42024960,
+    "kv": "q8",
+    "kvBits": 8,
+    "kvGroupSize": 64,
+    "kvPrecision": "Q8 full attention \u00b7 BF16 sliding",
+    "quantizedKvLayers": 10,
+    "fullPrecisionKvLayers": 40,
+    "prefillSize": 64,
+    "promptCacheBytes": 4294967296,
+    "attentionWorkspaceBytes": 6442450944,
+    "workspaceReserveBytes": 8595177472,
+    "runtimeReserveBytes": 13158580224,
+    "estimatedWorkingSetBytes": 35001921024,
+    "osReserveBytes": 5153960756,
+    "requiredHeadroomBytes": 40155881780,
+    "contextTokens": 262144,
+    "basis": "Complete Q6 trunk plus the largest whole expert cache fitting current macOS headroom, the selected ceiling and Metal's working set. The selected KV precision applies to full attention; sliding caches remain BF16. Full selected-context KV, retained chat cache and prefill workspace have separate reserves. Rechecked before loading.",
+    "peakMlxMemoryBytes": 18955742752,
+    "activeMlxMemoryBytes": 18955742736
+  },
+  "turns": [
+    {
+      "answer": "RAVEN 42",
+      "usage": {
+        "prompt_tokens": 758,
+        "completion_tokens": 7,
+        "total_tokens": 765,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "streamEvents": 7
+    },
+    {
+      "answer": "RAVEN 43",
+      "usage": {
+        "prompt_tokens": 795,
+        "completion_tokens": 7,
+        "total_tokens": 802,
+        "prompt_tokens_details": {
+          "cached_tokens": 576
+        }
+      },
+      "streamEvents": 7
+    },
+    {
+      "answer": "RAVEN 44",
+      "usage": {
+        "prompt_tokens": 832,
+        "completion_tokens": 7,
+        "total_tokens": 839,
+        "prompt_tokens_details": {
+          "cached_tokens": 640
+        }
+      },
+      "streamEvents": 7
+    }
+  ],
+  "prefixReused": true,
+  "livePlanAfterGeneration": {
+    "version": 2,
+    "ready": true,
+    "memoryMode": "auto",
+    "memoryCeilingBytes": 40000000000,
+    "processLimitBytes": 35046933134,
+    "expertCacheBytes": 16773120000,
+    "residentExpertsPerLayer": 105,
+    "totalExpertsPerLayer": 384,
+    "residentWeightBytes": 18949189120,
+    "residentWeightFraction": 0.2983279078399306,
+    "kvCacheBytes": 2894151680,
+    "fullAttentionKvBytes": 2852126720,
+    "slidingAttentionKvBytes": 42024960,
+    "kv": "q8",
+    "kvBits": 8,
+    "kvGroupSize": 64,
+    "kvPrecision": "Q8 full attention \u00b7 BF16 sliding",
+    "quantizedKvLayers": 10,
+    "fullPrecisionKvLayers": 40,
+    "prefillSize": 64,
+    "promptCacheBytes": 4294967296,
+    "attentionWorkspaceBytes": 6442450944,
+    "workspaceReserveBytes": 8595177472,
+    "runtimeReserveBytes": 13158580224,
+    "estimatedWorkingSetBytes": 35001921024,
+    "osReserveBytes": 5153960756,
+    "requiredHeadroomBytes": 40155881780,
+    "contextTokens": 262144,
+    "basis": "Complete Q6 trunk plus the largest whole expert cache fitting current macOS headroom, the selected ceiling and Metal's working set. The selected KV precision applies to full attention; sliding caches remain BF16. Full selected-context KV, retained chat cache and prefill workspace have separate reserves. Rechecked before loading.",
+    "peakMlxMemoryBytes": 19807331252,
+    "activeMlxMemoryBytes": 19452354064
+  },
+  "stopPassed": true,
+  "nativeCacheChecks": {
+    "kvChoices": [
+      "q8",
+      "q6",
+      "q4"
+    ],
+    "tokens": 641,
+    "slidingWindowBoundaryPassed": true,
+    "prefixCopyPassed": true,
+    "q6PackingPassed": true,
+    "absolutePrefixSnapshotKeysPassed": true
+  },
+  "unitChecks": {
+    "kolibri": {
+      "passed": 23
+    },
+    "javascriptFiles": {
+      "passed": 69
+    },
+    "launcher": {
+      "tests": 307,
+      "passed": 295,
+      "skipped": 10,
+      "preexistingFailures": 2
+    }
+  },
+  "preexistingFailures": [
+    "test_best_engine_requires_complete_comparable_matrix_and_clears_noise_floor",
+    "test_ssd_shootout_reuses_cross_format_result_and_never_requests_normal_engines"
+  ]
+}

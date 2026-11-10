@@ -1,5 +1,5 @@
 import {createDeliveryProgressCheck, implementationRequest, applyBashDeadline} from './pi_delivery_progress.js';
-import {reasoningRepetition, isDamagedReasoningBlock, createContextRecovery} from './pi_context_recovery.js';
+import {reasoningRepetition, reasoningDigitRun, isDamagedReasoningBlock, exhaustedThinkingOnly, createContextRecovery} from './pi_context_recovery.js';
 import {registerBrowserCheck} from './pi-browser.js';
 import {open} from 'node:fs/promises';
 import {constants as fsConstants} from 'node:fs';
@@ -366,10 +366,13 @@ export default function launcherWorkflow(pi) {
       .map(b => b.thinking || b.text || '').join('\n\n');
     if (thinking.length < reasoningCheckedAt + 512) return;
     reasoningCheckedAt = thinking.length;
-    if (!reasoningRepetition(thinking)) return;
+    const digitRun = reasoningDigitRun(thinking);
+    if (!digitRun && !reasoningRepetition(thinking)) return;
     reasoningStopped = true;
     pi.sendMessage({customType:'launcher-loop-stop', display:true,
-      content:'Paused: the model is repeating the same reasoning paragraphs. Generation was stopped before it could fill the context. Compact to create a clean handover before continuing; the original conversation stays saved.'},
+      content:digitRun
+        ? 'Paused: the model is generating an unbroken stream of digits in its reasoning. Generation was stopped. Send “continue” to retry from the last confirmed result; the damaged reasoning will be omitted and the original conversation stays saved.'
+        : 'Paused: the model is repeating the same reasoning paragraphs. Generation was stopped before it could fill the context. Send “continue” to retry from the last confirmed result; the repeated thinking will be omitted while the original conversation stays saved.'},
     {triggerTurn:false});
     ctx.abort();
   });
@@ -396,11 +399,26 @@ export default function launcherWorkflow(pi) {
     const boundary = branch.findLastIndex(e => e.type === 'compaction'
       || (e.type === 'message' && e.message?.role === 'user'));
     const recent = branch.slice(boundary + 1);
-    if (!recent.some(e => e.type === 'custom_message' && e.customType === 'launcher-loop-stop')
+    if (recent.some(e => e.type === 'message' && exhaustedThinkingOnly(e.message))
+        && !recent.some(e => e.type === 'custom_message' && e.customType === 'launcher-thinking-limit')) {
+      pi.sendMessage({customType:'launcher-thinking-limit', display:true,
+        content:'The previous turn exhausted its response allowance in thinking. Send “continue” to retry from the last confirmed result. That unfinished reasoning will be omitted from the model context; the original conversation and tool results stay saved.'},
+      {triggerTurn:false});
+    }
+    const numericDamage = recent.some(e => e.type === 'message' && e.message?.role === 'assistant'
+      && e.message.content?.some(b => b.type === 'thinking' && reasoningDigitRun(b.thinking || b.text || '')));
+    // Upgrade older numeric-runaway notices that advised compaction. Native
+    // Pi can refuse to compact a short session, while the context hook can
+    // already remove damaged thinking on a direct retry.
+    if (!recent.some(e => e.type === 'custom_message' && e.customType === 'launcher-loop-stop'
+          && (!numericDamage || e.details?.recovery === 'numeric-retry'))
         && recent.some(e => e.type === 'message' && e.message?.role === 'assistant'
           && e.message.content?.some(isDamagedReasoningBlock))) {
       pi.sendMessage({customType:'launcher-loop-stop',display:true,
-        content:'Repeated reasoning was found in the saved unfinished turn. Compact to create a clean handover before continuing. The original transcript and confirmed tool results remain saved.'}, {triggerTurn:false});
+        ...(numericDamage ? {details:{recovery:'numeric-retry'}} : {}),
+        content:numericDamage
+          ? 'Number spam was found in the saved unfinished turn. Send “continue” to retry from the last confirmed result; no compaction is needed. The damaged reasoning will be omitted while the original transcript and tool results stay saved.'
+          : 'Repeated reasoning was found in the saved unfinished turn. Send “continue” to retry from the last confirmed result; the repeated thinking will be omitted while the original transcript and tool results remain saved.'}, {triggerTurn:false});
     }
   });
   pi.on('input', event => {

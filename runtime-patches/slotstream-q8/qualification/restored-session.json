@@ -1,0 +1,11 @@
+{
+  "kv": "q8",
+  "runtimeVersion": "0.2.17-q8.1",
+  "context": 131072,
+  "output": 100000,
+  "memoryGB": 41,
+  "depth": 2,
+  "conversationPreserved": true,
+  "consoleState": "running",
+  "streaming": false
+}

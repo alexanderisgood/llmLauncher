@@ -1,4 +1,5 @@
 "use strict";
+const benchmarkSources = require("./helpers/benchmark_sources.js");
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -59,7 +60,7 @@ assert.deepEqual(themes.writeDetail(blockedStorage, "detailed"), {detail:"detail
 
 const styles = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
 const index = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
-const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const app = benchmarkSources.controllerSource;
 assert.match(styles, /--mac-control-height:34px/);
 assert.match(styles, /--mac-action-height:42px/);
 assert.match(styles, /\.launch-dock,\.optimization-panel\{align-items:start\}/);

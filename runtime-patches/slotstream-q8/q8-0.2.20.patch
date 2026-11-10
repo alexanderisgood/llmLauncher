@@ -1,0 +1,839 @@
+diff --git a/Sources/Slotstream/ContextMemory.swift b/Sources/Slotstream/ContextMemory.swift
+index c6e8210..af2928d 100644
+--- a/Sources/Slotstream/ContextMemory.swift
++++ b/Sources/Slotstream/ContextMemory.swift
+@@ -29,7 +29,9 @@ package enum ContextBytes {
+ public enum ContextGeometry {
+     public static let allocationStep = 1024
+     public static let attentionLayers = 12
+-    public static let rowBytes = 2304
++    // Two KV heads, 256 channels: Q8 bytes + two BF16 metadata values per
++    // group of 64, for both K and V; the 256-byte indexer row stays BF16.
++    public static let rowBytes = 1344
+ 
+     /// Physical bytes needed when one buffer grows. The old allocation can
+     /// still have GPU or checkpoint readers, so growth charges the complete
+@@ -108,9 +110,12 @@ public struct ContextMemoryLedger: Sendable {
+     /// an additional complete growth allocation for candidate qualification;
+     /// this conservative copy budget is not a measured interpolation.
+     public static func transientReserveBytes(context: Int, mtp: Bool = false) -> Int {
+-        guard context > ContextPolicy.tokensInFixedFootprint else { return 0 }
+-        let hermes = 32_768 * PrefixCache.bytesPerToken
+-        return max(hermes, ContextGeometry.additionalActiveBytes(tokens: context, mtp: mtp))
++        // Preserve the empirical BF16 Hermes reserve. Only geometrically
++        // known persistent storage shrinks; no unmeasured workspace credit.
++        let dequantization = ContextBytes.product(context, 2048)
++        guard context > ContextPolicy.tokensInFixedFootprint else { return dequantization }
++        let hermes = 905_969_664
++        return ContextBytes.sum(max(hermes, ContextGeometry.additionalActiveBytes(tokens: context, mtp: mtp)), dequantization)
+     }
+ 
+     public var expectedPeakBytes: Int {
+@@ -193,7 +198,7 @@ public enum ContextWorkspace {
+         // activations. Preserve the original linear allowance; bound the
+         // query-by-context part even when late passes fall below 256.
+         return ContextBytes.sum(max(ContextBytes.product(max(pass, minimumProjectionRows), PlannerCostModel.prefillBytesPerToken),
+-            ContextBytes.product(queries, extent, ContextBytes.sum(ContextBytes.product(attentionHeads, 8), 16))), ContextBytes.product(max(0, scope - pass), 32_768))
++            ContextBytes.product(queries, extent, ContextBytes.sum(ContextBytes.product(attentionHeads, 8), 16))), ContextBytes.product(max(0, scope - pass), 32_768), ContextBytes.product(context, 2048))
+     }
+ 
+     /// The optional workspace must fit both actual reclaimable memory and
+diff --git a/Sources/Slotstream/Engine.swift b/Sources/Slotstream/Engine.swift
+index 89a6323..ca50187 100644
+--- a/Sources/Slotstream/Engine.swift
++++ b/Sources/Slotstream/Engine.swift
+@@ -944,7 +944,8 @@ public final class Engine {
+         promptIds: [Int], params: SampleParams, vision: VisionPrompt? = nil,
+         shouldContinue: (() -> Bool)? = nil,
+         onToken: ((Int, String) -> Bool)? = nil,
+-        request: RequestController?, onAdmitted: (() -> Bool)? = nil
++        request: RequestController?, onAdmitted: (() -> Bool)? = nil,
++        onPrefill: ((GenStats) -> Void)? = nil
+     ) -> (text: String, ids: [Int], stats: GenStats) {
+         let requestStart = RuntimeClock.now()
+         let control: RequestController
+@@ -1126,7 +1127,7 @@ public final class Engine {
+                 guard !clientGone, !stopFound else { return false }
+                 if observePressure() { return false }
+                 return shouldContinue?() ?? true
+-            }, onToken: tokenHandler, request: control, onAdmitted: onAdmitted)
++            }, onToken: tokenHandler, request: control, onAdmitted: onAdmitted, onPrefill: onPrefill)
+ 
+         var text = tokenizer.decode(tokens: ids, skipSpecialTokens: true)
+         if !stops.isEmpty, let cut = Self.stopIndex(text, stops) {
+diff --git a/Sources/Slotstream/Generate.swift b/Sources/Slotstream/Generate.swift
+index 34fe27d..2cd2292 100644
+--- a/Sources/Slotstream/Generate.swift
++++ b/Sources/Slotstream/Generate.swift
+@@ -453,7 +453,8 @@ public final class Generator {
+         cache: PrefixCache? = nil, vision: VisionPrompt? = nil,
+         shouldContinue: (() -> Bool)? = nil,
+         onToken: ((Int) -> Bool)? = nil,
+-        request: RequestController?, onAdmitted: (() -> Bool)? = nil
++        request: RequestController?, onAdmitted: (() -> Bool)? = nil,
++        onPrefill: ((GenStats) -> Void)? = nil
+     ) -> ([Int], GenStats) {
+         let requestStart = RuntimeClock.now()
+         let smallSweepStart = model.smallPrefillSweeps
+@@ -1043,6 +1044,8 @@ public final class Generator {
+         model.pool.resetStats()
+         model.ngram.resetStats()
+ 
++        onPrefill?(stats)
++
+         // ---- decode
+         var out: [Int] = []
+         var generated = Set<Int>()
+diff --git a/Sources/Slotstream/Layers.swift b/Sources/Slotstream/Layers.swift
+index 5adb6e3..32b8ff4 100644
+--- a/Sources/Slotstream/Layers.swift
++++ b/Sources/Slotstream/Layers.swift
+@@ -148,46 +148,111 @@ func ropePartial(_ x: MLXArray, _ cosA: MLXArray, _ sinA: MLXArray) -> MLXArray
+ 
+ // MARK: - caches
+ 
+-final class KVCache {
+-    var keys: MLXArray?
+-    var values: MLXArray?
+-    var offset = 0
++/// This local runtime stores attention KV as affine Q8, with one BF16 scale
++/// and bias per 64 values. The original BF16 runtime remains a separate build.
++/// State layout is immutable; trim never requantizes committed rows.
++package final class KVCache {
++    package init() {}
++    package var keys: MLXArray?
++    package var values: MLXArray?
++    package var keyScales: MLXArray?
++    package var keyBiases: MLXArray?
++    package var valueScales: MLXArray?
++    package var valueBiases: MLXArray?
++    package var offset = 0
+     let step = 1024
+-    var allocatedBytes: Int { (keys?.nbytes ?? 0) + (values?.nbytes ?? 0) }
++    package static let groupSize = 64
++    package var storage: [MLXArray] {
++        [keys, values, keyScales, keyBiases, valueScales, valueBiases].compactMap { $0 }
++    }
++    package var allocatedBytes: Int { storage.reduce(0) { $0 + $1.nbytes } }
++    package func materialize() { eval(storage) }
+ 
+-    /// Distinct Swift array contexts share the existing MLX storage. Indexed
+-    /// updates then retain the other branch's reader and copy on write.
+-    func copyForPrefix(to target: KVCache) {
++    /// Distinct MLX array contexts preserve copy-on-write ownership of all six
++    /// buffers, including quantization metadata, when a prefix branches.
++    package func copyForPrefix(to target: KVCache) {
+         target.keys = keys.map { $0.reshaped($0.shape) }
+         target.values = values.map { $0.reshaped($0.shape) }
++        target.keyScales = keyScales.map { $0.reshaped($0.shape) }
++        target.keyBiases = keyBiases.map { $0.reshaped($0.shape) }
++        target.valueScales = valueScales.map { $0.reshaped($0.shape) }
++        target.valueBiases = valueBiases.map { $0.reshaped($0.shape) }
+         target.offset = offset
+     }
+ 
+-    func updateAndFetch(_ k: MLXArray, _ v: MLXArray) -> (MLXArray, MLXArray) {
+-        let prev = offset
+-        let s = k.dim(2)
+-        if keys == nil || prev + s > keys!.dim(2) {
+-            let newCap = ((prev + s + step - 1) / step) * step
+-            let b = k.dim(0)
+-            let h = k.dim(1)
+-            let grownK = MLXArray.zeros([b, h, newCap, k.dim(3)], dtype: k.dtype)
+-            let grownV = MLXArray.zeros([b, h, newCap, v.dim(3)], dtype: v.dtype)
+-            if let ok = keys, prev > 0 {
+-                grownK[0..., 0..., 0 ..< prev, 0...] = ok[0..., 0..., 0 ..< prev, 0...]
+-                grownV[0..., 0..., 0 ..< prev, 0...] = values![0..., 0..., 0 ..< prev, 0...]
++    package func append(_ k: MLXArray, _ v: MLXArray) {
++        precondition(k.dtype == .bfloat16 && v.dtype == .bfloat16,
++            "Q8 cache expects the pinned checkpoint's BF16 activations")
++        precondition(k.shape == v.shape && k.dim(3) % Self.groupSize == 0)
++        let prev = offset, count = k.dim(2)
++        let qk = quantized(k, groupSize: Self.groupSize, bits: 8)
++        let qv = quantized(v, groupSize: Self.groupSize, bits: 8)
++        let cap = ((prev + count + step - 1) / step) * step
++        func write(_ old: MLXArray?, _ fresh: MLXArray) -> MLXArray {
++            let buffer: MLXArray
++            if let old, old.dim(2) >= prev + count { buffer = old }
++            else {
++                buffer = MLXArray.zeros([fresh.dim(0), fresh.dim(1), cap, fresh.dim(3)], dtype: fresh.dtype)
++                if let old, prev > 0 { buffer[0..., 0..., 0..<prev, 0...] = old[0..., 0..., 0..<prev, 0...] }
+             }
+-            keys = grownK
+-            values = grownV
++            buffer[0..., 0..., prev..<(prev + count), 0...] = fresh
++            return buffer
++        }
++        keys = write(keys, qk.wq); keyScales = write(keyScales, qk.scales); keyBiases = write(keyBiases, qk.biases!)
++        values = write(values, qv.wq); valueScales = write(valueScales, qv.scales); valueBiases = write(valueBiases, qv.biases!)
++        offset = prev + count
++        // Attention evaluates every metadata buffer before returning. The
++        // keys-only terminal path explicitly materializes without attention.
++    }
++
++    package func fetched() -> (MLXArray, MLXArray) {
++        func unpack(_ words: MLXArray, _ scales: MLXArray, _ biases: MLXArray) -> MLXArray {
++            dequantized(words[0..., 0..., 0..<offset, 0...],
++                scales: scales[0..., 0..., 0..<offset, 0...], biases: biases[0..., 0..., 0..<offset, 0...],
++                groupSize: Self.groupSize, bits: 8)
+         }
+-        keys![0..., 0..., prev ..< (prev + s), 0...] = k
+-        values![0..., 0..., prev ..< (prev + s), 0...] = v
+-        offset = prev + s
+-        return (keys![0..., 0..., 0 ..< offset, 0...], values![0..., 0..., 0 ..< offset, 0...])
++        return (unpack(keys!, keyScales!, keyBiases!), unpack(values!, valueScales!, valueBiases!))
+     }
+ 
+-    /// Roll back to `n` entries. Bytes past `n` stay in the buffer but are
+-    /// dead: the next update writes over them, and fetches slice 0..<offset.
+-    func trim(to n: Int) { offset = min(offset, max(0, n)) }
++    package func updateAndFetch(_ k: MLXArray, _ v: MLXArray) -> (MLXArray, MLXArray) {
++        append(k, v)
++        return fetched()
++    }
++
++    /// Quantized GQA for decode and MTP verification. This consumes packed KV
++    /// directly: there is no full-context floating-point cache reconstruction.
++    /// Larger prefill passes use the existing selected-attention kernel below.
++    package func attend(_ q: MLXArray, scale: Float, mask: MLXArray?) -> MLXArray {
++        precondition(q.dim(3) == 256 && q.dim(2) <= 8 && scale == 0.0625)
++        return Q8Attention.execute(q: q, cache: self, mask: mask)
++    }
++
++    /// Independent MLX quantized-matmul comparison path for qualification.
++    package func attendQMM(_ q: MLXArray, scale: Float, mask: MLXArray?) -> MLXArray {
++        let b = q.dim(0), heads = q.dim(1), rows = q.dim(2), d = q.dim(3)
++        let kvHeads = keys!.dim(1), repeats = heads / kvHeads
++        precondition(heads % kvHeads == 0 && rows <= 8 && offset >= rows)
++        func grouped(_ a: MLXArray) -> MLXArray {
++            a[0..., 0..., 0..<offset, 0...].expandedDimensions(axis: 2)
++        }
++        let queries = (q * scale).reshaped([b, kvHeads, repeats, rows, d])
++        var scores = quantizedMM(queries, grouped(keys!), scales: grouped(keyScales!),
++            biases: grouped(keyBiases!), transpose: true, groupSize: Self.groupSize, bits: 8)
++        var keep = mask
++        if keep == nil && rows > 1 {
++            let positions = MLXArray((offset-rows..<offset).map(Int32.init)).reshaped([1, 1, rows, 1])
++            let positionsK = MLXArray((0..<offset).map(Int32.init)).reshaped([1, 1, 1, offset])
++            keep = positions .>= positionsK
++        }
++        if let keep { scores = which(keep.expandedDimensions(axis: 2), scores, MLXArray(-Float.infinity).asType(scores.dtype)) }
++        let probabilities = softmax(scores, axis: -1, precise: true)
++        return quantizedMM(probabilities, grouped(values!), scales: grouped(valueScales!),
++            biases: grouped(valueBiases!), transpose: false, groupSize: Self.groupSize, bits: 8)
++            .reshaped([b, heads, rows, d])
++    }
++
++    /// Dead speculative rows remain allocated but cannot be read by attention.
++    package func trim(to n: Int) { offset = min(offset, max(0, n)) }
+ }
+ 
+ /// Grown in blocks like KVCache rather than re-concatenated per token: a
+@@ -658,8 +723,8 @@ final class QSAAttention {
+         let v = vProj(x, minimumRows: minimumProjectionRows).reshaped([B, S, cfg.numKVHeads, D]).transposed(0, 2, 1, 3)
+         let (c, s) = rope.table(start: offset, count: S)
+         k = rope.rotate(k, c.expandedDimensions(axis: 1), s.expandedDimensions(axis: 1))
+-        let retained = cache.updateAndFetch(k, v)
+-        eval(retained.0, retained.1)
++        cache.append(k, v)
++        cache.materialize()
+     }
+ 
+     func callAsFunction(
+@@ -692,7 +757,17 @@ final class QSAAttention {
+         q = rope.rotate(q, c, s)
+         k = rope.rotate(k, c, s)
+ 
+-        (k, v) = cache.updateAndFetch(k, v)
++        cache.append(k, v)
++        if S <= 8 && !stableSmallKeyDomain {
++            let keep = selection?.mask(lo: 0, hi: S, keyEnd: offset + S) ?? sparse
++            let attended = cache.attend(q, scale: scale, mask: keep)
++            eval(attended)
++            let flattened = attended.transposed(0, 2, 1, 3).reshaped([B, S, H * D])
++            return oProj(flattened * sigmoid(gate), minimumRows: minimumProjectionRows)
++        }
++        // Only this attention layer's temporary BF16 reconstruction is alive.
++        // Every return below evaluates attention before these locals are freed.
++        (k, v) = cache.fetched()
+ 
+         if pruneLastQuery {
+             // Preserve matrix dispatch with one 64-row terminal tile. The
+@@ -705,6 +780,7 @@ final class QSAAttention {
+             let mask = selection?.mask(lo: first, hi: S, keyEnd: offset + S)
+             let attended = Self.attend(q: queries, k: k, v: v, sparse: mask,
+                 base: offset + first, scale: scale, block: rows)
++            eval(attended)
+             let flattened = attended.transposed(0, 2, 1, 3).reshaped([B, rows, H * D])
+             return oProj(flattened * sigmoid(gate[0..., first..., 0...]), minimumRows: minimumProjectionRows)
+         }
+@@ -744,7 +820,8 @@ final class QSAAttention {
+                 let attended = Self.attend(q: queries, k: paddedK, v: paddedV, sparse: keep,
+                     base: offset, scale: scale, block: queryRows)[0..., 0..., 0 ..< S, 0...]
+                 if extent > actual { paddedSmallKeyDomains += 1 }
+-                let flattened = attended.transposed(0, 2, 1, 3).reshaped([B, S, H * D])
++                eval(attended)
++            let flattened = attended.transposed(0, 2, 1, 3).reshaped([B, S, H * D])
+                 return oProj(flattened * sigmoid(gate), minimumRows: minimumProjectionRows)
+             }
+         }
+@@ -756,6 +833,7 @@ final class QSAAttention {
+             selection: boundedIndexer || useSelected ? selection : nil,
+             selectedAttention: useSelected,
+             onSelected: { [weak self] in self?.selectedAttentionTiles += 1 })
++        eval(out)
+         debugSink?("sdpaOut", out)
+         out = out.transposed(0, 2, 1, 3).reshaped([B, S, H * D])
+         return oProj(out * sigmoid(gate), minimumRows: minimumProjectionRows)
+diff --git a/Sources/Slotstream/MTP.swift b/Sources/Slotstream/MTP.swift
+index 727b005..460554f 100644
+--- a/Sources/Slotstream/MTP.swift
++++ b/Sources/Slotstream/MTP.swift
+@@ -148,7 +148,7 @@ public final class MTPState {
+     /// Force pending lazy cache writes so the graph never spans multiple
+     /// prefill chunks or speculative rounds.
+     func materialize() {
+-        if let k = kv.keys, let v = kv.values { eval(k, v) }
++        kv.materialize()
+         indexer.materializeStorage()
+     }
+ }
+diff --git a/Sources/Slotstream/Model.swift b/Sources/Slotstream/Model.swift
+index dddf419..41da366 100644
+--- a/Sources/Slotstream/Model.swift
++++ b/Sources/Slotstream/Model.swift
+@@ -259,7 +259,7 @@ public final class Qwen4ExpModel {
+     /// head when it may be used; it performs no allocation or GPU evaluation.
+     public func sequenceCapacityBytes(tokens: Int, mtp: Bool) -> Int {
+         let layers = cfg.layerTypes.prefix(runLayers).filter { $0 != "linear_attention" }.count + (mtp ? 1 : 0)
+-        let rowBytes = (2 * cfg.numKVHeads * cfg.headDim + cfg.indexerHeadDim) * 2
++        let rowBytes = 2 * cfg.numKVHeads * (cfg.headDim + cfg.headDim / 64 * 4) + cfg.indexerHeadDim * 2
+         return ContextGeometry.capacityBytes(tokens: tokens, layers: layers, rowBytes: rowBytes,
+             pooledRowBytes: cfg.indexerHeadDim * 2, compressionRatio: cfg.indexerCompressRatio,
+             indexerBudget: cfg.indexerBudget, incrementalIndexer: optimizations.incrementalIndexer)
+@@ -272,7 +272,8 @@ public final class Qwen4ExpModel {
+                                          sharedBacking: Bool = false) -> Int {
+         guard tokens >= 0, tokens <= ContextPolicy.modelLimit,
+               draftTokens.map({ $0 >= 0 && $0 <= ContextPolicy.modelLimit }) ?? true else { return Int.max }
+-        let kvRowBytes = ContextBytes.product(cfg.numKVHeads, cfg.headDim, 2)
++        let kvRowBytes = ContextBytes.product(cfg.numKVHeads, cfg.headDim)
++        let scaleRowBytes = ContextBytes.product(cfg.numKVHeads, cfg.headDim / 64, 2)
+         let indexRowBytes = ContextBytes.product(cfg.indexerHeadDim, 2)
+         func bytes(_ end: Int, kv: KVCache?, index: IndexerCache?, compact: Bool) -> Int {
+             func replacement(_ count: Int, _ rowBytes: Int, _ owned: Int, step: Int = 1024) -> Int {
+@@ -284,6 +285,10 @@ public final class Qwen4ExpModel {
+             var result = ContextBytes.sum(
+                 replacement(end, kvRowBytes, kv?.keys?.nbytes ?? 0),
+                 replacement(end, kvRowBytes, kv?.values?.nbytes ?? 0),
++                replacement(end, scaleRowBytes, kv?.keyScales?.nbytes ?? 0),
++                replacement(end, scaleRowBytes, kv?.keyBiases?.nbytes ?? 0),
++                replacement(end, scaleRowBytes, kv?.valueScales?.nbytes ?? 0),
++                replacement(end, scaleRowBytes, kv?.valueBiases?.nbytes ?? 0),
+                 replacement(end - rawBase, indexRowBytes, index?.rawAllocatedBytes ?? 0,
+                     step: compact && rawBase > 0 ? 256 : 1024))
+             if end > cfg.indexerBudget, optimizations.incrementalIndexer || compact {
+@@ -1160,6 +1165,11 @@ extension Qwen4ExpModel.State {
+             result["key.\(l)"] = c.keys.map { $0[0..., 0..., 0 ..< c.offset, 0...] }
+             result["value.\(l)"] = c.values.map { $0[0..., 0..., 0 ..< c.offset, 0...] }
+         }
++        for (l, c) in kv {
++            for (name, a) in [("keyScale", c.keyScales), ("keyBias", c.keyBiases), ("valueScale", c.valueScales), ("valueBias", c.valueBiases)] {
++                result["\(name).\(l)"] = a.map { $0[0..., 0..., 0..<c.offset, 0...] }
++            }
++        }
+         for (l, c) in indexer { result["index.\(l)"] = c.diagnosticValues() }
+         result["ngram"] = MLXArray(ngramCtx)
+         result["tokens"] = MLXArray(Int64(tokenCount))
+@@ -1167,6 +1177,9 @@ extension Qwen4ExpModel.State {
+         if let c = mtp {
+             result["mtp.key"] = c.kv.keys.map { $0[0..., 0..., 0 ..< c.kv.offset, 0...] }
+             result["mtp.value"] = c.kv.values.map { $0[0..., 0..., 0 ..< c.kv.offset, 0...] }
++            for (name, a) in [("keyScale", c.kv.keyScales), ("keyBias", c.kv.keyBiases), ("valueScale", c.kv.valueScales), ("valueBias", c.kv.valueBiases)] {
++                result["mtp.\(name)"] = a.map { $0[0..., 0..., 0..<c.kv.offset, 0...] }
++            }
+             result["mtp.index"] = c.indexer.diagnosticValues()
+             result["mtp.offset"] = MLXArray(Int64(c.offset))
+         }
+@@ -1281,7 +1294,7 @@ extension Qwen4ExpModel.State {
+         }
+         for (l, cache) in kv {
+             cache.trim(to: c.kvOffsets[l] ?? 0)
+-            if let k = cache.keys, let v = cache.values { eval(k, v) }
++            cache.materialize()
+         }
+         for (l, cache) in indexer {
+             if let snapshot = c.indexerSnapshots[l] { cache.restore(snapshot) }
+diff --git a/Sources/Slotstream/Plan.swift b/Sources/Slotstream/Plan.swift
+index a4fd47d..e9fbd80 100644
+--- a/Sources/Slotstream/Plan.swift
++++ b/Sources/Slotstream/Plan.swift
+@@ -283,6 +283,8 @@ public struct MemoryPlan {
+         }
+         var d: [String: Any] = [
+             "source": source.rawValue,
++            "kv_cache_bits": 8, "kv_cache_group_size": 64,
++            "runtime_version": SlotstreamBuild.version,
+             "experts_per_layer_cached": Int(expertsPerLayerCached.rounded()),
+             "pool_slots": slots,
+             "pool_gb": tenth(poolGB),
+diff --git a/Sources/Slotstream/PrefixCache.swift b/Sources/Slotstream/PrefixCache.swift
+index f86959b..396938e 100644
+--- a/Sources/Slotstream/PrefixCache.swift
++++ b/Sources/Slotstream/PrefixCache.swift
+@@ -115,7 +115,7 @@ public final class PrefixCache {
+     /// charged in these units using actual allocated sequence capacity, so
+     /// stepped buffers, completed blocks and MTP cannot hide behind the count
+     /// of live token IDs. Fixed recurrent state is budgeted separately.
+-    public static let bytesPerToken = 27_648
++    public static let bytesPerToken = 16_128
+ 
+     /// 36 linear-attention layers × 48 value heads × 128 × 128 float32.
+     public static let fixedBytesPerEntry = 36 * 48 * 128 * 128 * 4
+diff --git a/Sources/Slotstream/Q8Attention.swift b/Sources/Slotstream/Q8Attention.swift
+new file mode 100644
+index 0000000..869e0bb
+--- /dev/null
++++ b/Sources/Slotstream/Q8Attention.swift
+@@ -0,0 +1,91 @@
++import MLX
++
++/// Split-key online softmax over packed Q8. Sparse-invisible keys are skipped
++/// before loading their payload. Each SIMD group owns 128 keys and one query;
++/// a second dispatch combines its stable softmax statistics in FP32.
++package enum Q8Attention {
++    private final class Kernels: Sendable {
++        static let shared = Kernels()
++        let partial = MLXFast.metalKernel(name: "slotstream_q8_attention_partial",
++            inputNames: ["query", "key", "value", "ks", "kb", "vs", "vb", "mask", "meta"],
++            outputNames: ["partial"], source: """
++            uint lane = thread_index_in_simdgroup;
++            uint work = thread_position_in_grid.x / 32;
++            int N = meta[0], capacity = meta[1], S = meta[2], H = meta[3];
++            int HK = meta[4], parts = meta[5], masked = meta[6];
++            int part = work % parts, row = work / parts;
++            int pos = row % S, head = (row / S) % H, batch = row / (S * H);
++            int kh = batch * HK + head / (H / HK);
++            int start = part * 128, end = min(start + 128, N - S + pos + 1);
++            float q[8], acc[8];
++            for (int d = 0; d < 8; ++d) {
++                q[d] = float(query[row * 256 + d * 32 + lane]) * 0.0625f;
++                acc[d] = 0.0f;
++            }
++            float maximum = -INFINITY, denominator = 0.0f;
++            for (int index = start; index < end; ++index) {
++                if (masked && !mask[(batch * S + pos) * N + index]) continue;
++                int wordBase = (kh * capacity + index) * 64;
++                int scaleBase = (kh * capacity + index) * 4;
++                float dot = 0.0f;
++                for (int d = 0; d < 8; ++d) {
++                    int channel = d * 32 + lane, group = channel / 64;
++                    uint word = key[wordBase + channel / 4];
++                    float quant = float((word >> ((channel % 4) * 8)) & 255);
++                    float k = float(InT(quant * float(ks[scaleBase + group]) + float(kb[scaleBase + group])));
++                    dot += q[d] * k;
++                }
++                dot = simd_sum(dot);
++                float next = max(maximum, dot);
++                float correction = maximum == -INFINITY ? 0.0f : exp(maximum - next);
++                float weight = exp(dot - next);
++                denominator = denominator * correction + weight;
++                for (int d = 0; d < 8; ++d) {
++                    int channel = d * 32 + lane, group = channel / 64;
++                    uint word = value[wordBase + channel / 4];
++                    float quant = float((word >> ((channel % 4) * 8)) & 255);
++                    float v = float(InT(quant * float(vs[scaleBase + group]) + float(vb[scaleBase + group])));
++                    acc[d] = acc[d] * correction + weight * v;
++                }
++                maximum = next;
++            }
++            int outputBase = work * 258;
++            for (int d = 0; d < 8; ++d) partial[outputBase + d * 32 + lane] = acc[d];
++            if (lane == 0) { partial[outputBase + 256] = maximum; partial[outputBase + 257] = denominator; }
++            """)
++        let reduce = MLXFast.metalKernel(name: "slotstream_q8_attention_reduce",
++            inputNames: ["partial", "meta"], outputNames: ["output"], source: """
++            uint channel = thread_position_in_grid.x % 256;
++            uint row = thread_position_in_grid.x / 256;
++            int parts = meta[5];
++            float maximum = -INFINITY;
++            for (int p = 0; p < parts; ++p) maximum = max(maximum, partial[(row * parts + p) * 258 + 256]);
++            float numerator = 0.0f, denominator = 0.0f;
++            for (int p = 0; p < parts; ++p) {
++                int base = (row * parts + p) * 258;
++                float sum = partial[base + 257];
++                if (sum == 0.0f) continue;
++                float weight = exp(partial[base + 256] - maximum);
++                numerator += partial[base + channel] * weight;
++                denominator += sum * weight;
++            }
++            output[row * 256 + channel] = InT(denominator > 0.0f ? numerator / denominator : 0.0f);
++            """)
++    }
++
++    package static func execute(q: MLXArray, cache: KVCache, mask: MLXArray?) -> MLXArray {
++        let parts = (cache.offset + 127) / 128
++        let meta = MLXArray([cache.offset, cache.keys!.dim(2), q.dim(2), q.dim(1),
++            cache.keys!.dim(1), parts, mask == nil ? 0 : 1].map(Int32.init))
++        let rows = q.dim(0) * q.dim(1) * q.dim(2)
++        let kernels = Kernels.shared
++        let partial = kernels.partial(
++            [q, cache.keys!, cache.values!, cache.keyScales!, cache.keyBiases!,
++             cache.valueScales!, cache.valueBiases!, mask ?? MLXArray([false]), meta],
++            template: [("InT", q.dtype)], grid: (rows * parts * 32, 1, 1), threadGroup: (32, 1, 1),
++            outputShapes: [[rows, parts, 258]], outputDTypes: [.float32])[0]
++        return kernels.reduce([partial, meta], template: [("InT", q.dtype)],
++            grid: (rows * 256, 1, 1), threadGroup: (256, 1, 1),
++            outputShapes: [q.shape], outputDTypes: [q.dtype])[0]
++    }
++}
+diff --git a/Sources/Slotstream/Server.swift b/Sources/Slotstream/Server.swift
+index fd75cfb..d5c7ca4 100644
+--- a/Sources/Slotstream/Server.swift
++++ b/Sources/Slotstream/Server.swift
+@@ -65,6 +65,27 @@ public final class Server {
+          "optimizations": try! JSONSerialization.jsonObject(with: JSONEncoder().encode(engine.model.optimizations))]
+     }
+ 
++    /// Numeric-only, request-scoped telemetry. Never includes token IDs or text.
++    private func performanceMetadata(_ stats: GenStats, phase: String) -> [String: Any] {
++        let pool = engine.poolSnapshot()
++        var result: [String: Any] = [
++            "version": 1, "phase": phase,
++            "prompt_tokens": stats.promptTokens, "processed_tokens": stats.prefillTokens,
++            "cached_tokens": stats.reusedPrefixTokens, "prefill_seconds": stats.prefillSeconds,
++            "expert_pool_slots": pool.slots,
++            "expert_pool_bytes": pool.poolBytes]
++        if phase == "completed" {
++            result["decode_tokens"] = stats.decodeTokens
++            result["decode_seconds"] = stats.decodeSeconds
++            result["drafted_tokens"] = stats.draftedTokens
++            result["accepted_drafts"] = stats.acceptedDrafts
++            result["expert_hit_rate"] = stats.expertHitRate
++            result["decode_io_seconds"] = stats.decodeIOSeconds
++            result["decode_read_bytes"] = stats.decodeReadBytes
++        }
++        return result
++    }
++
+     /// Claim the port. Callers bind *before* loading the model so "address
+     /// already in use" — running `serve` twice is the common case — costs a
+     /// second and one sentence instead of a full load and a fatalError.
+@@ -485,6 +506,7 @@ public final class Server {
+                         "created": startedAt, "owned_by": "slotstream",
+                         "context_length": engine.maxContextTokens,
+                         "context_window": engine.maxContextTokens,
++                        "kv_cache_bits": 8, "kv_cache_group_size": 64,
+                         "context_policy": engine.contextPolicyJSON,
+                         "max_output_tokens": GatewayDialect.outputBudget(contextCap: engine.maxContextTokens),
+                     ]],
+@@ -1637,6 +1659,11 @@ public final class Server {
+                 guard stream else { return true }
+                 headersStarted = self.startChunked(fd, contentType: "text/event-stream", cors: cors)
+                 return headersStarted
++            }, onPrefill: { stats in
++                guard stream, wantUsage, headersStarted else { return }
++                emit(["id": rid, "object": "chat.completion.chunk", "created": created,
++                      "model": self.engine.modelName, "choices": [],
++                      "slotstream_metrics": self.performanceMetadata(stats, phase: "prefilled")])
+             })
+         if let error = stats.runtimeError {
+             if headersStarted {
+@@ -1671,13 +1698,17 @@ public final class Server {
+             var final: [String: Any] = ["id": rid, "object": "chat.completion.chunk", "created": created,
+                 "model": engine.modelName, "choices": [["index": 0, "delta": [:], "finish_reason": finish]]]
+             // Keep the existing final-choice usage shape for current clients.
+-            if wantUsage { final["usage"] = usage }
++            if wantUsage {
++                final["usage"] = usage
++                final["slotstream_metrics"] = performanceMetadata(stats, phase: "completed")
++            }
+             emit(final)
+             if alive { writeChunk(Data("data: [DONE]\n\n".utf8)) }
+             endOutput()
+         } else if !stream, alive {
+             respondJSON(fd, ["id": rid, "object": "chat.completion", "created": created, "model": engine.modelName,
+-                "choices": [["index": 0, "finish_reason": finish, "message": accumulated.message]], "usage": usage], cors: cors)
++                "choices": [["index": 0, "finish_reason": finish, "message": accumulated.message]], "usage": usage,
++                "slotstream_metrics": performanceMetadata(stats, phase: "completed")], cors: cors)
+         }
+     }
+ 
+diff --git a/Sources/Slotstream/StatePrefixFork.swift b/Sources/Slotstream/StatePrefixFork.swift
+index 440853f..4539736 100644
+--- a/Sources/Slotstream/StatePrefixFork.swift
++++ b/Sources/Slotstream/StatePrefixFork.swift
+@@ -52,7 +52,7 @@ extension Qwen4ExpModel.State {
+             let fork = KVCache()
+             cache.copyForPrefix(to: fork)
+             result.kv[layer] = fork
+-            eval([fork.keys, fork.values].compactMap { $0 })
++            fork.materialize()
+         }
+         for (layer, cache) in indexer {
+             let fork = cache.forkForPrefix()
+diff --git a/Sources/Slotstream/Version.swift b/Sources/Slotstream/Version.swift
+index 60c2cc4..e389878 100644
+--- a/Sources/Slotstream/Version.swift
++++ b/Sources/Slotstream/Version.swift
+@@ -2,7 +2,7 @@
+ // /api/version response, and the release tag check in CI all read this.
+ 
+ public enum SlotstreamBuild {
+-    public static let version = "0.2.20"
++    public static let version = "0.2.20-q8.1"
+ }
+ 
+ /// Model name used in error messages. The pinned manifest lives in the
+diff --git a/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift b/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift
+index 4477309..189f5bf 100644
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift
+@@ -16,9 +16,9 @@ extension Diagnostics {
+             let bytes = ContextGeometry.sequenceBytes(tokens: cap)
+             // Independent allocator geometry, not a restatement of a helper call.
+             let rows = ((cap + 1023) / 1024) * 1024
+-            c.equal("main allocated capacity \(cap)", bytes, rows * 12 * (2 * 2 * 256 + 128) * 2)
++            c.equal("main allocated capacity \(cap)", bytes, rows * 12 * (2 * 2 * (256 + 256 / 64 * 4) + 128 * 2))
+             c.equal("MTP allocated capacity \(cap)", ContextGeometry.sequenceBytes(tokens: cap, mtp: true),
+-                    rows * 13 * (2 * 2 * 256 + 128) * 2)
++                    rows * 13 * (2 * 2 * (256 + 256 / 64 * 4) + 128 * 2))
+         }
+         c.equal("overflowing capacity is refused", ContextGeometry.sequenceBytes(tokens: Int.max), Int.max)
+         c.equal("negative capacity is refused", ContextGeometry.sequenceBytes(tokens: -1), Int.max)
+@@ -54,8 +54,8 @@ extension Diagnostics {
+             c.equal("provisional context bounds draft depth/\(room)", depth, min(16, max(0, room - 1)))
+             if room > 0 { c.expect("pending plus drafts remain inside context/\(room)", 1 + depth <= room) }
+         }
+-        c.equal("Hermes transient anchor remains fixed", ContextMemoryLedger.transientReserveBytes(context: 65536), 905_969_664)
+-        c.equal("default has no extra reserve", ContextMemoryLedger.transientReserveBytes(context: 32768), 0)
++        c.equal("Hermes anchor plus one Q8 prefill reconstruction", ContextMemoryLedger.transientReserveBytes(context: 65536), 905_969_664 + 65536 * 2048)
++        c.equal("default charges the Q8 prefill transient", ContextMemoryLedger.transientReserveBytes(context: 32768), 32768 * 2048)
+         // Concurrent requests see one unchanged injected reading. Atomic
+         // reservations, not real large allocations, decide how many fit.
+         let reservations = RequestMemoryReservations()
+@@ -631,7 +631,7 @@ extension Diagnostics {
+             }
+         }
+         c.equal("projection shape padding is charged before dispatch", ContextWorkspace.prefillBytes(pass: 64,
+-            context: 256, minimumProjectionRows: 256), 256 * 1_300_000)
++            context: 256, minimumProjectionRows: 256), 256 * 1_300_000 + 256 * 2048)
+         c.equal("invalid projection shape refuses before dispatch", ContextWorkspace.prefillBytes(pass: 64,
+             context: 256, minimumProjectionRows: 257), Int.max)
+         c.equal("unbounded 128 final pass is refused", ContextWorkspace.prefillBytes(pass: 128, context: 262144), Int.max)
+diff --git a/Sources/SlotstreamDiagnostics/Diagnostics+DecodeLookahead.swift b/Sources/SlotstreamDiagnostics/Diagnostics+DecodeLookahead.swift
+index 20b8ed5..dfbd009 100644
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+DecodeLookahead.swift
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+DecodeLookahead.swift
+@@ -81,8 +81,8 @@ extension Diagnostics {
+         let forced = try plan(12, mtp: .on)
+         c.expect("a head forced below the floor runs without the lookahead", forced.mtpEnabled && !forced.decodeLookahead)
+         let big = try plan(nil, ram: 137.4)
+-        c.expect("auto on a large machine: 34.6 GB with head and lookahead",
+-            abs((big.targetGB ?? 0) - 34.6) < 0.05 && big.mtpEnabled && big.decodeLookahead)
++        c.expect("auto: measured target plus Q8 workspace, with head and lookahead",
++            abs((big.targetGB ?? 0) - (34.6 + Double(32768 * 2048) / 1e9)) < 0.05 && big.mtpEnabled && big.decodeLookahead)
+         let retained = try plan(12, mtp: .on, lookahead: .retained(enabled: true, bytes: DecodeLookahead.reserveBytes))
+         c.expect("a retained decision survives re-planning",
+             retained.decodeLookahead && retained.lookaheadReserveBytes == DecodeLookahead.reserveBytes)
+diff --git a/Sources/SlotstreamDiagnostics/Diagnostics+Q8Cache.swift b/Sources/SlotstreamDiagnostics/Diagnostics+Q8Cache.swift
+new file mode 100644
+index 0000000..58dcf4b
+--- /dev/null
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Q8Cache.swift
+@@ -0,0 +1,93 @@
++import Foundation
++import MLX
++import MLXFast
++import Slotstream
++
++extension Diagnostics {
++    public static func q8Cache() -> CheckReport {
++        var c = CheckBuilder("q8-cache")
++        func tensor(_ rows: Int, _ phase: Float = 0, heads: Int = 2) -> MLXArray {
++            let data = (0..<(heads * rows * 256)).map { i in
++                sin(Float(i) * 0.073 + phase) * 2 + cos(Float(i) * 0.019) * 0.4
++            }
++            return MLXArray(data).reshaped([1, heads, rows, 256]).asType(.bfloat16)
++        }
++        func delta(_ a: MLXArray, _ b: MLXArray) -> Float {
++            abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self)
++        }
++        func same(_ a: KVCache, _ b: KVCache) -> Bool {
++            a.offset == b.offset && zip(a.storage, b.storage).allSatisfy {
++                let lhs = $0[0..., 0..., 0..<a.offset, 0...]
++                let rhs = $1[0..., 0..., 0..<b.offset, 0...]
++                return all(lhs .== rhs).item(Bool.self)
++            }
++        }
++        let cache = KVCache()
++        let k = tensor(17), v = tensor(17, 1)
++        cache.append(k, v)
++        c.equal("Q8 payload uses uint32 packing", cache.keys!.dtype, .uint32)
++        c.equal("metadata uses BF16", cache.keyScales!.dtype, .bfloat16)
++        c.equal("all six allocations are charged", cache.allocatedBytes, 1024 * 1088)
++        let (dk, dv) = cache.fetched()
++        let reconstruction = max(delta(k, dk), delta(v, dv))
++        c.measure("reconstruction_max_absolute_error", Double(reconstruction))
++        c.expect("bounded error on varied BF16 keys/values", reconstruction < 0.05)
++        c.expect("planner prices packed KV plus unquantized indexer", ContextGeometry.rowBytes == 1344)
++        c.expect("prefix charge matches twelve attention layers", PrefixCache.bytesPerToken == 12 * 1344)
++        for rows in [1, 2, 3, 4, 5, 8] {
++            let q = tensor(rows, 2, heads: 24)
++            let positions = MLXArray((17-rows..<17).map(Int32.init)).reshaped([1, 1, rows, 1])
++            let positionsK = MLXArray((0..<17).map(Int32.init)).reshaped([1, 1, 1, 17])
++            let causal = positions .>= positionsK
++            // Also exercise sparse QSA visibility: invisible keys have extreme
++            // values in a separate test below, so a dropped mask cannot pass.
++            let sparse = causal .&& (positionsK % 3 .!= 0)
++            for (name, mask) in [("causal", causal), ("sparse", sparse)] {
++                let actual = cache.attend(q, scale: 0.0625, mask: mask)
++                let oracle = MLXFast.scaledDotProductAttention(queries: q, keys: dk, values: dv,
++                    scale: 0.0625, mask: .array(mask))
++                let error = delta(actual, oracle)
++                c.measure("attention_\(name)_\(rows)_max_error", Double(error))
++                c.expect("Q8 GQA matches dequantized SDPA, \(rows) rows \(name)", error < 0.08, "error=\(error)")
++            }
++            let implicit = cache.attend(q, scale: 0.0625, mask: nil)
++            let explicit = cache.attend(q, scale: 0.0625, mask: causal)
++            c.expect("implicit causal mask matches explicit for \(rows) queries", delta(implicit, explicit) == 0)
++        }
++        let maskedCache = KVCache()
++        let hidden = MLXArray.full([1, 2, 17, 256], values: MLXArray(Float(10000)), dtype: .bfloat16)
++        hidden[0..., 0..., 0..<1, 0...] = MLXArray.full([1, 2, 1, 256], values: MLXArray(Float(0.5)), dtype: .bfloat16)
++        maskedCache.append(k, hidden)
++        let visible = MLXArray((0..<17).map { $0 == 0 }).reshaped([1, 1, 1, 17])
++        let maskedOutput = maskedCache.attend(tensor(1, 2, heads: 24), scale: 0.0625, mask: visible)
++        c.expect("masked extreme values cannot leak into attention", delta(maskedOutput,
++            MLXArray.full(maskedOutput.shape, values: MLXArray(Float(0.5)), dtype: .bfloat16)) == 0)
++        let sibling = KVCache(); cache.copyForPrefix(to: sibling)
++        let original = KVCache(); cache.copyForPrefix(to: original)
++        cache.append(tensor(3, 3), tensor(3, 4))
++        c.expect("prefix sibling survives append", same(sibling, original))
++        cache.trim(to: 17)
++        cache.append(tensor(4, 5), tensor(4, 6))
++        sibling.append(tensor(4, 5), tensor(4, 6))
++        c.expect("speculative rollback overwrites rejected KV and metadata exactly", same(cache, sibling))
++        c.equal("rollback retains reusable capacity", cache.allocatedBytes, 1024 * 1088)
++        let boundary = KVCache()
++        boundary.append(tensor(1023), tensor(1023, 1))
++        let branch = KVCache(); boundary.copyForPrefix(to: branch)
++        boundary.append(tensor(4, 2), tensor(4, 3))
++        c.equal("step crossing charges all six grown buffers", boundary.allocatedBytes, 2048 * 1088)
++        c.equal("growth leaves sibling capacity unchanged", branch.allocatedBytes, 1024 * 1088)
++        boundary.trim(to: 1023)
++        c.expect("growth preserves committed bytes across rollback", same(boundary, branch))
++        for value: Float in [0, 1, -1, 0.0001] {
++            let constant = KVCache()
++            let a = MLXArray.full([1, 2, 1, 256], values: MLXArray(value), dtype: .bfloat16)
++            constant.append(a, a)
++            let (restored, _) = constant.fetched()
++            c.expect("constant/zero group remains finite (\(value))", all(isFinite(restored)).item(Bool.self))
++            c.expect("constant/zero group round trip (\(value))", delta(a, restored) <= max(abs(value) * 0.01, 1e-7))
++        }
++        c.measure("kv_storage_fraction_of_bf16", Double(cache.allocatedBytes) / Double(1024 * 2048))
++        return c.report()
++    }
++}
+diff --git a/Sources/SlotstreamDiagnostics/Diagnostics+Q8CachePerformance.swift b/Sources/SlotstreamDiagnostics/Diagnostics+Q8CachePerformance.swift
+new file mode 100644
+index 0000000..16d4751
+--- /dev/null
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Q8CachePerformance.swift
+@@ -0,0 +1,62 @@
++import Foundation
++import MLX
++import MLXFast
++import Slotstream
++
++extension Diagnostics {
++    public static func q8CachePerformance() -> CheckReport {
++        MLX.Memory.cacheLimit = 64 << 20
++        var c = CheckBuilder("q8-cache-performance")
++        for length in [16_384, 131_072] {
++            let cache = KVCache()
++            let row = MLXArray((0..<512).map { sin(Float($0) * 0.137) }).reshaped([1, 2, 1, 256]).asType(.bfloat16)
++            let k = broadcast(row, to: [1, 2, length, 256])
++            let v = broadcast(row * 0.5, to: k.shape)
++            cache.append(k, v); cache.materialize()
++            let q = broadcast(row[0..., 0..<1, 0..., 0...], to: [1, 24, 1, 256])
++            func packed() -> MLXArray { cache.attend(q, scale: 0.0625, mask: nil) }
++            func expanded() -> MLXArray {
++                let (dk, dv) = cache.fetched()
++                return MLXFast.scaledDotProductAttention(queries: q, keys: dk, values: dv, scale: 0.0625, mask: .none)
++            }
++            let a = packed(), b = expanded(); eval(a, b)
++            c.expect("finite Q8 attention at \(length) tokens", all(isFinite(a)).item(Bool.self))
++            let error = abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self)
++            c.expect("long attention agrees with expanded oracle at \(length)", error < 0.025, "\(error)")
++            c.equal("exact long cache storage at \(length)", cache.allocatedBytes, length * 1088)
++            var times: [[Double]] = [[], [], []]
++            for round in 0..<6 {
++                for mode in (round % 2 == 0 ? [0, 1, 2] : [2, 1, 0]) {
++                    let start = DispatchTime.now().uptimeNanoseconds
++                    for _ in 0..<5 { eval(mode == 0 ? packed() : mode == 1 ? expanded() : cache.attendQMM(q, scale: 0.0625, mask: nil)) }
++                    times[mode].append(Double(DispatchTime.now().uptimeNanoseconds - start) / 5e6)
++                }
++            }
++            for (mode, name) in [(0, "fused"), (1, "expanded"), (2, "qmm")] {
++                let sorted = times[mode].sorted()
++                c.measure("\(length)_\(name)_median_ms", (sorted[2] + sorted[3]) / 2)
++            }
++            let indices = MLXArray((0..<length).map(Int32.init)).reshaped([1, 1, 1, length])
++            let sparse = (indices .< 2048) .|| (indices .>= length - 4)
++            var sparseTimes: [[Double]] = [[], []]
++            func sparseRun(_ mode: Int) -> MLXArray {
++                mode == 0 ? cache.attend(q, scale: 0.0625, mask: sparse)
++                    : cache.attendQMM(q, scale: 0.0625, mask: sparse)
++            }
++            eval(sparseRun(0), sparseRun(1))
++            for round in 0..<6 {
++                for mode in (round % 2 == 0 ? [0, 1] : [1, 0]) {
++                    let start = DispatchTime.now().uptimeNanoseconds
++                    for _ in 0..<5 { eval(sparseRun(mode)) }
++                    sparseTimes[mode].append(Double(DispatchTime.now().uptimeNanoseconds - start) / 5e6)
++                }
++            }
++            for (mode, name) in [(0, "fused"), (1, "qmm")] {
++                let sorted = sparseTimes[mode].sorted()
++                c.measure("\(length)_sparse_\(name)_median_ms", (sorted[2] + sorted[3]) / 2)
++            }
++            c.measure("\(length)_allocated_bytes", Double(cache.allocatedBytes))
++        }
++        return c.report()
++    }
++}
+diff --git a/Sources/SlotstreamTestKit/OpenAIChecks.swift b/Sources/SlotstreamTestKit/OpenAIChecks.swift
+index 3ceaa86..42ab0cd 100644
+--- a/Sources/SlotstreamTestKit/OpenAIChecks.swift
++++ b/Sources/SlotstreamTestKit/OpenAIChecks.swift
+@@ -166,7 +166,7 @@ extension Catalogue {
+         c.equal("default has no additional charge", Planner.extraContextStateGB(maxContextTokens: ordinary.maxContextTokens), 0)
+         c.expect("larger context charged before pool allocation", hermes.slots < ordinary.slots)
+         c.expect("larger context has explicit active-state charge", Planner.extraContextStateGB(maxContextTokens: hermes.maxContextTokens) > 0)
+-        c.equal("default has no added transient reserve", Planner.extraContextMemoryGB(maxContextTokens: ordinary.maxContextTokens), 0)
++        c.equal("default charges one Q8 prefill reconstruction", Planner.extraContextMemoryGB(maxContextTokens: ordinary.maxContextTokens), Double(32768 * 2048) / 1e9)
+         c.expect("larger context also reserves the measured transient gap",
+             Planner.extraContextMemoryGB(maxContextTokens: hermes.maxContextTokens)
+                 - Planner.extraContextStateGB(maxContextTokens: hermes.maxContextTokens) > 0.8)
+diff --git a/Sources/SlotstreamTestKit/T0Checks.swift b/Sources/SlotstreamTestKit/T0Checks.swift
+index 4f2c90a..2f9457f 100644
+--- a/Sources/SlotstreamTestKit/T0Checks.swift
++++ b/Sources/SlotstreamTestKit/T0Checks.swift
+@@ -37,6 +37,8 @@ extension Catalogue {
+             Check("decode-lookahead-defaults", tier: .t0) { try Diagnostics.decodeLookaheadDefaults() },
+             Check("vision-check", tier: .t0) { Diagnostics.vision() },
+             // T1: touches MLX, so it needs the Metal library beside the runner.
++            Check("q8-cache-performance", tier: .t1) { Diagnostics.q8CachePerformance() },
++            Check("q8-cache", tier: .t1) { Diagnostics.q8Cache() },
+             Check("sampler-behaviour", tier: .t1) { try Diagnostics.samplerBehaviour() },
+             Check("expert-lookahead-adoption", tier: .t1) { try Diagnostics.expertLookaheadAdoption() },
+             Check("expert-lookahead-routing-readback", tier: .t1) { try Diagnostics.expertLookaheadRoutingReadback() },
+@@ -60,7 +62,7 @@ extension Catalogue {
+     static func automaticContextWindow() throws -> CheckReport {
+         var c = CheckBuilder("automatic-context-window")
+         let tiers: [(Double, Int)] = [(16, 32_768), (24, 32_768), (32, 32_768), (36, 65_536),
+-                                      (48, 65_536), (64, 131_072), (96, 262_144), (128, 262_144)]
++                                      (48, 131_072), (64, 262_144), (96, 262_144), (128, 262_144)]
+         for (ram, window) in tiers {
+             let gb = Int(ram)
+             let device = Machine(ramGB: ram, workingSetGB: ram * 0.75, availableGB: ram, isSimulated: true)

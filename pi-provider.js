@@ -80,10 +80,17 @@ export default function launcherProvider(pi) {
       contextWindow: model.contextWindow,
       maxTokens: model.maxTokens,
       compat: {
+        // Launcher sessions use local engines, without OpenAI response storage.
+        // Pi otherwise adds store:false, which strict engines reject outright.
+        supportsStore: false,
         supportsDeveloperRole: false,
         supportsReasoningEffort: Boolean(model.supportsReasoningEffort),
         supportsUsageInStreaming: true,
-        maxTokensField: "max_tokens"
+        maxTokensField: "max_tokens",
+        ...(["rec", "rapidmlx"].includes(data.backend) ? {
+          requiresReasoningContentOnAssistantMessages: model.compat?.requiresReasoningContentOnAssistantMessages === true,
+          supportsStrictMode: false,
+        } : {})
       }
     }]
   });
@@ -91,14 +98,16 @@ export default function launcherProvider(pi) {
     const message = event?.message;
     if (message?.role !== "assistant") return;
     if (!ctx?.hasUI || typeof ctx.ui?.notify !== "function") return;
+    const output = assistantOutputState(message);
     if (message.stopReason === "length") {
       ctx.ui.notify(
-        "The model used the complete response allowance before it finished. Send “continue” to resume this task, or raise Max response before launching the next hard task.",
+        output.hasThinking && !output.hasFinalOutput
+          ? "The model exhausted its response allowance in thinking without an answer or tool call. Send “continue” to retry from confirmed results; the unfinished thinking will be omitted while the original transcript stays saved."
+          : "The model used the complete response allowance before it finished. Send “continue” to resume this task, or raise Max response before launching the next hard task.",
         "warning",
       );
       return;
     }
-    const output = assistantOutputState(message);
     // Cancelled/failed turns already carry their own terminal status. Calling
     // those a clean thinking-only finish misleads both Hub and terminal users.
     if (message.stopReason === "stop" && output.hasThinking && !output.hasFinalOutput) {

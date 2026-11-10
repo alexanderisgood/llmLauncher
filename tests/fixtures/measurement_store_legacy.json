@@ -1,0 +1,15 @@
+{
+  "sourceSha256": "9e25983a617e04d48cf7975f6afe4503894ec0ac43cd7a60aa4aa589fd985152",
+  "functions": [
+    "ane_tuning_store_path",
+    "benchmark_store_path",
+    "load_ane_tuning_records",
+    "load_benchmark_records",
+    "load_runtime_promotion_records",
+    "runtime_promotion_store_path",
+    "save_ane_tuning_record",
+    "save_benchmark_record",
+    "save_benchmark_records",
+    "save_runtime_promotion_record"
+  ]
+}

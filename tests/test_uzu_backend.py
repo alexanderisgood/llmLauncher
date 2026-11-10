@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.memory_fixtures import physical_snapshot, physical_telemetry
 
 import copy
 import hashlib
@@ -384,6 +385,7 @@ class UzuBackendTests(unittest.TestCase):
                 "reasoningPolicy": spec["reasoningPolicy"],
                 "toolProbeRequired": False,
                 "memoryProofRequired": True,
+                "memorySemanticsVersion": 2,
                 "memoryCeilingBytes": launcher.UZU_PROCESS_MEMORY_CEILING_BYTES,
                 "modelFingerprint": "a" * 64,
                 "modelRegistryId": launcher.UZU_MODEL_REGISTRY_ID,
@@ -441,7 +443,7 @@ class UzuBackendTests(unittest.TestCase):
                 "ar": {
                     "samples": samples,
                     "medianDecodeTokensPerSecond": 31.5,
-                    "resourceTelemetry": {
+                    "resourceTelemetry": physical_telemetry({
                         "version": 1,
                         "samplingComplete": True,
                         "sampleCount": 8,
@@ -464,7 +466,7 @@ class UzuBackendTests(unittest.TestCase):
                         "processGroupMemberCountMinimum": 1,
                         "processGroupMemberCountMaximum": 1,
                         "peakProcessGroupPhysicalFootprintBytes": 21 * 1024**3,
-                    },
+                    }),
                 },
             },
         }
@@ -582,7 +584,10 @@ class UzuBackendTests(unittest.TestCase):
                 mock.patch.object(launcher.sys, "platform", "darwin"),
                 mock.patch.object(launcher.platform, "machine", return_value="arm64"),
                 mock.patch.dict(launcher.BINARIES, {"mirai": str(runtime)}, clear=True),
-                mock.patch.object(launcher, "runtime_candidates", return_value=[candidate]),
+                mock.patch.object(
+                    launcher.runtime_catalog.RuntimeCatalog,
+                    "runtime_candidates", return_value=[candidate],
+                ),
                 mock.patch.object(
                     launcher,
                     "command_version",
@@ -1185,9 +1190,9 @@ class UzuBackendTests(unittest.TestCase):
                         "processGroupPhysicalFootprintBytes": current,
                         "processGroupLifetimePeakPhysicalFootprintBytes": peak,
                     },
-                ), mock.patch.object(launcher, "apple_memory_pressure_state", return_value={
+                ), mock.patch.object(launcher, "apple_memory_pressure_state", return_value=physical_snapshot({
                     "memoryAvailable": True, "totalBytes": 48 * 1024**3, "freePercent": 20,
-                }), mock.patch.object(manager, "_stop_owned") as stop:
+                })), mock.patch.object(manager, "_stop_owned") as stop:
                     manager._guard_uzu_memory(plan, process, cancelled)
                 self.assertEqual(stop.called, should_stop)
 
@@ -1202,7 +1207,7 @@ class UzuBackendTests(unittest.TestCase):
             "headDimension": 256,
             "layerSource": "uzu-layer-configs",
         }
-        snapshot = {
+        snapshot = physical_snapshot({
             "memoryAvailable": True,
             "totalBytes": 48 * 1024**3,
             "freePercent": 80.0,
@@ -1210,7 +1215,7 @@ class UzuBackendTests(unittest.TestCase):
             "thermalState": 0,
             "lowPowerMode": False,
             "metalWiredLimitBytes": 0,
-        }
+        })
         idle_hub = {"phase": "idle", "message": "Ready"}
         idle_operation = {"active": False}
 
@@ -1379,7 +1384,7 @@ class UzuBackendTests(unittest.TestCase):
         }
         request = copy.deepcopy(payload)
         request["scope"] = "qualification"
-        snapshot = {
+        snapshot = physical_snapshot({
             "memoryAvailable": True,
             "totalBytes": 48 * 1024**3,
             "freePercent": 80.0,
@@ -1387,7 +1392,7 @@ class UzuBackendTests(unittest.TestCase):
             "thermalState": 0,
             "lowPowerMode": False,
             "metalWiredLimitBytes": 0,
-        }
+        })
         run_manager = launcher.RunManager()
         manager = launcher.BenchmarkManager(run_manager)
 
@@ -1557,7 +1562,7 @@ class UzuBackendTests(unittest.TestCase):
                         return_value=runtime_contract,
                     ),
                     mock.patch.object(
-                        launcher, "_uzu_model_cache_contract",
+                        launcher.model_catalog.ModelCatalog, "_uzu_model_cache_contract",
                         return_value=cache_contract,
                     ),
                     mock.patch.object(
@@ -1630,11 +1635,11 @@ class UzuBackendTests(unittest.TestCase):
         with (
             mock.patch.object(launcher, "UZU_RUNTIME_PATH", runtime),
             mock.patch.object(
-                launcher, "_validated_uzu_route",
+                launcher.engine_planning.EnginePlanner, "_validated_uzu_route",
                 return_value=(runtime, {}, {}, expected),
             ),
             mock.patch.object(
-                launcher, "_uzu_inherited_executable_path",
+                launcher.engine_planning.EnginePlanner, "_uzu_inherited_executable_path",
                 side_effect=lambda opened: f"/dev/fd/{opened.fd}",
             ),
         ):
@@ -2408,8 +2413,11 @@ class UzuBackendTests(unittest.TestCase):
              mock.patch.object(launcher, "free_port", side_effect=[18080, 18081]), \
              mock.patch.object(launcher, "verified_route_qualification", return_value={"id": "qualified"}) as verified, \
              mock.patch.object(launcher, "build_engine_plan"), \
-             mock.patch.object(launcher, "build_client_plan"):
+             mock.patch.object(launcher, "build_client_plan"), \
+             mock.patch.object(launcher, "_validated_uzu_route", return_value=(binary, {}, {}, ())) as current_artifact:
             plan = launcher.normalized_request(payload, [model], purpose="session")
+        current_artifact.assert_called_once()
+        self.assertEqual(current_artifact.call_args.args[0].model["id"], model["id"])
         self.assertEqual(plan.client, "pi")
         self.assertEqual(plan.agent_host, "console")
         evidence = verified.call_args.args[2]
@@ -2428,7 +2436,7 @@ class UzuBackendTests(unittest.TestCase):
                     launcher.BINARIES, {"mirai": str(binary)}, clear=True,
                 ), mock.patch.object(
                     launcher, "free_port", side_effect=[18_080, 18_081],
-                ), mock.patch.object(
+                ) as allocate_port, mock.patch.object(
                     launcher, "verified_route_qualification", return_value=None,
                 ) as verified, mock.patch.object(
                     launcher, "build_engine_plan",
@@ -2440,6 +2448,7 @@ class UzuBackendTests(unittest.TestCase):
                             payload, [model], purpose=purpose,
                         )
                     verified.assert_called_once()
+                    allocate_port.assert_not_called()
 
         with mock.patch.dict(
             launcher.BINARIES, {"mirai": str(binary)}, clear=True,
@@ -2449,11 +2458,16 @@ class UzuBackendTests(unittest.TestCase):
             launcher, "verified_route_qualification", return_value={"id": "qualified"},
         ) as verified, mock.patch.object(
             launcher, "build_engine_plan",
-        ), mock.patch.object(launcher, "build_client_plan"):
+        ), mock.patch.object(launcher, "build_client_plan"), mock.patch.object(
+            launcher, "_validated_uzu_route", return_value=(str(binary), {}, Path(model["path"]), {}, ()),
+        ) as artifacts:
             plan = launcher.normalized_request(payload, [model], purpose="session")
         self.assertEqual(plan.backend, "uzu")
         self.assertEqual(plan.context, 16_384)
         verified.assert_called_once()
+        artifacts.assert_called_once()
+        self.assertEqual(artifacts.call_args.args[0].model, model)
+        self.assertEqual(artifacts.call_args.args[0].purpose, "session")
         evidence = verified.call_args.args[2]
         self.assertEqual(evidence["context"], 16_384)
         self.assertEqual(evidence["client"], "chat")
@@ -2510,6 +2524,24 @@ class UzuBackendTests(unittest.TestCase):
             broken = copy.deepcopy(record)
             mutation(broken)
             self.assertIsNone(launcher.route_qualification_metrics(broken, spec))
+
+    def test_legacy_pressure_receipt_cannot_certify_physical_capacity(self) -> None:
+        model, _payload, _binary = self.qualification_fixture()
+        spec = launcher.route_qualification_spec(model, "uzu")
+        self.assertIsNotNone(spec)
+        current = self.qualification_record(spec)
+        self.assertIsNotNone(launcher.route_qualification_metrics(current, spec))
+        legacy = copy.deepcopy(current)
+        legacy["modes"]["ar"]["resourceTelemetry"].update({
+            "version": 1, "memorySemanticsVersion": 1,
+            "memorySource": "memory_pressure -Q", "minimumHeadroomBytes": None,
+            "minimumHeadroomPercent": 84.0,
+        })
+        self.assertIsNone(launcher.route_qualification_metrics(legacy, spec))
+        self.assertEqual(legacy["modes"]["ar"]["medianDecodeTokensPerSecond"], 31.5)
+        unversioned = copy.deepcopy(current)
+        unversioned["qualificationContract"].pop("memorySemanticsVersion")
+        self.assertIsNone(launcher.route_qualification_metrics(unversioned, spec))
 
     def test_high_context_receipts_require_authoritative_near_tier_prompt_usage(self) -> None:
         for context in (65_536, 131_072):
@@ -2769,11 +2801,11 @@ class UzuBackendTests(unittest.TestCase):
             def pressure() -> dict:
                 index = min(pressure_calls["count"], len(free_percentages) - 1)
                 pressure_calls["count"] += 1
-                return {
+                return physical_snapshot({
                     "memoryAvailable": True,
                     "totalBytes": 48 * 1024**3,
                     "freePercent": free_percentages[index],
-                }
+                })
 
             clock = {"value": 0.0}
 
@@ -2846,11 +2878,11 @@ class UzuBackendTests(unittest.TestCase):
             },
         ), mock.patch.object(
             launcher, "apple_memory_pressure_state",
-            return_value={
+            return_value=physical_snapshot({
                 "memoryAvailable": False,
                 "totalBytes": 48 * 1024**3,
                 "freePercent": None,
-            },
+            }),
         ) as pressure_reader, mock.patch.object(
             launcher.time, "monotonic", side_effect=monotonic,
         ), mock.patch.object(manager, "_stop_owned") as stop_owned:
@@ -2858,7 +2890,7 @@ class UzuBackendTests(unittest.TestCase):
         self.assertTrue(stopped["value"])
         stop_owned.assert_called_once_with(plan)
         self.assertGreaterEqual(pressure_reader.call_count, 3)
-        self.assertIn("pressure", manager.state["message"].lower())
+        self.assertIn("physical memory", manager.state["message"].lower())
 
 
 if __name__ == "__main__":
